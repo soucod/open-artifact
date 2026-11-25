@@ -1,16 +1,29 @@
-/** Asking the agent from a line of the text: `@` → Ask Agent opens a prompt there, and the agent writes in its place. */
+/** Asking the agent from the text: Ask Agent in the @ menu, and the box under an empty doc. */
 import { fillSlot } from '../app/slots.ts';
 import { useDocs } from '../app/store.ts';
-import { emptyDocHint } from '../editor/plugins.ts';
-import { AskCard } from './AskCard.tsx';
-import { canAskFromText, closeAsk } from './actions.ts';
+import { useCommentUi } from '../comments/store.ts';
+import { addEditorExtension } from '../editor/DocEditor.tsx';
+import { useEditor } from '../editor/format.ts';
+import { useSuggestMode } from '../suggest/mode.ts';
+import { AskCard, EmptyDocAsk } from './AskCard.tsx';
+import { canAskInText, closeAsk } from './actions.ts';
+import { askSpotPlugin } from './spot.ts';
 import { getAsk } from './store.ts';
 
+addEditorExtension({ plugins: () => [askSpotPlugin()] });
 fillSlot('layer', 'ask-card', AskCard);
-emptyDocHint.askAgent = canAskFromText;
+fillSlot('float', 'ask-dock', EmptyDocAsk, 15);
 
-// Another tab, or a doc that can't be written any more: a waiting prompt goes.
-useDocs.subscribe((state, before) => {
-  const open = getAsk().open;
-  if (open?.phase === 'prompt' && (state.activeTab !== before.activeTab || !state.writable)) closeAsk(false);
+const closeIfGone = () => {
+  const { prompt, sending } = getAsk();
+  if (!prompt || sending === 'caret') return;
+  if (prompt.tab !== useEditor.getState().tab || !canAskInText()) closeAsk(false);
+};
+useEditor.subscribe((state, before) => {
+  if (state.tab !== before.tab) closeIfGone();
 });
+useDocs.subscribe(closeIfGone);
+useCommentUi.subscribe((state, before) => {
+  if (state.agent !== before.agent) closeIfGone();
+});
+useSuggestMode.subscribe(closeIfGone);

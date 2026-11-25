@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/wasm-export",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "crates/open-artifact-export compiled to WebAssembly (generated/, built by scripts/build-wasm.mjs).",

@@ -164,6 +164,13 @@
   --cds-fade-size: calc(var(--spacing) * 4);
 }
 
+/* A text box that has reached its height cap: it scrolls, with a thin bar, and does not scroll the card behind it. */
+@utility scroll-thin {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
 /* ---------- tokens ---------- */
 
 @layer base {
@@ -359,10 +366,10 @@
   }
 
   /* Buttons give a little under a press. */
-  .cds-root .cds-btn-squish {
+  .btn-squish {
     transition: transform var(--cds-dur-slow) var(--cds-ease-out);
   }
-  .cds-root .group\/btn:not([disabled]):is(:active, :has(:active)) .cds-btn-squish {
+  .group\/btn:not([disabled]):is(:active, :has(:active)) .btn-squish {
     transform: scale(0.97);
     transition-duration: var(--cds-dur-fast);
   }
@@ -426,8 +433,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .cds-root .cds-btn-squish,
-    .cds-root .group\/btn:not([disabled]):is(:active, :has(:active)) .cds-btn-squish {
+    .btn-squish,
+    .group\/btn:not([disabled]):is(:active, :has(:active)) .btn-squish {
       transition: none;
     }
     .cds-root .cds-working-dot-halo,

@@ -7,8 +7,8 @@ import { useLocale } from './theme.tsx';
 import { Tooltip, TooltipGroup } from './tooltip.tsx';
 
 export type AvatarSize = 'xs' | 'sm' | 'md';
-/** `agent` stands for the agent rather than a person, and shows its mark. */
-export type AvatarVariant = 'default' | 'agent';
+/** `agent` stands for the agent rather than a person, and shows its mark; `neutral` is a person shown without color. */
+export type AvatarVariant = 'default' | 'neutral' | 'agent';
 
 const SIZE_CLASSES: Readonly<Record<AvatarSize, string>> = {
   xs: 'size-[var(--ui-avatar-xs)] text-[length:var(--ui-avatar-text-xs)]',
@@ -30,6 +30,7 @@ const OVERLAP: Readonly<Record<AvatarSize, string>> = {
 
 const VARIANT_CLASSES: Readonly<Record<AvatarVariant, string>> = {
   default: 'bg-fill-control text-primary',
+  neutral: 'bg-neutral text-secondary',
   agent: 'bg-[var(--ui-agent-tint)] text-[var(--ui-on-brand)]',
 };
 

@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import type { HtmlElement } from '@open-artifact/whiteboard-core';
 import {
   EMBED_CLIP_STYLE,
@@ -31,6 +32,83 @@ function embed(id: string, html = '<p>Hi</p>'): HtmlElement {
   return { type: 'html', id, x: 0, y: 0, w: 320, h: 240, html };
 }
 
+/** A stand-in for a DOM event in the embed's page. */
+interface FakeEvent {
+  type: string;
+  key: string;
+  isTrusted: boolean;
+  repeat: boolean;
+  isComposing: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  timeStamp: number;
+  held: boolean;
+  dataTransfer: { dropEffect: string };
+}
+
+/** The bootstrap run in a bare page: fire events at it, post board messages, and read what it told the board. */
+function bootedEmbed(): { fire(type: string, init?: Partial<FakeEvent>): FakeEvent; board(message: object): void; told: unknown[] } {
+  const listeners = new Map<string, Array<(event: FakeEvent) => void>>();
+  const told: unknown[] = [];
+  const port1: { onmessage: ((event: { data: unknown }) => void) | null; postMessage(message: unknown): void } = {
+    onmessage: null,
+    postMessage(message) {
+      // A copy made in this realm, as a real port would deliver it.
+      told.push(structuredClone(message));
+    },
+  };
+  class FakeEventBase {
+    held = false;
+    preventDefault(this: FakeEvent): void {
+      this.held = true;
+    }
+    stopImmediatePropagation(): void {}
+  }
+  const context = {
+    Reflect,
+    JSON,
+    Object,
+    setTimeout,
+    Event: FakeEventBase,
+    MessagePort: { prototype: { postMessage: port1.postMessage } },
+    MessageChannel: class {
+      port1 = port1;
+      port2 = {};
+    },
+    performance: { now: () => 0 },
+    parent: { postMessage() {} },
+    addEventListener(type: string, listener: (event: FakeEvent) => void) {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    window: {},
+  };
+  runInNewContext(embedBootstrap(undefined), context);
+  return {
+    told,
+    fire(type, init = {}) {
+      const event = Object.assign(new FakeEventBase(), {
+        type,
+        key: '',
+        isTrusted: true,
+        repeat: false,
+        isComposing: false,
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        timeStamp: 0,
+        dataTransfer: { dropEffect: 'copy' },
+        ...init,
+      }) as FakeEvent;
+      for (const listener of listeners.get(type) ?? []) listener(event);
+      return event;
+    },
+    board(message) {
+      port1.onmessage?.({ data: message });
+    },
+  };
+}
+
 describe('embed document', () => {
   it('clips the page: no margins, nothing scrolls past the card', () => {
     assert.equal(EMBED_CLIP_STYLE, 'html,body{margin:0;padding:0;overflow:hidden}');
@@ -48,8 +126,44 @@ describe('embed document', () => {
     assert.ok(boot.includes("tell({kind:'press'"));
     assert.ok(boot.includes("event.key==='Escape'"));
     assert.ok(boot.includes("tell({kind:'echo',n:data.ping})"));
-    // Reports only trusted input.
-    assert.equal(boot.match(/event\.isTrusted/g)?.length, 2);
+    // Reports and holds back only trusted input.
+    assert.equal(boot.match(/event\.isTrusted/g)?.length, 4);
+  });
+
+  it('keeps typing, Delete, paste and drops from the page until the embed is entered', () => {
+    const page = bootedEmbed();
+    const blocked = (type: string, init: Partial<FakeEvent> = {}): boolean => page.fire(type, init).held;
+    for (const key of ['a', 'Delete', 'Backspace', 'Enter', 'F5', 'Tab']) assert.ok(blocked('keydown', { key }), key);
+    assert.ok(blocked('keydown', { key: 'v', metaKey: true }));
+    assert.ok(blocked('paste'));
+    assert.ok(blocked('beforeinput'));
+    assert.ok(blocked('drop'));
+    const over = page.fire('dragover');
+    assert.ok(over.held);
+    assert.equal(over.dataTransfer.dropEffect, 'none');
+    // Escape always goes through, and is reported.
+    assert.ok(!blocked('keydown', { key: 'Escape' }));
+    assert.deepEqual(page.told.at(-1), { kind: 'key', key: 'Escape' });
+    // Scripted events are the page's own business.
+    assert.ok(!blocked('keydown', { key: 'a', isTrusted: false }));
+  });
+
+  it('lets everything through once entered by a press or by the board, until Escape or the board ends it', () => {
+    const page = bootedEmbed();
+    page.fire('pointerdown');
+    for (const key of ['a', 'Delete', 'F5', 'F24']) assert.ok(!page.fire('keydown', { key }).held, key);
+    assert.ok(!page.fire('keydown', { key: 'z', ctrlKey: true }).held);
+    assert.ok(!page.fire('paste').held);
+    assert.ok(!page.fire('drop').held);
+    page.fire('keydown', { key: 'Escape' });
+    assert.ok(page.fire('keydown', { key: 'a' }).held);
+    page.board({ enter: true });
+    assert.ok(!page.fire('keydown', { key: 'a' }).held);
+    page.board({ enter: false });
+    assert.ok(page.fire('paste').held);
+    // Pings are still echoed.
+    page.board({ ping: 7 });
+    assert.deepEqual(page.told.at(-1), { kind: 'echo', n: 7 });
   });
 
   it('reads port offers and port messages', () => {

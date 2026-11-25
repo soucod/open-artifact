@@ -91,6 +91,11 @@ export interface CommentsState<A> {
   draftText: string;
   /** Each thread's reply box: text and its "Send to agent" box (kept while the card closes and opens). */
   replies: Record<string, { text: string; send: boolean }>;
+  /**
+   * A resolve or reopen the host has not answered yet. The thread already shows its new status; until the answer
+   * comes, no other thread can be resolved or reopened and the thread menus wait.
+   */
+  statusChange: StatusChange | null;
   setOn(on: boolean): void;
   setListOpen(open: boolean): void;
   setActive(id: string | null): void;
@@ -99,6 +104,27 @@ export interface CommentsState<A> {
   setSendNew(send: boolean): void;
   setDraftText(text: string): void;
   setReply(id: string, reply: { text: string; send: boolean }): void;
+}
+
+/** A thread's status, set before the host has confirmed it. */
+export interface StatusChange {
+  id: string;
+  status: CommentThread['status'];
+}
+
+/** What a menu says while a status change is on its way. */
+export const WAIT_FOR_STATUS_CHANGE = 'Wait for the current change to finish.';
+
+/** The threads as shown: the stored ones, with an unconfirmed status change already applied. */
+export function withStatusChange(threads: CommentThread[], change: StatusChange | null): CommentThread[] {
+  if (!change) return threads;
+  return threads.map((thread) => (thread.id === change.id ? withStatus(thread, change.status) : thread));
+}
+
+function withStatus(thread: CommentThread, status: CommentThread['status'], resolvedBy?: CommentThread['resolvedBy']): CommentThread {
+  if (thread.status === status && thread.resolvedBy === resolvedBy) return thread;
+  const { resolvedBy: _, ...rest } = thread;
+  return status === 'resolved' && resolvedBy ? { ...rest, status, resolvedBy } : { ...rest, status };
 }
 
 /** One editor's comments. */
@@ -122,6 +148,10 @@ export interface CommentsController<A> {
   create(anchor: A, text: string, options?: { send?: boolean }): Promise<boolean>;
   /** Replies to a thread (`send`: and hands it to the agent; a resolved thread reopens); resolves whether it was saved. */
   reply(id: string, text: string, options?: { send?: boolean }): Promise<boolean>;
+  /**
+   * Resolves or reopens a thread. It shows the new status at once (a resolved card closes); if the host refuses, it
+   * goes back and its card reopens. One at a time: ignored while another change is waiting for the host.
+   */
   resolve(id: string, resolved: boolean): Promise<void>;
   remove(id: string, messageId?: string): Promise<void>;
   move(id: string, anchor: A): Promise<void>;
@@ -186,6 +216,7 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
     sendNew: false,
     draftText: '',
     replies: {},
+    statusChange: null,
     setOn(on) {
       set({ on, draft: null });
       adapter.onModeChange?.(on);
@@ -226,11 +257,19 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
     return anchor;
   };
 
+  /** The threads as the host last told them, without an unconfirmed status change. */
+  let stored: CommentThread[] = [];
+  const keep = (threads: CommentThread[], also?: Partial<CommentsState<A>>): void => {
+    stored = threads;
+    const statusChange = also && 'statusChange' in also ? (also.statusChange ?? null) : store.getState().statusChange;
+    store.setState({ ...also, threads: withStatusChange(threads, statusChange) });
+  };
+
   const failed = (error: unknown): void => {
     notify({ title: 'The comment could not be saved', description: error instanceof Error ? error.message : String(error) });
   };
   const put = (thread: CommentThread): void => {
-    store.setState((state) => ({ threads: state.threads.map((t) => (t.id === thread.id ? thread : t)) }));
+    keep(stored.map((t) => (t.id === thread.id ? thread : t)));
     adapter.heard?.([thread]);
   };
   const checkText = (text: string): string | undefined => {
@@ -252,7 +291,7 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
       try {
         const threads = await found.list();
         if (started !== generation) return;
-        store.setState({ threads });
+        keep(threads);
         adapter.heard?.(threads);
       } catch {
         // The list arrives with the first change.
@@ -260,7 +299,7 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
       if (started !== generation) return;
       unfollow = found.onChange((threads) => {
         const active = store.getState().active;
-        store.setState({ threads, active: active && threads.some((t) => t.id === active) ? active : null });
+        keep(threads, { active: active && threads.some((t) => t.id === active) ? active : null });
         adapter.heard?.(threads);
       });
       const thread = open ? store.getState().threads.find((t) => t.id === open) : undefined;
@@ -297,13 +336,12 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
           text: body,
         });
         const sends = Boolean(options?.send) && canSendToAgent();
-        store.setState((state) => ({
-          threads: state.threads.some((t) => t.id === thread.id) ? state.threads : [...state.threads, thread],
+        keep(stored.some((t) => t.id === thread.id) ? stored : [...stored, thread], {
           draft: null,
           draftText: '',
           sendNew: false,
           active: adapter.opensCreated?.(sends) === false ? null : thread.id,
-        }));
+        });
         adapter.heard?.([thread]);
         if (sends) await controller.sendToAgent(thread.id);
         return true;
@@ -334,19 +372,32 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
     },
     async resolve(id, resolved) {
       if (!capability) return;
+      const state = store.getState();
+      const status = resolved ? 'resolved' : 'open';
+      const thread = state.threads.find((t) => t.id === id);
+      if (!thread || state.statusChange || thread.status === status) return;
+      const closes = resolved && state.active === id && !state.showResolved;
+      keep(stored, { statusChange: { id, status }, ...(closes ? { active: null } : {}) });
       try {
-        put(await capability.setResolved(id, resolved));
-        const state = store.getState();
-        if (resolved && state.active === id && !state.showResolved) store.setState({ active: null });
+        const answer = await capability.setResolved(id, resolved);
+        // Only the status is taken from the answer: a change heard meanwhile may be newer in everything else.
+        keep(
+          stored.map((t) => (t.id === id ? withStatus(t, answer.status, answer.resolvedBy) : t)),
+          { statusChange: null },
+        );
+        adapter.heard?.([answer]);
       } catch (error) {
+        keep(stored, { statusChange: null });
         failed(error);
+        const now = store.getState();
+        if (closes && now.active === null && now.draft === null && stored.some((t) => t.id === id)) store.setState({ active: id });
       }
     },
     async remove(id, messageId) {
       if (!capability || (adapter.canRemove && !adapter.canRemove())) return;
       try {
         await capability.remove(id, messageId);
-        if (!messageId) store.setState((state) => ({ threads: state.threads.filter((t) => t.id !== id), active: state.active === id ? null : state.active }));
+        if (!messageId) keep(stored.filter((t) => t.id !== id), { active: store.getState().active === id ? null : store.getState().active });
       } catch (error) {
         failed(error);
       }
@@ -373,8 +424,27 @@ export function createComments<A>(adapter: CommentsAdapter<A>): CommentsControll
       }
     },
     async sendAllToAgent() {
+      if (!capability || !canSendToAgent()) return;
       const open = store.getState().threads.filter((t) => controller.canSendThread(t));
-      for (const thread of open) await controller.sendToAgent(thread.id);
+      if (!open.length) return;
+      // All at once: the host merges what reaches it within a short window into one message, so the agent gets
+      // every thread in one turn. One after another, each would wait out the window and arrive (or queue) alone.
+      if (adapter.sendToAgent) {
+        await Promise.all(open.map((thread) => adapter.sendToAgent!(thread, anchorOf(thread))));
+        return;
+      }
+      const cap = capability;
+      const results = await Promise.allSettled(open.map((thread) => cap.sendToAgent(thread.id)));
+      let sent = 0;
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          put(result.value);
+          sent++;
+        }
+      }
+      if (sent) notify(sentNotice(adapter.agentName?.() || 'the agent', adapter.agentWakesIdle?.()));
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure) failed(failure.reason);
     },
     canSendThread(thread) {
       if (thread.status !== 'open') return false;

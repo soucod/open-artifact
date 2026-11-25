@@ -1,13 +1,28 @@
-import type { Dynamic } from '../dynamic.ts';
-export function createPasteKeyTracker(target?: Dynamic, now: Dynamic = () => performance.now()) {
-  let lastKey: Dynamic = null;
-  let onKeyDown = ({ key: key, shiftKey: shiftKey, ctrlKey: ctrlKey, metaKey: metaKey, repeat: repeat }: Dynamic) => {
+/** The last key pressed, and whether it may be the one that pastes. */
+interface KeyThatMayPaste {
+  wentDownAt: number;
+  isWithoutFormatting: boolean;
+  mayPaste: boolean;
+  isHeldDown: boolean;
+}
+
+/** Tells whether a paste that comes now was asked for by a key, held down, or without formatting. */
+export interface PasteKeyTracker {
+  isWithoutFormatting: () => boolean;
+  isHeldDown: () => boolean;
+  isByKey: () => boolean;
+  stop(): void;
+}
+
+export function createPasteKeyTracker(target: Window, now: () => number = () => performance.now()): PasteKeyTracker {
+  let lastKey: KeyThatMayPaste | null = null;
+  let onKeyDown = ({ key, shiftKey, ctrlKey, metaKey, repeat }: KeyboardEvent) => {
     let isModifiedCharacter = key.length === String.fromCodePoint(key.codePointAt(0) ?? 0).length && (ctrlKey || metaKey);
     let mayPaste = isModifiedCharacter || key === 'Insert' || key === 'Paste';
     lastKey = {
       wentDownAt: now(),
       isWithoutFormatting: isModifiedCharacter && shiftKey,
-      mayPaste: mayPaste,
+      mayPaste,
       isHeldDown: repeat && mayPaste,
     };
   };

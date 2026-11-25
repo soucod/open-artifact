@@ -4,7 +4,8 @@
  * Files are saved through the host's downloads capability when it has one
  * and the file fits its 16 MB limit; otherwise the page starts an ordinary
  * browser download (up to 200 MB, which is what a tab can reliably hand
- * over).
+ * over). A host that saves in the browser (a cloud host) takes every file
+ * up to that 200 MB.
  */
 
 import { browserDownload } from '@open-artifact/editor-kit';
@@ -61,6 +62,8 @@ export function formatBytes(bytes: number): string {
 /** Saves through the host. */
 export interface FileSaver {
   save(file: { name: string; data: Blob }): Promise<{ savedTo?: string }>;
+  /** It saves in the browser (a cloud host): any size a browser download takes, and every file goes through it. */
+  readonly browser?: boolean;
 }
 
 /**
@@ -69,7 +72,10 @@ export interface FileSaver {
  * is too large or the host refuses it.
  */
 export async function saveExport(name: string, blob: Blob, saver: FileSaver | null): Promise<{ savedTo?: string; browser: boolean }> {
-  if (saver && blob.size <= CAPABILITY_LIMIT) {
+  if (saver?.browser === true && blob.size > BROWSER_LIMIT) {
+    throw new Error(`The file is ${formatBytes(blob.size)}, more than the ${formatBytes(BROWSER_LIMIT)} a download can hold. Try a lower quality or fewer slides.`);
+  }
+  if (saver && (blob.size <= CAPABILITY_LIMIT || saver.browser === true)) {
     try {
       const result = await saver.save({ name, data: blob });
       return { ...result, browser: false };

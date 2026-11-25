@@ -1,0 +1,15 @@
+[package]
+name = "open-artifact-motion"
+description = "Motion type pixel work: GIF palettes, dithering, frame differences and LZW encoding, QuickTime Animation (MOV) frames and atoms, and the flash analysis that guards shortened scenes."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+gif = { version = "0.14", default-features = false, features = ["std"] }

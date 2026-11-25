@@ -1,28 +1,27 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
-export const menuMatchCountWords = (count?: Dynamic) =>
+export const menuMatchCountWords = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, =0 {No matches} one {# match} other {# matches}}',
       id: 'spEc3ohsSH',
     },
     {
-      count: count,
+      count,
     },
   );
-export const menuMatchCountChooseRowWords = (count?: Dynamic, rowLabel?: Dynamic) =>
+export const menuMatchCountChooseRowWords = (count: number, rowLabel: string): string =>
   translateMessage(
     {
       defaultMessage:
         '{count, plural, =0 {No matches. Press Enter to choose {row}.} one {# match. Press Enter to choose {row}.} other {# matches. Press Enter to choose {row}.}}',
-      id: 'tYcvbXZSPV',
+      id: 'ifGhEIViDK',
     },
     {
-      count: count,
+      count,
       row: rowLabel,
     },
   );
-export const pressEnterAgainToConfirmWords = (rowLabel?: Dynamic) =>
+export const pressEnterAgainToConfirmWords = (rowLabel: string): string =>
   translateMessage(
     {
       defaultMessage: 'Press Enter again to confirm {row}.',
@@ -250,6 +249,12 @@ export const COMMAND_SEARCH_SYNONYMS = {
         'rule, rules, highlight, color scale, color by value, by value, by formula, colour, heat map, heatmap, gradient, traffic light, color code, color coding, flag, threshold, if then, format if, format when, duplicates, greater than, less than, data bars, conditonal, contitional',
       id: 'C+kgun//jE',
     }),
+  pivotTable: () =>
+    translateMessage({
+      defaultMessage:
+        'pivot, pivottable, summarize, summary, summary table, group by, totals by, subtotals, breakdown, crosstab, cross tab, roll up, rollup, aggregate',
+      id: 'juVz+WyTiT',
+    }),
   cellHistory: () =>
     translateMessage({
       defaultMessage:
@@ -257,8 +262,9 @@ export const COMMAND_SEARCH_SYNONYMS = {
       id: 'T6Cf4SKHRd',
     }),
 };
-export const commandSearchSynonyms = (command?: Dynamic) =>
+export type CommandWithSynonyms = keyof typeof COMMAND_SEARCH_SYNONYMS;
+export const commandSearchSynonyms = (command: CommandWithSynonyms): string[] =>
   COMMAND_SEARCH_SYNONYMS[command]()
     .split(/[,،、，]/)
-    .map((synonym?: Dynamic) => synonym.trim())
-    .filter((synonym?: Dynamic) => synonym !== '');
+    .map((synonym) => synonym.trim())
+    .filter((synonym) => synonym !== '');

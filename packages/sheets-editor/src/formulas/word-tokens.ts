@@ -1,32 +1,40 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName } from '@open-artifact/sheets-core';
+import type { CatalogFunction } from './function-catalog.ts';
 import { formulaArgumentSeparator } from '../format/number-signs.ts';
 import { describeFunction, describedArgumentAt } from './function-help.ts';
 import { upperCaseAsciiLetters } from './tokenizer.ts';
-export function endOfQuotedWord(text?: Dynamic, start?: Dynamic) {
+export type WordTokenKind = 'operand' | 'call' | 'word' | 'close' | 'sign';
+/** A piece of a formula read for words: a word is a run of letters that names nothing a formula knows. */
+export interface WordToken {
+  kind: WordTokenKind;
+  text: string;
+  isAfterSpace: boolean;
+}
+export function endOfQuotedWord(text: string, start: number): number | null {
   let quote = text[start];
-  let position: Dynamic = start + 1;
+  let position = start + 1;
   while (position < text.length)
     if (text[position] !== quote) position += 1;
     else if (text[position + 1] === quote) position += 2;
     else return position + 1;
   return null;
 }
-export function tokenizeFormulaWords(text?: Dynamic) {
-  let tokens2: Dynamic = [];
-  let position: Dynamic = 0;
-  let isAfterSpace: Dynamic = false;
-  let takeMatch = (pattern?: Dynamic) => {
+export function tokenizeFormulaWords(text: string): WordToken[] {
+  let tokens: WordToken[] = [];
+  let position = 0;
+  let isAfterSpace = false;
+  let takeMatch = (pattern: RegExp) => {
     pattern.lastIndex = position;
     let match = pattern.exec(text)?.[0] ?? null;
     if (match !== null) position += match.length;
     return match;
   };
-  let matchesHere = (pattern?: Dynamic) => ((pattern.lastIndex = position), pattern.test(text));
-  let pushToken = (kind?: Dynamic, tokenText?: Dynamic) => {
-    tokens2.push({
-      kind: kind,
+  let matchesHere = (pattern: RegExp) => ((pattern.lastIndex = position), pattern.test(text));
+  let pushToken = (kind: WordTokenKind, tokenText: string) => {
+    tokens.push({
+      kind,
       text: tokenText,
-      isAfterSpace: isAfterSpace,
+      isAfterSpace,
     });
     isAfterSpace = false;
   };
@@ -66,34 +74,35 @@ export function tokenizeFormulaWords(text?: Dynamic) {
     position += 1;
     pushToken(text[tokenStart] === ')' ? 'close' : 'sign', text.slice(tokenStart, position));
   }
-  return tokens2;
+  return tokens;
 }
-export function hasSpaceBetweenOperands(formula?: Dynamic) {
-  let tokens2 = tokenizeFormulaWords(formula.slice(1));
-  return tokens2.some((token?: Dynamic, tokenIndex?: Dynamic) => isSpaceBetweenOperands(tokens2[tokenIndex - 1], token));
+export function hasSpaceBetweenOperands(formula: string): boolean {
+  let tokens = tokenizeFormulaWords(formula.slice(1));
+  return tokens.some((token, tokenIndex) => isSpaceBetweenOperands(tokens[tokenIndex - 1], token));
 }
-export function namesDeclaredInNameArguments(tokens2?: Dynamic, decimalSign?: Dynamic) {
-  let isSignToken2 = (candidate?: Dynamic, sign?: Dynamic) => candidate?.kind === 'sign' && candidate.text === sign;
+/** The words written where a function takes a name (as `LET` and `LAMBDA` do), which the formula declares. */
+export function namesDeclaredInNameArguments(tokens: readonly WordToken[], decimalSign: DecimalSignName): Set<string> {
+  let isSign = (candidate: WordToken | undefined, sign: string) => candidate?.kind === 'sign' && candidate.text === sign;
   let argumentSeparator = formulaArgumentSeparator(decimalSign);
-  let declaredNames = new (Set as Dynamic)();
-  let openCalls: Dynamic = [];
-  let isInArrayLiteral: Dynamic = false;
-  for (let [tokenIndex, token] of tokens2.entries() as Dynamic) {
-    let [previousToken, nextToken, innermostCall] = [tokens2[tokenIndex - 1], tokens2[tokenIndex + 1], openCalls.at(-1)];
-    if (isSignToken2(token, '{') || isSignToken2(token, '}')) isInArrayLiteral = token.text === '{';
+  let declaredNames = new Set<string>();
+  let openCalls: { called: CatalogFunction | null; argumentAt: number }[] = [];
+  let isInArrayLiteral = false;
+  for (let [tokenIndex, token] of tokens.entries()) {
+    let [previousToken, nextToken, innermostCall] = [tokens[tokenIndex - 1], tokens[tokenIndex + 1], openCalls.at(-1)];
+    if (isSign(token, '{') || isSign(token, '}')) isInArrayLiteral = token.text === '{';
     if (isInArrayLiteral) continue;
     if (token.kind === 'close') openCalls.pop();
-    else if (isSignToken2(token, '('))
+    else if (isSign(token, '('))
       openCalls.push({
         called: previousToken?.kind === 'call' ? describeFunction(upperCaseAsciiLetters(previousToken.text)) : null,
         argumentAt: 0,
       });
-    else if (isSignToken2(token, argumentSeparator) && innermostCall !== undefined) innermostCall.argumentAt += 1;
+    else if (isSign(token, argumentSeparator) && innermostCall !== undefined) innermostCall.argumentAt += 1;
     if (
       !(
         token.kind === 'word' &&
-        (isSignToken2(previousToken, '(') || isSignToken2(previousToken, argumentSeparator)) &&
-        (nextToken === undefined || isSignToken2(nextToken, argumentSeparator))
+        (isSign(previousToken, '(') || isSign(previousToken, argumentSeparator)) &&
+        (nextToken === undefined || isSign(nextToken, argumentSeparator))
       ) ||
       innermostCall === undefined ||
       innermostCall.called === null
@@ -103,17 +112,17 @@ export function namesDeclaredInNameArguments(tokens2?: Dynamic, decimalSign?: Dy
   }
   return declaredNames;
 }
-export function formulaReadsAsWords(formula?: Dynamic, sheetNames?: Dynamic, decimalSign?: Dynamic) {
+export function formulaReadsAsWords(formula: string, sheetNames: readonly string[], decimalSign: DecimalSignName): boolean {
   if (!formula.startsWith('=')) return false;
-  let tokens2 = tokenizeFormulaWords(formula.slice(1));
-  let declaredNames = namesDeclaredInNameArguments(tokens2, decimalSign);
-  return tokens2.some((token?: Dynamic, tokenIndex?: Dynamic) => {
-    let previousToken = tokens2[tokenIndex - 1];
+  let tokens = tokenizeFormulaWords(formula.slice(1));
+  let declaredNames = namesDeclaredInNameArguments(tokens, decimalSign);
+  return tokens.some((token, tokenIndex) => {
+    let previousToken = tokens[tokenIndex - 1];
     if (isSpaceBetweenOperands(previousToken, token) && (previousToken.kind === 'word' || token.kind === 'word')) return true;
     return (
       token.kind === 'word' &&
       SCRIPT_WITHOUT_SPACES.test(token.text) &&
-      ![...sheetNames, ...declaredNames].some((knownName?: Dynamic) => knownName.startsWith(token.text))
+      ![...sheetNames, ...declaredNames].some((knownName) => knownName.startsWith(token.text))
     );
   });
 }
@@ -126,7 +135,7 @@ export const LETTERS_ONLY_WORD = /^\p{L}[\p{L}\p{M}]*(?:['’][\p{L}\p{M}]+)*$/u
 export const BOOLEAN_WORD = /^(?:true|false)$/i;
 export const SCRIPT_WITHOUT_SPACES =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
-export const KINDS_BEFORE_SPACE = new (Set as Dynamic)(['word', 'operand', 'close']);
-export const KINDS_AFTER_SPACE = new (Set as Dynamic)(['word', 'operand', 'call']);
-export const isSpaceBetweenOperands = (previousToken?: Dynamic, token?: Dynamic) =>
+export const KINDS_BEFORE_SPACE = new Set<WordTokenKind>(['word', 'operand', 'close']);
+export const KINDS_AFTER_SPACE = new Set<WordTokenKind>(['word', 'operand', 'call']);
+export const isSpaceBetweenOperands = (previousToken: WordToken | undefined, token: WordToken): boolean =>
   previousToken !== undefined && token.isAfterSpace && KINDS_BEFORE_SPACE.has(previousToken.kind) && KINDS_AFTER_SPACE.has(token.kind);

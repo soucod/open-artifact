@@ -26,7 +26,7 @@ import {
   type TextNode,
   type VideoSpec,
 } from './model.ts';
-import { cleanMarks, normalizeRuns, plainRuns } from './text.ts';
+import { cleanMarks, normalizeRuns, plainRuns, withMark } from './text.ts';
 import { LIMITS } from './limits.ts';
 
 /** A style change: a value sets, `undefined` removes. */
@@ -444,7 +444,7 @@ export function mapRuns(node: SlideNode, fn: (runs: Run[]) => Run[]): SlideNode 
     case 'text':
       return { ...node, runs: normalizeRuns(fn(node.runs)) };
     case 'list':
-      return { ...node, items: node.items.map((item) => ({ runs: normalizeRuns(fn(item.runs)) })) };
+      return { ...node, items: node.items.map((item) => ({ ...item, runs: normalizeRuns(fn(item.runs)) })) };
     case 'textbox':
       return { ...node, blocks: node.blocks.map((block) => mapRuns(block, fn) as TextNode | ListNode) };
     case 'table':
@@ -476,10 +476,7 @@ export function nodeHasMark(node: SlideNode, key: 'b' | 'i' | 'u'): boolean {
 export function setNodeMark<K extends keyof Marks>(node: SlideNode, key: K, value: Marks[K] | undefined): SlideNode {
   return mapRuns(node, (runs) =>
     runs.map((run) => {
-      const marks: Marks = { ...run.marks };
-      if (value === undefined) delete marks[key];
-      else marks[key] = value;
-      const clean = cleanMarks(marks);
+      const clean = cleanMarks(withMark(run.marks, key, value));
       return clean ? { text: run.text, marks: clean } : { text: run.text };
     }),
   );
@@ -505,7 +502,7 @@ export function setPlainText(node: SlideNode, text: string): SlideNode {
     case 'text':
       return { ...node, runs: runs(text) };
     case 'list':
-      return { ...node, items: text.split('\n').map((line) => ({ runs: runs(line) })) };
+      return { ...node, items: text.split('\n').map((line, i) => ({ ...node.items[i], runs: runs(line) })) };
     case 'textbox': {
       const first = node.blocks[0];
       const block: TextNode = first && first.kind === 'text' ? { ...first, runs: runs(text) } : { kind: 'text', tag: 'p', style: {}, runs: runs(text) };
@@ -521,14 +518,14 @@ export function setRuns(slide: Slide, path: NodePath, runs: readonly Run[], bloc
   const clean = normalizeRuns(runs);
   return updateNodeAt(slide, path, (node) => {
     if (node.kind === 'text') return { ...node, runs: clean };
-    if (node.kind === 'list' && item !== undefined) return { ...node, items: node.items.map((it, i) => (i === item ? { runs: clean } : it)) };
+    if (node.kind === 'list' && item !== undefined) return { ...node, items: node.items.map((it, i) => (i === item ? { ...it, runs: clean } : it)) };
     if (node.kind === 'textbox' && block !== undefined) {
       return {
         ...node,
         blocks: node.blocks.map((b, i) => {
           if (i !== block) return b;
           if (b.kind === 'text') return { ...b, runs: clean };
-          if (item !== undefined) return { ...b, items: b.items.map((it, j) => (j === item ? { runs: clean } : it)) };
+          if (item !== undefined) return { ...b, items: b.items.map((it, j) => (j === item ? { ...it, runs: clean } : it)) };
           return b;
         }),
       };
@@ -540,14 +537,14 @@ export function setRuns(slide: Slide, path: NodePath, runs: readonly Run[], bloc
 /** Turns a text node into a list (or back), keeping its lines. */
 export function setListKind(node: TextNode | ListNode, kind: 'ul' | 'ol' | null): TextNode | ListNode {
   if (node.kind === 'list') {
-    if (kind) return { ...node, tag: kind };
+    if (kind) return node.tag === kind ? node : retagList(node, kind);
     const runs: Run[] = [];
     node.items.forEach((item, i) => {
       if (i > 0) runs.push({ text: '\n' });
       runs.push(...item.runs);
     });
-    const { items: _items, tag: _tag, ...rest } = node;
-    return { ...rest, kind: 'text', tag: 'p', runs: normalizeRuns(runs) };
+    const { items: _items, tag: _tag, start: _start, reversed: _reversed, levels: _levels, itemMargin: _itemMargin, ...rest } = node;
+    return { ...rest, style: withoutMarkers(rest.style), kind: 'text', tag: 'p', runs: normalizeRuns(runs) };
   }
   if (!kind) return node;
   const lines: Run[][] = [[]];
@@ -560,6 +557,36 @@ export function setListKind(node: TextNode | ListNode, kind: 'ul' | 'ol' | null)
   }
   const { runs: _runs, tag: _tag, ...rest } = node;
   return { ...rest, kind: 'list', tag: kind, items: lines.map((line) => ({ runs: normalizeRuns(line) })) };
+}
+
+const NUMBER_MARKERS = new Set(['decimal', 'lower-alpha', 'upper-alpha', 'lower-roman', 'upper-roman']);
+const BULLET_MARKERS = new Set(['disc', 'circle', 'square']);
+
+function withoutMarkers(style: StyleMap): StyleMap {
+  const { 'list-style-type': _type, 'list-style-position': _position, ...rest } = style;
+  return rest;
+}
+
+/** A marker kept across a change of list kind: text and none stay, the other kind's keywords go. */
+function keptMarkers(style: StyleMap, kind: 'ul' | 'ol'): StyleMap {
+  const type = style['list-style-type'];
+  if (type === undefined || !(kind === 'ul' ? NUMBER_MARKERS : BULLET_MARKERS).has(type)) return style;
+  const { 'list-style-type': _type, ...rest } = style;
+  return rest;
+}
+
+function retagList(node: ListNode, kind: 'ul' | 'ol'): ListNode {
+  const { start: _start, reversed: _reversed, levels, ...rest } = node;
+  const next: ListNode = { ...rest, tag: kind, style: keptMarkers(node.style, kind) };
+  if (kind === 'ol') {
+    if (node.start !== undefined) next.start = node.start;
+    if (node.reversed) next.reversed = true;
+  }
+  const kept = Object.entries(levels ?? {})
+    .map(([level, look]) => [level, keptMarkers(look, kind)] as const)
+    .filter(([, look]) => Object.keys(look).length > 0);
+  if (kept.length) next.levels = Object.fromEntries(kept);
+  return next;
 }
 
 /** Changes a text node's tag (h1/h2/h3/p) and replaces its type declarations. */

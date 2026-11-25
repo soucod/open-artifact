@@ -1,84 +1,84 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
-export function giveUpPopupAround(element?: Dynamic) {
-  for (let node: Dynamic = isElementLike(element) ? element : null; node !== null; node = node.parentElement) {
-    let entry = popupGiveUpHandlers.get(node);
-    if (entry !== undefined) return entry();
+export function giveUpPopupAround(element: unknown) {
+  for (let node = isElementLike(element) ? element : null; node !== null; node = node.parentElement) {
+    let giveUp = popupGiveUpHandlers.get(node);
+    if (giveUp !== undefined) return giveUp();
   }
 }
-export function usePopupGivenUpOnBlur(isOpen?: Dynamic, giveUp?: Dynamic) {
+export function usePopupGivenUpOnBlur(isOpen: boolean, giveUp: () => void) {
   let [isGivenUp, setIsGivenUp] = React.useState(false);
   if (!isOpen && isGivenUp) setIsGivenUp(false);
-  let ref = React.useRef(false);
-  let ref2 = React.useRef({
-    isOpen: isOpen,
-    giveUp: giveUp,
+  let wasFocusedRef = React.useRef(false);
+  let latestRef = React.useRef({
+    isOpen,
+    giveUp,
   });
   React.useLayoutEffect(() => {
-    ref2.current = {
-      isOpen: isOpen,
-      giveUp: giveUp,
+    latestRef.current = {
+      isOpen,
+      giveUp,
     };
   });
   React.useLayoutEffect(() => {
     if (!isOpen) return;
-    ref.current = false;
-    let value2 = () => setIsGivenUp(false);
-    (window as Dynamic).addEventListener('focus', value2);
-    return () => (window as Dynamic).removeEventListener('focus', value2);
+    wasFocusedRef.current = false;
+    let takeBack = () => setIsGivenUp(false);
+    window.addEventListener('focus', takeBack);
+    return () => window.removeEventListener('focus', takeBack);
   }, [isOpen]);
-  let [value] = React.useState(
+  let [handlers] = React.useState(
     () => ({
-      holdPopup: (input?: Dynamic) => {
-        if (input === null) return;
-        registerPopupGiveUp(input, () => {
-          if (!ref2.current.isOpen || ref.current) return;
+      holdPopup: (popup: HTMLElement | null) => {
+        if (popup === null) return;
+        registerPopupGiveUp(popup, () => {
+          if (!latestRef.current.isOpen || wasFocusedRef.current) return;
           setIsGivenUp(true);
-          ref2.current.giveUp();
+          latestRef.current.giveUp();
         });
       },
       noteFocus: () => {
-        ref.current = true;
+        wasFocusedRef.current = true;
       },
     }),
   );
   return {
-    isGivenUp: isGivenUp,
-    ...value,
+    isGivenUp,
+    ...handlers,
   };
 }
-export function useShutOnWindowBlur(isOpen?: Dynamic, shut?: Dynamic) {
+export function useShutOnWindowBlur(isOpen: boolean, shut: () => void) {
   let [isShut, setIsShut] = React.useState(false);
   if (!isOpen && isShut) setIsShut(false);
-  let ref = React.useRef(false);
-  let value = React.useEffectEvent(() => {
-    if (ref.current || (document as Dynamic).activeElement instanceof HTMLIFrameElement) return;
+  let wasFocusedRef = React.useRef(false);
+  let shutUnlessFocused = React.useEffectEvent(() => {
+    if (wasFocusedRef.current || document.activeElement instanceof HTMLIFrameElement) return;
     setIsShut(true);
     shut();
   });
   React.useLayoutEffect(() => {
     if (!isOpen) return;
-    ref.current = false;
-    let value3 = () => value();
-    let value4 = () => setIsShut(false);
-    (window as Dynamic).addEventListener('blur', value3);
-    (window as Dynamic).addEventListener('focus', value4);
+    wasFocusedRef.current = false;
+    let onBlur = () => shutUnlessFocused();
+    let onFocus = () => setIsShut(false);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     return () => {
-      (window as Dynamic).removeEventListener('blur', value3);
-      (window as Dynamic).removeEventListener('focus', value4);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
     };
   }, [isOpen]);
-  let [value2] = React.useState(
+  let [noteFocus] = React.useState(
     () => () => {
-      ref.current = true;
+      wasFocusedRef.current = true;
     },
   );
   return {
-    isShut: isShut,
-    noteFocus: value2,
+    isShut,
+    noteFocus,
   };
 }
-export const CanTakeFocusContext = React.createContext(() => false);
-export const isElementLike = (input?: Dynamic) => typeof input === 'object' && input !== null && 'parentElement' in input;
-export const popupGiveUpHandlers = new (WeakMap as Dynamic)();
-export const registerPopupGiveUp = (input?: Dynamic, options?: Dynamic) => void popupGiveUpHandlers.set(input, options);
+export const CanTakeFocusContext = React.createContext<() => boolean>(() => false);
+/** Whether a value has a parent element to walk up from (the `this` of a call to `focus` may be the window). */
+export const isElementLike = (input: unknown): input is Node => typeof input === 'object' && input !== null && 'parentElement' in input;
+export const popupGiveUpHandlers = new WeakMap<Node, () => void>();
+export const registerPopupGiveUp = (popup: Node, giveUp: () => void) => void popupGiveUpHandlers.set(popup, giveUp);

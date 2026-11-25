@@ -62,6 +62,8 @@ import { bezierPathData, relativeNodes, sampleBezier, type BezierNode } from '..
 import { CropOverlay } from './CropOverlay.tsx';
 import { NodeEditor } from './NodeEditor.tsx';
 import { announce } from '../services/announce.ts';
+import { endsMode } from '../lib/mode-keys.ts';
+import { isTextField } from '@open-artifact/editor-kit';
 
 /** Resize handle directions. */
 export type Handle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
@@ -342,7 +344,7 @@ export function Canvas() {
       return;
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (!pathDraft.current || (event.key !== 'Enter' && event.key !== 'Escape')) return;
+      if (!pathDraft.current || !endsMode(event, isTextField(event.target))) return;
       event.preventDefault();
       event.stopPropagation();
       finishPath();
@@ -371,7 +373,9 @@ export function Canvas() {
     viewportSize.height = element.clientHeight;
     if (pendingFit.current && element.clientWidth > 0) {
       pendingFit.current = false;
-      zoomToFit();
+      if (pendingFit.boards) zoomToBoards(pendingFit.boards);
+      else zoomToFit();
+      pendingFit.boards = null;
     }
     return () => observer.disconnect();
   }, []);
@@ -1114,6 +1118,7 @@ function DomWorld({ boards, notes }: { boards: string[]; notes: string[] }) {
   const frames = useView((s) => s.frames);
   const canvas = useDocument((s) => s.canvas);
   const live = useLive((s) => s.live);
+  const resting = useLive((s) => s.resting);
   const snapshots = useLive((s) => s.snapshots);
   return (
     <>
@@ -1132,6 +1137,8 @@ function DomWorld({ boards, notes }: { boards: string[]; notes: string[] }) {
           const entry = canvas.boards[path]!;
           const shown = isLive(path, live);
           const snapshot = liveAll ? null : snapshots[path]?.url ?? null;
+          // A resting artboard keeps its frame, hidden under its snapshot.
+          const rests = Boolean(snapshot) && resting.has(path);
           return (
             <div
               key={path}
@@ -1139,10 +1146,10 @@ function DomWorld({ boards, notes }: { boards: string[]; notes: string[] }) {
               className="absolute overflow-hidden bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.08),0_2px_8px_rgba(0,0,0,0.06)]"
               style={{ left: entry.x, top: entry.y, width: entry.w, height: entry.h, borderRadius: entry.radius }}
             >
-              {snapshot && !(shown && frames[path]?.booted) ? (
+              {snapshot && !(shown && frames[path]?.booted && !rests) ? (
                 <img data-board-snapshot="" src={snapshot} alt="" draggable={false} className="pointer-events-none absolute left-0 top-0 block select-none" style={{ width: entry.w, height: entry.h }} />
               ) : null}
-              {shown ? <BoardFrame path={path} mode={playing === path ? 'play' : 'edit'} onNavigate={playTarget} width={entry.w} height={entry.h} interactive={textEdit?.board === path || playing === path} hideUntilBooted={Boolean(snapshot)} /> : null}
+              {shown ? <BoardFrame path={path} mode={playing === path ? 'play' : 'edit'} onNavigate={playTarget} width={entry.w} height={entry.h} interactive={textEdit?.board === path || playing === path} hideUntilBooted={Boolean(snapshot)} hidden={rests} /> : null}
             </div>
           );
         })}

@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { doesChartKindSuitRows, isNumberValuedCell, isYearValuedCell } from './chart-kind-fit.ts';
 export { doesChartKindSuitRows, isNumberValuedCell, isYearValuedCell };
 import type { WidgetRequest } from '@open-artifact/runtime/sheet-api';
@@ -6,6 +5,9 @@ import { answerOf, isRetryableFailure, refusalOf } from '../store/requests.ts';
 import { isRecord } from '../store/json.ts';
 import type { StoreCall, StoreOutcome } from '../store/sheet-stream.ts';
 import { STOCK_CHART_PROGRAMS, STOCK_KINDS, type StockKind } from './stock-programs.ts';
+import type { ChartEditAsked } from '../state/event-reducer.ts';
+import type { ChartEditOutcome } from '../state/controller.ts';
+import type { ChartChangeOutcome } from '../messages/charts.ts';
 /** A widget's code and how many times it was published, from a read of it. */
 export function readWidgetSource(outcome: StoreOutcome): { code: string; pub: number } | null {
   const widget = answerOf(outcome)?.widget;
@@ -24,6 +26,18 @@ export interface ChartWidgetNodesDeps {
   wait(ms: number): Promise<void>;
   nameOfKind(kind: string): string;
 }
+
+/** A kept change to a chart: the node its view shows now, the node to show instead, and how many times the first had been published when the change was asked. */
+export interface ChartNodeSwap {
+  from: string;
+  to: string;
+  pubOfFrom: number;
+}
+
+/** Asks the page to edit the workbook for a chart. */
+export type AskForEditOfChart = (asked: ChartEditAsked) => Promise<ChartEditOutcome>;
+
+export type ChartWidgetNodes = ReturnType<typeof createChartWidgetNodes>;
 
 export function createChartWidgetNodes(deps: ChartWidgetNodesDeps) {
   let workbook: { call(call: StoreCall): Promise<StoreOutcome> } | null = null;
@@ -74,7 +88,7 @@ export function createChartWidgetNodes(deps: ChartWidgetNodesDeps) {
       const made = readMade(created);
       return typeof made === 'string' ? whyNoWidgetCopy(created) : made;
     },
-    pointAt: async (viewId: Dynamic, swap: Dynamic, pointChart: Dynamic): Promise<Dynamic> => {
+    pointAt: async (viewId: string, swap: ChartNodeSwap, pointChart: AskForEditOfChart): Promise<ChartChangeOutcome> => {
       const { from, to, pubOfFrom } = swap;
       const fromSource = await sourceOf(from);
       if (fromSource === null) return 'notPointed';

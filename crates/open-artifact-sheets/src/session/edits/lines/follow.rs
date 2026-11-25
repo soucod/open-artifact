@@ -10,6 +10,7 @@ use super::fit::merged_boxes;
 use super::{groups, Lines};
 use crate::formula::{Reference, StoredFormula};
 use crate::ids::{move_items, Axis, Bases, IdRun, LineId};
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{blocks, Leaf};
 use crate::workbook::layout::{
     live_ends, CellIds, EndsOfGroup, GroupPatch, GroupToSet, RangeIds, SheetSettings, SheetToSet,
@@ -163,9 +164,14 @@ pub fn of_delete(workbook: &Workbook, sheet: &Sheet, lines: Lines, deleted: &Has
         };
         let (Some(first), Some(last)) = (bases.parse(first), bases.parse(last)) else { continue };
         if is_table_shown(bases, sheet, t) && live_ends(&left, first, last).is_none() {
-            tables.push(CellTableToSet { cell_table_id: table_id.clone(), cell_table: None });
+            let at = |id: &str, axis: &Axis| bases.parse(id).and_then(|l| axis.position(l)).unwrap_or(usize::MAX);
+            let place = (at(&t.header_rows.first_row, &sheet.rows), at(&t.first_column, &sheet.columns));
+            tables.push((place, CellTableToSet { cell_table_id: table_id.clone(), cell_table: None }));
         }
     }
+    // In the order of their places in the sheet, top first.
+    tables.sort_by_key(|(place, _)| *place);
+    let tables: Vec<CellTableToSet> = tables.into_iter().map(|(_, t)| t).collect();
     if !tables.is_empty() {
         ops.push(Op::SetCellTables { sheet_id: sheet.id.clone(), cell_tables: tables });
     }
@@ -448,7 +454,7 @@ fn formulas_after_move(workbook: &Workbook, sheet: &Sheet, lines: Lines, moving:
         }
         if !cells.is_empty() {
             cells.sort_by(|x, y| (&x.r, &x.c).cmp(&(&y.r, &y.c)));
-            ops.push(Op::SetCells { sheet_id: other.id.clone(), cells, listed: false });
+            ops.push(Op::SetCells { sheet_id: other.id.clone(), cells, form: CellForm::Auto });
         }
     }
     ops
@@ -547,7 +553,7 @@ pub fn checkboxes_of_new(sheet: &Sheet, from: LineId, formatted: &Workbook, new:
             }
         }
     }
-    (!cells.is_empty()).then(|| Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false })
+    (!cells.is_empty()).then(|| Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto })
 }
 
 /// The groups that take in new lines: one that ends with the line given, when they go right after it, or starts
@@ -774,5 +780,5 @@ pub fn formulas_of_new(workbook: &Workbook, sheet: &Sheet, from: LineId, after_i
             })
         })
         .collect();
-    (!cells.is_empty()).then(|| Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false })
+    (!cells.is_empty()).then(|| Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto })
 }

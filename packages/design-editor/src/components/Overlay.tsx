@@ -1,6 +1,7 @@
 /**
  * Screen-space layer over the canvas: artboard labels, selection outlines,
- * resize handles, hovered and selected element boxes, and error badges.
+ * resize handles, hovered and selected element boxes, and the error notices
+ * under artboards.
  * Over the canvas engine, which draws selection outlines and handles
  * itself, only the rest is drawn here.
  *
@@ -9,18 +10,21 @@
  * artboards far outside the view are left out.
  */
 
-import { AlertTriangle, Maximize2, Play, Square, SlidersHorizontal, Wand2 } from 'lucide-react';
+import { Maximize2, Play, Square, SlidersHorizontal } from 'lucide-react';
 import { useMemo, type ReactNode } from 'react';
 import { parseDcDocument, tweakEntries, type BoardRect } from '@open-artifact/dc';
 import { cn } from '@open-artifact/ui';
 import { useDocument } from '../state/document.ts';
 import { useView, type Camera } from '../state/view.ts';
 import { boardApi } from '../services/frames.ts';
-import { session } from '../services/session.ts';
-import { askAgentToFix } from '../services/agent.ts';
+import { ErrorMark, ErrorNotice, useBoardProblems, useCanAskAgent } from './BoardErrors.tsx';
+import { noticeClosed } from '../lib/board-errors.ts';
 import { noteBounds } from '../lib/notes.ts';
 import type { Handle } from './Canvas.tsx';
 import { LayoutGuides } from './LayoutGuides.tsx';
+import { HoverLink } from './HoverLink.tsx';
+import { linkAround } from '../lib/hover-link.ts';
+import { templateOf } from '../services/agent.ts';
 import { SelectionBar } from './SelectionBar.tsx';
 import { useScale } from '../services/scale.ts';
 import { viewportSize } from '../services/viewport.ts';
@@ -95,7 +99,6 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
   const selection = useView((s) => s.selection);
   const hover = useView((s) => s.hover);
   const textEdit = useView((s) => s.textEdit);
-  const frames = useView((s) => s.frames);
   const layoutTick = useView((s) => s.layoutTick);
   const focus = useView((s) => s.focus);
   const canvas = useDocument((s) => s.canvas);
@@ -104,6 +107,10 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
   const panelOpen = useView((s) => s.panelOpen);
   const scaling = useScale((s) => s.session !== null);
   const sources = useDocument((s) => s.boards);
+  const problems = useBoardProblems(boards);
+  const closedNotices = useView((s) => s.closedNotices);
+  const canAsk = useCanAskAgent();
+  const problemOf = useMemo(() => new Map(problems.map((problem) => [problem.path, problem])), [problems]);
   const tweakable = useMemo(() => {
     const out = new Set<string>();
     for (const path of boards) {
@@ -130,6 +137,15 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
     return elementBoxes(hover.board, [hover.tid], null, camera);
   }, [hover, selection, textEdit, camera, layoutTick, canvas]);
 
+  // A hovered element inside a link shows its address; a selected one carries it on the selection bar.
+  const hoverLink = useMemo(() => {
+    const box = hoverBoxes[0];
+    const source = hover ? sources[hover.board]?.source : undefined;
+    if (!hover || !box || source == null || playing) return null;
+    const href = linkAround(templateOf(source), hover.tid);
+    return href ? { href, left: box.left, top: box.top, height: box.height } : null;
+  }, [hover, hoverBoxes, sources, playing]);
+
   const objectBoxes = useMemo(() => {
     if (selection.kind !== 'objects') return [];
     const out: { key: string; box: Box; board?: string; note?: string }[] = [];
@@ -152,13 +168,14 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
 
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      {/* Artboard labels and error badges. */}
+      {/* Artboard labels and error notices. */}
       {boards.map((path) => {
         const entry = canvas.boards[path]!;
         const box = toBox(camera, entry.x, entry.y, entry.w, entry.h);
         if (box.width < 24) return null;
         if (box.left > viewportSize.width + LABEL_MARGIN || box.top > viewportSize.height + LABEL_MARGIN || box.left + box.width < -LABEL_MARGIN || box.top + box.height < -LABEL_MARGIN) return null;
-        const errors = frames[path]?.errors ?? [];
+        const problem = problemOf.get(path);
+        const closed = problem ? noticeClosed(closedNotices, problem) : false;
         const selected = selection.kind === 'objects' ? selection.boards.includes(path) : selection.kind === 'elements' && selection.board === path;
         return (
           // The engine moves selected artboards without the document until the drag ends: their labels hide meanwhile.
@@ -170,6 +187,7 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
               style={{ left: box.left, top: box.top - 22, width: Math.max(60, box.width) }}
             >
               <span className={cn('min-w-0 flex-1 truncate', selected ? 'text-accent' : 'text-fg-muted')}>{entry.title || path.replace(/\.dc\.html$/, '')}</span>
+              {problem && closed ? <ErrorMark problem={problem} /> : null}
               {box.width >= 64 ? (
                 <>
                   {tweakable.has(path) ? (
@@ -196,24 +214,15 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
                 </FrameButton>
               ) : null}
             </div>
-            {errors.length ? (
-              <div
-                className="pointer-events-auto absolute flex items-center gap-1 rounded-md bg-danger px-1.5 py-0.5 text-[11px] text-white shadow"
-                style={{ left: box.left + 8, top: box.top + 8 }}
-                onPointerDown={(event) => event.stopPropagation()}
-                title={errors.map((e) => e.message).join('\n')}
-              >
-                <AlertTriangle className="size-3" />
-                <span>
-                  {errors.length} {errors.length === 1 ? 'error' : 'errors'}
-                </span>
-                {!readOnly && session().agent && session().viewer.role === 'owner' ? (
-                  <button type="button" onClick={() => void askAgentToFix([path])} className="ml-1 flex items-center gap-1 rounded bg-white/20 px-1 hover:bg-white/30">
-                    <Wand2 className="size-3" />
-                    Ask agent to fix
-                  </button>
-                ) : null}
-              </div>
+            {/* Under the artboard, and under its size label while it is the only thing selected. */}
+            {problem && !closed ? (
+              <ErrorNotice
+                problem={problem}
+                canAsk={canAsk}
+                onShowAll={() => useView.getState().setErrorsOpen(true)}
+                className="absolute"
+                style={{ left: box.left, top: box.top + box.height + (single?.board === path ? 28 : 6), width: box.width }}
+              />
             ) : null}
           </div>
         );
@@ -222,6 +231,7 @@ export function Overlay({ boards, engine = false }: OverlayProps) {
       {hoverBoxes.map((box, index) => (
         <div key={`h${index}`} className="absolute border border-accent/70" style={box} />
       ))}
+      <HoverLink link={hoverLink} />
       {selectedBoxes.map((box, index) => (
         <div key={`s${index}`} className={cn('absolute border-2', textEdit ? 'border-accent/40' : 'border-accent')} style={box} />
       ))}

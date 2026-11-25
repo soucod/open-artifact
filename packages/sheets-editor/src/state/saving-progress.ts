@@ -5,7 +5,7 @@ export function nextSavingProgress(progress: SavingProgress | null, unsavedEditC
   if (progress === null)
     return areUnsavedEditsMany(unsavedEditCount)
       ? {
-          unsavedEditCount: unsavedEditCount,
+          unsavedEditCount,
           mostUnsavedEditCount: unsavedEditCount,
           wait: {
             ms: 1000,
@@ -16,7 +16,7 @@ export function nextSavingProgress(progress: SavingProgress | null, unsavedEditC
   if (unsavedEditCount === progress.unsavedEditCount) return progress;
   return {
     ...progress,
-    unsavedEditCount: unsavedEditCount,
+    unsavedEditCount,
     mostUnsavedEditCount: Math.max(progress.mostUnsavedEditCount, unsavedEditCount),
     isBarUp: progress.isBarUp || (progress.wait === null && areUnsavedEditsMany(unsavedEditCount)),
   };

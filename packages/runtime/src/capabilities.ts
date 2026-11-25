@@ -13,6 +13,7 @@
 import type {
   ImportFileResponse,
   SheetFrame,
+  SheetWalkthrough,
   SheetReadAnswers,
   SheetReadRefusal,
   SheetReadRequest,
@@ -213,6 +214,12 @@ export interface Viewer {
   id: string;
   name: string;
   role: Role;
+  /** Who they are on a cloud host: a signed-in person, a link guest, an agent or an anonymous visitor. Unset locally. */
+  kind?: 'user' | 'guest' | 'agent' | 'anonymous';
+  /** Their address, on a cloud host that knows it. */
+  email?: string;
+  /** Their picture's URL, on a cloud host that knows it. */
+  avatar?: string;
 }
 
 /** The `user` capability. */
@@ -251,6 +258,8 @@ export interface AgentSendResult {
   status: 'delivered' | 'queued' | 'staged' | 'failed';
   /** Human-readable reason when `failed`. */
   reason?: string;
+  /** With `delivered`: it was put in the agent's conversation for the person to send there. */
+  drafted?: true;
 }
 
 /** Whether an agent is reachable and working. */
@@ -263,6 +272,11 @@ export interface AgentStatus {
   name: string;
   /** false: an idle agent is not woken; what is sent waits until the person next talks to it. Left out: it is woken. */
   wakesIdle?: boolean;
+  /**
+   * true: the agent asked the person something (a form, a question in the chat) and its work waits on the answer.
+   * It is still at work, so pages show that it waits on them rather than that it stopped. Left out: it does not.
+   */
+  waitingForPerson?: boolean;
 }
 
 /** The `agent` capability. */
@@ -326,8 +340,20 @@ export interface RoomCapability {
 
 /** The `downloads` capability. */
 export interface DownloadsCapability {
-  /** Saves a file. Hosts cap a single file at 16 MB. */
+  /** Saves a file. The local host takes a single file of up to 512 MB; other hosts may take less. */
   save(file: { name: string; data: Blob }): Promise<{ savedTo?: string }>;
+  /**
+   * True when the host saves each file as this browser's own download rather than on a computer of its own (a cloud
+   * host): any role may then ask, the host decides whether the person may export, and there is no size limit but the
+   * browser's.
+   */
+  readonly browser?: boolean;
+  /**
+   * Where `browser` is true: resolves when the person may export now, else rejects with `not_writer` and the host's
+   * words. For an export that is not a file (a print): it follows the same switch. That keeps the product's own
+   * buttons consistent; it is no security boundary (a viewer can always print from the browser or take a screenshot).
+   */
+  check?(): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -378,6 +404,43 @@ export interface DbChangeEvent {
   changes: Record<DbPath, JsonRecord | null>;
   /** Who made the change, when the host knows (`agent`, `owner`, a peer id). */
   author?: string;
+  /**
+   * The change's place in the host's order ({@link DbOrder}), when the host
+   * keeps one. Events reach a page in this order; write receipts may not.
+   */
+  epoch?: string;
+  seq?: number;
+  /**
+   * The first event of every event stream (each connect and reconnect), with
+   * empty `changes`: `epoch` and `seq` say where the host stood as the stream
+   * started. Changes up to it were sent before this stream, so a page that
+   * heard and read less (its stream was down) reads its documents again.
+   */
+  resync?: boolean;
+}
+
+/**
+ * Where a host's documents stand: `seq` counts the host's db change events
+ * since `epoch` began (a new epoch, such as after a restart, starts over).
+ * A write's receipt says the written documents are as of `seq`.
+ */
+export interface DbOrder {
+  epoch: string;
+  seq: number;
+}
+
+/**
+ * A write's receipt: the host's order after the batch, and each written
+ * document as stored (`null`: absent), so a page shows what the host holds
+ * even when the host merged in a change it had not reported yet.
+ */
+export interface DbReceipt extends DbOrder {
+  documents: Record<DbPath, JsonRecord | null>;
+}
+
+/** One collection's documents and, when the host keeps an order, where it stood when they were read. */
+export interface DbListing extends Partial<DbOrder> {
+  documents: DbDocument[];
 }
 
 /** Limits every host enforces on the document store. */
@@ -396,12 +459,14 @@ export interface DbCapability {
   get(path: DbPath): Promise<JsonRecord | null>;
   /** Every document of one collection (`elements`, `data/users/u1/ideas`), sorted by path. */
   list(collection: string): Promise<DbDocument[]>;
+  /** {@link list} with the host's {@link DbOrder} at the read, for pages that keep documents in sync. */
+  listing?(collection: string): Promise<DbListing>;
   /**
    * Applies a batch in order, all or nothing. Rejects with `invalid` (bad
    * path, too large), `conflict` (an `ifMatch` no longer holds) or `not_writer`. The host never echoes the batch back
-   * through {@link onChange}.
+   * through {@link onChange}. Resolves with a {@link DbReceipt}, when the host keeps an order.
    */
-  write(writes: DbWrite[]): Promise<void>;
+  write(writes: DbWrite[]): Promise<DbReceipt | void>;
   /** Subscribes to changes made by anyone else. Returns an unsubscribe function. */
   onChange(listener: (event: DbChangeEvent) => void): () => void;
 }
@@ -456,6 +521,8 @@ export interface CommentReplyOptions {
 export interface CommentAgentState {
   /** `pending`: sent, not yet read; `delivered`: the agent has it; `replied`: it answered. */
   status: 'pending' | 'delivered' | 'replied';
+  /** With `delivered`: it was put in the agent's conversation for the person to send there. */
+  drafted?: true;
 }
 
 /** A comment thread. */
@@ -822,6 +889,11 @@ export interface SheetCapability {
   importFile(file: Blob, name: string): Promise<ImportFileResponse>;
   /** Subscribes to the stream's frames: a snapshot first on every (re)connect, then edits, clocks and widgets. */
   onFrame(listener: (frame: SheetFrame) => void): () => void;
+  /**
+   * Subscribes to the walkthroughs the agent sends the person. Only one page of the owner's hears each, the one
+   * they used last; guests hear none. A walkthrough sent while no listener is attached is not kept here.
+   */
+  onWalkthrough(listener: (walkthrough: SheetWalkthrough) => void): () => void;
 }
 
 /* -------------------------------------------------------------------------- */

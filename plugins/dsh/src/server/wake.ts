@@ -7,6 +7,9 @@
  * - One waiting on the person's answer to its own question is not left waiting: the person answered on the page
  *   instead. A timed question ends as its timeout would ("pending", still answerable later) and the turn reads the
  *   message next; a blocking one ends with the turn, and the message starts the next.
+ *
+ * That last rule is for the owner only (`source.from.kind === 'owner'`). A collaborator's message and a task's result
+ * are notices: they reach the agent the same way but leave its questions to the person open ({@link deliverNotice}).
  */
 import { randomUUID } from 'node:crypto';
 import { WAKE_SOURCE_KIND, type WakeDeliverStatus, type WakeSource } from '@open-artifact/protocol';
@@ -76,6 +79,26 @@ export interface QuestionState {
   asking: boolean;
   /** End the timed waits as their timeouts would; false when there were none. */
   endTimedWaits(): boolean;
+}
+
+/**
+ * Hands a message that is not the owner's to the agent: a collaborator's comment, or a task's result. DSH has one kind
+ * of message for a turn, the user message (marked a notice here), so it goes in as that, but it never ends the
+ * person's own questions the way the owner's words do: the agent reads it next, or a new turn starts when it is idle.
+ * Whether to act on it is up to the agent; the text itself says who sent it and that they are not the owner.
+ */
+export function deliverNotice(agent: DshAgent, message: DshUserMessage): WakeDeliverStatus {
+  if (agent.status === 'idle') {
+    agent.followup(message);
+    return 'resumed';
+  }
+  agent.inject(message);
+  return 'delivered';
+}
+
+/** Whether a wake is the owner's own words: only those are handled as the person answering (see {@link deliverWake}). */
+export function fromOwner(source: Pick<WakeSource, 'from'> | null | undefined): boolean {
+  return source?.from?.kind === 'owner';
 }
 
 /** Hands the message to the agent; the status `wake.deliver` answers with. */

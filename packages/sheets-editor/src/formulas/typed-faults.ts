@@ -1,42 +1,48 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, Reference, SheetId } from '@open-artifact/sheets-core';
+import type { ErrorTell } from '../messages/formula-errors.ts';
+import type { SheetSize } from '../model/a1-references.ts';
+import type { SheetSummary } from '../model/workbook.ts';
+import type { WrittenLineSpan, WrittenReference } from './references.ts';
+import type { ArrayLiteral, FormulaToken, FormulaTokenKind } from './tokenizer.ts';
 import { isSignToken, upperCaseAsciiLetters, findArrayLiterals, tokenizeFormulaText } from './tokenizer.ts';
 import { A1_CELL_PATTERN, isA1CellInSheet, normalizeA1Reference, columnLetters } from '../model/a1-references.ts';
 import { formulaArgumentSeparator } from '../format/number-signs.ts';
 import { findFormulaReferences, isWholeLineReference, resolveFormulaReference, formulaHasMoreReferencesThan } from './references.ts';
-export function lastOrFirstIndex({ first: first, count: count }: Dynamic, index?: Dynamic) {
+export function lastOrFirstIndex({ first, count }: WrittenLineSpan, index: number): number {
   let last = first + (count ?? 1) - 1;
   return last >= index ? last : first;
 }
-export function isConstantTokens(tokens2?: Dynamic) {
-  let [first, second] = tokens2;
-  if (tokens2.length === 2) return isSignToken(first, '+-') && second?.kind === 'number';
-  if (tokens2.length !== 1 || first === undefined) return false;
+export function isConstantTokens(tokens: readonly FormulaToken[]): boolean {
+  let [first, second] = tokens;
+  if (tokens.length === 2) return isSignToken(first, '+-') && second?.kind === 'number';
+  if (tokens.length !== 1 || first === undefined) return false;
   return ['number', 'text', 'error'].includes(first.kind) || (first.kind === 'name' && ['TRUE', 'FALSE'].includes(upperCaseAsciiLetters(first.text)));
 }
-export function faultOfArrayLiteral({ rows: rows }: Dynamic) {
-  let nonConstants = rows.flat().filter((input?: Dynamic) => !isConstantTokens(input));
+export function faultOfArrayLiteral({ rows }: ArrayLiteral): ErrorTell | null {
+  let nonConstants = rows.flat().filter((itemTokens) => !isConstantTokens(itemTokens));
   if (nonConstants.some(isArrayLiteralItem)) return null;
   if (nonConstants.length > 0)
     return {
       cause: 'notOnlyValuesInCurlyBrackets',
     };
-  return rows.some((items?: Dynamic) => items.length !== rows[0]?.length)
+  return rows.some((items) => items.length !== rows[0]?.length)
     ? {
         cause: 'rowsOfDifferentLengthsInCurlyBrackets',
       }
     : null;
 }
-export function findArrayLiteralFaults(tokens2?: Dynamic) {
-  let { arrays: arrays, isOneLeftOpen: isOneLeftOpen } = findArrayLiterals(tokens2);
-  let outside: Dynamic = [];
-  let fault: Dynamic = null;
-  let index: Dynamic = 0;
-  for (let array of arrays as Dynamic) {
+/** The first fault of the formula's array literals, and the tokens outside them (each array's `{` and `}` with them). */
+export function findArrayLiteralFaults(tokens: readonly FormulaToken[]): { fault: ErrorTell | null; outside: FormulaToken[] } {
+  let { arrays, isOneLeftOpen } = findArrayLiterals(tokens);
+  let outside: FormulaToken[] = [];
+  let fault: ErrorTell | null = null;
+  let index = 0;
+  for (let array of arrays) {
     fault ??= faultOfArrayLiteral(array);
-    (outside.push as Dynamic)(...tokens2.slice(index, array.from + 1));
+    outside.push(...tokens.slice(index, array.from + 1));
     index = array.to - 1;
   }
-  (outside.push as Dynamic)(...tokens2.slice(index));
+  outside.push(...tokens.slice(index));
   return {
     fault:
       fault ??
@@ -45,17 +51,27 @@ export function findArrayLiteralFaults(tokens2?: Dynamic) {
             cause: 'curlyBracketNotClosed',
           }
         : null),
-    outside: outside,
+    outside,
   };
 }
-export function findFormulaFault(text?: Dynamic, sheets?: Dynamic, sheetId?: Dynamic, decimalSign?: Dynamic, cell?: Dynamic) {
-  let { tokens: tokens2, isQuotationLeftOpen: isQuotationLeftOpen } = tokenizeFormulaText(text, decimalSign);
+/**
+ * A fault of a formula as typed that the person can be told of, or `null`. `knownReferences`, the references of the formula as
+ * the cell keeps it, are for telling whether it would read more of them if entered again (`null`: not to be told).
+ */
+export function findFormulaFault(
+  text: string,
+  sheets: readonly SheetSummary[],
+  sheetId: SheetId,
+  decimalSign: DecimalSignName,
+  knownReferences: readonly Reference[] | null,
+): ErrorTell | null {
+  let { tokens, isQuotationLeftOpen } = tokenizeFormulaText(text, decimalSign);
   if (isQuotationLeftOpen)
     return {
       cause: 'quotationMarkNotClosed',
     };
-  if (tokens2.some((input?: Dynamic) => isSignToken(input, QUOTE_CHARACTERS))) return null;
-  let countOfKind = (kind?: Dynamic) => tokens2.filter((input?: Dynamic) => input.kind === kind).length;
+  if (tokens.some((token) => isSignToken(token, QUOTE_CHARACTERS))) return null;
+  let countOfKind = (kind: FormulaTokenKind) => tokens.filter((token) => token.kind === kind).length;
   if (countOfKind('open') > countOfKind('close'))
     return {
       cause: 'parenthesisNotClosed',
@@ -64,18 +80,18 @@ export function findFormulaFault(text?: Dynamic, sheets?: Dynamic, sheetId?: Dyn
     return {
       cause: 'tooManyClosingParentheses',
     };
-  let sheetNames = sheets.map(({ name: name }: Dynamic) => name.toLowerCase());
-  let unknownSheet = tokens2.find(({ kind: kind, text: text2 }: Dynamic, index?: Dynamic) => {
-    let before = tokens2[index - 1];
+  let sheetNames = sheets.map(({ name }) => name.toLowerCase());
+  let unknownSheet = tokens.find(({ kind, text: tokenText }, index) => {
+    let before = tokens[index - 1];
     let isAtOperandStart =
       before === undefined || before.kind === 'open' || before.kind === 'betweenArguments' || isSignToken(before, '+-*/^=<>');
-    let lowerText = text2.toLowerCase();
+    let lowerText = tokenText.toLowerCase();
     return (
       kind === 'sheetName' &&
       isAtOperandStart &&
-      !A1_CELL_PATTERN.test(text2) &&
-      !text2.includes('$') &&
-      !sheetNames.some((input?: Dynamic) => input.endsWith(lowerText))
+      !A1_CELL_PATTERN.test(tokenText) &&
+      !tokenText.includes('$') &&
+      !sheetNames.some((sheetName) => sheetName.endsWith(lowerText))
     );
   });
   if (unknownSheet !== undefined)
@@ -83,14 +99,14 @@ export function findFormulaFault(text?: Dynamic, sheets?: Dynamic, sheetId?: Dyn
       cause: 'noSuchSheet',
       name: unknownSheet.text,
     };
-  let sheet = sheets.find(({ sheetId: sheetId2 }: Dynamic) => sheetId2 === sheetId);
-  let outsideRange = tokens2.find((token?: Dynamic, index?: Dynamic) => {
-    let isRangeEnd = isSignToken(tokens2[index - 1], ':') || isSignToken(tokens2[index + 1], ':');
+  let sheet = sheets.find(({ sheetId: listedSheetId }) => listedSheetId === sheetId);
+  let outsideRange = tokens.find((token, index) => {
+    let isRangeEnd = isSignToken(tokens[index - 1], ':') || isSignToken(tokens[index + 1], ':');
     let isAfterSheetName =
-      isSheetNameToken(tokens2[index - 1]) || (isSignToken(tokens2[index - 1], ':') && isSheetNameToken(tokens2[index - 3]));
+      isSheetNameToken(tokens[index - 1]) || (isSignToken(tokens[index - 1], ':') && isSheetNameToken(tokens[index - 3]));
     return (
       isCellAddressToken(token) &&
-      tokens2[index + 1]?.kind !== 'open' &&
+      tokens[index + 1]?.kind !== 'open' &&
       isRangeEnd &&
       !isAfterSheetName &&
       sheet !== undefined &&
@@ -102,40 +118,40 @@ export function findFormulaFault(text?: Dynamic, sheets?: Dynamic, sheetId?: Dyn
       cause: 'noSuchCellInARange',
       address: normalizeA1Reference(outsideRange.text),
     };
-  let { fault: fault, outside: outside } = findArrayLiteralFaults(tokens2);
+  let { fault, outside } = findArrayLiteralFaults(tokens);
   if (fault !== null) return fault;
-  if (outside.some((input?: Dynamic) => isSignToken(input, decimalSign === 'comma' ? ',' : ';')))
+  if (outside.some((token) => isSignToken(token, decimalSign === 'comma' ? ',' : ';')))
     return {
       cause: 'wrongSignBetweenArguments',
       rightSign: formulaArgumentSeparator(decimalSign),
     };
-  if (isSignToken(tokens2.at(-1), '+-*/^&=<>'))
+  if (isSignToken(tokens.at(-1), '+-*/^&=<>'))
     return {
       cause: 'somethingMissingAtTheEnd',
     };
   let outsideReference = findFormulaReferences(text, decimalSign).references.find(
-    (input?: Dynamic) =>
-      input.sheetName === null &&
-      input.otherSheetName === null &&
-      isWholeLineReference(input) &&
-      input.ends.every(({ letters: letters }: Dynamic) => letters.length <= 3) &&
-      resolveFormulaReference(input, sheetId, sheets) === null,
+    (reference) =>
+      reference.sheetName === null &&
+      reference.otherSheetName === null &&
+      isWholeLineReference(reference) &&
+      reference.ends.every(({ letters }) => letters.length <= 3) &&
+      resolveFormulaReference(reference, sheetId, sheets) === null,
   );
   if (outsideReference !== undefined && sheet !== undefined)
     return {
       cause: 'noSuchCellInARange',
       address: addressOfReferenceEnd(outsideReference, sheet),
     };
-  return cell !== null && formulaHasMoreReferencesThan(text, decimalSign, sheetId, sheets, cell)
+  return knownReferences !== null && formulaHasMoreReferencesThan(text, decimalSign, sheetId, sheets, knownReferences)
     ? {
         cause: 'readIfEnteredAgain',
       }
     : null;
 }
 export const QUOTE_CHARACTERS = "'‘’“”";
-export const isCellAddressToken = (token?: Dynamic) => token.kind === 'name' && A1_CELL_PATTERN.test(token.text);
-export const isSheetNameToken = (token?: Dynamic) => token?.kind === 'sheetName' || isSignToken(token, '!');
-export const addressOfReferenceEnd = ({ rows: rows, columns: columns }: Dynamic, sheet?: Dynamic) =>
+export const isCellAddressToken = (token: FormulaToken): boolean => token.kind === 'name' && A1_CELL_PATTERN.test(token.text);
+export const isSheetNameToken = (token: FormulaToken | undefined): boolean => token?.kind === 'sheetName' || isSignToken(token, '!');
+export const addressOfReferenceEnd = ({ rows, columns }: WrittenReference, sheet: SheetSize): string =>
   `${columnLetters(lastOrFirstIndex(columns, sheet.columnCount))}${lastOrFirstIndex(rows, sheet.rowCount) + 1}`;
-export const isArrayLiteralItem = (items?: Dynamic) =>
-  items.every((token?: Dynamic) => isSignToken(token, ',\\') || isConstantTokens([token]));
+export const isArrayLiteralItem = (items: readonly FormulaToken[]): boolean =>
+  items.every((token) => isSignToken(token, ',\\') || isConstantTokens([token]));

@@ -1,50 +1,60 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ChartInputs } from '../chart-frame/messages.ts';
+import type { ChartCellsProblem } from '../messages/charts.ts';
 import { canSwapChartKind, readsRowsAlone } from './chart-kind-fit.ts';
-import { STOCK_KINDS } from './stock-programs.ts';
+import type { ChartSketch } from './chart-thumbnail-paths.ts';
+import type { ChartOfView } from './placed-views.ts';
+import { STOCK_KINDS, type StockKind } from './stock-programs.ts';
 
 // What "Change chart type" offers for a chart. It lives apart from the layer that draws the menu, so that it can be
 // tested without the layer's components.
 
+/** A kind offered under "Change chart type", and whether the page swaps to it alone (or the agent writes it). */
+export type ChartChangeOffer = ChartSketch & { isSwap: boolean };
+
 /** Why the cells a chart reads cannot be drawn: none holds a number, or some hold errors. Null when they can be. */
-export function chartCellsProblem(inputs?: Dynamic) {
-  let areas = Object.values(inputs);
+export function chartCellsProblem(inputs: ChartInputs): ChartCellsProblem | null {
+  const areas = Object.values(inputs);
   if (areas.length === 0) return null;
-  let hasErrorCells: Dynamic = false;
-  for (let area of areas as Dynamic) {
-    let hasManyColumns = area.some((row?: Dynamic) => row.length > 1);
-    for (let [rowIndex, row] of area.entries() as Dynamic)
-      for (let [columnIndex, { value: value, text: text }] of row.entries() as Dynamic) {
-        let isLabelCell = (rowIndex === 0 && area.length > 1) || (columnIndex === 0 && hasManyColumns);
+  let hasErrorCells = false;
+  for (const area of areas) {
+    const hasManyColumns = area.some((row) => row.length > 1);
+    for (const [rowIndex, row] of area.entries())
+      for (const [columnIndex, { value, text }] of row.entries()) {
+        const isLabelCell = (rowIndex === 0 && area.length > 1) || (columnIndex === 0 && hasManyColumns);
         if (typeof value === 'number' || (value !== null && !isLabelCell)) return null;
         hasErrorCells ||= value === null && text !== '';
       }
   }
   return hasErrorCells ? 'cellsHaveErrors' : 'cellsHaveNoNumbers';
 }
-/** Whether this chart can be changed here: by a kind swap the page makes alone, or by the agent. */
-export const canAskChartChange = (changes?: Dynamic, chart?: Dynamic, canAgentWrite: Dynamic = false) =>
+/**
+ * Whether this chart can be changed here: by a kind swap the page makes alone, or by the agent. Of the changes to
+ * charts only whether there are any is read.
+ */
+export const canAskChartChange = (changes: object | null, chart: ChartOfView, canAgentWrite = false): boolean =>
   changes !== null &&
   chart.kind !== 'none' &&
   chartCellsProblem(chart.inputs) === null &&
-  (canAgentWrite || STOCK_KINDS.some((kind?: Dynamic) => canSwapChartKind(chart.inputs, kind)));
+  (canAgentWrite || STOCK_KINDS.some((kind) => canSwapChartKind(chart.inputs, kind)));
 /**
  * The kinds offered under "Change chart type": each kind the page can swap this chart to by itself, leaving out the
  * kind it is now. A chart the page cannot swap (one that reads inputs other than `rows`) is offered the first four
  * kinds, for the agent to write, and none when no agent can.
  */
-export function chartChangeOffers(chart: Dynamic, kindNow: Dynamic, canAgentWrite: Dynamic) {
+export function chartChangeOffers(chart: ChartOfView, kindNow: StockKind | null, canAgentWrite: boolean): ChartChangeOffer[] {
   if (chart.kind === 'none') return [];
-  let offerOf = (kind?: Dynamic, isSwap?: Dynamic) => ({
-    ...CHART_CHANGE_OFFERS.find((offer?: Dynamic) => offer.kind === kind),
-    isSwap: isSwap,
+  const offerOf = (kind: StockKind, isSwap: boolean): ChartChangeOffer => ({
+    // Every kind offered is one of CHART_CHANGE_OFFERS.
+    ...CHART_CHANGE_OFFERS.find((offer) => offer.kind === kind)!,
+    isSwap,
   });
-  if (!readsRowsAlone(chart.inputs)) return canAgentWrite ? AGENT_CHANGE_KINDS.map((kind?: Dynamic) => offerOf(kind, false)) : [];
-  return CHART_CHANGE_OFFERS.filter(({ kind: kind }: Dynamic) => kind !== kindNow && canSwapChartKind(chart.inputs, kind)).map(
-    ({ kind: kind }: Dynamic) => offerOf(kind, true),
+  if (!readsRowsAlone(chart.inputs)) return canAgentWrite ? AGENT_CHANGE_KINDS.map((kind) => offerOf(kind, false)) : [];
+  return CHART_CHANGE_OFFERS.filter(({ kind }) => kind !== kindNow && canSwapChartKind(chart.inputs, kind)).map(
+    ({ kind }) => offerOf(kind, true),
   );
 }
-export const AGENT_CHANGE_KINDS = ['bar', 'stackedBar', 'line', 'pie'];
-export const CHART_CHANGE_OFFERS = [
+export const AGENT_CHANGE_KINDS: readonly StockKind[] = ['bar', 'stackedBar', 'line', 'pie'];
+export const CHART_CHANGE_OFFERS: readonly ChartSketch[] = [
   {
     kind: 'bar',
     series: [

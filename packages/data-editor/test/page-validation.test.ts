@@ -69,6 +69,19 @@ describe('page faults', () => {
     assert.equal(tracker.list().length, 2);
   });
 
+  it('keeps which drawing threw, apart from the same fault in another one', () => {
+    const tracker = createPageFaultTracker();
+    assert.equal(tracker.record('stopped', new TypeError('a'), undefined, 'revenue'), true);
+    assert.equal(tracker.record('stopped', new TypeError('b'), undefined, 'costs'), true);
+    assert.equal(tracker.record('stopped', new TypeError('c'), undefined, 'revenue'), false);
+    assert.deepEqual(
+      tracker.list().map((fault) => fault.where),
+      ['revenue', 'costs'],
+    );
+    tracker.record('stopped', new RangeError('d'));
+    assert.equal(Object.hasOwn(tracker.list()[2] ?? {}, 'where'), false);
+  });
+
   it('names fault classes and describes stops', () => {
     assert.equal(getPageFaultName(new RangeError('r')), 'RangeError');
     assert.equal(getPageFaultName(new Error('e')), 'Error');

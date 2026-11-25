@@ -14,6 +14,7 @@ import { useAgent } from '../services/agent.ts';
 import { canChange } from '../services/commands.ts';
 import { EndCard } from './EndCard.tsx';
 import { FormatBar } from './FormatBar.tsx';
+import { TextLinkCard } from './TextLinkCard.tsx';
 import { FootToolbar } from './FootToolbar.tsx';
 import { FollowingPill, PresenceCard } from './Presence.tsx';
 import { StartCard } from './StartCard.tsx';
@@ -61,6 +62,7 @@ export function StageChrome({ onStage, startCard }: StageChromeProps): ReactNode
             <FootToolbar editing={editing} ask={agentAvailable && !readOnly} />
           </div>
           <FormatBar />
+          <TextLinkCard />
         </>
       ) : null}
     </>

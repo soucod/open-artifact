@@ -1,23 +1,65 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type {
+  CellCondition,
+  Color,
+  ColumnId,
+  ColumnOfRecords,
+  Effect,
+  FontOfACondition,
+  FormatOfACondition,
+  HighestAnchor,
+  Hue,
+  LowestAnchor,
+  MiddleAnchor,
+  RangeCorners,
+  RuleInIds,
+  Shade,
+  Stop,
+  Test,
+  TestedCell,
+} from '@open-artifact/sheets-core';
 import { testedColumnOf, firstColumnOfRule, findColumnStats, defaultConditionForColumn } from './conditions.ts';
+import type { ColumnStats } from './conditions.ts';
 import { NO_COLOR } from '../../model/colors.ts';
 import { measureOfColumn } from '../../words/column-holds.ts';
-export function rangesNarrowedToColumn({ ranges: [firstRange, ...moreRanges] }: Dynamic, c?: Dynamic) {
-  let toColumn = ({ topLeft: topLeft, bottomRight: bottomRight }: Dynamic) => ({
+import type { FontMark } from '../../state/initial-state.ts';
+import type { ColorProperty } from '../../i18n/format-labels.ts';
+import type { RulePreset, ScaleAnchorKind, ScaleStop } from '../../messages/conditional-format.ts';
+export type FormatWhereEffect = Extract<Effect, { kind: 'formatWhere' }>;
+export type ColorScaleEffect = Extract<Effect, { kind: 'colorScale' }>;
+export type StandardColor = Extract<Color, { kind: 'standard' }>;
+export type ScaleAnchor = LowestAnchor | MiddleAnchor | HighestAnchor;
+export interface FormatWhereRule extends RuleInIds {
+  effect: FormatWhereEffect;
+}
+export interface ColorScaleRule extends RuleInIds {
+  effect: ColorScaleEffect;
+}
+export interface RuleFormatPreset {
+  key: RulePreset;
+  format: FormatOfACondition;
+}
+export interface SuggestedRules {
+  scale: ColorScaleRule;
+  ofNegatives: FormatWhereRule;
+  ofTheLargest: FormatWhereRule;
+  ofAnyNumber: FormatWhereRule;
+}
+export function rangesNarrowedToColumn({ ranges: [firstRange, ...moreRanges] }: Pick<RuleInIds, 'ranges'>, c: ColumnId): RangeCorners[] {
+  let toColumn = ({ topLeft, bottomRight }: RangeCorners): RangeCorners => ({
     topLeft: {
       r: topLeft.r,
-      c: c,
+      c,
     },
     bottomRight: {
       r: bottomRight.r,
-      c: c,
+      c,
     },
   });
   return [toColumn(firstRange), ...moreRanges.map(toColumn)];
 }
-export function updateRuleTest(effect?: Dynamic, testIndex?: Dynamic, update?: Dynamic) {
+export function updateRuleTest(effect: FormatWhereEffect, testIndex: number, update: (test: Test) => Test): FormatWhereEffect {
   let [firstTest, ...moreTests] = effect.allOf.map(
-    (test?: Dynamic, index?: Dynamic) => (index === testIndex ? update(test) : test),
+    (test, index) => (index === testIndex ? update(test) : test),
   );
   return firstTest === undefined
     ? effect
@@ -26,8 +68,8 @@ export function updateRuleTest(effect?: Dynamic, testIndex?: Dynamic, update?: D
         allOf: [firstTest, ...moreTests],
       };
 }
-export function removeRuleTest(effect?: Dynamic, testIndex?: Dynamic) {
-  let [firstTest, ...moreTests] = effect.allOf.filter((test?: Dynamic, index?: Dynamic) => index !== testIndex);
+export function removeRuleTest(effect: FormatWhereEffect, testIndex: number): FormatWhereEffect {
+  let [firstTest, ...moreTests] = effect.allOf.filter((test, index) => index !== testIndex);
   return firstTest === undefined
     ? effect
     : {
@@ -35,25 +77,25 @@ export function removeRuleTest(effect?: Dynamic, testIndex?: Dynamic) {
         allOf: [firstTest, ...moreTests],
       };
 }
-export function testOfUnusedColumn(rule?: Dynamic, columnStats?: Dynamic) {
-  let testedColumns = new (Set as Dynamic)(
-    rule.effect.allOf.map((test?: Dynamic) => testedColumnOf(test, firstColumnOfRule(rule))),
+export function testOfUnusedColumn(rule: FormatWhereRule, columnStats: ColumnStats): TestedCell {
+  let testedColumns = new Set<ColumnId | null>(
+    rule.effect.allOf.map((test) => testedColumnOf(test, firstColumnOfRule(rule))),
   );
   return {
     kind: 'sameRowInColumn',
-    c: (columnStats.columns.find(({ c: c }: Dynamic) => !testedColumns.has(c)) ?? columnStats.columns[0]).c,
+    c: (columnStats.columns.find(({ c }) => !testedColumns.has(c)) ?? columnStats.columns[0]).c,
   };
 }
-export function withRuleFont(format?: Dynamic, font?: Dynamic) {
+export function withRuleFont(format: FormatOfACondition, font: FontOfACondition): FormatOfACondition {
   let { font: oldFont, ...rest } = format;
   return Object.keys(font).length === 0
     ? rest
     : {
         ...rest,
-        font: font,
+        font,
       };
 }
-export function withFormatColor(format?: Dynamic, target?: Dynamic, color?: Dynamic) {
+export function withFormatColor(format: FormatOfACondition, target: ColorProperty, color: Color): FormatOfACondition {
   if (target === 'fillColor') {
     let { fillColor: oldFill, ...rest } = format;
     return color.kind === 'none'
@@ -70,15 +112,15 @@ export function withFormatColor(format?: Dynamic, target?: Dynamic, color?: Dyna
       ? otherFont
       : {
           ...otherFont,
-          color: color,
+          color,
         },
   );
 }
-export function isFontStyleOn({ font: font }: Dynamic, style?: Dynamic) {
+export function isFontStyleOn({ font }: FormatOfACondition, style: FontMark): boolean {
   let value = font?.[style];
   return value !== undefined && value !== false && value !== 'none';
 }
-export function toggleFontStyle(format?: Dynamic, style?: Dynamic) {
+export function toggleFontStyle(format: FormatOfACondition, style: FontMark): FormatOfACondition {
   let { [style]: oldValue, ...otherFont } = format.font ?? {};
   if (isFontStyleOn(format, style)) return withRuleFont(format, otherFont);
   return withRuleFont(format, {
@@ -86,7 +128,7 @@ export function toggleFontStyle(format?: Dynamic, style?: Dynamic) {
     [style]: style === 'underline' ? 'single' : true,
   });
 }
-export function withScalePointColor(scale?: Dynamic, point?: Dynamic, color?: Dynamic) {
+export function withScalePointColor(scale: ColorScaleEffect, point: ScaleStop, color: Color): ColorScaleEffect {
   if (point === 'middle')
     return scale.middle === null
       ? scale
@@ -94,23 +136,28 @@ export function withScalePointColor(scale?: Dynamic, point?: Dynamic, color?: Dy
           ...scale,
           middle: {
             ...scale.middle,
-            color: color,
+            color,
           },
         };
   return {
     ...scale,
     [point]: {
       ...scale[point],
-      color: color,
+      color,
     },
   };
 }
-export function withScalePointAnchor(scale?: Dynamic, point?: Dynamic, anchorKind?: Dynamic, number?: Dynamic) {
-  let anchor =
+export function withScalePointAnchor(
+  scale: ColorScaleEffect,
+  point: ScaleStop,
+  anchorKind: ScaleAnchorKind,
+  number: number,
+): ColorScaleEffect {
+  let anchor: MiddleAnchor =
     anchorKind === 'number'
       ? {
           kind: 'number',
-          number: number,
+          number,
         }
       : {
           kind: 'percentile',
@@ -150,20 +197,20 @@ export function withScalePointAnchor(scale?: Dynamic, point?: Dynamic, anchorKin
             ...scale,
             middle: {
               ...scale.middle,
-              anchor: anchor,
+              anchor,
             },
           };
   }
 }
-export function orderScaleAnchors(scale?: Dynamic) {
-  let anchors = [scale.lowest.anchor, scale.middle?.anchor, scale.highest.anchor];
-  let numbers = sortedNumbers(anchors.flatMap((anchor?: Dynamic) => (anchor?.kind === 'number' ? [anchor.number] : [])));
+export function orderScaleAnchors(scale: ColorScaleEffect): ColorScaleEffect | null {
+  let anchors: (ScaleAnchor | undefined)[] = [scale.lowest.anchor, scale.middle?.anchor, scale.highest.anchor];
+  let numbers = sortedNumbers(anchors.flatMap((anchor) => (anchor?.kind === 'number' ? [anchor.number] : [])));
   let percentiles = sortedNumbers(
-    anchors.flatMap((anchor?: Dynamic) => (anchor?.kind === 'percentile' ? [anchor.percentile] : [])),
+    anchors.flatMap((anchor) => (anchor?.kind === 'percentile' ? [anchor.percentile] : [])),
   );
   if (hasRepeatedNeighbor(numbers) || hasRepeatedNeighbor(percentiles)) return null;
-  let orderedAnchor = (anchor?: Dynamic, earlierAnchors?: Dynamic) => {
-    let rank = earlierAnchors.filter((earlier?: Dynamic) => earlier?.kind === anchor.kind).length;
+  let orderedAnchor = <A extends ScaleAnchor>(anchor: A, earlierAnchors: (ScaleAnchor | undefined)[]): A | MiddleAnchor => {
+    let rank = earlierAnchors.filter((earlier) => earlier?.kind === anchor.kind).length;
     if (anchor.kind === 'number')
       return {
         kind: 'number',
@@ -176,7 +223,7 @@ export function orderScaleAnchors(scale?: Dynamic) {
       };
     return anchor;
   };
-  let { lowest: lowest, middle: middle, highest: highest } = scale;
+  let { lowest, middle, highest } = scale;
   return {
     ...scale,
     lowest: {
@@ -196,14 +243,18 @@ export function orderScaleAnchors(scale?: Dynamic) {
     },
   };
 }
-export function columnForColorScale(rule?: Dynamic, columnStats?: Dynamic) {
+export function columnForColorScale(rule: RuleInIds, columnStats: ColumnStats): ColumnId {
   let c = testedColumnOfRule(rule);
   let column = findColumnStats(columnStats, c);
   return column !== null && isScaleColumn(column) ? c : (columnStats.columns.find(isScaleColumn)?.c ?? c);
 }
-export function ruleWithEffectKind(rule?: Dynamic, effectKind?: Dynamic, columnStats?: Dynamic) {
+export function ruleWithEffectKind(
+  rule: RuleInIds,
+  effectKind: Effect['kind'],
+  columnStats: ColumnStats,
+): FormatWhereRule | ColorScaleRule | null {
   if (rule.effect.kind === effectKind) return null;
-  let [{ topLeft: topLeft, bottomRight: bottomRight }, ...moreRanges] = rule.ranges;
+  let [{ topLeft, bottomRight }, ...moreRanges] = rule.ranges;
   let isOneRowRange = moreRanges.length === 0 && topLeft.r === bottomRight.r && topLeft.c !== bottomRight.c;
   if (effectKind === 'colorScale')
     return {
@@ -228,22 +279,22 @@ export function ruleWithEffectKind(rule?: Dynamic, effectKind?: Dynamic, columnS
   };
 }
 export const NEW_TEST_INDEX = -1;
-export const withAddedTest = (effect?: Dynamic, test?: Dynamic) => ({
+export const withAddedTest = (effect: FormatWhereEffect, test: Test): FormatWhereEffect => ({
   ...effect,
   allOf: [...effect.allOf, test],
 });
-export const standardColorOf = (hue?: Dynamic, shade?: Dynamic) => ({
+export const standardColorOf = (hue: Hue, shade: Shade): StandardColor => ({
   kind: 'standard',
-  hue: hue,
-  shade: shade,
+  hue,
+  shade,
 });
-export const tintFormatOf = (hue?: Dynamic) => ({
+export const tintFormatOf = (hue: Hue): FormatOfACondition => ({
   fillColor: standardColorOf(hue, 100),
   font: {
     color: standardColorOf(hue, 800),
   },
 });
-export const RULE_FORMAT_PRESETS = [
+export const RULE_FORMAT_PRESETS: readonly RuleFormatPreset[] = [
   {
     key: 'red',
     format: tintFormatOf('red'),
@@ -278,8 +329,8 @@ export const RULE_FORMAT_PRESETS = [
     },
   },
 ];
-export const defaultRuleForRanges = (ranges?: Dynamic) => ({
-  ranges: ranges,
+export const defaultRuleForRanges = (ranges: RangeCorners[]): FormatWhereRule => ({
+  ranges,
   effect: {
     kind: 'formatWhere',
     allOf: [
@@ -295,8 +346,8 @@ export const defaultRuleForRanges = (ranges?: Dynamic) => ({
     format: tintFormatOf('yellow'),
   },
 });
-export const ruleOfCellCondition = (ranges?: Dynamic, condition?: Dynamic, format?: Dynamic) => ({
-  ranges: ranges,
+export const ruleOfCellCondition = (ranges: RangeCorners[], condition: CellCondition, format: FormatOfACondition): FormatWhereRule => ({
+  ranges,
   effect: {
     kind: 'formatWhere',
     allOf: [
@@ -304,15 +355,15 @@ export const ruleOfCellCondition = (ranges?: Dynamic, condition?: Dynamic, forma
         tested: {
           kind: 'theCellItself',
         },
-        condition: condition,
+        condition,
       },
     ],
-    format: format,
+    format,
   },
 });
-export const suggestedRulesFor = (ranges?: Dynamic) => ({
+export const suggestedRulesFor = (ranges: RangeCorners[]): SuggestedRules => ({
   scale: {
-    ranges: ranges,
+    ranges,
     effect: DEFAULT_COLOR_SCALE,
   },
   ofNegatives: ruleOfCellCondition(
@@ -357,9 +408,9 @@ export const suggestedRulesFor = (ranges?: Dynamic) => ({
     },
   ),
 });
-export const isFormatNonEmpty = (format?: Dynamic) => Object.keys(format).length > 0;
+export const isFormatNonEmpty = (format: FormatOfACondition): boolean => Object.keys(format).length > 0;
 export const MIDPOINT_PERCENTILE = 50;
-export const DEFAULT_COLOR_SCALE = {
+export const DEFAULT_COLOR_SCALE: ColorScaleEffect = {
   kind: 'colorScale',
   lowest: {
     anchor: {
@@ -379,7 +430,7 @@ export const DEFAULT_COLOR_SCALE = {
     },
   },
 };
-export const DEFAULT_SCALE_MIDPOINT = {
+export const DEFAULT_SCALE_MIDPOINT: Stop<MiddleAnchor> = {
   anchor: {
     kind: 'percentile',
     percentile: MIDPOINT_PERCENTILE,
@@ -390,13 +441,13 @@ export const DEFAULT_SCALE_MIDPOINT = {
     shade: 300,
   },
 };
-export const withScaleMidpoint = (scale?: Dynamic, hasMiddle?: Dynamic) => ({
+export const withScaleMidpoint = (scale: ColorScaleEffect, hasMiddle: boolean): ColorScaleEffect => ({
   ...scale,
   middle: hasMiddle ? (scale.middle ?? DEFAULT_SCALE_MIDPOINT) : null,
 });
-export const sortedNumbers = (numbers?: Dynamic) => numbers.toSorted((a?: Dynamic, b2?: Dynamic) => a - b2);
-export const hasRepeatedNeighbor = (numbers?: Dynamic) =>
-  numbers.some((number?: Dynamic, index?: Dynamic) => index > 0 && number === numbers[index - 1]);
-export const isScaleColumn = (column?: Dynamic) => measureOfColumn(column) !== null;
-export const testedColumnOfRule = (rule?: Dynamic) =>
+export const sortedNumbers = (numbers: number[]): number[] => numbers.toSorted((a, b) => a - b);
+export const hasRepeatedNeighbor = (numbers: number[]): boolean =>
+  numbers.some((number, index) => index > 0 && number === numbers[index - 1]);
+export const isScaleColumn = (column: ColumnOfRecords): boolean => measureOfColumn(column) !== null;
+export const testedColumnOfRule = (rule: RuleInIds): ColumnId =>
   rule.effect.kind === 'formatWhere' ? testedColumnOf(rule.effect.allOf[0], firstColumnOfRule(rule)) : firstColumnOfRule(rule);

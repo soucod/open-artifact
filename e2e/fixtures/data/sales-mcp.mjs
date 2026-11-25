@@ -2,6 +2,7 @@
 // A stdio MCP server with made-up sales numbers, for the Data type's tests.
 // Tools: run_sql (orders filtered by the region the query names), list_tickets
 // (one content block per ticket plus a paging block) and broken (a tool error).
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const send = message => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -26,12 +27,25 @@ const tools = [
   { name: 'broken', description: 'Always fails.', inputSchema: { type: 'object' } },
 ];
 
+// SALES_MCP_BONUS_FILE names a file holding a number added to every revenue, read on each call, so a test can change
+// what the warehouse answers while the server runs.
+function bonus() {
+  const file = process.env.SALES_MCP_BONUS_FILE;
+  if (!file) return 0;
+  try {
+    return Number(readFileSync(file, 'utf8').trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 function runSql(args) {
   const query = String(args.query ?? '');
+  const extra = bonus();
   const named = /region\s*=\s*'([A-Za-z]+)'/.exec(query);
   const all = /'([A-Za-z]*)'\s*=\s*''/.exec(query);
   const region = all && all[1] === '' ? null : named?.[1] ?? null;
-  const rows = ORDERS.filter(o => region === null || o.region === region);
+  const rows = ORDERS.filter(o => region === null || o.region === region).map(o => (extra ? { ...o, revenue: String(Number(o.revenue) + extra) } : o));
   return { content: [text({ rows, query })], structuredContent: { rows, query } };
 }
 

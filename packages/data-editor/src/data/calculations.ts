@@ -14,7 +14,7 @@ import {
   type Table,
 } from '@open-artifact/data-core';
 import { collectDependencies } from './calc-engine.ts';
-import { getLastSuccessfulRun, isFailedDatasetRun, isRetryableDatasetFailure } from './query-store.ts';
+import { getLastSuccessfulRun, isDatasetStale, isFailedDatasetRun, isRetryableDatasetFailure } from './query-store.ts';
 import { joinAlternatives } from './util.ts';
 
 /** "salesByRegion" → "Sales by region". */
@@ -103,6 +103,22 @@ function getBlockedCalculationInput({ id, ds, run, waits }: CalculationInput): C
   return isFailedDatasetRun(run) && getLastSuccessfulRun(run) === null ? [{ id, failed: isRetryableDatasetFailure(run) }] : [];
 }
 
+function earliestInputTime(inputs: readonly CalculationInput[], now: number): number | null {
+  const hasLiveQuery = inputs.some((input) => input.ds?.source.kind === 'query');
+  const relevant = hasLiveQuery
+    ? inputs.filter((input) => input.ds !== undefined && (input.ds.source.kind === 'query' || isDatasetStale(input.ds, now)))
+    : inputs;
+  const pickOldest = (list: readonly CalculationInput[]): number | null => {
+    let oldest: number | null = null;
+    for (const input of list) {
+      const at = input.ds === undefined ? null : getInputUpdatedAt(input.ds, input.run);
+      if (at !== null && (oldest === null || at < oldest)) oldest = at;
+    }
+    return oldest;
+  };
+  return pickOldest(relevant) ?? (hasLiveQuery ? pickOldest(inputs) : null);
+}
+
 function resolveCalculationRun(source: CalculationSource, inputs: CalculationInput[]): CalculationResolution {
   const failure = (message: string, wording?: LoadWording): FailedRun => ({
     status: 'failed',
@@ -122,13 +138,9 @@ function resolveCalculationRun(source: CalculationSource, inputs: CalculationInp
   if (source.status === 'loading' || inputs.some((input) => getLastSuccessfulRun(input.run) === null))
     return { run: { status: 'running', startedAt: source.at, prev: null }, waits };
   if (source.status === 'error') return { run: { ...failure(source.error), quoted: true }, waits };
-  let latest: number | null = null;
-  for (const input of inputs) {
-    const at = input.ds === undefined ? null : getInputUpdatedAt(input.ds, input.run);
-    if (at !== null && (latest === null || at > latest)) latest = at;
-  }
+  const oldest = earliestInputTime(inputs, Date.now());
   return {
-    run: { status: 'ok', table: getCalculationTable(source.result) ?? { columns: [], rows: [] }, at: latest ?? source.at, ms: 0 },
+    run: { status: 'ok', table: getCalculationTable(source.result) ?? { columns: [], rows: [] }, at: oldest ?? source.at, ms: 0 },
     waits,
   };
 }

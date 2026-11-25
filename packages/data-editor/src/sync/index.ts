@@ -106,8 +106,9 @@ function shellSaved(snapshot: LiveSnapshot<DataDocuments>): ChromeReport['saved'
   switch (snapshot.status) {
     case 'ready':
       return 'saved';
+    // Edits waiting out the write debounce: on their way, not failed.
     case 'dirty':
-      return 'unsaved';
+      return 'saving';
     case 'error':
       return snapshot.loadState === 'failed' && snapshot.pending === 0 ? undefined : 'unsaved';
     case 'saving':
@@ -138,6 +139,7 @@ export async function startLiveDocument(): Promise<void> {
   const transport: SyncTransport = {
     get: (path) => db.get(path),
     list: (collection) => db.list(collection),
+    listing: async (collection) => (db.listing ? db.listing(collection) : { documents: await db.list(collection) }),
     // Paths come from the live codec, which only writes well-formed document paths.
     write: (writes) => db.write(writes as Parameters<typeof db.write>[0]),
     onChange: (listener) =>

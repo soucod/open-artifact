@@ -2,18 +2,12 @@
  * The web links a selected item offers to open, shared by the selection
  * bar's Open link button and the More actions menu: a link card's address,
  * a linked picture's, or the links written in a note, shape or text.
- * Either control offers one link only; with several, Mod-click on the one
+ * Either control offers one link only; with several, a click on the one
  * wanted opens it.
  */
 
 import { markdownLinkUrls, type BoardElement } from '@open-artifact/whiteboard-core';
 import { boardLinkTarget } from '../elements/links.ts';
-import { modKey } from '../lib/tools.ts';
-
-/** Why Open link is off when an item holds several links. */
-export function severalLinksMessage(): string {
-  return `Several links: open one with ${modKey()}-click`;
-}
 
 /** The web links of one item, in reading order, without repeats. */
 export function elementLinks(element: BoardElement | undefined): string[] {

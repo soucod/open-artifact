@@ -7,9 +7,7 @@
  * (ahead of time, while the timer runs), its loop count is set to one and
  * its frame durations are summed; each play shows a fresh blob URL of those
  * bytes (so it starts at the first frame) for that long, then the sticker
- * goes back to its still art. On the WebGL board a playing sticker is drawn
- * as DOM (see `engine/items.ts`), so the store of playing stickers is read
- * by the engine too.
+ * goes back to its still art.
  */
 
 import { useEffect, useState } from 'react';

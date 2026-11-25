@@ -7,16 +7,16 @@ import { editsOfQueued } from '../engine/cause-of-error-cache.ts';
 import { selectedArea, selectionKeepsItsCells } from '../selection/model.ts';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
-export function doesEffectDropCopiedCells(effect: PageEffect, { cutToken: cutToken }: Pick<CopiedCells, 'cutToken'>): boolean {
+export function doesEffectDropCopiedCells(effect: PageEffect, { cutToken }: Pick<CopiedCells, 'cutToken'>): boolean {
   if (effect.kind === 'copyLinkToSheet') return true;
   if (effect.kind === 'undoOrRedo' || effect.kind === 'queueEditsThatTakeBack') return cutToken !== null;
   if (effect.kind !== 'queueEdit' || effect.ifQueued.askOfChart !== undefined) return false;
   let keepsCut =
-    editsOfQueued(effect).every(({ kind: kind }) => EDITS_THAT_KEEP_CUT.has(kind)) || effect.ifQueued.leavesLineRoundCopy === true;
+    editsOfQueued(effect).every(({ kind }) => EDITS_THAT_KEEP_CUT.has(kind)) || effect.ifQueued.leavesLineRoundCopy === true;
   return cutToken === null ? !keepsCut : effect.ifQueued.movesCut === undefined;
 }
 export function letGoOfCopiedCells(state: PageState, reads: WorkbookReads, keepCut: boolean): PageState {
-  let { copiedCells: copiedCells } = state;
+  let { copiedCells } = state;
   let area = copiedCells === null ? null : selectedArea(copiedCells, reads);
   let nextState = {
     ...state,
@@ -24,13 +24,13 @@ export function letGoOfCopiedCells(state: PageState, reads: WorkbookReads, keepC
     lastDone: null,
   };
   if (copiedCells === null || area === null) return nextState;
-  let value: CopiedCellsLeft = keepCut ? 'cutCanceledAndPasteCopies' : 'cutCanceled';
-  let value2: CopiedCellsLeft = copiedCells.cutToken === null ? 'stillCopied' : value;
+  let cutLeaves: CopiedCellsLeft = keepCut ? 'cutCanceledAndPasteCopies' : 'cutCanceled';
+  let leaves: CopiedCellsLeft = copiedCells.cutToken === null ? 'stillCopied' : cutLeaves;
   return {
     ...nextState,
     lastDone: {
       what: 'copiedCellsLetGo',
-      leaves: value2,
+      leaves,
       cells: areaToA1AsStored(area, ownRowOrderOfSheet(reads, state.activeCell.sheetId)),
     },
   };
@@ -38,15 +38,15 @@ export function letGoOfCopiedCells(state: PageState, reads: WorkbookReads, keepC
 export function updateCopiedCells(state: PageState, effects: readonly PageEffect[], event: PageEvent, reads: WorkbookReads): PageState {
   let pasteEffect = effects.find((effect): effect is PutOnClipboardEffect => effect.kind === 'putOnClipboard');
   if (pasteEffect !== undefined) {
-    let { activeCell: activeCell, selectionCorner: selectionCorner, rangeWalked: rangeWalked } = state;
-    let { cutToken: cutToken } = pasteEffect;
+    let { activeCell, selectionCorner, rangeWalked } = state;
+    let { cutToken } = pasteEffect;
     return {
       ...state,
       copiedCells: {
-        activeCell: activeCell,
-        selectionCorner: selectionCorner,
-        rangeWalked: rangeWalked,
-        cutToken: cutToken,
+        activeCell,
+        selectionCorner,
+        rangeWalked,
+        cutToken,
       },
       cutJustMoved: null,
     };
@@ -57,24 +57,24 @@ export function updateCopiedCells(state: PageState, effects: readonly PageEffect
       copiedCells: null,
       cutJustMoved: null,
     };
-  let value = event.kind === 'editAnswered' && event.outcome.kind === 'editQueued' ? (event.ifQueued.movesCut ?? null) : null;
-  let value2 = effects.some(
+  let cutMoved = event.kind === 'editAnswered' && event.outcome.kind === 'editQueued' ? (event.ifQueued.movesCut ?? null) : null;
+  let isWorkbookEdited = effects.some(
     (effect) => effect.kind === 'queueEdit' || effect.kind === 'undoOrRedo' || effect.kind === 'queueEditsThatTakeBack',
   );
-  let value3 = value ?? (value2 ? null : state.cutJustMoved);
-  let { copiedCells: copiedCells } = state;
-  let value4 =
+  let cutJustMoved = cutMoved ?? (isWorkbookEdited ? null : state.cutJustMoved);
+  let { copiedCells } = state;
+  let areCopiedCellsDropped =
     copiedCells !== null &&
     (effects.some((effect) => doesEffectDropCopiedCells(effect, copiedCells)) ||
-      (value !== null && value.token === copiedCells.cutToken) ||
+      (cutMoved !== null && cutMoved.token === copiedCells.cutToken) ||
       event.kind === 'linkAddressCopied' ||
       event.kind === 'otherThanCellsCopied' ||
       (event.kind === 'workbookChanged' && !selectionKeepsItsCells(copiedCells, event.readsBefore, reads)));
-  if (!value4 && value3 === state.cutJustMoved) return state;
+  if (!areCopiedCellsDropped && cutJustMoved === state.cutJustMoved) return state;
   return {
     ...state,
-    copiedCells: value4 ? null : copiedCells,
-    cutJustMoved: value3,
+    copiedCells: areCopiedCellsDropped ? null : copiedCells,
+    cutJustMoved,
   };
 }
 export const EDITS_THAT_KEEP_CUT = new Set<Edit['kind']>(['pasteCopiedCells', 'pasteValuesOfCopiedCells', 'clearCells']);

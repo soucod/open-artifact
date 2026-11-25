@@ -142,8 +142,7 @@ export function useMeasureNode<T extends HTMLElement>(id: ElementId, mode: Measu
 
 /**
  * Whether an element is "featured": the only one selected, or hovered with
- * the select tool. By-chips (who placed a sticker, which items the agent
- * wrote) show only then.
+ * the select tool. A face sticker's by-chip (who placed it) shows only then.
  */
 export function useIsFeatured(id: ElementId): boolean {
   const selected = useSelection((state) => state.ids.length === 1 && state.ids[0] === id);

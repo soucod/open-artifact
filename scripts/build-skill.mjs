@@ -4,7 +4,9 @@
  * Codex and any agent that reads skills and runs shell commands. The skill folder holds everything it runs, so it
  * can be copied anywhere (~/.claude/skills/, ~/.agents/skills/, a project's .claude/skills/):
  *
- *   skills/open-artifact/SKILL.md                  what the agent reads on `/open-artifact <type> …` (tracked)
+ *   skills/open-artifact/SKILL.md                  what the agent reads on `/open-artifact <type> …` (tracked): the
+ *                                                  skill template (packages/protocol/src/skill.ts) rendered with its
+ *                                                  defaults, written here when it changed
  *   skills/open-artifact/scripts/open-artifact.mjs the command the agent runs: points the daemon at vendor/ (tracked)
  *   skills/open-artifact/vendor/                   built here, git ignores it:
  *     open-artifact.mjs                            the daemon and its CLI, one Node ESM file
@@ -20,19 +22,21 @@
  *
  *   node scripts/build-skill.mjs [--out <dir>]     --out also copies the finished skill folder there
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSync } from 'esbuild';
+import { renderSkill } from '../packages/protocol/src/skill.ts';
+import { PROTOCOL_MAX, PROTOCOL_MIN } from '../packages/protocol/src/harness.ts';
 import { vendorTypes } from './vendor-types.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const skill = join(repo, 'skills', 'open-artifact');
 const vendor = join(skill, 'vendor');
-// The built-in types: the daemon's own list (BUILTIN_TYPE_IDS), as it lists no other type from the built-in root.
+// The built-in types: the protocol's list (BUILTIN_TYPE_IDS), as the daemon lists no other type from the built-in root.
 const TYPES = JSON.parse(
-  /BUILTIN_TYPE_IDS[^=]*=\s*(\[[^\]]*\])/
-    .exec(readFileSync(join(repo, 'packages', 'daemon', 'src', 'types.ts'), 'utf8'))[1]
+  /BUILTIN_TYPE_IDS[^=]*=\s*(?:Object\.freeze\()?(\[[^\]]*\])/
+    .exec(readFileSync(join(repo, 'packages', 'protocol', 'src', 'type-authoring.ts'), 'utf8'))[1]
     .replace(/'/g, '"'),
 );
 
@@ -64,11 +68,24 @@ function bundleDaemon() {
   });
 }
 
+/** SKILL.md: the template's default rendering (the same text `open-artifact skill render` prints). */
+function writeSkillFile() {
+  const file = join(skill, 'SKILL.md');
+  const text = renderSkill();
+  if (existsSync(file) && readFileSync(file, 'utf8') === text) return;
+  writeFileSync(file, text);
+  log('SKILL.md rendered from packages/protocol/src/skill.ts');
+}
+
 function main() {
+  writeSkillFile();
   rmSync(vendor, { recursive: true, force: true });
   mkdirSync(vendor, { recursive: true });
   bundleDaemon();
   log('vendor/open-artifact.mjs');
+  // What this runtime is, for choosing among the runtimes on a computer (packages/harness-kit/src/runtimes.ts).
+  const daemonVersion = JSON.parse(readFileSync(join(repo, 'packages', 'daemon', 'package.json'), 'utf8')).version;
+  writeFileSync(join(vendor, 'runtime.json'), `${JSON.stringify({ version: daemonVersion, protocols: { min: PROTOCOL_MIN, max: PROTOCOL_MAX } }, null, 2)}\n`);
   vendorCopy(join(repo, 'dist', 'daemon', 'shell'), join(vendor, 'shell'), 'the Shell');
   vendorCopy(join(repo, 'dist', 'daemon', 'home'), join(vendor, 'home'), 'the home page');
   vendorCopy(join(repo, 'dist', 'daemon', 'frame-host'), join(vendor, 'frame-host'), 'frame-host');

@@ -1,9 +1,14 @@
-import type { Dynamic } from '../dynamic.ts';
 import { DEFAULT_TIME_OF_DAY_PATTERN } from '../model/workbook.ts';
+/** A number format the number format menu offers by name with a pattern of its own (every one but a foreign currency). */
+export type NamedNumberFormatChoice = keyof typeof NUMBER_FORMAT_CHOICE_PATTERNS;
 export const NUMBER_FORMAT_CHOICE_PATTERNS = {
   general: {
     pattern: 'General',
     example: '1234.5',
+  },
+  text: {
+    pattern: '@',
+    example: '007',
   },
   number: {
     pattern: '#,##0.00',
@@ -28,6 +33,10 @@ export const NUMBER_FORMAT_CHOICE_PATTERNS = {
   percent: {
     pattern: '0.00%',
     example: '12.50%',
+  },
+  roundedPercent: {
+    pattern: '0%',
+    example: '13%',
   },
   scientific: {
     pattern: '0.00E+00',

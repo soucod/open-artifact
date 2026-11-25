@@ -1,12 +1,40 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ChartFrameFault } from '../charts/frame-messages.ts';
+import type { ChartEditOutcome } from '../state/controller.ts';
+import type { PlacedViewDeletedOffer, PlacedViewDone } from '../state/initial-state.ts';
+import { draftedText } from '@open-artifact/editor-kit';
 import { translateMessage } from '../i18n/messages.ts';
-export function askSentToChatWords(outcome?: Dynamic) {
+
+/**
+ * What came of sending words to the chat with the agent. `drafted`: taken, but put in the conversation for the person
+ * to send there (the page says so instead of closing).
+ */
+export type AskSentToChat = 'taken' | 'drafted' | 'tooSoon' | 'failed' | 'notListening';
+
+/** Whether the agent's chat took the words (`taken`, or `drafted` for the person to send). */
+export const isAskTaken = (outcome: AskSentToChat | null): boolean => outcome === 'taken' || outcome === 'drafted';
+
+/** Why a chart is not shown. */
+export type ChartProblem = 'cantBeShown' | 'cantBeShownBeforeReload' | 'tooMuchData' | 'notLoaded' | 'paused';
+
+/** What is wrong with the cells a chart draws. */
+export type ChartCellsProblem = 'cellsHaveNoNumbers' | 'cellsHaveErrors';
+
+/** Why a chart could not be changed on the page. */
+export type ChartChangeRefusal = 'noAgent' | 'tooLarge' | 'forChat' | 'notHere' | 'notChanged';
+
+/** What came of keeping a change to a chart: the step that made it, or why it may not have been made. */
+export type ChartChangeOutcome = Extract<ChartEditOutcome, object> | 'notPointed' | 'showsAnother' | 'unsure';
+
+export function askSentToChatWords(outcome: AskSentToChat): string {
   switch (outcome) {
     case 'taken':
       return translateMessage({
         defaultMessage: 'Continue in your chat with Agent.',
         id: 'vWypqhnbz9',
       });
+    case 'drafted':
+      // The Shell's words (English, or Simplified Chinese on a Chinese page), as every editor says them.
+      return draftedText().sent;
     case 'tooSoon':
       return translateMessage({
         defaultMessage: 'Not sent. Try again in a few seconds.',
@@ -24,11 +52,11 @@ export function askSentToChatWords(outcome?: Dynamic) {
       });
   }
 }
-export function chartProblemOfFault(fault?: Dynamic) {
+export function chartProblemOfFault(fault: ChartFrameFault): ChartProblem {
   if (fault === 'tookCaret') return 'cantBeShownBeforeReload';
   return fault === 'tooManyRows' ? 'tooMuchData' : 'cantBeShown';
 }
-export function chartProblemWords(problem?: Dynamic) {
+export function chartProblemWords(problem: ChartProblem): { title: string; advice: string } {
   switch (problem) {
     case 'cantBeShown':
       return {
@@ -81,7 +109,7 @@ export function chartProblemWords(problem?: Dynamic) {
       };
   }
 }
-export function chartFixAsk(problem?: Dynamic) {
+export function chartFixAsk(problem: ChartProblem): string | null {
   if (problem === 'cantBeShown')
     return translateMessage({
       defaultMessage: 'Fix this chart. It can’t be shown.',
@@ -94,7 +122,7 @@ export function chartFixAsk(problem?: Dynamic) {
     });
   return null;
 }
-export function placedViewMovedWords(change?: Dynamic) {
+export function placedViewMovedWords(change: PlacedViewDone): string {
   if (change.what === 'placedViewMoved')
     return translateMessage(
       {
@@ -118,7 +146,7 @@ export function placedViewMovedWords(change?: Dynamic) {
     },
   );
 }
-export function placedViewDeletedNotice({ name: name, isSaved: isSaved }: Dynamic) {
+export function placedViewDeletedNotice({ name, isSaved }: PlacedViewDeletedOffer): { title: string; undoLabel: string } {
   return {
     title: isSaved
       ? translateMessage(
@@ -127,7 +155,7 @@ export function placedViewDeletedNotice({ name: name, isSaved: isSaved }: Dynami
             id: 'fLyk8NMWCi',
           },
           {
-            name: name,
+            name,
           },
         )
       : translateMessage(
@@ -136,7 +164,7 @@ export function placedViewDeletedNotice({ name: name, isSaved: isSaved }: Dynami
             id: 'VtnK23bpgU',
           },
           {
-            name: name,
+            name,
           },
         ),
     undoLabel: translateMessage({
@@ -146,14 +174,14 @@ export function placedViewDeletedNotice({ name: name, isSaved: isSaved }: Dynami
   };
 }
 export const chartMessages = {
-  chartNamed: (name?: Dynamic) =>
+  chartNamed: (name: string): string =>
     translateMessage(
       {
         defaultMessage: 'Chart: {name}',
         id: 'Ut5bs3JCIH',
       },
       {
-        name: name,
+        name,
       },
     ),
   keys: () =>
@@ -307,7 +335,7 @@ export const chartCantBeShownTitle = () =>
     defaultMessage: 'This chart can’t be shown',
     id: 'hdBogsDJMx',
   });
-export const chartCellsProblemWords = (problem?: Dynamic) =>
+export const chartCellsProblemWords = (problem: ChartCellsProblem): string =>
   problem === 'cellsHaveNoNumbers'
     ? translateMessage({
         defaultMessage: 'This chart’s cells have no numbers.',
@@ -317,7 +345,7 @@ export const chartCellsProblemWords = (problem?: Dynamic) =>
         defaultMessage: 'This chart’s cells have errors.',
         id: '1UNr5PuiiA',
       });
-export const placedViewChangeUndoneWords = ({ what: what, name: name }: Dynamic) =>
+export const placedViewChangeUndoneWords = ({ what, name }: PlacedViewDone): string =>
   what === 'placedViewChangeUndone'
     ? translateMessage(
         {
@@ -325,7 +353,7 @@ export const placedViewChangeUndoneWords = ({ what: what, name: name }: Dynamic)
           id: '08z8KM96Rw',
         },
         {
-          name: name,
+          name,
         },
       )
     : translateMessage(
@@ -334,25 +362,21 @@ export const placedViewChangeUndoneWords = ({ what: what, name: name }: Dynamic)
           id: '2B1YZLHrAJ',
         },
         {
-          name: name,
+          name,
         },
       );
-export const chartChangeRefusalWords = (refusal?: Dynamic, forChat?: Dynamic) =>
-  (
-    ({
-      noAgent: chartMessages.agentNotToBeHad,
-      tooLarge: chartMessages.chartTooLarge,
-      forChat: forChat ? chartMessages.changeNeedsChat : chartMessages.changeNeedsChatWithChart,
-      notHere: chartMessages.changeNotToBeHadHere,
-      notChanged: chartMessages.chartNotChanged,
-    }) as Dynamic
-  )[refusal]();
-export const chartChangeOutcomeWords = (outcome?: Dynamic) =>
-  (
-    ({
-      pointed: chartMessages.chartChanged,
-      notPointed: chartMessages.changeNotKept,
-      showsAnother: chartMessages.changeNotKeptOverAnother,
-      unsure: chartMessages.changePerhapsKept,
-    }) as Dynamic
-  )[typeof outcome === 'object' ? 'pointed' : outcome]();
+export const chartChangeRefusalWords = (refusal: ChartChangeRefusal, forChat: boolean): string =>
+  ({
+    noAgent: chartMessages.agentNotToBeHad,
+    tooLarge: chartMessages.chartTooLarge,
+    forChat: forChat ? chartMessages.changeNeedsChat : chartMessages.changeNeedsChatWithChart,
+    notHere: chartMessages.changeNotToBeHadHere,
+    notChanged: chartMessages.chartNotChanged,
+  })[refusal]();
+export const chartChangeOutcomeWords = (outcome: ChartChangeOutcome): string =>
+  ({
+    pointed: chartMessages.chartChanged,
+    notPointed: chartMessages.changeNotKept,
+    showsAnother: chartMessages.changeNotKeptOverAnother,
+    unsure: chartMessages.changePerhapsKept,
+  })[typeof outcome === 'object' ? 'pointed' : outcome]();

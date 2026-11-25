@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   SLIDE_WIDTH,
   checkSlidesProject,
+  clipPathPoints,
   compileSlide,
   createSourceDeck,
   deckFormatKind,
@@ -12,6 +13,7 @@ import {
   matchesMedia,
   newDeckIndex,
   normalizeDeckIndex,
+  parseClipPath,
   parseSelectorList,
   parseStylesheet,
   patchSourceSlide,
@@ -89,6 +91,25 @@ describe('stylesheet', () => {
 });
 
 describe('reading a source slide', () => {
+  it('resolves a shared cut token in a clip-path without scaling the cut, and clearing it writes none', () => {
+    const css = createSourceDeck(`:root { --cut: 12px; }
+      .cut { clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, 0 100%); }`);
+    const html = '<section id="cut"><div class="cut"></div><img class="cut"></section>';
+    const read = readSourceSlide(html, css, { id: 'cut', lints: false });
+    const canonical = 'polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%)';
+    assert.deepEqual(read.slide.children.map((node) => node.style['clip-path']), [canonical, canonical]);
+    const flat = compileSlide(flattenSlide(read.slide), { id: 'cut', lints: false });
+    assert.deepEqual(flat.slide.children.map((node) => node.style['clip-path']), [canonical, canonical]);
+    const polygon = parseClipPath(canonical);
+    assert.ok(polygon.ok && polygon.value);
+    for (const width of [240, 800]) {
+      assert.deepEqual(clipPathPoints(polygon.value, width, 180).slice(1, 3), [[width - 12, 0], [width, 12]]);
+    }
+    const cleared = structuredClone(read.slide);
+    delete cleared.children[0]!.style['clip-path'];
+    assert.match(patchSourceSlide(html, read.slide, cleared, css, { id: 'cut', index: 0 }) ?? '', /<div class="cut" style="clip-path:none">/);
+  });
+
   it('works classes, variables and units out into the subset', () => {
     const cover = slide('cover', 0);
     assert.equal(cover.held, false);
@@ -117,11 +138,12 @@ describe('reading a source slide', () => {
     assert.equal((plan.slide.children[2] as TextNode).runs[0]!.text, '2');
   });
 
-  it('reads nested lists and reports styles on list lines', () => {
+  it('reads nested lists and moves a colour all their lines share onto the list', () => {
     const steps = slide('steps', 2);
     const list = steps.slide.children[1] as ListNode;
     assert.deepEqual(list.items.map((item) => [item.runs[0]!.text, item.level ?? 0]), [['One', 0], ['One a', 1], ['One b', 1], ['Two', 0]]);
-    assert.ok(steps.diagnostics.some((d) => d.level === 'unsupported' && /<li> color/.test(d.message) && d.line === 4));
+    assert.equal(list.style.color, 'red');
+    assert.ok(!steps.diagnostics.some((d) => /<li>/.test(d.message)));
   });
 
   it('follows the cascade: inline over sheet, !important over inline, var() fallbacks', () => {
@@ -241,6 +263,16 @@ describe('4:3 decks', () => {
     }
     assert.equal(SLIDE_WIDTH, 1920);
   });
+
+  it("checks a deck at its own size without touching the editor's width (a server checks many decks at once)", () => {
+    const files = new Map([
+      ['deck.json', JSON.stringify({ v: 4, title: 'x', size: '4:3', format: 'source', order: ['cover'] })],
+      ['deck.css', '@media (max-width: 1500px){p{color:red}}'],
+      ['slides/cover.html', '<section id="cover"><p>Hi</p></section>'],
+    ]);
+    checkSlidesProject(files, { lints: false });
+    assert.equal(SLIDE_WIDTH, 1920);
+  });
 });
 
 describe('nested lists in the inline format', () => {
@@ -254,9 +286,10 @@ describe('nested lists in the inline format', () => {
     assert.deepEqual((compileSlide(out, { id: 'a', lints: false }).slide.children[0] as ListNode).items, list.items);
   });
 
-  it('keeps margins out of inline decks', () => {
-    const result = compileSlide('<section id="a"><p style="margin:16px">t</p></section>', { id: 'a', lints: false });
-    assert.equal(result.slide.children[0]!.style.margin, undefined);
+  it('keeps margins on flow children of inline decks, not on pinned ones', () => {
+    const result = compileSlide('<section id="a"><p style="margin:16px">t</p><p style="position:absolute;left:0;top:0;margin:16px">u</p></section>', { id: 'a', lints: false });
+    assert.equal(result.slide.children[0]!.style.margin, '16px');
+    assert.equal(result.slide.children[1]!.style.margin, undefined);
     assert.ok(result.diagnostics.some((d) => /margin/.test(d.message)));
   });
 });

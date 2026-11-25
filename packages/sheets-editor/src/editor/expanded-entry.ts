@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { activeAnchorCell, scrollToShowActiveCell } from '../selection/model.ts';
 import { cardBeingShown } from '../state/list-cards.ts';
 import { canCellEntryExpand, textToEditAt, stopArrowsActingOnCells, startEntryEditing, doesEntryTakeLineBreaks } from './start-entry.ts';
@@ -10,10 +9,18 @@ import { lineCountOfEntry } from './entry-lines.ts';
 import { rowHeightForLines } from '../grid/cell-metrics-values.ts';
 import { isFormulaText } from '../chips/dropdown-pane-edits.ts';
 import { filterButtonAtActiveCell } from '../tables/own-filter-list.ts';
-import type { ReadsWithTextMeasurer } from '../state/controller.ts';
+import type { FontToMeasure, ReadsWithTextMeasurer } from '../state/controller.ts';
+import type { EditingMode, PageMode } from '../state/transitions.ts';
+import type { PaneRect } from '../grid/geometry.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
-export function expandEntry(state: PageState, reads: ReadsWithTextMeasurer) {
+/** Where the expanded entry's card and its text go, and how many lines the text takes. */
+export interface ExpandedEntryLayout {
+  card: PaneRect;
+  text: PaneRect;
+  lineCount: number;
+}
+export function expandEntry(state: PageState, reads: ReadsWithTextMeasurer): PageState {
   let cell = activeAnchorCell(state, reads);
   if (cardBeingShown(state) !== null || !canCellEntryExpand(reads, cell)) return state;
   let text = state.mode.kind === 'editing' ? state.mode.text : textToEditAt(state, reads, cell);
@@ -35,13 +42,13 @@ export function expandEntry(state: PageState, reads: ReadsWithTextMeasurer) {
     reads,
   );
 }
-export function collapseEntry(state: PageState, reads: ReadsWithTextMeasurer) {
+export function collapseEntry(state: PageState, reads: ReadsWithTextMeasurer): PageState {
   if (state.mode.kind !== 'editing' || state.mode.isExpanded !== true) return state;
-  let { isExpanded: isExpanded, ...mode } = state.mode;
+  let { isExpanded, ...mode } = state.mode;
   return scrollToShowActiveCell(
     {
       ...state,
-      mode: mode,
+      mode,
       lastDone: {
         what: 'entryCollapsed',
       },
@@ -49,8 +56,8 @@ export function collapseEntry(state: PageState, reads: ReadsWithTextMeasurer) {
     reads,
   );
 }
-export function isExpandOfferedInEntry(state: PageState, reads: WorkbookReads) {
-  let { mode: mode } = state;
+export function isExpandOfferedInEntry(state: PageState, reads: WorkbookReads): boolean {
+  let { mode } = state;
   if (mode.kind !== 'editing' || mode.isExpanded === true) return false;
   if (mode.text === '' && !hasEntryLists(mode)) return false;
   let cellId = activeAnchorCell(state, reads);
@@ -66,14 +73,20 @@ export function isExpandOfferedInEntry(state: PageState, reads: WorkbookReads) {
     canEntryExpandNow(state, reads)
   );
 }
-export function expandedEntryLayout(mode: Dynamic, cellBox: Dynamic, viewSize: Dynamic, font: Dynamic, workbook: ReadsWithTextMeasurer) {
+export function expandedEntryLayout(
+  mode: EditingMode,
+  cellBox: Pick<PaneRect, 'left' | 'top' | 'width'>,
+  viewSize: Pick<PaneRect, 'width' | 'height'>,
+  font: FontToMeasure,
+  workbook: ReadsWithTextMeasurer,
+): ExpandedEntryLayout {
   let room = {
     width: Math.max(0, viewSize.width - EXPANDED_ENTRY_VIEW_GAP),
     height: Math.max(0, viewSize.height - EXPANDED_ENTRY_VIEW_GAP),
   };
   let width = Math.min(Math.max(EXPANDED_ENTRY_MIN_WIDTH, cellBox.width), room.width);
   let textWidth = Math.max(0, width - EXPANDED_ENTRY_SIDE_ROOM);
-  let { left: left, right: right } = EXPANDED_ENTRY_PADDING;
+  let { left, right } = EXPANDED_ENTRY_PADDING;
   let lists = entryListsOf(mode);
   let wrapWidth = Math.max(0, textWidth - left - right);
   let lineCount = lineCountWithListGaps(lineCountOfEntry(mode.text, font, wrapWidth, workbook, lists), lists?.length ?? 1, font.size);
@@ -85,8 +98,8 @@ export function expandedEntryLayout(mode: Dynamic, cellBox: Dynamic, viewSize: D
     card: {
       left: cardLeft,
       top: cardTop,
-      width: width,
-      height: height,
+      width,
+      height,
     },
     text: {
       left: cardLeft,
@@ -94,18 +107,18 @@ export function expandedEntryLayout(mode: Dynamic, cellBox: Dynamic, viewSize: D
       width: textWidth,
       height: Math.max(0, height - EXPANDED_ENTRY_FOOT_HEIGHT),
     },
-    lineCount: lineCount,
+    lineCount,
   };
 }
-export const isEntryExpanded = (mode?: Dynamic) => mode.kind === 'editing' && mode.isExpanded === true;
-export const canEntryExpandNow = (state: PageState, reads: WorkbookReads) =>
+export const isEntryExpanded = (mode: PageMode): boolean => mode.kind === 'editing' && mode.isExpanded === true;
+export const canEntryExpandNow = (state: PageState, reads: WorkbookReads): boolean =>
   state.mode.kind === 'editing' &&
   !state.isOnPhone &&
   !isFormulaText(state.mode.text) &&
   doesEntryTakeLineBreaks(state, reads) &&
   cardBeingShown(state) === null &&
   state.calendar === null;
-export const isExpandOfferedAtActiveCell = (state: PageState, reads: ReadsWithTextMeasurer) =>
+export const isExpandOfferedAtActiveCell = (state: PageState, reads: ReadsWithTextMeasurer): boolean =>
   !state.isOnPhone &&
   cellPlainText(reads.cellOf(state.activeCell)) !== null &&
   canCellEntryExpand(reads, state.activeCell) &&
@@ -123,4 +136,4 @@ export const EXPANDED_ENTRY_PADDING = {
   left: 12,
   right: 4,
 };
-export const clampIntoRoom = (start?: Dynamic, size?: Dynamic, room?: Dynamic) => Math.max(0, Math.min(start, room - size));
+export const clampIntoRoom = (start: number, size: number, room: number): number => Math.max(0, Math.min(start, room - size));

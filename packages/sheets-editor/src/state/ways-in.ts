@@ -16,7 +16,7 @@ export function pendingWaysIn(state: PageState): WaysIn {
   return isPageWideEnoughForWaysIn(state) ? 'areToCome' : 'awaitWidthOfPage';
 }
 export function stepWaysIn(stateBefore: PageState, state: PageState, reads: WorkbookReads, event: PageEvent, isEditingPaused: boolean): PageState {
-  let { waysIn: waysIn } = state;
+  let { waysIn } = state;
   let nextWaysIn = ((): WaysIn => {
     if (waysIn === 'areNotToCome' || state.isAgentWorking) return 'areNotToCome';
     let isEscapeWhileNavigating =
@@ -65,7 +65,7 @@ export const areWaysInToComeSoon = (state: PageState): boolean =>
     state.waysIn === 'awaitWidthOfPage' ||
     state.waysIn === 'areToCome' ||
     state.waysIn === 'areHeldBackByChat');
-export const isLayoutChangeForWaysIn = ({ kind: kind }: PageEvent): boolean =>
+export const isLayoutChangeForWaysIn = ({ kind }: PageEvent): boolean =>
   kind === 'gridResized' || kind === 'waysInOutOfSightChanged';
 export const isWaysInCoveredByPane = (state: PageState): boolean => isSidePaneShownAsPane(state) || state.find?.isReplaceShown === true;
 export type WaysIn =

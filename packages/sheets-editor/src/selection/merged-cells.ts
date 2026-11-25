@@ -58,10 +58,10 @@ export function mergedCellsToSkipTest(workbook: WorkbookReads, sheetId: SheetId,
 }
 export function mergeAnchorCellsTest(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): (cellId: CellId) => boolean {
   let anchors = new Set<string>();
-  for (let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex } of workbook.mergedAreasIn(sheetId, area)) {
+  for (let { topRowIndex, leftColumnIndex } of workbook.mergedAreasIn(sheetId, area)) {
     let anchor = workbook.cellIdAt(sheetId, topRowIndex, leftColumnIndex);
     if (anchor !== null) anchors.add(mergeCellKey(anchor));
   }
   return (cellId: CellId) => anchors.has(mergeCellKey(cellId));
 }
-export const mergeCellKey = ({ rowId: rowId, columnId: columnId }: Pick<CellId, 'rowId' | 'columnId'>): string => `${rowId} ${columnId}`;
+export const mergeCellKey = ({ rowId, columnId }: Pick<CellId, 'rowId' | 'columnId'>): string => `${rowId} ${columnId}`;

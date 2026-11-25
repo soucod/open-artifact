@@ -1,10 +1,31 @@
 import { prefersReducedMotion } from '../kit/platform.ts';
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
 import { getKeyboardInset, subscribeBottomInsets } from './bottom-insets.ts';
-export let phoneTouchMedia: Dynamic;
-export let cachedWindowSize: Dynamic;
-export function useTabsAway(isAskedAway?: Dynamic) {
+export interface WindowSize {
+  width: number;
+  height: number;
+}
+/** Whether the sheet tabs have gone from the foot of the page, as they do on a phone while typing. */
+export interface TabsAway {
+  areTabsAway: boolean;
+  isFrameShortened: boolean;
+}
+/** A slide of an element up or down, from one offset to another, in pixels. */
+export interface Slide {
+  from: number;
+  to: number;
+  isKeyboardComing: boolean;
+}
+/** Where an element is, leaving out the offset of a slide under way. */
+export interface PlaceWithoutSlide {
+  top: number;
+  height: number;
+  /** How far the slide has moved the element down. */
+  under: number;
+}
+export let phoneTouchMedia: MediaQueryList | undefined;
+export let cachedWindowSize: WindowSize | null;
+export function useTabsAway(isAskedAway: boolean): TabsAway {
   let isPhoneTouch = usePhoneTouch();
   let isKeyboardUp = useIsKeyboardUp();
   let windowSize = useWindowSize();
@@ -21,16 +42,16 @@ export function useTabsAway(isAskedAway?: Dynamic) {
   };
 }
 export function slideFromTo(
-  element: Dynamic,
-  { from: from, to: to, isKeyboardComing: isKeyboardComing }: Dynamic,
-  keyframeStyle: Dynamic = {},
-) {
+  element: Element,
+  { from, to, isKeyboardComing }: Slide,
+  keyframeStyle: Keyframe = {},
+): void {
   slideAnimations.get(element)?.cancel();
   if (from === to || prefersReducedMotion()) return;
   let style = getComputedStyle(element);
-  let cssValue = (property?: Dynamic, fallback?: Dynamic) => {
-    let value = style.getPropertyValue(property).trim();
-    return value === '' ? fallback : value;
+  let cssValue = (property: string, fallback: string): string => {
+    let propertyValue = style.getPropertyValue(property).trim();
+    return propertyValue === '' ? fallback : propertyValue;
   };
   let duration = cssValue('--ui-dur-sheet', '300ms');
   let animation = element.animate(
@@ -51,15 +72,15 @@ export function slideFromTo(
   );
   slideAnimations.set(element, animation);
 }
-export function placeWithoutSlide(element?: Dynamic) {
-  let [{ top: top, height: height }, slideOffset] = [element.getBoundingClientRect(), slideOffsetNow(element)];
+export function placeWithoutSlide(element: Element): PlaceWithoutSlide {
+  let [{ top, height }, slideOffset] = [element.getBoundingClientRect(), slideOffsetNow(element)];
   return {
     top: top - slideOffset,
-    height: height,
+    height,
     under: slideOffset,
   };
 }
-export function watchKeyboardSlides(frame?: Dynamic) {
+export function watchKeyboardSlides(frame: HTMLElement | null): (() => void) | undefined {
   let overGrid = frame?.querySelector('.sheet-over-grid') ?? null;
   let tabs = frame?.querySelector('.sheet-bar') ?? null;
   if (frame === null || overGrid === null || tabs === null) return;
@@ -74,8 +95,8 @@ export function watchKeyboardSlides(frame?: Dynamic) {
       tabs: placeWithoutSlide(tabs),
     };
   };
-  let last: Dynamic = measure();
-  let observer = new (ResizeObserver as Dynamic)(() => {
+  let last = measure();
+  let observer = new ResizeObserver(() => {
     let [before, after] = [last, measure()];
     last = after;
     if (before === null || after === null || !getPhoneTouchMedia().matches) return;
@@ -87,7 +108,7 @@ export function watchKeyboardSlides(frame?: Dynamic) {
       slideFromTo(card, {
         from: cardFrom,
         to: 0,
-        isKeyboardComing: isKeyboardComing,
+        isKeyboardComing,
       });
     }
     let tabsFrom = before.tabs.top - after.tabs.top + after.tabs.under;
@@ -97,7 +118,7 @@ export function watchKeyboardSlides(frame?: Dynamic) {
         {
           from: tabsFrom,
           to: tabsFrom + before.tabs.height,
-          isKeyboardComing: isKeyboardComing,
+          isKeyboardComing,
         },
         {
           visibility: 'visible',
@@ -107,7 +128,7 @@ export function watchKeyboardSlides(frame?: Dynamic) {
       slideFromTo(tabs, {
         from: tabsFrom,
         to: 0,
-        isKeyboardComing: isKeyboardComing,
+        isKeyboardComing,
       });
     else slideAnimations.get(tabs)?.cancel();
   });
@@ -117,27 +138,27 @@ export function watchKeyboardSlides(frame?: Dynamic) {
 }
 export const SMALL_DEVICE_QUERY = ['(max-device-width:599px)', '(max-device-height:599px)'].join(' or ');
 export const PHONE_TOUCH_QUERY = ['(pointer:coarse)', `(${SMALL_DEVICE_QUERY})`].join(' and ');
-export const getPhoneTouchMedia = () => (phoneTouchMedia ??= matchMedia(PHONE_TOUCH_QUERY));
-export const subscribePhoneTouch = (onChange?: Dynamic) => (
+export const getPhoneTouchMedia = (): MediaQueryList => (phoneTouchMedia ??= matchMedia(PHONE_TOUCH_QUERY));
+export const subscribePhoneTouch = (onChange: () => void): (() => void) => (
   getPhoneTouchMedia().addEventListener('change', onChange),
   () => getPhoneTouchMedia().removeEventListener('change', onChange)
 );
-export const falseOnServer = () => false;
-export const usePhoneTouch = () =>
+export const falseOnServer = (): boolean => false;
+export const usePhoneTouch = (): boolean =>
   React.useSyncExternalStore(subscribePhoneTouch, () => getPhoneTouchMedia().matches, falseOnServer);
-export const useIsKeyboardUp = () =>
+export const useIsKeyboardUp = (): boolean =>
   React.useSyncExternalStore(subscribeBottomInsets, () => getKeyboardInset() > 0, falseOnServer);
-export const ZERO_WINDOW_SIZE = {
+export const ZERO_WINDOW_SIZE: WindowSize = {
   width: 0,
   height: 0,
 };
 cachedWindowSize = null;
-export const readWindowSize = () =>
+export const readWindowSize = (): WindowSize =>
   (cachedWindowSize = {
     width: innerWidth,
     height: innerHeight,
   });
-export const subscribeWindowResize = (onResize?: Dynamic) => {
+export const subscribeWindowResize = (onResize: () => void): (() => void) => {
   let onWindowResize = () => {
     readWindowSize();
     if (getPhoneTouchMedia().matches) onResize();
@@ -145,18 +166,18 @@ export const subscribeWindowResize = (onResize?: Dynamic) => {
   addEventListener('resize', onWindowResize);
   return () => removeEventListener('resize', onWindowResize);
 };
-export const useWindowSize = () =>
+export const useWindowSize = (): WindowSize =>
   React.useSyncExternalStore(
     subscribeWindowResize,
     () => cachedWindowSize ?? readWindowSize(),
     () => ZERO_WINDOW_SIZE,
   );
 export const KEYBOARD_HEIGHT_MIN = 150;
-export const isFrameShortenedBy = (fullSize?: Dynamic, size?: Dynamic) => fullSize.height - size.height >= KEYBOARD_HEIGHT_MIN;
-export const keptFullWindowSize = (kept?: Dynamic, size?: Dynamic, mayKeep?: Dynamic) =>
+export const isFrameShortenedBy = (fullSize: WindowSize, size: WindowSize): boolean => fullSize.height - size.height >= KEYBOARD_HEIGHT_MIN;
+export const keptFullWindowSize = (kept: WindowSize, size: WindowSize, mayKeep: boolean): WindowSize =>
   mayKeep && size.width === kept.width && size.height < kept.height ? kept : size;
-export const slideAnimations = new (WeakMap as Dynamic)();
-export const slideOffsetNow = (element?: Dynamic) =>
-  slideAnimations.get(element)?.playState === 'running' ? new (DOMMatrixReadOnly as Dynamic)(getComputedStyle(element).transform).m42 : 0;
+export const slideAnimations = new WeakMap<Element, Animation>();
+export const slideOffsetNow = (element: Element): number =>
+  slideAnimations.get(element)?.playState === 'running' ? new DOMMatrixReadOnly(getComputedStyle(element).transform).m42 : 0;
 export const SLIDE_EASING = 'cubic-bezier(0.4, 0, 0.2, 1)';
-export const bottomOfPlace = ({ top: top, height: height }: Dynamic) => top + height;
+export const bottomOfPlace = ({ top, height }: PlaceWithoutSlide): number => top + height;

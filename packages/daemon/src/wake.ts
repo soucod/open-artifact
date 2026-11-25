@@ -9,6 +9,11 @@
  *    tool call, or by a wait (which takes it at once: `via: 'wait'`). A
  *    session whose harness hands over its inbox only while a turn runs is then
  *    nudged (`nudge`), which starts a turn there.
+ *
+ * An adapter's answer counts as delivered unless it is `failed`: `drafted` (put in the session's draft for the person
+ * to send) too, so it never also goes to the inbox. When the answer names another session that took it (a thread that
+ * ended handed it to its coordinator), that session of the same harness becomes the artifact's owner (`handOver` in
+ * `ownership.ts`), and later wakes go straight to it.
  */
 
 import {
@@ -19,6 +24,7 @@ import {
   wakeMessage,
   type LibraryEvent,
   type SessionRef,
+  type WakeDeliverResult,
   type WakeDeliverStatus,
   type WakePayload,
   type WakeRequestItem,
@@ -26,22 +32,41 @@ import {
   type WakeVia,
 } from '@open-artifact/protocol';
 import type { Inbox } from './inbox.ts';
+import { handOver } from './ownership.ts';
 import { sessionKeyOf, type ArtifactStore } from './store.ts';
 
 /** Session key of the inbox that takes wakes of artifacts with no owner. */
 export const UNOWNED_KEY = 'unowned';
+
+/**
+ * How long a nudge counts as still on its way, ms: while it is and the session has not taken its inbox, another wake
+ * joins that inbox without a nudge of its own (the turn the first one starts hands over every waiting message).
+ */
+export const NUDGE_REPEAT_MS = 5 * 60_000;
 
 /** How one wake ended up. */
 export interface WakeResult {
   via: WakeVia;
   /** The adapter's answer, for `live`. */
   status?: WakeDeliverStatus;
+  /** The session that took it, for `live`, when the adapter named another one than the target. */
+  session?: string;
 }
 
 /** What delivers a wake live: the Harness hub. */
 export interface LiveDelivery {
-  /** The adapter's answer, or `null` when no adapter can take it. */
-  deliver(ref: SessionRef, payload: WakePayload): Promise<WakeDeliverStatus | null>;
+  /** The adapter's answer (a status, or a status and the session that took it), or `null` when no adapter can take it. */
+  deliver(ref: SessionRef, payload: WakePayload): Promise<WakeDeliverResult | WakeDeliverStatus | null>;
+}
+
+const STATUSES = new Set<WakeDeliverStatus>(['delivered', 'resumed', 'queued', 'drafted', 'failed']);
+
+/** An adapter's answer, checked: a known status, and a session id when it names one. */
+export function deliverAnswer(answer: unknown): WakeDeliverResult | null {
+  const raw = typeof answer === 'string' ? { status: answer } : answer && typeof answer === 'object' ? (answer as Record<string, unknown>) : null;
+  if (!raw || !STATUSES.has(raw.status as WakeDeliverStatus)) return null;
+  const session = typeof raw.session === 'string' && raw.session.length > 0 && raw.session.length <= 256 && !/[\x00-\x1f]/.test(raw.session) ? raw.session : null;
+  return { status: raw.status as WakeDeliverStatus, ...(session ? { session } : {}) };
 }
 
 /** Options of {@link WakeRouter}. */
@@ -76,6 +101,8 @@ export class WakeRouter {
   private readonly pending = new Map<string, Pending>();
   /** Send times in the last minute, by artifact id. */
   private readonly sent = new Map<string, number[]>();
+  /** When each session key was last nudged. */
+  private readonly nudged = new Map<string, number>();
 
   constructor(options: WakeRouterOptions) {
     this.options = options;
@@ -135,7 +162,10 @@ export class WakeRouter {
     const owner = record.owner;
     const message = wakeMessage(record, threads, requests, { viewUrl: this.options.viewUrl(id), noOwner: !owner });
     const payload: WakePayload = { artifact: artifactUrl(id), artifactId: id, text: message.text, source: message.source };
-    return this.send(owner, payload);
+    const result = await this.send(owner, payload);
+    // The adapter handed it to another session of the harness: that one owns the artifact from now on.
+    if (owner && result.session) handOver(this.options.store, id, owner, result.session, this.options.log);
+    return result;
   }
 
   /**
@@ -149,20 +179,34 @@ export class WakeRouter {
     const id = payload.artifactId;
     const live = this.options.live();
     if (target && live) {
-      const status = await live.deliver(target, payload).catch((error: unknown) => {
-        log(`wake.deliver to ${sessionKeyOf(target)}: ${(error as Error)?.message ?? error}`);
-        return null;
-      });
+      const answer = deliverAnswer(
+        await live.deliver(target, payload).catch((error: unknown) => {
+          log(`wake.deliver to ${sessionKeyOf(target)}: ${(error as Error)?.message ?? error}`);
+          return null;
+        }),
+      );
+      const status = answer?.status;
       if (status && status !== 'failed') {
-        log(`wake ${id} -> ${sessionKeyOf(target)} (${status})`);
+        const session = answer.session && answer.session !== target.session ? answer.session : undefined;
+        log(`wake ${id} -> ${sessionKeyOf(target)} (${status}${session ? `, taken by ${session}` : ''})`);
         emit?.({ type: 'wake/state', artifactId: id, via: 'live', status });
-        return { via: 'live', status };
+        return { via: 'live', status, ...(session ? { session } : {}) };
       }
     }
     const key = (target && sessionKeyOf(target)) || UNOWNED_KEY;
+    const waiting = inbox.count(key) > 0;
     const { taken } = inbox.append(key, { kind: 'wake', ...payload });
     log(`wake ${id} -> inbox ${key}${taken ? ' (taken by a wait)' : ''}`);
-    if (!taken && target) this.options.nudge?.(target, payload);
+    if (!taken && target && this.options.nudge) {
+      // A nudge still on its way starts a turn that takes this message too; a second one would only queue an empty turn.
+      const last = this.nudged.get(key);
+      if (waiting && last !== undefined && Date.now() - last < NUDGE_REPEAT_MS) {
+        log(`wake ${id}: ${key} already nudged; joins its inbox`);
+      } else {
+        this.nudged.set(key, Date.now());
+        this.options.nudge(target, payload);
+      }
+    }
     const via: WakeVia = taken ? 'wait' : 'inbox';
     emit?.({ type: 'wake/state', artifactId: id, via });
     return { via };

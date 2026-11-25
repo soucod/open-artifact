@@ -1,82 +1,108 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as ProsemirrorModel from 'prosemirror-model';
 import * as ProsemirrorState from 'prosemirror-state';
 import * as ProsemirrorView from 'prosemirror-view';
 import * as ProsemirrorHistory from 'prosemirror-history';
 import * as ProsemirrorKeymap from 'prosemirror-keymap';
 import * as ProsemirrorCommands from 'prosemirror-commands';
+import type { Mark, Node as ProsemirrorNode, Slice } from 'prosemirror-model';
+import type { Command, EditorState, Transaction } from 'prosemirror-state';
+import type { Decoration, DecorationSet, EditorView } from 'prosemirror-view';
+import type { ListLine } from '@open-artifact/sheets-core';
 import { FONT_MARKS, looksFromLines, NO_LIST, isSameList, listsAfterTyping, diffTexts, lineRangeOf } from './text-looks.ts';
+import type { LineOfLooks, Look } from './text-looks.ts';
 import { typedMarkAtCaret, readTypedMarks } from './entry-looks.ts';
+import type { TypedMark } from './entry-looks.ts';
+import type { HuedReference } from './formula-bar-hues.tsx';
 import { levelInList } from '../model/cell-values.ts';
 import { listNumberAttributes, CHECKBOX_LIST_SELECTOR, isPressOnListCheckbox, listOfElement, listAttributesOf } from '../ui/cell-list-attributes.ts';
 import { isNonNullObject } from '../utils/objects.ts';
 import { normalizeLineBreaks } from '../format/shown-text.ts';
 import { registerEntryEditor, isEntryEditor } from '../dom/entry-editor.ts';
-import { referenceTintStyle } from '../grid/cell-drawing.ts';
+import type { EntryEditorElement, SignsInLastInput } from '../dom/entry-editor.ts';
+import { referenceTintStyle } from '../grid/cell-drawing.tsx';
 import { IS_APPLE_PLATFORM } from '../ui/dom-events.ts';
-export let baseBackspace: Dynamic;
-export let baseDelete: Dynamic;
-export let entryBackspace: Dynamic;
-export function lookOfMarks(marks?: Dynamic) {
-  let linkAddress = marks.find(({ type: type }: Dynamic) => type.name === 'link')?.attrs.address;
+import type { EntryLooks, FontMark, StretchOfLooks } from '../state/initial-state.ts';
+import type { CaretSpan } from '../keys/key-acts.ts';
+/** How signs typed into an entry are read as looks: just as typed, or across the whole text asked for. */
+export type HowSignsRead = 'typed' | 'whole';
+/** The signs last read in the entry, and whether an undo has since put them back as text. */
+export interface SignsRead {
+  what: 'read' | 'putBack';
+  how: HowSignsRead;
+}
+/** The number shown before each line of the entry, or null for a line that shows none. */
+export type NumbersOfListLines = readonly (number | null)[];
+export type SelectionDirection = EntryEditorElement['selectionDirection'];
+/** An entry's ProseMirror view, with what it takes to end it and to read the signs typed into it. */
+export interface EntryEditorView {
+  view: EditorView;
+  end: () => void;
+  readSigns: (makeTr: (state: EditorState) => Transaction | null, how: HowSignsRead) => void;
+  signsInLastInput: () => SignsInLastInput;
+}
+export let baseBackspace: Command;
+export let baseDelete: Command;
+export let entryBackspace: Command;
+export function lookOfMarks(marks: readonly Mark[]): Look {
+  let linkAddress: unknown = marks.find(({ type }) => type.name === 'link')?.attrs.address;
   return {
-    marks: FONT_MARKS.filter((input?: Dynamic) => marks.some(({ type: type }: Dynamic) => type.name === input)),
+    marks: FONT_MARKS.filter((fontMark) => marks.some(({ type }) => type.name === fontMark)),
     link: typeof linkAddress === 'string' ? linkAddress : null,
   };
 }
-export function looksOfEntryDoc(doc?: Dynamic) {
-  let looks: Dynamic = [];
-  doc.forEach((input?: Dynamic) => {
-    let items: Dynamic = [];
-    input.forEach(
-      ({ nodeSize: nodeSize, marks: marks }: Dynamic) =>
-        items.push({
+export function looksOfEntryDoc(doc: ProsemirrorNode): EntryLooks {
+  let lines: LineOfLooks[] = [];
+  doc.forEach((paragraph) => {
+    let stretches: StretchOfLooks[] = [];
+    paragraph.forEach(
+      ({ nodeSize, marks }) =>
+        stretches.push({
           length: nodeSize,
           ...lookOfMarks(marks),
         }),
     );
-    looks.push({
-      list: listOfParagraph(input),
-      stretches: items,
+    lines.push({
+      list: listOfParagraph(paragraph),
+      stretches,
     });
   });
-  return looksFromLines(looks, []);
+  return looksFromLines(lines, []);
 }
-export function setListsOfEntryLines(tr?: Dynamic, lists?: Dynamic) {
-  tr.doc.forEach((node?: Dynamic, pos?: Dynamic, index?: Dynamic) => {
+export function setListsOfEntryLines(tr: Transaction, lists: readonly ListLine[]): void {
+  tr.doc.forEach((node, pos, index) => {
     let list = lists[index] ?? NO_LIST;
     if (!isSameList(listOfParagraph(node), list)) tr.setNodeAttribute(pos, 'list', list);
   });
 }
-export function docPosOfTextOffset(doc?: Dynamic, offset?: Dynamic) {
-  let remaining: Dynamic = Math.max(0, offset);
-  let pos: Dynamic = 0;
-  for (let index: Dynamic = 0; index < doc.childCount; index += 1) {
-    let { content: content, nodeSize: nodeSize } = doc.child(index);
+export function docPosOfTextOffset(doc: ProsemirrorNode, offset: number): number {
+  let remaining = Math.max(0, offset);
+  let pos = 0;
+  for (let index = 0; index < doc.childCount; index += 1) {
+    let { content, nodeSize } = doc.child(index);
     if (remaining <= content.size) return pos + 1 + remaining;
     remaining -= content.size + 1;
     pos += nodeSize;
   }
   return doc.content.size - 1;
 }
-export function textOffsetOfDocPos(doc?: Dynamic, pos?: Dynamic) {
+export function textOffsetOfDocPos(doc: ProsemirrorNode, pos: number): number {
   let resolved = doc.resolve(Math.min(Math.max(pos, 0), doc.content.size));
-  let offset: Dynamic = 0;
-  for (let index: Dynamic = 0; index < resolved.index(0); index += 1) offset += doc.child(index).content.size + 1;
+  let offset = 0;
+  for (let index = 0; index < resolved.index(0); index += 1) offset += doc.child(index).content.size + 1;
   if (resolved.depth === 0) return Math.max(0, offset - 1);
   return offset + resolved.parentOffset;
 }
-export function replaceEntryText(state?: Dynamic, from?: Dynamic, to?: Dynamic, text?: Dynamic) {
-  let { doc: doc } = state;
+export function replaceEntryText(state: EditorState, from: number, to: number, text: string): Transaction {
+  let { doc } = state;
   let marks = state.storedMarks ?? doc.resolve(docPosOfTextOffset(doc, from)).marks();
-  let slice = new (ProsemirrorModel.Slice as Dynamic)(
+  let slice = new ProsemirrorModel.Slice(
     ProsemirrorModel.Fragment.from(
       text
         .split(
           `
 `,
         )
-        .map((input?: Dynamic) => entryParagraphOf(input, marks)),
+        .map((line) => entryParagraphOf(line, marks)),
     ),
     1,
     1,
@@ -85,17 +111,17 @@ export function replaceEntryText(state?: Dynamic, from?: Dynamic, to?: Dynamic, 
   setListsOfEntryLines(
     tr,
     listsAfterTyping(looksOfEntryDoc(doc).lists, textOfEntryDoc(doc), {
-      from: from,
-      to: to,
+      from,
+      to,
       written: text,
     }),
   );
   let caret = docPosOfTextOffset(tr.doc, from + text.length);
   return tr.setSelection(ProsemirrorState.TextSelection.create(tr.doc, caret));
 }
-export function moveEntryText(state?: Dynamic, from?: Dynamic, to?: Dynamic, target?: Dynamic) {
+export function moveEntryText(state: EditorState, from: number, to: number, target: number): Transaction | null {
   if (target >= from && target <= to) return null;
-  let { doc: doc, tr: tr } = state;
+  let { doc, tr } = state;
   let [fromPos, toPos] = [docPosOfTextOffset(doc, from), docPosOfTextOffset(doc, to)];
   let slice = doc.slice(fromPos, toPos);
   tr.delete(fromPos, toPos);
@@ -106,40 +132,45 @@ export function moveEntryText(state?: Dynamic, from?: Dynamic, to?: Dynamic, tar
     ProsemirrorState.TextSelection.create(tr.doc, docPosOfTextOffset(tr.doc, newFrom), docPosOfTextOffset(tr.doc, newFrom + (to - from))),
   );
 }
-export function selectLastWordAtLineEnd(state?: Dynamic, clickPos?: Dynamic) {
-  let { $from: selectionFrom, $to: selectionTo, empty: selection } = state.selection;
-  let { parent: value, parentOffset: value2, pos: value3 } = selection ? selectionTo : state.doc.resolve(clickPos);
-  let value4 = value.isTextblock && value2 > 0 && value2 === value.content.size;
-  let value5 = selectionFrom.pos === value3 - value2 && (selectionTo.pos === value3 || selectionTo.pos === value3 + 2);
-  if (!value4 || !(selection || value5) || typeof Intl.Segmenter !== 'function') return null;
-  let items = [
-    ...new (Intl.Segmenter as Dynamic)(undefined, {
+export function selectLastWordAtLineEnd(state: EditorState, clickPos: number): Transaction | null {
+  let { $from: selectionFrom, $to: selectionTo, empty: isSelectionEmpty } = state.selection;
+  let {
+    parent: paragraph,
+    parentOffset: offsetInParagraph,
+    pos: lineEndPos,
+  } = isSelectionEmpty ? selectionTo : state.doc.resolve(clickPos);
+  let isAtLineEnd = paragraph.isTextblock && offsetInParagraph > 0 && offsetInParagraph === paragraph.content.size;
+  let isLineSelected =
+    selectionFrom.pos === lineEndPos - offsetInParagraph && (selectionTo.pos === lineEndPos || selectionTo.pos === lineEndPos + 2);
+  if (!isAtLineEnd || !(isSelectionEmpty || isLineSelected) || typeof Intl.Segmenter !== 'function') return null;
+  let words = [
+    ...new Intl.Segmenter(undefined, {
       granularity: 'word',
-    }).segment(value.textContent),
+    }).segment(paragraph.textContent),
   ];
-  let value6 = value3 - (items.at(-1)?.segment.length ?? 0);
-  return state.tr.setSelection(ProsemirrorState.TextSelection.create(state.doc, value6, value3));
+  let lastWordPos = lineEndPos - (words.at(-1)?.segment.length ?? 0);
+  return state.tr.setSelection(ProsemirrorState.TextSelection.create(state.doc, lastWordPos, lineEndPos));
 }
-export function setEntryValue(state?: Dynamic, newText?: Dynamic) {
+export function setEntryValue(state: EditorState, newText: string): Transaction | null {
   let oldText = textOfEntryDoc(state.doc);
   if (oldText === newText) return null;
-  let { from: value, to: value2, written: value3 } = diffTexts(oldText, newText);
-  return replaceEntryText(state, value, value2, value3);
+  let { from, to, written } = diffTexts(oldText, newText);
+  return replaceEntryText(state, from, to, written);
 }
-export function applyLooksToEntry(state?: Dynamic, looks?: Dynamic) {
-  let { doc: doc, tr: tr } = state;
-  let index: Dynamic = 0;
-  for (let value of looks.stretches as Dynamic) {
-    let [items, items2] = [docPosOfTextOffset(doc, index), docPosOfTextOffset(doc, index + value.length)];
-    tr.removeMark(items, items2);
-    for (let value2 of marksOfLook(value) as Dynamic) tr.addMark(items, items2, value2);
-    index += value.length;
+export function applyLooksToEntry(state: EditorState, looks: EntryLooks): Transaction | null {
+  let { doc, tr } = state;
+  let offset = 0;
+  for (let stretch of looks.stretches) {
+    let [fromPos, toPos] = [docPosOfTextOffset(doc, offset), docPosOfTextOffset(doc, offset + stretch.length)];
+    tr.removeMark(fromPos, toPos);
+    for (let mark of marksOfLook(stretch)) tr.addMark(fromPos, toPos, mark);
+    offset += stretch.length;
   }
   setListsOfEntryLines(tr, looks.lists);
   return tr.doc.eq(doc) && state.storedMarks === null ? null : tr.setStoredMarks(null);
 }
-export function withTypedMarkApplied(tr: Dynamic, { from: from, wordsFrom: wordsFrom, wordsTo: wordsTo, to: to, mark: mark }: Dynamic) {
-  let { doc: doc } = tr;
+export function withTypedMarkApplied(tr: Transaction, { from, wordsFrom, wordsTo, to, mark }: TypedMark): Transaction {
+  let { doc } = tr;
   let fromPos = docPosOfTextOffset(doc, from);
   return tr
     .delete(docPosOfTextOffset(doc, wordsTo), docPosOfTextOffset(doc, to))
@@ -147,23 +178,23 @@ export function withTypedMarkApplied(tr: Dynamic, { from: from, wordsFrom: words
     .addMark(fromPos, fromPos + wordsTo - wordsFrom, entrySchema.mark(mark))
     .setStoredMarks(null);
 }
-export function trOfTypedMarkAt(state?: Dynamic, caret?: Dynamic, textBefore: Dynamic = '') {
+export function trOfTypedMarkAt(state: EditorState, caret: number, textBefore: string = ''): Transaction | null {
   let text = textOfEntryDoc(state.doc);
   let typedMark = typedMarkAtCaret(text, caret);
   if (typedMark === null) return null;
-  let { from: from, written: written } = diffTexts(textBefore, text);
+  let { from, written } = diffTexts(textBefore, text);
   return from <= typedMark.from && typedMark.to <= from + written.length ? withTypedMarkApplied(state.tr, typedMark) : null;
 }
-export function trOfTypedMarkAtCaret(state?: Dynamic, textBefore?: Dynamic, isExact?: Dynamic) {
+export function trOfTypedMarkAtCaret(state: EditorState, textBefore: string, isExact: boolean): Transaction | null {
   if (!state.selection.empty) return null;
   let caret = textOffsetOfDocPos(state.doc, state.selection.head);
   let tr = trOfTypedMarkAt(state, caret, textBefore);
   return tr !== null || isExact ? tr : trOfTypedMarkAt(state, caret - 1, textBefore);
 }
-export function entrySliceWithLooks(text?: Dynamic, looks?: Dynamic, from?: Dynamic, to?: Dynamic) {
-  let lines = [[]];
-  let offset: Dynamic = 0;
-  for (let stretch of looks.stretches as Dynamic) {
+export function entrySliceWithLooks(text: string, looks: EntryLooks, from: number, to: number): Slice {
+  let lines: ProsemirrorNode[][] = [[]];
+  let offset = 0;
+  for (let stretch of looks.stretches) {
     let [start, end] = [Math.max(offset, from), Math.min(offset + stretch.length, to)];
     offset += stretch.length;
     if (end <= start) continue;
@@ -173,14 +204,14 @@ export function entrySliceWithLooks(text?: Dynamic, looks?: Dynamic, from?: Dyna
         `
 `,
       )
-      .entries() as Dynamic) {
+      .entries()) {
       if (index > 0) lines.push([]);
       if (line !== '') lines.at(-1)?.push(entrySchema.text(line, marksOfLook(stretch)));
     }
   }
   let [firstLine] = lineRangeOf(text, from, to);
   let paragraphs = lines.map(
-    (nodes?: Dynamic, index?: Dynamic) =>
+    (nodes, index) =>
       entrySchema.node(
         'paragraph',
         {
@@ -189,10 +220,10 @@ export function entrySliceWithLooks(text?: Dynamic, looks?: Dynamic, from?: Dyna
         nodes,
       ),
   );
-  return new (ProsemirrorModel.Slice as Dynamic)(ProsemirrorModel.Fragment.from(paragraphs), 1, 1);
+  return new ProsemirrorModel.Slice(ProsemirrorModel.Fragment.from(paragraphs), 1, 1);
 }
-export function trWithMarkSignsRead(state?: Dynamic, from?: Dynamic, to?: Dynamic, isMarked: Dynamic = true) {
-  let { doc: doc } = state;
+export function trWithMarkSignsRead(state: EditorState, from: number, to: number, isMarked: boolean = true): Transaction | null {
+  let { doc } = state;
   let [text, looks] = [textOfEntryDoc(doc), looksOfEntryDoc(doc)];
   let read = readTypedMarks(text, looks, from, to, isMarked);
   if (read === null) return null;
@@ -203,103 +234,103 @@ export function trWithMarkSignsRead(state?: Dynamic, from?: Dynamic, to?: Dynami
   );
   return tr.setSelection(ProsemirrorState.TextSelection.create(tr.doc, docPosOfTextOffset(tr.doc, read.to))).setStoredMarks(null);
 }
-export function listNumberDecorations(doc?: Dynamic, numbers?: Dynamic) {
-  let decorations: Dynamic = [];
-  doc.forEach((node?: Dynamic, pos?: Dynamic, index?: Dynamic) => {
+export function listNumberDecorations(doc: ProsemirrorNode, numbers: NumbersOfListLines): Decoration[] {
+  let decorations: Decoration[] = [];
+  doc.forEach((node, pos, index) => {
     let [number, level] = [numbers[index] ?? null, levelInList(listOfParagraph(node))];
     if (number !== null && level !== null)
       decorations.push(ProsemirrorView.Decoration.node(pos, pos + node.nodeSize, listNumberAttributes(level, number)));
   });
   return decorations;
 }
-export function dispatchAsInput(view?: Dynamic, tr?: Dynamic, inputType?: Dynamic) {
+export function dispatchAsInput(view: EditorView, tr: Transaction, inputType: string): void {
   view.dispatch(ProsemirrorHistory.closeHistory(tr).setMeta(INPUT_TYPE_META, inputType));
   if (!view.isDestroyed) view.dispatch(ProsemirrorHistory.closeHistory(view.state.tr));
 }
-export function prosemirrorViewInternal(input?: Dynamic, options?: Dynamic) {
-  let entry = Reflect.get(input, options);
-  if (!isNonNullObject(entry)) throw Error(`this ProseMirror’s view has no ${options}`);
-  return entry;
+export function prosemirrorViewInternal(view: EditorView, member: string): Record<PropertyKey, unknown> {
+  let internal: unknown = Reflect.get(view, member);
+  if (!isNonNullObject(internal)) throw Error(`this ProseMirror’s view has no ${member}`);
+  return internal;
 }
-export function callDomObserver(input?: Dynamic, options?: Dynamic) {
-  let value = prosemirrorViewInternal(input, 'domObserver');
-  let value2 = value[options];
-  if (typeof value2 !== 'function') throw Error(`this ProseMirror’s observer has no ${options}()`);
-  Reflect.apply(value2, value, []);
+export function callDomObserver(view: EditorView, methodName: string): void {
+  let observer = prosemirrorViewInternal(view, 'domObserver');
+  let method = observer[methodName];
+  if (typeof method !== 'function') throw Error(`this ProseMirror’s observer has no ${methodName}()`);
+  Reflect.apply(method, observer, []);
 }
-export function runRestartingObserverOnError(input?: Dynamic, options?: Dynamic) {
+export function runRestartingObserverOnError(view: EditorView, run: () => void): void {
   try {
-    options();
-  } catch (value: Dynamic) {
-    throw (callDomObserver(input, 'start'), value);
+    run();
+  } catch (error) {
+    throw (callDomObserver(view, 'start'), error);
   }
 }
-export function scrollCaretIntoEntry(input?: Dynamic) {
-  let dom = input.dom;
-  let value = input.coordsAtPos(input.state.selection.head);
+export function scrollCaretIntoEntry(view: EditorView): boolean {
+  let dom = view.dom;
+  let caretBox = view.coordsAtPos(view.state.selection.head);
   let bounds = dom.getBoundingClientRect();
-  let value2 = dom.offsetWidth === 0 ? 1 : bounds.width / dom.offsetWidth;
-  let [items, items2] = [bounds.left + dom.clientLeft * value2, bounds.top + dom.clientTop * value2];
-  let [items3, items4] = [items + dom.clientWidth * value2, items2 + dom.clientHeight * value2];
-  let value3 = (input2?: Dynamic, options?: Dynamic) => (input2 < 0 ? input2 : Math.max(0, options)) / value2;
-  dom.scrollLeft += value3(value.left - items, value.right - items3);
-  dom.scrollTop += value3(value.top - items2, value.bottom - items4);
+  let scale = dom.offsetWidth === 0 ? 1 : bounds.width / dom.offsetWidth;
+  let [innerLeft, innerTop] = [bounds.left + dom.clientLeft * scale, bounds.top + dom.clientTop * scale];
+  let [innerRight, innerBottom] = [innerLeft + dom.clientWidth * scale, innerTop + dom.clientHeight * scale];
+  let scrollToShow = (overBefore: number, overAfter: number) => (overBefore < 0 ? overBefore : Math.max(0, overAfter)) / scale;
+  dom.scrollLeft += scrollToShow(caretBox.left - innerLeft, caretBox.right - innerRight);
+  dom.scrollTop += scrollToShow(caretBox.top - innerTop, caretBox.bottom - innerBottom);
   return true;
 }
-export function copyEntryAsPlainText(input?: Dynamic, event?: Dynamic) {
-  let { from: selection, to: selection2, empty: selection3 } = input.state.selection;
-  if (selection3 || event.clipboardData === null) return false;
+export function copyEntryAsPlainText(view: EditorView, event: ClipboardEvent): boolean {
+  let { from, to, empty } = view.state.selection;
+  if (empty || event.clipboardData === null) return false;
   event.preventDefault();
   event.clipboardData.setData(
     'text/plain',
-    input.state.doc.textBetween(
-      selection,
-      selection2,
+    view.state.doc.textBetween(
+      from,
+      to,
       `
 `,
     ),
   );
-  if (event.type === 'cut') dispatchAsInput(input, input.state.tr.deleteSelection().scrollIntoView(), 'deleteByCut');
+  if (event.type === 'cut') dispatchAsInput(view, view.state.tr.deleteSelection().scrollIntoView(), 'deleteByCut');
   return true;
 }
-export function dropIntoEntry(view?: Dynamic, event?: Dynamic, isMove?: Dynamic) {
-  let value = view.posAtCoords({
+export function dropIntoEntry(view: EditorView, event: DragEvent, isMove: boolean): boolean {
+  let dropAt = view.posAtCoords({
     left: event.clientX,
     top: event.clientY,
   });
-  let value2 = normalizeLineBreaks(event.dataTransfer?.getData('text/plain') ?? '');
+  let droppedText = normalizeLineBreaks(event.dataTransfer?.getData('text/plain') ?? '');
   event.preventDefault();
-  if (value === null) return true;
-  let { doc: state, selection: state2 } = view.state;
-  let value3 = textOffsetOfDocPos(state, value.pos);
-  let value4 = isMove
-    ? moveEntryText(view.state, textOffsetOfDocPos(state, state2.from), textOffsetOfDocPos(state, state2.to), value3)
-    : replaceEntryText(view.state, value3, value3, value2);
-  if (value4 === null || (!isMove && value2 === '')) return true;
-  dispatchAsInput(view, value4, 'insertFromDrop');
+  if (dropAt === null) return true;
+  let { doc, selection } = view.state;
+  let dropOffset = textOffsetOfDocPos(doc, dropAt.pos);
+  let tr = isMove
+    ? moveEntryText(view.state, textOffsetOfDocPos(doc, selection.from), textOffsetOfDocPos(doc, selection.to), dropOffset)
+    : replaceEntryText(view.state, dropOffset, dropOffset, droppedText);
+  if (tr === null || (!isMove && droppedText === '')) return true;
+  dispatchAsInput(view, tr, 'insertFromDrop');
   if (!view.isDestroyed) view.focus();
   return true;
 }
-export function dressEntryAsTextArea(element: Dynamic, { view: view, readSigns: readSigns, signsInLastInput: signsInLastInput }: Dynamic) {
-  let value = () => {
+export function dressEntryAsTextArea(element: HTMLElement, { view, readSigns, signsInLastInput }: EntryEditorView): EntryEditorElement {
+  let caretOffsets = () => {
     flushEntryDomObserver(view);
-    let { doc: state, selection: state2 } = view.state;
+    let { doc, selection } = view.state;
     return {
-      anchor: textOffsetOfDocPos(state, state2.anchor),
-      head: textOffsetOfDocPos(state, state2.head),
+      anchor: textOffsetOfDocPos(doc, selection.anchor),
+      head: textOffsetOfDocPos(doc, selection.head),
     };
   };
-  let [items, items2] = [
-    () => (Math.min as Dynamic)(...Object.values(value())),
-    () => (Math.max as Dynamic)(...Object.values(value())),
+  let [startOfSelection, endOfSelection] = [
+    () => Math.min(...Object.values(caretOffsets())),
+    () => Math.max(...Object.values(caretOffsets())),
   ];
-  let value2 = (input?: Dynamic, options?: Dynamic, context?: Dynamic) => {
+  let selectOffsets = (from: number, to: number, direction?: SelectionDirection) => {
     if (view.isDestroyed) return;
     flushEntryDomObserver(view);
-    let { doc: state, tr: state2 } = view.state;
-    let [items3, items4] = [docPosOfTextOffset(state, input), docPosOfTextOffset(state, options)];
-    let [value3, value4] = context === 'backward' ? [items4, items3] : [items3, items4];
-    view.dispatch(state2.setSelection(ProsemirrorState.TextSelection.create(state, value3, value4)));
+    let { doc, tr } = view.state;
+    let [fromPos, toPos] = [docPosOfTextOffset(doc, from), docPosOfTextOffset(doc, to)];
+    let [anchorPos, headPos] = direction === 'backward' ? [toPos, fromPos] : [fromPos, toPos];
+    view.dispatch(tr.setSelection(ProsemirrorState.TextSelection.create(doc, anchorPos, headPos)));
   };
   Object.defineProperties(
     element,
@@ -307,10 +338,10 @@ export function dressEntryAsTextArea(element: Dynamic, { view: view, readSigns: 
       Object.entries({
         value: {
           get: () => (flushEntryDomObserver(view), textOfEntryDoc(view.state.doc)),
-          set: (input?: Dynamic) => {
-            let value3 = view.isDestroyed ? null : setEntryValue(view.state, input);
-            if (value3 === null) return;
-            view.dispatch(value3.setSelection(ProsemirrorState.TextSelection.atEnd(value3.doc)).setMeta(WRITTEN_INTO_VALUE_META, true));
+          set: (text: string) => {
+            let tr = view.isDestroyed ? null : setEntryValue(view.state, text);
+            if (tr === null) return;
+            view.dispatch(tr.setSelection(ProsemirrorState.TextSelection.atEnd(tr.doc)).setMeta(WRITTEN_INTO_VALUE_META, true));
             view.updateState(withEntryHistoryCleared(view.state));
           },
         },
@@ -318,36 +349,36 @@ export function dressEntryAsTextArea(element: Dynamic, { view: view, readSigns: 
           get: () => (flushEntryDomObserver(view), looksOfEntryDoc(view.state.doc)),
         },
         selectionStart: {
-          get: items,
-          set: (input?: Dynamic) => value2(input, Math.max(input, items2())),
+          get: startOfSelection,
+          set: (start: number) => selectOffsets(start, Math.max(start, endOfSelection())),
         },
         selectionEnd: {
-          get: items2,
-          set: (input?: Dynamic) => value2(Math.min(items(), input), input),
+          get: endOfSelection,
+          set: (end: number) => selectOffsets(Math.min(startOfSelection(), end), end),
         },
         selectionDirection: {
-          get: () => {
-            let { anchor: value3, head: value4 } = value();
-            if (value3 === value4) return 'none';
-            return value3 < value4 ? 'forward' : 'backward';
+          get: (): SelectionDirection => {
+            let { anchor, head } = caretOffsets();
+            if (anchor === head) return 'none';
+            return anchor < head ? 'forward' : 'backward';
           },
         },
         setSelectionRange: {
-          value: (input?: Dynamic, options?: Dynamic, context?: Dynamic) => value2(input ?? 0, options ?? 0, context),
+          value: (start: number | null, end: number | null, direction?: SelectionDirection) => selectOffsets(start ?? 0, end ?? 0, direction),
         },
         select: {
-          value: () => value2(0, Number.POSITIVE_INFINITY),
+          value: () => selectOffsets(0, Number.POSITIVE_INFINITY),
         },
         replaceText: {
-          value: (input?: Dynamic, options?: Dynamic, context?: Dynamic) => {
+          value: (from: number, to: number, text: string) => {
             if (view.isDestroyed) return;
             flushEntryDomObserver(view);
-            dispatchAsInput(view, replaceEntryText(view.state, input, options, context).scrollIntoView(), 'insertText');
+            dispatchAsInput(view, replaceEntryText(view.state, from, to, text).scrollIntoView(), 'insertText');
           },
         },
         readSigns: {
-          value: (from?: Dynamic, to?: Dynamic, isMarked?: Dynamic) =>
-            readSigns((state?: Dynamic) => trWithMarkSignsRead(state, from, to, isMarked), 'whole'),
+          value: (from: number, to: number, isMarked?: boolean) =>
+            readSigns((state) => trWithMarkSignsRead(state, from, to, isMarked), 'whole'),
         },
         signsInLastInput: {
           get: signsInLastInput,
@@ -358,20 +389,20 @@ export function dressEntryAsTextArea(element: Dynamic, { view: view, readSigns: 
           },
         },
         offsetAtPoint: {
-          value: ({ x: x, y: y }: Dynamic) => {
-            let value3 = view.isDestroyed
+          value: ({ x, y }: { x: number; y: number }) => {
+            let pointAt = view.isDestroyed
               ? null
               : view.posAtCoords({
                   left: x,
                   top: y,
                 });
-            return value3 === null ? null : textOffsetOfDocPos(view.state.doc, value3.pos);
+            return pointAt === null ? null : textOffsetOfDocPos(view.state.doc, pointAt.pos);
           },
         },
         focus: {
-          value: (input?: Dynamic) => {
+          value: (focusOptions?: FocusOptions) => {
             if (entryViewsBeingFocused.has(view) || view.isDestroyed)
-              return element.ownerDocument.defaultView?.HTMLElement.prototype.focus.call(element, input);
+              return element.ownerDocument.defaultView?.HTMLElement.prototype.focus.call(element, focusOptions);
             if (element === element.ownerDocument.activeElement) return;
             entryViewsBeingFocused.add(view);
             try {
@@ -383,66 +414,66 @@ export function dressEntryAsTextArea(element: Dynamic, { view: view, readSigns: 
           },
         },
       }).map(
-        ([input, input2]: Dynamic) => [
-          input,
+        ([name, descriptor]): [string, PropertyDescriptor] => [
+          name,
           {
             configurable: true,
-            ...input2,
+            ...descriptor,
           },
         ],
       ),
     ),
   );
-  registerEntryEditor(element);
+  // The members of a text area were defined on the element just above.
+  registerEntryEditor(element as EntryEditorElement);
   if (!isEntryEditor(element)) throw Error('the entry’s editor was not noted');
   return element;
 }
-export function dispatchEntryLooks(view?: Dynamic, looks?: Dynamic, addToHistory?: Dynamic) {
-  let value = applyLooksToEntry(view.state, looks)?.setMeta(WRITTEN_INTO_VALUE_META, true);
-  if (value === undefined) return;
-  if (!addToHistory) return view.dispatch(value.setMeta('addToHistory', false));
-  view.dispatch(ProsemirrorHistory.closeHistory(value));
+export function dispatchEntryLooks(view: EditorView, looks: EntryLooks, addToHistory: boolean): void {
+  let tr = applyLooksToEntry(view.state, looks)?.setMeta(WRITTEN_INTO_VALUE_META, true);
+  if (tr === undefined) return;
+  if (!addToHistory) return view.dispatch(tr.setMeta('addToHistory', false));
+  view.dispatch(ProsemirrorHistory.closeHistory(tr));
   return view.dispatch(ProsemirrorHistory.closeHistory(view.state.tr));
 }
 export function createEntryEditorView(
-  mount?: Dynamic,
-  text?: Dynamic,
-  onMarkAsked?: Dynamic,
-  beforeSignsRead?: Dynamic,
-  onBoxOfLinePressed?: Dynamic,
-) {
-  let lastSigns: Dynamic = null;
-  let wereSignsRead: Dynamic = false;
-  let signsInLastInput: Dynamic = null;
-  let isInputPending: Dynamic = false;
-  let doubleClickPos: Dynamic = null;
+  mount: HTMLElement,
+  text: string,
+  onMarkAsked: (mark: FontMark) => void,
+  beforeSignsRead: () => void,
+  onBoxOfLinePressed: (line: number) => void,
+): EntryEditorView {
+  let lastSigns: SignsRead | null = null;
+  let wereSignsRead = false;
+  let signsInLastInput: SignsInLastInput = null;
+  let isInputPending = false;
+  let doubleClickPos: number | null = null;
   let doc = entryDocOfText(text);
-  let view = new (ProsemirrorView.EditorView as Dynamic)(
+  let view: EditorView = new ProsemirrorView.EditorView(
     {
-      mount: mount,
+      mount,
     },
     {
       state: ProsemirrorState.EditorState.create({
-        doc: doc,
+        doc,
         selection: ProsemirrorState.TextSelection.atEnd(doc),
         plugins: [
           entryHistoryPlugin,
           ProsemirrorKeymap.keymap({
             ...ENTRY_DELETE_KEYMAP,
             ...ENTRY_HISTORY_KEYMAP,
-            Backspace: (...args: Dynamic[]) =>
-              (lastSigns?.what === 'read' && lastSigns.how === 'typed' && (undoInEntry as Dynamic)(...args)) ||
-              (entryBackspace as Dynamic)?.(...args) === true,
+            Backspace: (...args: Parameters<Command>) =>
+              (lastSigns?.what === 'read' && lastSigns.how === 'typed' && undoInEntry(...args)) || entryBackspace?.(...args) === true,
           }),
           createDecorationsPlugin(referenceHuesKey),
           listNumbersPlugin,
           createSelectionHeldPlugin(),
         ],
       }),
-      dispatchTransaction(input?: Dynamic) {
-        if (input.docChanged || !input.selection.eq(view.state.selection)) {
-          let readsSigns = input.getMeta(READS_SIGNS_META);
-          let inputType = input.getMeta(INPUT_TYPE_META);
+      dispatchTransaction(tr: Transaction) {
+        if (tr.docChanged || !tr.selection.eq(view.state.selection)) {
+          let readsSigns: unknown = tr.getMeta(READS_SIGNS_META);
+          let inputType: unknown = tr.getMeta(INPUT_TYPE_META);
           if (readsSigns === 'typed' || readsSigns === 'whole') wereSignsRead = true;
           if (readsSigns === 'typed' || readsSigns === 'whole')
             lastSigns = {
@@ -461,27 +492,27 @@ export function createEntryEditorView(
             };
           else lastSigns = null;
         }
-        let isUndoAfterRead = wereSignsRead && input.getMeta(INPUT_TYPE_META) === 'historyUndo';
-        if (input.docChanged) signsInLastInput = lastSigns?.what ?? (isUndoAfterRead ? 'putBack' : null);
-        view.updateState(view.state.apply(input));
-        if (!input.docChanged || input.getMeta(WRITTEN_INTO_VALUE_META) === true) return;
-        let value = input.getMeta(INPUT_TYPE_META);
-        if (typeof value !== 'string' && isInputPending) return;
-        let { InputEvent: value2 } = mount.ownerDocument.defaultView ?? {};
-        if (value2 !== undefined)
+        let isUndoAfterRead = wereSignsRead && tr.getMeta(INPUT_TYPE_META) === 'historyUndo';
+        if (tr.docChanged) signsInLastInput = lastSigns?.what ?? (isUndoAfterRead ? 'putBack' : null);
+        view.updateState(view.state.apply(tr));
+        if (!tr.docChanged || tr.getMeta(WRITTEN_INTO_VALUE_META) === true) return;
+        let inputTypeOfTr: unknown = tr.getMeta(INPUT_TYPE_META);
+        if (typeof inputTypeOfTr !== 'string' && isInputPending) return;
+        let { InputEvent: InputEventOfView }: Partial<Pick<Window & typeof globalThis, 'InputEvent'>> = mount.ownerDocument.defaultView ?? {};
+        if (InputEventOfView !== undefined)
           mount.dispatchEvent(
-            new (value2 as Dynamic)('input', {
+            new InputEventOfView('input', {
               bubbles: true,
-              inputType: typeof value === 'string' ? value : '',
+              inputType: typeof inputTypeOfTr === 'string' ? inputTypeOfTr : '',
             }),
           );
       },
       handleDOMEvents: {
-        focus: (input?: Dynamic) => entryViewsBeingFocused.has(input),
-        paste: (input?: Dynamic, options?: Dynamic) => options.defaultPrevented,
+        focus: (viewFocused) => entryViewsBeingFocused.has(viewFocused),
+        paste: (_view, event) => event.defaultPrevented,
         copy: copyEntryAsPlainText,
         cut: copyEntryAsPlainText,
-        mousedown: (input?: Dynamic, event?: Dynamic) => {
+        mousedown: (_view, event) => {
           doubleClickPos = null;
           let paragraph = event.target instanceof Element ? event.target.closest('p') : null;
           if (!(event.button === 0 && paragraph?.matches(CHECKBOX_LIST_SELECTOR) === true && isPressOnListCheckbox(paragraph, event))) return false;
@@ -489,9 +520,9 @@ export function createEntryEditorView(
           onBoxOfLinePressed([...mount.children].indexOf(paragraph));
           return true;
         },
-        dblclick: (input: Dynamic, { button: button, shiftKey: shiftKey, clientX: clientX, clientY: clientY }: Dynamic) => {
+        dblclick: (_view, { button, shiftKey, clientX, clientY }) => {
           flushEntryDomObserver(view);
-          let value =
+          let tr =
             button === 0 &&
             !shiftKey &&
             view.posAtCoords({
@@ -501,13 +532,13 @@ export function createEntryEditorView(
             doubleClickPos !== null
               ? selectLastWordAtLineEnd(view.state, doubleClickPos)
               : null;
-          if (value !== null) view.dispatch(value);
+          if (tr !== null) view.dispatch(tr);
           return false;
         },
-        beforeinput: (input?: Dynamic, event?: Dynamic) => {
+        beforeinput: (_view, event) => {
           if (event.inputType.startsWith('format')) event.preventDefault();
-          let value = FORMAT_INPUT_MARKS[event.inputType];
-          if (value !== undefined) onMarkAsked(value);
+          let mark = FORMAT_INPUT_MARKS[event.inputType];
+          if (mark !== undefined) onMarkAsked(mark);
           if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
             event.preventDefault();
             (event.inputType === 'historyUndo' ? undoInEntry : redoInEntry)(view.state, view.dispatch, view);
@@ -515,17 +546,17 @@ export function createEntryEditorView(
           return true;
         },
       },
-      handleKeyPress: (input?: Dynamic, options?: Dynamic) => {
-        let value = String.fromCharCode(options.charCode);
-        if (isSelectionInOneParagraph(view.state) || !options.isTrusted || /[\r\n]/.test(value)) return false;
-        view.dispatch(view.state.tr.insertText(value).scrollIntoView().setMeta(INPUT_TYPE_META, 'insertText'));
+      handleKeyPress: (_view, event) => {
+        let typed = String.fromCharCode(event.charCode);
+        if (isSelectionInOneParagraph(view.state) || !event.isTrusted || /[\r\n]/.test(typed)) return false;
+        view.dispatch(view.state.tr.insertText(typed).scrollIntoView().setMeta(INPUT_TYPE_META, 'insertText'));
         return true;
       },
-      handleDoubleClick: (input?: Dynamic, options?: Dynamic) => ((doubleClickPos = options), false),
-      handleDrop: (input?: Dynamic, options?: Dynamic, context?: Dynamic, value?: Dynamic) => dropIntoEntry(view, options, value),
+      handleDoubleClick: (_view, pos) => ((doubleClickPos = pos), false),
+      handleDrop: (_view, event, _slice, isMove) => dropIntoEntry(view, event, isMove),
       handleScrollToSelection: scrollCaretIntoEntry,
       transformPastedHTML: () => '',
-      clipboardTextSerializer: ({ content: content }: Dynamic) =>
+      clipboardTextSerializer: ({ content }) =>
         content.textBetween(
           0,
           content.size,
@@ -535,28 +566,32 @@ export function createEntryEditorView(
     },
   );
   guardEntryUpdateState(view);
-  let controller = new (AbortController as Dynamic)();
-  let listen = (input?: Dynamic, options?: Dynamic, context: Dynamic = false) =>
-    mount.addEventListener(input, options, {
-      capture: context,
+  let controller = new AbortController();
+  let listen = <Type extends keyof HTMLElementEventMap>(
+    type: Type,
+    listener: (event: HTMLElementEventMap[Type]) => void,
+    isCapture: boolean = false,
+  ) =>
+    mount.addEventListener(type, listener, {
+      capture: isCapture,
       signal: controller.signal,
     });
-  listen('beforeinput', (input?: Dynamic) => {
-    isInputPending = !input.defaultPrevented;
+  listen('beforeinput', (event) => {
+    isInputPending = !event.defaultPrevented;
   });
   listen('input', () => {
     flushEntryDomObserver(view);
     isInputPending = false;
   });
-  for (let value of ['keydown', 'drop'] as Dynamic) listen(value, () => void (isInputPending = false), true);
-  listen('dragstart', ({ dataTransfer: dataTransfer }: Dynamic) => dataTransfer?.clearData('text/html'));
+  for (let type of ['keydown', 'drop'] satisfies (keyof HTMLElementEventMap)[]) listen(type, () => void (isInputPending = false), true);
+  listen('dragstart', ({ dataTransfer }) => dataTransfer?.clearData('text/html'));
   return {
-    view: view,
+    view,
     end: () => {
       controller.abort();
       view.destroy();
     },
-    readSigns: (makeTr?: Dynamic, how?: Dynamic) => {
+    readSigns: (makeTr, how) => {
       if (view.isDestroyed || view.composing) return;
       flushEntryDomObserver(view);
       if (makeTr(view.state) === null) return;
@@ -568,10 +603,11 @@ export function createEntryEditorView(
   };
 }
 export const LINK_ADDRESS_ATTRIBUTE = 'data-links-to';
-export const isListObject = (input?: Dynamic) => typeof input === 'object' && input !== null && 'kind' in input;
-export const listOfParagraph = ({ attrs: attrs }: Dynamic) => (isListObject(attrs.list) ? attrs.list : NO_LIST);
-export const isListParagraph = (input?: Dynamic) => listOfParagraph(input).kind !== 'none';
-export const entrySchema = new (ProsemirrorModel.Schema as Dynamic)({
+export const isListObject = (value: unknown): boolean => typeof value === 'object' && value !== null && 'kind' in value;
+/** The list a paragraph is a line of; the schema and every write of the attribute keep it a list line. */
+export const listOfParagraph = ({ attrs }: ProsemirrorNode): ListLine => (isListObject(attrs.list) ? attrs.list : NO_LIST);
+export const isListParagraph = (node: ProsemirrorNode): boolean => listOfParagraph(node).kind !== 'none';
+export const entrySchema = new ProsemirrorModel.Schema({
   nodes: {
     doc: {
       content: 'paragraph+',
@@ -587,7 +623,7 @@ export const entrySchema = new (ProsemirrorModel.Schema as Dynamic)({
       parseDOM: [
         {
           tag: 'p',
-          getAttrs: (element?: Dynamic) => ({
+          getAttrs: (element) => ({
             list: listOfElement(element),
           }),
         },
@@ -595,7 +631,7 @@ export const entrySchema = new (ProsemirrorModel.Schema as Dynamic)({
           tag: 'div',
         },
       ],
-      toDOM: (node?: Dynamic) => [
+      toDOM: (node) => [
         'p',
         listAttributesOf({
           list: listOfParagraph(node),
@@ -651,12 +687,12 @@ export const entrySchema = new (ProsemirrorModel.Schema as Dynamic)({
       parseDOM: [
         {
           tag: `span[${LINK_ADDRESS_ATTRIBUTE}]`,
-          getAttrs: (element?: Dynamic) => ({
+          getAttrs: (element) => ({
             address: element.getAttribute(LINK_ADDRESS_ATTRIBUTE),
           }),
         },
       ],
-      toDOM: ({ attrs: attrs }: Dynamic) => [
+      toDOM: ({ attrs }) => [
         'span',
         {
           [LINK_ADDRESS_ATTRIBUTE]: String(attrs.address),
@@ -666,8 +702,8 @@ export const entrySchema = new (ProsemirrorModel.Schema as Dynamic)({
     },
   },
 });
-export const marksOfLook = ({ marks: marks, link: link }: Dynamic) => [
-  ...marks.map((input?: Dynamic) => entrySchema.mark(input)),
+export const marksOfLook = ({ marks, link }: Look): Mark[] => [
+  ...marks.map((mark) => entrySchema.mark(mark)),
   ...(link === null
     ? []
     : [
@@ -676,23 +712,23 @@ export const marksOfLook = ({ marks: marks, link: link }: Dynamic) => [
         }),
       ]),
 ];
-export const entryParagraphOf = (input?: Dynamic, options: Dynamic = []) =>
-  entrySchema.node('paragraph', null, input === '' ? [] : [entrySchema.text(input, options)]);
-export const entryDocOfText = (input?: Dynamic) =>
+export const entryParagraphOf = (text: string, marks: readonly Mark[] = []): ProsemirrorNode =>
+  entrySchema.node('paragraph', null, text === '' ? [] : [entrySchema.text(text, marks)]);
+export const entryDocOfText = (text: string): ProsemirrorNode =>
   entrySchema.node(
     'doc',
     null,
-    input
+    text
       .split(
         `
 `,
       )
-      .map((input2?: Dynamic) => entryParagraphOf(input2)),
+      .map((line) => entryParagraphOf(line)),
   );
-export const textOfEntryDoc = (input?: Dynamic) =>
-  input.textBetween(
+export const textOfEntryDoc = (doc: ProsemirrorNode): string =>
+  doc.textBetween(
     0,
-    input.content.size,
+    doc.content.size,
     `
 `,
   );
@@ -700,34 +736,34 @@ export const entryHistoryPlugin = ProsemirrorHistory.history({
   newGroupDelay: -1,
   depth: 1000,
 });
-export const withEntryHistoryCleared = (input?: Dynamic) =>
-  input
+export const withEntryHistoryCleared = (state: EditorState): EditorState =>
+  state
     .reconfigure({
-      plugins: input.plugins.filter((input2?: Dynamic) => input2 !== entryHistoryPlugin),
+      plugins: state.plugins.filter((plugin) => plugin !== entryHistoryPlugin),
     })
     .reconfigure({
-      plugins: input.plugins,
+      plugins: state.plugins,
     });
-export const selectionHeldDecorations = (input?: Dynamic, span?: Dynamic) =>
+export const selectionHeldDecorations = (doc: ProsemirrorNode, span: CaretSpan | undefined): DecorationSet =>
   span === undefined
     ? ProsemirrorView.DecorationSet.empty
-    : ProsemirrorView.DecorationSet.create(input, [
-        ProsemirrorView.Decoration.inline(docPosOfTextOffset(input, span.start), docPosOfTextOffset(input, span.end), {
+    : ProsemirrorView.DecorationSet.create(doc, [
+        ProsemirrorView.Decoration.inline(docPosOfTextOffset(doc, span.start), docPosOfTextOffset(doc, span.end), {
           class: 'sheet-selection-held',
         }),
       ]);
-export const referenceHueDecorations = (input?: Dynamic, options?: Dynamic) =>
+export const referenceHueDecorations = (doc: ProsemirrorNode, references: readonly HuedReference[]): DecorationSet =>
   ProsemirrorView.DecorationSet.create(
-    input,
-    options.flatMap(
-      ({ writtenAt: writtenAt, hue: hue }: Dynamic) =>
+    doc,
+    references.flatMap(
+      ({ writtenAt, hue }) =>
         writtenAt === undefined
           ? []
           : [
-              ProsemirrorView.Decoration.inline(docPosOfTextOffset(input, writtenAt.start), docPosOfTextOffset(input, writtenAt.end), {
+              ProsemirrorView.Decoration.inline(docPosOfTextOffset(doc, writtenAt.start), docPosOfTextOffset(doc, writtenAt.end), {
                 class: 'sheet-reference-in-entry',
                 style: Object.entries(referenceTintStyle(hue))
-                  .map(([input2, input3]: Dynamic) => `${input2}:${input3}`)
+                  .map(([property, propertyValue]) => `${property}:${propertyValue}`)
                   .join(';'),
               }),
             ],
@@ -737,47 +773,43 @@ export const INPUT_TYPE_META = 'inputTypeOfEntryEditor';
 export const READS_SIGNS_META = 'readsSignsInEntryEditor';
 export const WRITTEN_INTO_VALUE_META = 'isWrittenIntoValueOfEntryEditor';
 export const withInputTypeMeta =
-  (input?: Dynamic, options?: Dynamic) =>
-  (input2?: Dynamic, options2?: Dynamic, context?: Dynamic) =>
-    options(input2, options2 === undefined ? undefined : (input3?: Dynamic) => options2(input3.setMeta(INPUT_TYPE_META, input)), context);
+  (inputType: string, command: Command): Command =>
+  (state, dispatch, view) =>
+    command(state, dispatch === undefined ? undefined : (tr) => dispatch(tr.setMeta(INPUT_TYPE_META, inputType)), view);
 export const undoInEntry = withInputTypeMeta('historyUndo', ProsemirrorHistory.undo);
 export const redoInEntry = withInputTypeMeta('historyRedo', ProsemirrorHistory.redo);
 export const asInputCommand =
-  (input?: Dynamic, options?: Dynamic) =>
-  (input2?: Dynamic, options2?: Dynamic, context?: Dynamic) =>
-    options(
-      input2,
-      options2 === undefined || context === undefined ? undefined : (input3?: Dynamic) => dispatchAsInput(context, input3, input),
-      context,
-    );
-export const isSelectionInOneParagraph = ({ selection: selection }: Dynamic) =>
+  (inputType: string, command: Command): Command =>
+  (state, dispatch, view) =>
+    command(state, dispatch === undefined || view === undefined ? undefined : (tr) => dispatchAsInput(view, tr, inputType), view);
+export const isSelectionInOneParagraph = ({ selection }: EditorState): boolean =>
   selection instanceof ProsemirrorState.TextSelection && selection.$from.sameParent(selection.$to);
 export const leaveInParagraphDeletesToBrowser =
-  (input?: Dynamic) =>
-  (input2?: Dynamic, options?: Dynamic, context?: Dynamic) =>
-    (input2.selection.empty || !isSelectionInOneParagraph(input2)) && input(input2, options, context);
+  (command: Command): Command =>
+  (state, dispatch, view) =>
+    (state.selection.empty || !isSelectionInOneParagraph(state)) && command(state, dispatch, view);
 ({ Backspace: baseBackspace, Delete: baseDelete } = ProsemirrorCommands.baseKeymap);
 export const keepsListOnBackspaceAtStart =
-  (input?: Dynamic) =>
-  (state?: Dynamic, dispatch?: Dynamic, view?: Dynamic) => {
-    let { empty: empty, $from: selectionFrom } = state.selection;
+  (command: Command): Command =>
+  (state, dispatch, view) => {
+    let { empty, $from: selectionFrom } = state.selection;
     let isAtListStart = empty && selectionFrom.parentOffset === 0 && isListParagraph(selectionFrom.parent);
     let areLooksSeen = view?.dom.hasAttribute('data-keeps-looks-unseen') !== true;
-    return !(isAtListStart && areLooksSeen) && input(state, dispatch, view);
+    return !(isAtListStart && areLooksSeen) && command(state, dispatch, view);
   };
 export const ENTRY_DELETE_KEYMAP = Object.fromEntries(
-  Object.entries(ProsemirrorCommands.baseKeymap).flatMap(([input, input2]: Dynamic) => {
-    if (input2 !== baseBackspace && input2 !== baseDelete) return [];
+  Object.entries(ProsemirrorCommands.baseKeymap).flatMap(([key, baseCommand]): [string, Command][] => {
+    if (baseCommand !== baseBackspace && baseCommand !== baseDelete) return [];
     let command = leaveInParagraphDeletesToBrowser(
-      asInputCommand(input2 === baseBackspace ? 'deleteContentBackward' : 'deleteContentForward', input2),
+      asInputCommand(baseCommand === baseBackspace ? 'deleteContentBackward' : 'deleteContentForward', baseCommand),
     );
-    return [[input, input === 'Backspace' ? keepsListOnBackspaceAtStart(command) : command]];
+    return [[key, key === 'Backspace' ? keepsListOnBackspaceAtStart(command) : command]];
   }),
 );
 ({ Backspace: entryBackspace } = ENTRY_DELETE_KEYMAP);
 export const alwaysHandled =
-  (input?: Dynamic) =>
-  (...input2: Dynamic[]) => ((input as Dynamic)(...input2), true);
+  (command: Command) =>
+  (...args: Parameters<Command>): true => (command(...args), true);
 export const ENTRY_HISTORY_KEYMAP = {
   'Mod-z': alwaysHandled(undoInEntry),
   'Shift-Mod-z': alwaysHandled(redoInEntry),
@@ -787,62 +819,64 @@ export const ENTRY_HISTORY_KEYMAP = {
         'Mod-y': alwaysHandled(redoInEntry),
       }),
 };
-export const selectionHeldKey = new (ProsemirrorState.PluginKey as Dynamic)('selectionHeld');
+export const selectionHeldKey = new ProsemirrorState.PluginKey<DecorationSet>('selectionHeld');
 export const createSelectionHeldPlugin = () =>
-  new (ProsemirrorState.Plugin as Dynamic)({
+  new ProsemirrorState.Plugin<DecorationSet>({
     key: selectionHeldKey,
     state: {
       init: () => ProsemirrorView.DecorationSet.empty,
-      apply: (input?: Dynamic, options?: Dynamic) => {
-        let value = input.getMeta(selectionHeldKey);
-        return value instanceof ProsemirrorView.DecorationSet ? value : options.map(input.mapping, input.doc);
+      apply: (tr, decorations) => {
+        let held: unknown = tr.getMeta(selectionHeldKey);
+        return held instanceof ProsemirrorView.DecorationSet ? held : decorations.map(tr.mapping, tr.doc);
       },
     },
     props: {
-      decorations: (input?: Dynamic) => selectionHeldKey.getState(input),
+      decorations: (state) => selectionHeldKey.getState(state),
     },
   });
-export const referenceHuesKey = new (ProsemirrorState.PluginKey as Dynamic)('huesOnReferences');
-export const listNumbersKey = new (ProsemirrorState.PluginKey as Dynamic)('numbersOnLines');
-export const NO_LIST_NUMBERS: Dynamic = [];
-export const isListNumbers = (input?: Dynamic) => Array.isArray(input);
-export const listNumbersPlugin = new (ProsemirrorState.Plugin as Dynamic)({
+export const referenceHuesKey = new ProsemirrorState.PluginKey<DecorationSet>('huesOnReferences');
+export const listNumbersKey = new ProsemirrorState.PluginKey<NumbersOfListLines>('numbersOnLines');
+export const NO_LIST_NUMBERS: NumbersOfListLines = [];
+/** Whether a meta set on the list numbers' key holds numbers; the entry field sets it only to the numbers of its lines. */
+export const isListNumbers = (meta: unknown): meta is NumbersOfListLines => Array.isArray(meta);
+export const listNumbersPlugin = new ProsemirrorState.Plugin<NumbersOfListLines>({
   key: listNumbersKey,
   state: {
     init: () => NO_LIST_NUMBERS,
-    apply: (input?: Dynamic, options?: Dynamic) => {
-      let value = input.getMeta(listNumbersKey);
-      return isListNumbers(value) ? value : options;
+    apply: (tr, numbers) => {
+      let numbersMeta: unknown = tr.getMeta(listNumbersKey);
+      return isListNumbers(numbersMeta) ? numbersMeta : numbers;
     },
   },
   props: {
-    decorations: (input?: Dynamic) =>
-      ProsemirrorView.DecorationSet.create(input.doc, [...listNumberDecorations(input.doc, listNumbersKey.getState(input) ?? NO_LIST_NUMBERS)]),
+    decorations: (state) =>
+      ProsemirrorView.DecorationSet.create(state.doc, [...listNumberDecorations(state.doc, listNumbersKey.getState(state) ?? NO_LIST_NUMBERS)]),
   },
 });
-export const createDecorationsPlugin = (key?: Dynamic) =>
-  new (ProsemirrorState.Plugin as Dynamic)({
-    key: key,
+export const createDecorationsPlugin = (key: ProsemirrorState.PluginKey<DecorationSet>) =>
+  new ProsemirrorState.Plugin<DecorationSet>({
+    key,
     state: {
       init: () => ProsemirrorView.DecorationSet.empty,
-      apply: (input?: Dynamic, options?: Dynamic) => {
-        let value = input.getMeta(key);
-        return value instanceof ProsemirrorView.DecorationSet ? value : options.map(input.mapping, input.doc);
+      apply: (tr, decorations) => {
+        let decorationsMeta: unknown = tr.getMeta(key);
+        return decorationsMeta instanceof ProsemirrorView.DecorationSet ? decorationsMeta : decorations.map(tr.mapping, tr.doc);
       },
     },
     props: {
-      decorations: (input?: Dynamic) => key.getState(input),
+      decorations: (state) => key.getState(state),
     },
   });
 export const MATCHING_BRACKETS_CLASS = 'sheet-matching-brackets';
-export const flushEntryDomObserver = (input?: Dynamic) => callDomObserver(input, 'flush');
-export const guardEntryUpdateState = (input?: Dynamic) =>
-  void Object.defineProperty(input, 'updateState', {
-    value: (input2?: Dynamic) =>
-      runRestartingObserverOnError(input, () => ProsemirrorView.EditorView.prototype.updateState.call(input, input2)),
+export const flushEntryDomObserver = (view: EditorView): void => callDomObserver(view, 'flush');
+export const guardEntryUpdateState = (view: EditorView): void =>
+  void Object.defineProperty(view, 'updateState', {
+    value: (state: EditorState) =>
+      runRestartingObserverOnError(view, () => ProsemirrorView.EditorView.prototype.updateState.call(view, state)),
   });
-export const entryViewsBeingFocused = new (WeakSet as Dynamic)();
-export const FORMAT_INPUT_MARKS = {
+export const entryViewsBeingFocused = new WeakSet<EditorView>();
+/** The font mark each formatting input asks for. */
+export const FORMAT_INPUT_MARKS: Readonly<Partial<Record<string, FontMark>>> = {
   formatBold: 'bold',
   formatItalic: 'italic',
   formatUnderline: 'underline',

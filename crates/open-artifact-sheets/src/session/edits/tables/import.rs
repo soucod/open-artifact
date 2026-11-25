@@ -32,6 +32,7 @@ use crate::session::edits::lines::fit;
 use crate::session::edits::objects::dropdowns::{check_labels, OptionToMake};
 use crate::session::place::Place;
 use crate::typing;
+use crate::workbook::grid::CellForm;
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
 use crate::workbook::objects::{DropdownOption, DropdownToSet};
 use crate::workbook::{Input, Workbook};
@@ -269,7 +270,7 @@ pub fn as_new_sheet(
         typed_ops.into_iter().partition(|op| matches!(op, Op::SetCellFormats { .. }));
     ops.extend(typed_formats);
     if !cells.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet_id.clone(), cells, listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet_id.clone(), cells, form: CellForm::Auto });
     }
     ops.extend(typed_cells);
     Ok(Made { ops, place: Some(Place::sheet(&sheet_id)) })

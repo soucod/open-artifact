@@ -20,9 +20,10 @@ import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { Tooltip as BaseTooltip } from '@base-ui/react/tooltip';
 import { Check, ChevronRight } from 'lucide-react';
-import { forwardRef, useEffect, useState, type ButtonHTMLAttributes, type CSSProperties, type HTMLAttributes, type ReactElement, type ReactNode } from 'react';
+import { forwardRef, useEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type HTMLAttributes, type ReactElement, type ReactNode } from 'react';
 import type { ChromeDraw, ShellConnection } from '@open-artifact/runtime';
-import { cn } from '@open-artifact/ui';
+import { cn, swallowFollowUpClicks } from '@open-artifact/ui';
+import { menuFit } from './menu-fit.ts';
 
 /** A floating chrome card. */
 export const Card = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(function Card({ className, ...rest }, ref) {
@@ -208,7 +209,7 @@ export function ChromeMenu({
       )}
       <BaseMenu.Portal>
         <BaseMenu.Positioner side={side} align={align} sideOffset={sideOffset} className="z-[1000]">
-          <BaseMenu.Popup {...marked(mark)} className={cn(popupBase, className)}>
+          <BaseMenu.Popup {...marked(mark)} className={cn(popupBase, className)} style={menuFit(className)}>
             {children}
           </BaseMenu.Popup>
         </BaseMenu.Positioner>
@@ -234,13 +235,16 @@ export interface ChromeMenuItemProps {
   title?: string;
 }
 
-/** One menu row. */
+/** One menu row. A row that closes the menu keeps the rest of a double click from reaching what the menu uncovers. */
 export function ChromeMenuItem({ children, onSelect, shortcut, checked, disabled, danger, icon, title, description, closeOnClick }: ChromeMenuItemProps): ReactNode {
   return (
     <BaseMenu.Item
       className={cn(ITEM, description !== undefined && 'h-auto min-h-7 items-start py-1.5', danger && 'text-danger data-[highlighted]:bg-danger data-[highlighted]:text-white')}
       disabled={disabled}
-      onClick={onSelect}
+      onClick={(event) => {
+        if (closeOnClick !== false) swallowFollowUpClicks(event.nativeEvent);
+        onSelect?.();
+      }}
       closeOnClick={closeOnClick}
       title={title}
     >
@@ -291,7 +295,7 @@ export function ChromeSubmenu({
       </BaseMenu.SubmenuTrigger>
       <BaseMenu.Portal>
         <BaseMenu.Positioner sideOffset={4} className="z-[1000]">
-          <BaseMenu.Popup {...marked(mark)} className={cn(popupBase, className)}>
+          <BaseMenu.Popup {...marked(mark)} className={cn(popupBase, className)} style={menuFit(className)}>
             {children}
           </BaseMenu.Popup>
         </BaseMenu.Positioner>
@@ -319,7 +323,7 @@ export interface ChromePopoverProps {
   side?: ChromeSide;
   align?: 'start' | 'center' | 'end';
   open?: boolean;
-  onOpenChange?: (open: boolean) => void;
+  onOpenChange?: (open: boolean, details: ChromePopoverChange) => void;
   className?: string;
   /** Accessible name of the popup. */
   label?: string;
@@ -334,9 +338,25 @@ export interface ChromePopoverProps {
   /** Popup classes in place of {@link POPUP}. */
   popupBase?: string;
   style?: CSSProperties;
+  /**
+   * Once something has been typed into a field of the popup (other than a
+   * search field), a press outside no longer closes it: Escape, or the
+   * popup's own buttons, do.
+   */
+  holdWhileTyped?: boolean;
 }
 
-/** A floating chrome panel anchored to a trigger (or to `anchor`). */
+/** Why a {@link ChromePopover} opens or closes; `cancel()` keeps it as it is. */
+export type ChromePopoverChange = BasePopover.Root.ChangeEventDetails;
+
+/** True for a field whose typing is a search (a filter, not an edit worth keeping). */
+function isSearchField(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return true;
+  if (!target.matches('input, textarea, [contenteditable="true"]')) return true;
+  return target.matches('[type="search"], [role="searchbox"], [role="combobox"]');
+}
+
+/** A floating chrome panel anchored to a trigger (or to `anchor`). A press outside that closes it does not double-click what is under it. */
 export function ChromePopover({
   trigger,
   children,
@@ -352,13 +372,40 @@ export function ChromePopover({
   mark,
   popupBase = POPUP,
   style,
+  holdWhileTyped = false,
 }: ChromePopoverProps): ReactNode {
+  const typed = useRef(false);
+  const change = (next: boolean, details: ChromePopoverChange) => {
+    if (!next && details.reason === 'outside-press') {
+      if (holdWhileTyped && typed.current) {
+        details.cancel();
+        return;
+      }
+      if (details.event instanceof MouseEvent) swallowFollowUpClicks(details.event);
+    }
+    onOpenChange?.(next, details);
+  };
   return (
-    <BasePopover.Root open={open} onOpenChange={onOpenChange ? (next) => onOpenChange(next) : undefined}>
+    <BasePopover.Root
+      open={open}
+      onOpenChange={change}
+      onOpenChangeComplete={(done) => {
+        if (!done) typed.current = false;
+      }}
+    >
       <BasePopover.Trigger render={trigger} />
       <BasePopover.Portal>
         <BasePopover.Positioner side={side} align={align} sideOffset={gap} anchor={anchor ?? undefined} className="z-[1000]">
-          <BasePopover.Popup {...marked(mark)} aria-label={label} initialFocus={initialFocus ? undefined : false} className={cn(popupBase, className)} style={style}>
+          <BasePopover.Popup
+            {...marked(mark)}
+            aria-label={label}
+            initialFocus={initialFocus ? undefined : false}
+            className={cn(popupBase, className)}
+            style={style}
+            onInput={(event) => {
+              if (!isSearchField(event.target)) typed.current = true;
+            }}
+          >
             {children}
           </BasePopover.Popup>
         </BasePopover.Positioner>

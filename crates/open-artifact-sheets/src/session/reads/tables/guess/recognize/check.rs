@@ -67,45 +67,8 @@ impl Sheet<'_> {
         }
 
         // Each column's kind over its records, and whether it has two cells or more.
-        let mut kinds: BTreeMap<usize, (bool, u8)> = BTreeMap::new();
-        let cells = record_rows()
-            .flat_map(|r| self.cells_in(r, c0, c1).iter())
-            .chain(record_rows().flat_map(|r| self.unticked_in(r, c0, c1).iter()));
-        for cell in cells {
-            let prev = kinds.get(&cell.column).map(|v| v.1);
-            if matches!(cell.value, Value::Error) || prev == Some(MIXED) {
-                continue;
-            }
-            let new = match cell.value {
-                Value::Number(_) => NUMBER,
-                Value::Boolean => BOOLEAN,
-                _ => match self.grid.input(cell.row, cell.column) {
-                    None | Some(Input::Formula { .. }) => COMPUTED_TEXT,
-                    Some(Input::DropdownOption { .. } | Input::User { .. } | Input::Users { .. }) => PICKED_TEXT,
-                    Some(_) => PLAIN_TEXT,
-                },
-            };
-            let kind = match prev {
-                None => new,
-                Some(p) if cell.is_text() && p <= 2 => {
-                    if p == PLAIN_TEXT || new == p {
-                        p
-                    } else {
-                        PLAIN_TEXT
-                    }
-                }
-                Some(p) => {
-                    if family(p) != family(new) {
-                        MIXED
-                    } else if family(p) != 2 || p == new {
-                        new
-                    } else {
-                        MIXED
-                    }
-                }
-            };
-            kinds.insert(cell.column, (prev.is_some(), kind));
-        }
+        let rows: Vec<usize> = record_rows().collect();
+        let kinds = self.kinds_of(&rows, c0, c1);
 
         let first_kind = kinds.get(&c0).map_or(NO_CELL, |v| v.1);
         let two_columns = c0.saturating_add(1) == c1;
@@ -173,12 +136,68 @@ impl Sheet<'_> {
                 return Ok(found());
             }
         }
+        // Nothing proves the header, but the first record would as the header: the records under it are typed
+        //.
+        let second_proves = || {
+            rows.len() > 2
+                && self
+                    .kinds_of(&rows[1..], c0, c1)
+                    .values()
+                    .any(|&(several, kind)| several && matches!(kind, NUMBER | BOOLEAN))
+        };
         Err(if few {
             Reason::FewerThanTwoRecords
+        } else if nothing_proves && second_proves() {
+            Reason::EitherOfTwoRowsMayBeTheHeader
         } else if nothing_proves {
             Reason::NothingProvesTheHeader
         } else {
             Reason::MayBeLabelsAndValues
         })
+    }
+
+    /// Each column's kind over these records, and whether it has two cells or more.
+    fn kinds_of(&self, rows: &[usize], c0: usize, c1: usize) -> BTreeMap<usize, (bool, u8)> {
+        let mut kinds: BTreeMap<usize, (bool, u8)> = BTreeMap::new();
+        let cells = rows
+            .iter()
+            .flat_map(|&r| self.cells_in(r, c0, c1).iter())
+            .chain(rows.iter().flat_map(|&r| self.unticked_in(r, c0, c1).iter()));
+        for cell in cells {
+            let prev = kinds.get(&cell.column).map(|v| v.1);
+            if matches!(cell.value, Value::Error) || prev == Some(MIXED) {
+                continue;
+            }
+            let new = match cell.value {
+                Value::Number(_) => NUMBER,
+                Value::Boolean => BOOLEAN,
+                _ => match self.grid.input(cell.row, cell.column) {
+                    None | Some(Input::Formula { .. }) => COMPUTED_TEXT,
+                    Some(Input::DropdownOption { .. } | Input::User { .. } | Input::Users { .. }) => PICKED_TEXT,
+                    Some(_) => PLAIN_TEXT,
+                },
+            };
+            let kind = match prev {
+                None => new,
+                Some(p) if cell.is_text() && p <= 2 => {
+                    if p == PLAIN_TEXT || new == p {
+                        p
+                    } else {
+                        PLAIN_TEXT
+                    }
+                }
+                Some(p) => {
+                    if family(p) != family(new) {
+                        MIXED
+                    } else if family(p) != 2 || p == new {
+                        new
+                    } else {
+                        MIXED
+                    }
+                }
+            };
+            kinds.insert(cell.column, (prev.is_some(), kind));
+        }
+        kinds
     }
 }

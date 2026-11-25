@@ -2,6 +2,7 @@ import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { ContextMenu as BaseContextMenu } from '@base-ui/react/context-menu';
+import { preventRepeatedActivation } from './closing-guard.ts';
 import { cn } from './cn.ts';
 import { Icon, LeadingIcon, type IconName } from './icon.tsx';
 import { useKitLabel } from './labels.tsx';
@@ -22,6 +23,7 @@ import {
   useMergedRefs,
   useOpenerFocusReturn,
   useSheetPresentation,
+  useSwallowSheetEntryTaps,
   type PopupFinalFocus,
 } from './popup-frame.tsx';
 import { Shortcut, parseSingleShortcut } from './shortcut.tsx';
@@ -64,6 +66,64 @@ const MENU_POPUP_CLASSES =
 
 const ENABLED_MENU_ITEM_SELECTOR = '[role^="menuitem"]:not([aria-disabled="true"])';
 const ENGAGING_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End']);
+
+/** Keys that move the highlight or choose a row, which end a run of typed letters. */
+const MOVING_KEY_PATTERN = /^(Arrow|Home$|End$|Enter$)/;
+/** How long after a typed letter the menu still counts the next key as part of the same search. */
+const TYPEAHEAD_WINDOW_MS = 500;
+
+/**
+ * Letters typed in a menu jump to the row they spell, and a space can be part of that text. A
+ * space typed within the search window must not also choose the highlighted row, so the click it
+ * makes is swallowed.
+ */
+function useTypeaheadSpaceGuard(
+  onClickCapture: React.MouseEventHandler<HTMLDivElement> | undefined,
+  onKeyDownCapture: React.KeyboardEventHandler<HTMLDivElement> | undefined,
+): Pick<React.HTMLAttributes<HTMLDivElement>, 'onClickCapture' | 'onKeyDownCapture'> {
+  const lastLetterAt = React.useRef(Number.NEGATIVE_INFINITY);
+  const swallowsClick = React.useRef(false);
+  const handleKeyDownCapture = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      swallowsClick.current = false;
+      onKeyDownCapture?.(event);
+      if (MOVING_KEY_PATTERN.test(event.key)) {
+        lastLetterAt.current = Number.NEGATIVE_INFINITY;
+        return;
+      }
+      const popup = event.currentTarget;
+      const target = event.target;
+      const onRowOrPopup =
+        target === popup || (target instanceof Element && popup.contains(target) && target.getAttribute('role')?.startsWith('menuitem') === true);
+      if (!onRowOrPopup || event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey || event.isPropagationStopped()) return;
+      if (event.key !== ' ') {
+        lastLetterAt.current = event.timeStamp;
+        return;
+      }
+      if (event.timeStamp - lastLetterAt.current >= TYPEAHEAD_WINDOW_MS) return;
+      swallowsClick.current = true;
+      popup.ownerDocument.defaultView?.setTimeout(() => {
+        swallowsClick.current = false;
+      }, 0);
+    },
+    [onKeyDownCapture],
+  );
+  const handleClickCapture = React.useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (swallowsClick.current && !event.isTrusted && event.detail === 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      onClickCapture?.(event);
+    },
+    [onClickCapture],
+  );
+  return React.useMemo(
+    () => ({ onClickCapture: handleClickCapture, onKeyDownCapture: handleKeyDownCapture }),
+    [handleClickCapture, handleKeyDownCapture],
+  );
+}
 
 export function menuOpenType(event: Event | undefined): MenuOpenType {
   if (event === undefined) return '';
@@ -280,6 +340,8 @@ const MenuPopup = React.forwardRef<HTMLDivElement, MenuPopupProps>(function Menu
     onMouseDown,
     onKeyDown,
     onContextMenu,
+    onClickCapture,
+    onKeyDownCapture,
     'data-ui': dataUi,
     ...rest
   },
@@ -304,7 +366,10 @@ const MenuPopup = React.forwardRef<HTMLDivElement, MenuPopupProps>(function Menu
   const anchoredAlone = atRoot && !cursorAnchored && anchor !== undefined && anchor !== null && finalFocus === undefined;
   const opener = useOpenerFocusReturn(atRoot && (declined || anchoredAlone), !declined);
   const popupRef = React.useRef<HTMLDivElement | null>(null);
-  const mergedRef = useMergedRefs<HTMLDivElement>(ref, popupRef, opener.popupRef);
+  const [popupElement, setPopupElement] = React.useState<HTMLDivElement | null>(null);
+  const mergedRef = useMergedRefs<HTMLDivElement>(ref, popupRef, opener.popupRef, setPopupElement);
+  const typeaheadGuard = useTypeaheadSpaceGuard(onClickCapture, onKeyDownCapture);
+  useSwallowSheetEntryTaps(sheet ? popupElement : null, level.open);
 
   const resolvedFinalFocus: PopupFinalFocus = declined
     ? finalFocus === false
@@ -362,6 +427,7 @@ const MenuPopup = React.forwardRef<HTMLDivElement, MenuPopupProps>(function Menu
               data-presentation={sheet ? 'sheet' : undefined}
               {...{ [OVERLAY_ATTRIBUTE]: '' }}
               {...rest}
+              {...typeaheadGuard}
               finalFocus={resolvedFinalFocus}
               render={declined ? unfocusable : undefined}
               onMouseDown={(event) => {
@@ -383,7 +449,7 @@ const MenuPopup = React.forwardRef<HTMLDivElement, MenuPopupProps>(function Menu
               {sheet && atRoot && <SheetTitleBar title={level.sheetTitle} closeLabel={level.closeLabel} onClose={level.close} />}
               {sheet && level.nested && (
                 <div className="shrink-0 px-[var(--ui-menu-gutter)] pt-[var(--ui-menu-gutter)]">
-                  <BaseMenu.Item closeOnClick={false} onClick={level.close} className={menuItemVariants()}>
+                  <BaseMenu.Item closeOnClick={false} onClick={level.close} onKeyDown={preventRepeatedActivation} className={menuItemVariants()}>
                     <LeadingIcon icon={<Icon name="CaretLeft" size="auto" />} />
                     <span className="min-w-0 flex-1 truncate">{back}</span>
                   </BaseMenu.Item>
@@ -517,10 +583,15 @@ const MenuItem = React.forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
     </>
   );
 
+  const guardsRepeats = closes || hasCheck || rest['aria-checked'] !== undefined;
   const shared = {
     ...rest,
     ref,
     disabled,
+    onKeyDown: (event: Parameters<NonNullable<typeof rest.onKeyDown>>[0]) => {
+      rest.onKeyDown?.(event);
+      if (guardsRepeats) preventRepeatedActivation(event);
+    },
     render: render ?? (passive ? unfocusable : undefined),
     'aria-keyshortcuts': rest['aria-keyshortcuts'] ?? (shortcut ? parseSingleShortcut(shortcut, isApplePlatform()) : undefined),
     'aria-describedby': cn(showsReason && reasonId, rest['aria-describedby']) || undefined,
@@ -545,7 +616,7 @@ const MenuItem = React.forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
 
   if (disabledReason === undefined) return row;
   return (
-    <InlineEndTooltip content={showsReason ? disabledReason : undefined} multiline closeOnClick={false}>
+    <InlineEndTooltip content={showsReason ? disabledReason : undefined} explainsDisabled>
       <div role="none">
         {row}
         <DisabledReasonDescription id={reasonId} reason={showsReason ? disabledReason : undefined} />
@@ -641,7 +712,7 @@ export interface MenuSubmenuTriggerProps extends Omit<BaseMenu.SubmenuTrigger.Pr
 }
 
 const MenuSubmenuTrigger = React.forwardRef<HTMLElement, MenuSubmenuTriggerProps>(function MenuSubmenuTrigger(
-  { icon, hint, trailing, className, children, openOnHover, render, ...rest },
+  { icon, hint, trailing, className, children, openOnHover, render, onKeyDown, ...rest },
   ref,
 ) {
   const sheet = useIsSheet();
@@ -650,6 +721,10 @@ const MenuSubmenuTrigger = React.forwardRef<HTMLElement, MenuSubmenuTriggerProps
     <BaseMenu.SubmenuTrigger
       ref={ref}
       {...rest}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        preventRepeatedActivation(event);
+      }}
       openOnHover={sheet ? false : openOnHover}
       render={render ?? (passive ? unfocusable : undefined)}
       data-ui-icon-row={icon !== undefined && icon !== null ? '' : undefined}

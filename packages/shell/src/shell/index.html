@@ -5,9 +5,128 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Artifact</title>
     <script>window.__OPEN_ARTIFACT_BOOT__ = /*__OPEN_ARTIFACT_BOOT__*/null;</script>
+    <!-- The pre-boot script (preboot.ts), inlined by the build. -->
+    <!--open-artifact:preboot-->
+    <style>
+      /* What shows before the app: the Shell's bar and its stage's spinner, in the app's colours (packages/ui styles.css). */
+      :root {
+        --oa-preboot-canvas: #f2f2f0;
+        --oa-preboot-surface: #ffffff;
+        --oa-preboot-line: rgb(0 0 0 / 0.1);
+        --oa-preboot-fg: #1c1c1a;
+        --oa-preboot-fg-muted: #5c5c57;
+        --oa-preboot-fg-subtle: #8a8a84;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --oa-preboot-canvas: #1a1a19;
+          --oa-preboot-surface: #242423;
+          --oa-preboot-line: rgb(255 255 255 / 0.1);
+          --oa-preboot-fg: #ededeb;
+          --oa-preboot-fg-muted: #a8a8a3;
+          --oa-preboot-fg-subtle: #7c7c77;
+        }
+      }
+      :root[data-theme="dark"] {
+        --oa-preboot-canvas: #1a1a19;
+        --oa-preboot-surface: #242423;
+        --oa-preboot-line: rgb(255 255 255 / 0.1);
+        --oa-preboot-fg: #ededeb;
+        --oa-preboot-fg-muted: #a8a8a3;
+        --oa-preboot-fg-subtle: #7c7c77;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--oa-preboot-canvas);
+      }
+      #oa-preboot,
+      #oa-preboot-error {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        display: flex;
+        flex-direction: column;
+        background: var(--oa-preboot-canvas);
+        font: 13px/1.5 "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      #oa-preboot[hidden],
+      #oa-preboot-error[hidden] {
+        display: none;
+      }
+      #oa-preboot > div:first-child {
+        box-sizing: border-box;
+        flex-shrink: 0;
+        height: 48px;
+        border-bottom: 1px solid var(--oa-preboot-line);
+        background: var(--oa-preboot-surface);
+      }
+      [data-oa-preboot-bar="40"] #oa-preboot > div:first-child {
+        height: 40px;
+      }
+      [data-oa-preboot-bar="0"] #oa-preboot > div:first-child {
+        display: none;
+      }
+      #oa-preboot > div:last-child {
+        position: relative;
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--oa-preboot-fg-subtle);
+      }
+      #oa-preboot svg {
+        width: 24px;
+        height: 24px;
+        animation: oa-preboot-spin 1s linear infinite;
+      }
+      @keyframes oa-preboot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #oa-preboot svg {
+          animation: none;
+        }
+      }
+      #oa-preboot-error {
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 32px;
+        text-align: center;
+        color: var(--oa-preboot-fg-muted);
+      }
+      #oa-preboot-error p {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--oa-preboot-fg);
+      }
+      #oa-preboot-error button {
+        font: inherit;
+        padding: 6px 14px;
+        border: 1px solid var(--oa-preboot-line);
+        border-radius: 8px;
+        background: var(--oa-preboot-surface);
+        color: var(--oa-preboot-fg);
+      }
+    </style>
     <script type="module" src="./main.tsx"></script>
   </head>
   <body>
     <div id="root"></div>
+    <div id="oa-preboot" aria-busy="true">
+      <div></div>
+      <div>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+      </div>
+    </div>
+    <div id="oa-preboot-error" role="alert" hidden>
+      <p>This page could not load.</p>
+      <button type="button">Try again</button>
+    </div>
   </body>
 </html>

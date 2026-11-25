@@ -1,15 +1,43 @@
-import type { Dynamic } from '../dynamic.ts';
-import { ownRowOrderOfSheet, wholeRowSpanIn } from '../model/line-ids.ts';
+import { ownRowOrderOfSheet, wholeRowSpanIn, type RowOrderSide } from '../model/line-ids.ts';
 import { selectedArea, isSameCell } from '../selection/model.ts';
 import { peerColorOf } from './colors.ts';
 import { inkOnPeerColor } from '@open-artifact/editor-kit';
+import type { SheetId } from '@open-artifact/sheets-core';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
-import type { SelectionToRead } from '../selection/model.ts';
-export function withSelectionsOfOthers(state: PageState, heard?: Dynamic, nowMs2?: Dynamic) {
+import type { PageTransition } from '../state/transitions.ts';
+import type { ProfileOfPerson } from '../chips/people-list.ts';
+import type { CellArea, CellSelection, SelectionToRead } from '../selection/model.ts';
+import type { HeardSelection, RoomPresence } from './room.ts';
+/** A selection by its two corners, with nothing about how it was walked. */
+export type SelectionCorners = Pick<CellSelection, 'activeCell' | 'selectionCorner'>;
+/** How another person's name flag looks. */
+export interface PeerFlagLook {
+  name: string;
+  color: string;
+  inkColor: string;
+}
+/** Another person on a sheet, as shown over its tab. */
+export interface PeerFlag extends PeerFlagLook {
+  userId: string;
+  avatarUrl: string;
+}
+interface SelectedAreaCached {
+  reads: WorkbookReads;
+  area: CellArea | null;
+}
+interface SelectionAsSeenCached {
+  reads: WorkbookReads;
+  seen: SelectionCorners;
+}
+interface PeerFlagsCached {
+  profilesById: PageState['profilesById'];
+  bySheet: Map<SheetId, PeerFlag[]>;
+}
+export function withSelectionsOfOthers(state: PageState, heard: readonly HeardSelection[], nowMs: number): PageTransition {
   let isSame =
     heard.length === state.selectionsOfOthers.length &&
-    heard.every((heardOne?: Dynamic, index?: Dynamic) => {
+    heard.every((heardOne, index) => {
       let known = state.selectionsOfOthers[index];
       return (
         known?.tabKey === heardOne.tabKey &&
@@ -18,22 +46,22 @@ export function withSelectionsOfOthers(state: PageState, heard?: Dynamic, nowMs2
         isSameToldSelection(known.selection, heardOne.selection)
       );
     });
-  let userIdsToLookUp = [...new (Set as Dynamic)(heard.map(({ userId: userId }: Dynamic) => userId))].filter(
-    (userId?: Dynamic) => (state.profilesById.get(userId)?.name ?? '') === '',
+  let userIdsToLookUp = [...new Set(heard.map(({ userId }) => userId))].filter(
+    (userId) => (state.profilesById.get(userId)?.name ?? '') === '',
   );
   return {
     state: isSame
       ? state
       : {
           ...state,
-          selectionsOfOthers: heard.map((heardOne?: Dynamic) => {
+          selectionsOfOthers: heard.map((heardOne) => {
             let known = state.selectionsOfOthers.find(
-              ({ userId: userId, selection: selection }: Dynamic) =>
+              ({ userId, selection }) =>
                 userId === heardOne.userId && isSameToldSelection(selection, heardOne.selection),
             );
             return {
               ...heardOne,
-              movedAtMs: known?.movedAtMs ?? nowMs2,
+              movedAtMs: known?.movedAtMs ?? nowMs,
             };
           }),
         },
@@ -48,25 +76,25 @@ export function withSelectionsOfOthers(state: PageState, heard?: Dynamic, nowMs2
           ],
   };
 }
-export function withOwnSelectionTold({ state: state, effects: effects }: Dynamic, reads: WorkbookReads) {
-  let { activeCell: activeCell, selectionCorner: selectionCorner, selectionToldToOthers: told } = state;
+export function withOwnSelectionTold({ state, effects }: PageTransition, reads: WorkbookReads): PageTransition {
+  let { activeCell, selectionCorner, selectionToldToOthers: told } = state;
   let selection = selectionInRowOrder(
     'stored',
     {
-      activeCell: activeCell,
-      selectionCorner: selectionCorner,
+      activeCell,
+      selectionCorner,
     },
     reads,
   );
   if (told !== null && isSameToldSelection(told, selection))
     return {
-      state: state,
-      effects: effects,
+      state,
+      effects,
     };
   if (told !== null && state.followed !== null)
     return {
-      state: state,
-      effects: effects,
+      state,
+      effects,
     };
   return {
     state: {
@@ -77,13 +105,14 @@ export function withOwnSelectionTold({ state: state, effects: effects }: Dynamic
       ...effects,
       {
         kind: 'tellOthersOwnSelection',
-        selection: selection,
+        selection,
       },
     ],
   };
 }
-export function selectionInRowOrder(order: Dynamic, selection: Dynamic, reads: WorkbookReads) {
-  let { activeCell: activeCell, selectionCorner: selectionCorner } = selection;
+/** The same selection with its rows taken in the other order: as the sheet shows them, or as they are stored. */
+export function selectionInRowOrder(order: RowOrderSide, selection: SelectionCorners, reads: WorkbookReads): SelectionCorners {
+  let { activeCell, selectionCorner } = selection;
   let ownRowOrder = ownRowOrderOfSheet(reads, activeCell.sheetId);
   if (ownRowOrder === null || activeCell.rowId === selectionCorner.rowId) return selection;
   let fromOrder = order === 'seen' ? ownRowOrder.stored : ownRowOrder.seen;
@@ -95,7 +124,7 @@ export function selectionInRowOrder(order: Dynamic, selection: Dynamic, reads: W
   });
   if (span === null)
     return {
-      activeCell: activeCell,
+      activeCell,
       selectionCorner: activeCell,
     };
   let [firstRowId, lastRowId] = [ownRowOrder[order].idAt(span.firstIndex), ownRowOrder[order].idAt(span.firstIndex + span.count - 1)];
@@ -111,43 +140,50 @@ export function selectionInRowOrder(order: Dynamic, selection: Dynamic, reads: W
     },
   };
 }
-export function selectedAreaAsSeen(selection: Dynamic, reads: WorkbookReads) {
+export function selectedAreaAsSeen(selection: SelectionCorners, reads: WorkbookReads): CellArea | null {
   let cached = selectionAsSeenCache.get(selection);
   let seen = cached?.reads === reads ? cached.seen : selectionInRowOrder('seen', selection, reads);
   selectionAsSeenCache.set(selection, {
-    reads: reads,
-    seen: seen,
+    reads,
+    seen,
   });
   return cachedSelectedArea(seen, reads);
 }
-export function cachedSelectedArea(state: SelectionToRead, reads: WorkbookReads) {
-  let cached = selectedAreaCache.get(state);
+export function cachedSelectedArea(selection: SelectionToRead, reads: WorkbookReads): CellArea | null {
+  let cached = selectedAreaCache.get(selection);
   if (cached?.reads === reads) return cached.area;
-  let area = selectedArea(state, reads);
-  selectedAreaCache.set(state, {
-    reads: reads,
-    area: area,
+  let area = selectedArea(selection, reads);
+  selectedAreaCache.set(selection, {
+    reads,
+    area,
   });
   return area;
 }
-export function peerFlagLook({ userId: userId, colorClaimed: colorClaimed }: Dynamic, profilesById?: Dynamic) {
-  let { name: personName = '', color: usualColor = null } = profilesById.get(userId) ?? {};
+export function peerFlagLook(
+  { userId, colorClaimed }: Pick<HeardSelection, 'userId' | 'colorClaimed'>,
+  profilesById: PageState['profilesById'],
+): PeerFlagLook | null {
+  let { name: personName = '', color: usualColor = null }: Partial<ProfileOfPerson> = profilesById.get(userId) ?? {};
+
   if (personName === '') return null;
   let color = peerColorOf(colorClaimed, usualColor, userId);
   return {
     name: personName,
-    color: color,
+    color,
     inkColor: inkOnPeerColor(color),
   };
 }
-export function peerFlagsOnSheet(sheetId: Dynamic, { selectionsOfOthers: selectionsOfOthers, profilesById: profilesById }: Dynamic) {
+export function peerFlagsOnSheet(
+  sheetId: SheetId,
+  { selectionsOfOthers, profilesById }: Pick<PageState, 'selectionsOfOthers' | 'profilesById'>,
+): readonly PeerFlag[] {
   let cached = peerFlagsCache.get(selectionsOfOthers);
   if (cached?.profilesById === profilesById) return cached.bySheet.get(sheetId) ?? NO_PEER_FLAGS;
-  let flagsBySheet = new (Map as Dynamic)();
-  for (let heard of selectionsOfOthers as Dynamic) {
-    let { userId: userId, selection: selection } = heard;
+  let flagsBySheet = new Map<SheetId, PeerFlag[]>();
+  for (let heard of selectionsOfOthers) {
+    let { userId, selection } = heard;
     let flagsOnSheet = flagsBySheet.get(selection.activeCell.sheetId) ?? [];
-    if (flagsOnSheet.some((input?: Dynamic) => input.userId === userId)) continue;
+    if (flagsOnSheet.some((peerFlag) => peerFlag.userId === userId)) continue;
     let look = peerFlagLook(heard, profilesById);
     if (look === null) continue;
     let avatarUrl = profilesById.get(userId)?.avatarUrl ?? '';
@@ -156,27 +192,28 @@ export function peerFlagsOnSheet(sheetId: Dynamic, { selectionsOfOthers: selecti
       ...flagsOnSheet,
       {
         ...look,
-        userId: userId,
+        userId,
         avatarUrl: shownAvatarUrl,
       },
     ]);
   }
   peerFlagsCache.set(selectionsOfOthers, {
-    profilesById: profilesById,
+    profilesById,
     bySheet: flagsBySheet,
   });
   return flagsBySheet.get(sheetId) ?? NO_PEER_FLAGS;
 }
-export const inertRoomPresence = {
+/** Room presence for a workbook that is not the page's own: tells nothing and hears no one. */
+export const inertRoomPresence: RoomPresence = {
   tellOwnSelection() {},
   tellAgentWhatIsSelected() {},
   tellWhomViewFollows() {},
   personWithTab: () => null,
   onSelectionsChanged: () => () => {},
 };
-export const isSameToldSelection = (selection?: Dynamic, otherSelection?: Dynamic) =>
+export const isSameToldSelection = (selection: SelectionCorners, otherSelection: SelectionCorners): boolean =>
   isSameCell(selection.activeCell, otherSelection.activeCell) && isSameCell(selection.selectionCorner, otherSelection.selectionCorner);
-export const selectedAreaCache = new (WeakMap as Dynamic)();
-export const peerFlagsCache = new (WeakMap as Dynamic)();
-export const NO_PEER_FLAGS: Dynamic = [];
-export const selectionAsSeenCache = new (WeakMap as Dynamic)();
+export const selectedAreaCache = new WeakMap<SelectionToRead, SelectedAreaCached>();
+export const peerFlagsCache = new WeakMap<PageState['selectionsOfOthers'], PeerFlagsCached>();
+export const NO_PEER_FLAGS: readonly PeerFlag[] = [];
+export const selectionAsSeenCache = new WeakMap<SelectionCorners, SelectionAsSeenCached>();

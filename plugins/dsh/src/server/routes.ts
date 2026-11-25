@@ -4,9 +4,9 @@
  * token, and answer in the page's shapes (src/shared/routes.ts). Nothing here keeps state of its own: the library, the
  * opened times and the thumbnails are the daemon's, so every harness's page sees the same.
  */
-import { ensureDaemon, type EnsureDaemonOptions } from '@open-artifact/daemon/client';
-import { LIBRARY_ROUTES, type ArtifactView, type DaemonState, type TypeView } from '@open-artifact/protocol';
-import { PATHS, type ArtifactList, type DeleteAnswer, type OpenAnswer, type PageArtifact, type TypeTile, type UpdateCheck } from '../shared/routes.ts';
+import { ensureDaemon, type EnsureDaemonOptions } from '@open-artifact/harness-kit';
+import { LIBRARY_ROUTES, hostToShellOf, type ArtifactView, type DaemonState, type HostToShell, type TypeView } from '@open-artifact/protocol';
+import { PATHS, SHELL_EVENT, type ArtifactList, type DeleteAnswer, type OpenAnswer, type PageArtifact, type TypeTile, type UpdateCheck } from '../shared/routes.ts';
 import type { ChangelogAnswer } from '../shared/changelog.ts';
 import type { DshRoute } from './dsh.ts';
 import type { HostOpens } from './host-open.ts';
@@ -90,6 +90,8 @@ export interface RouteOptions {
   library?: LibraryApi;
   /** The daemon's `host.open` requests, which the browser halves follow (the host routes). */
   hostOpens?: HostOpens;
+  /** Sends a browser half's host message to the Shell of a view (the shell-command route; none without it). */
+  shellCommand?: (view: string, command: HostToShell) => Promise<void>;
   /** Whether this plugin has a newer release (the updates route); no route without it. */
   updates?: () => Promise<UpdateCheck>;
   /** The release notes (the changelog route); no route without it. `upcoming`: the offered release's too. */
@@ -269,7 +271,12 @@ export function registerRoutes(routes: RouteRegistry, options: RouteOptions = {}
             stop();
           }
         };
-        const unlisten = hostOpens.listen((open) => write(`data: ${JSON.stringify(open)}\n\n`));
+        const unlistenOpens = hostOpens.listen((open) => write(`data: ${JSON.stringify(open)}\n\n`));
+        const unlistenShell = hostOpens.listenShell((event) => write(`event: ${SHELL_EVENT}\ndata: ${JSON.stringify(event)}\n\n`));
+        const unlisten = () => {
+          unlistenOpens();
+          unlistenShell();
+        };
         // A comment now and then keeps proxies and the app's fetch layer from closing a quiet stream.
         const ping = setInterval(() => write(': ping\n\n'), 25_000);
         stop = () => {
@@ -293,6 +300,18 @@ export function registerRoutes(routes: RouteRegistry, options: RouteOptions = {}
 
   route(PATHS.hostOpened, ['POST'], async (request) => {
     hostOpens.answer(param(request, 'id'), param(request, 'opened') === '1');
+    return json({ ok: true });
+  });
+
+  const shellCommand = options.shellCommand;
+  if (shellCommand === undefined) return;
+
+  // A browser half's answer to the Shell of a view it shows: only the host messages a host may send.
+  route(PATHS.shellCommand, ['POST'], async (request) => {
+    const view = param(request, 'view');
+    const command = hostToShellOf(await request.json().catch(() => null));
+    if (!view || !command) return json({ error: 'A view and a host message (host_hello or goto) are needed.' }, 400);
+    await shellCommand(view, command);
     return json({ ok: true });
   });
 }

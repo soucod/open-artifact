@@ -5,8 +5,8 @@
  *
  * Lists hang by the widest top-level marker (`--wb-hang`, in `ch` of the
  * text's own font) so wrapped lines align under the text, not the marker.
- * Links open in a new tab; a click only follows them when the board says so
- * (see `PassiveLink`). List items take their direction from their own
+ * Links open in a new tab when a click on them is meant to open them (see
+ * `PassiveLink`). List items take their direction from their own
  * text (`dir="auto"`), so right-to-left items read and hang correctly.
  */
 

@@ -48,10 +48,11 @@ export interface CommentsUiState {
   composer: ComposerUi | null;
 }
 
-export interface CommentUiPatch {
+/** A type alias rather than an interface, so that the object check in applyPatch keeps its fields. */
+export type CommentUiPatch = {
   at?: PagePoint | null;
   display?: CardDisplay | null;
-}
+};
 
 export interface ComposerPatch {
   anchor: string;

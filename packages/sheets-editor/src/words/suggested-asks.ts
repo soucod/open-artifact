@@ -1,23 +1,34 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ValueContents } from '@open-artifact/sheets-core';
+import type { ColumnHolds, ColumnValueHeld, SuggestedAsk, SuggestedAskWhat, TableHolds } from '../state/initial-state.ts';
+import type { SortKeyOfColumn } from '../state/event-reducer.ts';
 import { filterOfEntries, filterEntry } from '../tables/filter-model.ts';
-export function viewersValuesColumn(columns?: Dynamic, viewerId?: Dynamic) {
-  let [found, ...others] = columns.flatMap((column?: Dynamic) => {
-    let viewersValues = column.values.filter(({ userIds: userIds }: Dynamic) => viewerId !== null && userIds.includes(viewerId));
+/** Values a column holds, as found for an ask. */
+export interface ValuesFound {
+  column: ColumnHolds;
+  values: ColumnValueHeld[];
+}
+/** The values of a column that read as a status, and the status as said. */
+export interface StatusValues extends ValuesFound {
+  label: string;
+}
+export function viewersValuesColumn(columns: ColumnHolds[], viewerId: string | null): ValuesFound | null {
+  let [found, ...others] = columns.flatMap((column): ValuesFound[] => {
+    let viewersValues = column.values.filter(({ userIds }) => viewerId !== null && userIds.includes(viewerId));
     return viewersValues.length === 0
       ? []
       : [
           {
-            column: column,
+            column,
             values: viewersValues,
           },
         ];
   });
   return others.length > 0 || found?.column.areMoreValuesLeftOut === true ? null : (found ?? null);
 }
-export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
-  let { columns: columns } = holds;
-  let priorityColumn = columns.find((column?: Dynamic) => column.name !== null && isPriorityColumn(column));
-  let byPriority =
+export function suggestedAsksOf(holds: TableHolds, viewerId: string | null): SuggestedAsk[] {
+  let { columns } = holds;
+  let priorityColumn = columns.find((column) => column.name !== null && isPriorityColumn(column));
+  let byPriority: SortKeyOfColumn[] =
     priorityColumn === undefined
       ? NO_SORT_KEYS
       : [
@@ -26,26 +37,31 @@ export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
             direction: 'ascending',
           },
         ];
-  let suggestAsk = (what?: Dynamic, valuesFound?: Dynamic, kind?: Dynamic, sortBy: Dynamic = NO_SORT_KEYS) => {
-    let [firstValue, ...otherValues] = valuesFound?.values.map(({ value: value }: Dynamic) => value) ?? [];
+  let suggestAsk = (
+    what: SuggestedAskWhat,
+    valuesFound: ValuesFound | null,
+    kind: 'isOneOf' | 'isNoneOf',
+    sortBy: SortKeyOfColumn[] = NO_SORT_KEYS,
+  ): SuggestedAsk[] => {
+    let [firstValue, ...otherValues] = valuesFound?.values.map(({ value }) => value) ?? [];
     if (valuesFound === null || firstValue === undefined) return [];
-    let recordsOfValues = valuesFound.values.reduce((sum: Dynamic, { records: records2 }: Dynamic) => sum + records2, 0);
+    let recordsOfValues = valuesFound.values.reduce((sum, { records: valueRecords }) => sum + valueRecords, 0);
     let records = kind === 'isOneOf' ? recordsOfValues : holds.records - recordsOfValues;
     if (records <= 0 || records >= holds.records) return [];
     let filter = filterOfEntries([
       filterEntry(valuesFound.column.c, {
-        kind: kind,
+        kind,
         values: [firstValue, ...otherValues],
       }),
     ]);
     return [
       {
-        what: what,
+        what,
         asked: {
-          filter: filter,
-          sortBy: sortBy,
+          filter,
+          sortBy,
         },
-        records: records,
+        records,
       },
     ];
   };
@@ -72,7 +88,7 @@ export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
     ),
     ...statusValuesMatching(columns, doneStatusPattern)
       .flatMap(
-        (status?: Dynamic) =>
+        (status) =>
           suggestAsk(
             {
               kind: 'allBut',
@@ -85,7 +101,7 @@ export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
       .slice(0, 1),
     ...statusValuesMatching(columns, inProgressStatusPattern)
       .flatMap(
-        (status?: Dynamic) =>
+        (status) =>
           suggestAsk(
             {
               kind: 'only',
@@ -98,7 +114,7 @@ export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
       .slice(0, 1),
     ...(priorityName === null || holds.records < 2
       ? []
-      : [
+      : ([
           {
             what: {
               kind: 'sorted',
@@ -110,35 +126,35 @@ export function suggestedAsksOf(holds?: Dynamic, viewerId?: Dynamic) {
             },
             records: null,
           },
-        ]),
+        ] satisfies SuggestedAsk[])),
   ];
 }
 export const doneStatusPattern = /^(?:shipped|done|complete|completed|closed|finished|resolved)$/i;
-export const isDoneStatus = (text?: Dynamic) => doneStatusPattern.test(text.trim());
+export const isDoneStatus = (text: string): boolean => doneStatusPattern.test(text.trim());
 export const inProgressStatusPattern = /^(?:in progress|doing|started|under way|active)$/i;
 export const priorityLevelPattern = /^p\d+$/i;
-export const isChoiceColumn = ({ kind: kind, optionsOfDropdown: optionsOfDropdown }: Dynamic) =>
+export const isChoiceColumn = ({ kind, optionsOfDropdown }: Pick<ColumnHolds, 'kind' | 'optionsOfDropdown'>): boolean =>
   optionsOfDropdown !== null || kind === 'fewWords';
-export const textOfFilterValue = (filterValue?: Dynamic) => (filterValue?.kind === 'text' ? filterValue.value : null);
-export const statusValuesMatching = (columnHolds?: Dynamic, pattern?: Dynamic) =>
-  columnHolds.filter(isChoiceColumn).flatMap(
-    (column?: Dynamic) =>
-      column.values.flatMap((entry?: Dynamic) => {
-        let label = textOfFilterValue(entry.value)?.trim() ?? '';
+export const textOfFilterValue = (value: ValueContents | null): string | null => (value?.kind === 'text' ? value.value : null);
+export const statusValuesMatching = (columns: ColumnHolds[], pattern: RegExp): StatusValues[] =>
+  columns.filter(isChoiceColumn).flatMap(
+    (column) =>
+      column.values.flatMap((held): StatusValues[] => {
+        let label = textOfFilterValue(held.value)?.trim() ?? '';
         return pattern.test(label)
           ? [
               {
-                column: column,
-                values: [entry],
-                label: label,
+                column,
+                values: [held],
+                label,
               },
             ]
           : [];
       }),
   );
-export const isPriorityColumn = (column?: Dynamic) =>
+export const isPriorityColumn = (column: ColumnHolds): boolean =>
   column.optionsOfDropdown !== null &&
   column.values.length > 1 &&
   (/^(?:prio|priority|priorities)$/i.test(column.name?.trim() ?? '') ||
-    column.values.filter(({ value: value }: Dynamic) => priorityLevelPattern.test(textOfFilterValue(value) ?? '')).length > 1);
-export const NO_SORT_KEYS: Dynamic = [];
+    column.values.filter(({ value }) => priorityLevelPattern.test(textOfFilterValue(value) ?? '')).length > 1);
+export const NO_SORT_KEYS: SortKeyOfColumn[] = [];

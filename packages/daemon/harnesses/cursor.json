@@ -19,5 +19,14 @@
     "inbox"
   ],
   "open": "browser",
-  "wakesIdle": false
+  "wakesIdle": false,
+  "hookDialect": "cursor",
+  "caps": {
+    "tools": "mcp",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    }
+  }
 }

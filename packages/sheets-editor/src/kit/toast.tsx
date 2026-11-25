@@ -116,6 +116,26 @@ function isIdle(doc: Document): boolean {
 
 const ending = guardWhileClosing({}, 'data-ending-style');
 
+/**
+ * A tap that closes a toast lifts after the card is fading out or gone; the click the browser
+ * would make of it then lands on the page underneath, so that touch end is cancelled.
+ */
+function cancelTapThroughClosingCard(event: React.TouchEvent<HTMLElement>): void {
+  const card = event.currentTarget;
+  event.target.addEventListener(
+    'touchend',
+    (touchEnd) => {
+      if (touchEnd.cancelable && (card.hasAttribute('data-ending-style') || !card.isConnected)) touchEnd.preventDefault();
+    },
+    { once: true },
+  );
+}
+
+/** A tap on the empty part of the toast region makes no click on the page behind it. */
+function cancelTapOnRegion(event: React.TouchEvent<HTMLElement>): void {
+  if (event.target === event.currentTarget && event.cancelable) event.preventDefault();
+}
+
 interface ToastCardProps {
   toast: ToastObject;
   isFront: boolean;
@@ -144,6 +164,7 @@ function ToastCard({ toast, isFront, frontHeight, zIndex }: ToastCardProps): Rea
 
   return (
     <BaseToast.Root
+      onTouchStartCapture={cancelTapThroughClosingCard}
       toast={toast}
       swipeDirection={NO_SWIPE}
       className={STACKED_ITEM_CLASSES}
@@ -199,6 +220,7 @@ function PinnedCard({ pinned, onDismiss }: PinnedCardProps): React.ReactElement 
       tabIndex={-1}
       role="group"
       aria-labelledby={titleId}
+      onTouchStartCapture={cancelTapThroughClosingCard}
       className={cn('pointer-events-auto relative w-full outline-none focus-visible:outline-hidden', CARD_CLASSES, CARD_VARIANT_CLASSES[variant], 'focus-visible:shadow-focus')}
     >
       <div className={BODY_CLASSES}>
@@ -278,6 +300,7 @@ function ToastRegion({ className, pinned, setPinned, regionRef, slotRef }: Toast
               {pinned !== null && <PinnedCard pinned={pinned} onDismiss={() => setPinned(null)} />}
             </div>
             <BaseToast.Viewport
+              onTouchEnd={cancelTapOnRegion}
               className="pointer-events-auto relative outline-none focus-visible:outline-hidden"
               style={{ height: front?.height }}
             >

@@ -1,4 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Edit, SheetId } from '@open-artifact/sheets-core';
+import type { CellId } from '../model/workbook.ts';
+import type { FreezingDrag } from '../state/initial-state.ts';
+import type { FreezeChosen, IfQueued, PageContext, PointerPressed } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { GridPoint, LinesAxisName } from './geometry.ts';
 import { layoutOfView, sheetOfViewOrEmpty, clampScrollOfView } from './layout.ts';
 import { frozenCountsThatFit, freezeGripAt, dropIndexAtPointer } from './geometry.ts';
 import { selectedArea } from '../selection/model.ts';
@@ -12,28 +17,50 @@ import { holdFreezingAndKeepActiveCellInView } from '../selection/keep-in-view.t
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function freezeChoiceList(countInForce?: Dynamic, countUpToSelection?: Dynamic, roomFor?: Dynamic, shownCount?: Dynamic) {
-  let counts = [...new (Set as Dynamic)([...FREEZE_COUNTS_OFFERED, countUpToSelection])].filter(
-    (count?: Dynamic) => count < shownCount && count !== countInForce,
+/** A count of rows or columns the menu offers to freeze. */
+export interface FreezeChoice {
+  count: number;
+  isInForce: boolean;
+  /** Whether that many frozen lines leave room to scroll the rest. */
+  isRoom: boolean;
+  isUpToSelection: boolean;
+}
+/** How a freeze edit is queued; the fields past those of any queued edit are set only by `freezeFirstRows`, and nothing reads them yet. */
+export interface IfFreezeQueued extends Omit<IfQueued, 'select'> {
+  isOfOneAct?: true;
+  thenEdits?: Edit[];
+  isOnlyDressing?: true;
+  isLeftUnselectedByUndo?: true;
+}
+/** A pointer over the grid, and whether it is a finger. */
+export type PointerOverGrip = GridPoint & Pick<PointerPressed, 'isByFinger'>;
+/** A header cell the first rows are dressed by, and its text. */
+interface HeaderToDress {
+  cellId: CellId;
+  text: string;
+}
+export function freezeChoiceList(countInForce: number, countUpToSelection: number, roomFor: number, shownCount: number): FreezeChoice[] {
+  let counts = [...new Set([...FREEZE_COUNTS_OFFERED, countUpToSelection])].filter(
+    (count) => count < shownCount && count !== countInForce,
   );
   counts.push(countInForce);
-  counts.sort((count?: Dynamic, otherCount?: Dynamic) => count - otherCount);
+  counts.sort((count, otherCount) => count - otherCount);
   return counts.map(
-    (count?: Dynamic) => ({
-      count: count,
+    (count) => ({
+      count,
       isInForce: count === countInForce,
       isRoom: count <= roomFor,
       isUpToSelection: count === countUpToSelection,
     }),
   );
 }
-export function suggestedFreezeChoice(choices?: Dynamic) {
-  let countInForce = choices.find((choice?: Dynamic) => choice.isInForce)?.count ?? 0;
-  let upToSelection = choices.find((choice?: Dynamic) => choice.isUpToSelection && choice.count > countInForce);
+export function suggestedFreezeChoice(choices: readonly FreezeChoice[]): FreezeChoice | null {
+  let countInForce = choices.find((choice) => choice.isInForce)?.count ?? 0;
+  let upToSelection = choices.find((choice) => choice.isUpToSelection && choice.count > countInForce);
   if (upToSelection?.isRoom === true || countInForce === 0) return upToSelection ?? null;
-  return choices.find((choice?: Dynamic) => choice.count === 0) ?? null;
+  return choices.find((choice) => choice.count === 0) ?? null;
 }
-export function freezeChoicesOf(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function freezeChoicesOf(state: PageState, workbook: ReadsWithTextMeasurer): Record<LinesAxisName, FreezeChoice[]> {
   let layout = layoutOfView(state, workbook);
   let frozen = sheetOfViewOrEmpty(state, workbook);
   let fitting = frozenCountsThatFit(
@@ -44,24 +71,30 @@ export function freezeChoicesOf(state: PageState, workbook: ReadsWithTextMeasure
     layout,
     state,
   );
-  let selectedArea2 = selectedArea(state, workbook);
+  let areaSelected = selectedArea(state, workbook);
   return {
     rows: freezeChoiceList(
       frozen.frozenRowCount,
-      selectedArea2 === null ? 0 : selectedArea2.topRowIndex + selectedArea2.rowCount,
+      areaSelected === null ? 0 : areaSelected.topRowIndex + areaSelected.rowCount,
       fitting.frozenRowCount,
       layout.rowCount,
     ),
     columns: freezeChoiceList(
       frozen.frozenColumnCount,
-      selectedArea2 === null ? 0 : selectedArea2.leftColumnIndex + selectedArea2.columnCount,
+      areaSelected === null ? 0 : areaSelected.leftColumnIndex + areaSelected.columnCount,
       fitting.frozenColumnCount,
       layout.columnCount,
     ),
   };
 }
-export function queueFreezeEdit(state: PageState, workbook: WorkbookReads, what?: Dynamic, count?: Dynamic, ifQueued?: Dynamic) {
-  let { sheetId: sheetId } = state;
+export function queueFreezeEdit(
+  state: PageState,
+  workbook: WorkbookReads,
+  what: LinesAxisName,
+  count: number,
+  ifQueued: IfFreezeQueued,
+): PageTransition {
+  let { sheetId } = state;
   let lastFrozenCell = what === 'rows' ? workbook.cellIdAt(sheetId, count - 1, 0) : workbook.cellIdAt(sheetId, 0, count - 1);
   let settings =
     what === 'rows'
@@ -75,8 +108,8 @@ export function queueFreezeEdit(state: PageState, workbook: WorkbookReads, what?
     state,
     {
       kind: 'setSheetSettings',
-      sheetId: sheetId,
-      settings: settings,
+      sheetId,
+      settings,
     },
     {
       ...IF_QUEUED_DEFAULTS,
@@ -85,14 +118,14 @@ export function queueFreezeEdit(state: PageState, workbook: WorkbookReads, what?
     },
   );
 }
-export function headerDressingEdits(workbook: WorkbookReads, sheetId?: Dynamic, rowCount?: Dynamic) {
-  let headers: Dynamic = [];
+export function headerDressingEdits(workbook: WorkbookReads, sheetId: SheetId, rowCount: number): Edit[] {
+  let headers: HeaderToDress[] = [];
   while (headers.length < MOST_HEADER_COLUMNS_DRESSED) {
     let cellId = workbook.cellIdAt(sheetId, rowCount - 1, headers.length);
     let cell = cellId === null ? null : workbook.cellOf(cellId);
     if (cellId === null || cell === null) break;
     headers.push({
-      cellId: cellId,
+      cellId,
       text: shownCellText(cell, 1 / 0, workbook.decimalSign).text,
     });
   }
@@ -101,13 +134,13 @@ export function headerDressingEdits(workbook: WorkbookReads, sheetId?: Dynamic, 
   let headerArea =
     firstCell === null || lastHeader === undefined ? null : cellBlockOfCorners(workbook, areaRefBetween(firstCell, lastHeader.cellId));
   if (firstCell === null || lastHeader === undefined || headerArea === null) return [];
-  let hasLongTextBelow = (columnIndex?: Dynamic) =>
-    Array.from<Dynamic, Dynamic>(
+  let hasLongTextBelow = (columnIndex: number) =>
+    Array.from(
       {
         length: ROWS_SCANNED_FOR_LONG_TEXT,
       },
-      (input?: Dynamic, rowIndex?: Dynamic) => workbook.cellIdAt(sheetId, rowIndex, columnIndex),
-    ).some((cellId?: Dynamic) => {
+      (_slot, rowIndex) => workbook.cellIdAt(sheetId, rowIndex, columnIndex),
+    ).some((cellId) => {
       let cell = cellId === null ? null : workbook.cellOf(cellId);
       return cell !== null && shownCellText(cell, 1 / 0, workbook.decimalSign).text.length > HEADER_WIDTH_CAP.inCharacters;
     });
@@ -124,23 +157,23 @@ export function headerDressingEdits(workbook: WorkbookReads, sheetId?: Dynamic, 
     },
     {
       kind: 'fitColumns',
-      sheetId: sheetId,
+      sheetId,
       oneColumn: firstCell.columnId,
       otherColumn: lastHeader.cellId.columnId,
       noNarrowerThan: headers.map(
-        ({ cellId: cellId, text: text }: Dynamic) => ({
+        ({ cellId, text }) => ({
           column: cellId.columnId,
           widthInPixels: Math.min(HEADER_WIDTH_CAP.inPixels, Math.ceil(text.length * HEADER_FIT_WIDTHS.ofACharacter) + HEADER_FIT_WIDTHS.besideText),
         }),
       ),
     },
     ...headers.flatMap(
-      ({ cellId: { columnId: columnId } }: Dynamic, columnIndex?: Dynamic) =>
+      ({ cellId: { columnId } }, columnIndex): Edit[] =>
         hasLongTextBelow(columnIndex)
           ? [
               {
                 kind: 'setColumnWidths',
-                sheetId: sheetId,
+                sheetId,
                 oneColumn: columnId,
                 otherColumn: columnId,
                 widthInPixels: HEADER_WIDTH_CAP.inPixels,
@@ -150,22 +183,30 @@ export function headerDressingEdits(workbook: WorkbookReads, sheetId?: Dynamic, 
     ),
   ];
 }
-export function applyFreezeChoice(state: PageState, workbook: ReadsWithTextMeasurer, { what: what, count: count }: Dynamic) {
-  let choice = freezeChoicesOf(state, workbook)[what].find((choice2?: Dynamic) => choice2.count === count);
+export function applyFreezeChoice(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  { what, count }: Pick<FreezeChosen, 'what' | 'count'>,
+): PageTransition {
+  let choice = freezeChoicesOf(state, workbook)[what].find((offered) => offered.count === count);
   if (choice === undefined || !choice.isRoom || choice.isInForce) return withNoEffects(state);
   return queueFreezeEdit(state, workbook, what, count, {
     done: {
       what: what === 'rows' ? 'rowsFrozen' : 'columnsFrozen',
-      count: count,
+      count,
     },
   });
 }
-export function startFreezeDrag(state: PageState, pointer: Dynamic, { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) {
+export function startFreezeDrag(
+  state: PageState,
+  pointer: PointerOverGrip,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageState | null {
   if (refusalOfEveryEdit !== null || state.mode.kind === 'editing' || pointer.isByFinger) return null;
   let layout = layoutOfView(state, reads);
   let what = freezeGripAt(pointer, layout);
   if (what === null) return null;
-  let { sheetId: sheetId } = state;
+  let { sheetId } = state;
   let pressedAt = {
     x: pointer.x,
     y: pointer.y,
@@ -179,15 +220,15 @@ export function startFreezeDrag(state: PageState, pointer: Dynamic, { reads: rea
     peopleList: null,
     dragging: {
       kind: 'freezing',
-      sheetId: sheetId,
-      what: what,
-      pressedAt: pressedAt,
-      countAtPress: countAtPress,
+      sheetId,
+      what,
+      pressedAt,
+      countAtPress,
       count: null,
     },
   };
 }
-export function dragFreezeTo(state: Dynamic, dragging: Dynamic, pointer: Dynamic, reads: ReadsWithTextMeasurer) {
+export function dragFreezeTo(state: PageState, dragging: FreezingDrag, pointer: GridPoint, reads: ReadsWithTextMeasurer): PageState {
   let scrolled = scrollToStartAlong(state, dragging.what);
   let layout = layoutOfView(scrolled, reads);
   let shownCount = dragging.what === 'rows' ? layout.rowCount : layout.columnCount;
@@ -211,7 +252,11 @@ export function dragFreezeTo(state: Dynamic, dragging: Dynamic, pointer: Dynamic
         },
       };
 }
-export function finishFreezeDrag(state: Dynamic, drag: Dynamic, { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) {
+export function finishFreezeDrag(
+  state: PageState,
+  drag: FreezingDrag,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition {
   let view = clampScrollOfView(
     {
       ...state,
@@ -237,29 +282,29 @@ export function finishFreezeDrag(state: Dynamic, drag: Dynamic, { reads: reads, 
     },
     drag.what,
   );
-  let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(view, reads);
+  let { rowCount, columnCount } = layoutOfView(view, reads);
   let count = Math.min(drag.count, (drag.what === 'rows' ? rowCount : columnCount) - 1);
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = view;
+  let { scrollLeft, scrollTop } = view;
   let scrollIfRefused = {
-    scrollLeft: scrollLeft,
-    scrollTop: scrollTop,
+    scrollLeft,
+    scrollTop,
   };
   let queued = queueFreezeEdit(scrolledView, reads, drag.what, count, {
     done: null,
-    scrollIfRefused: scrollIfRefused,
+    scrollIfRefused,
   });
   return holdFreezingAndKeepActiveCellInView(
     scrolledView,
     queued,
     {
       ...drag,
-      count: count,
+      count,
     },
     reads,
   );
 }
 export const FREEZE_COUNTS_OFFERED = [0, 1, 2];
-export const freezeFirstRows = (state: PageState, workbook: WorkbookReads, rowCount: Dynamic, { isThenDressed: isThenDressed }: Dynamic) =>
+export const freezeFirstRows = (state: PageState, workbook: WorkbookReads, rowCount: number, { isThenDressed }: { isThenDressed: boolean }): PageTransition =>
   queueFreezeEdit(state, workbook, 'rows', rowCount, {
     done: null,
     isOfOneAct: true,
@@ -280,7 +325,7 @@ export const HEADER_WIDTH_CAP = {
 };
 export const ROWS_SCANNED_FOR_LONG_TEXT = 60;
 export const MOST_HEADER_COLUMNS_DRESSED = 1000;
-export const scrollToStartAlong = (state?: Dynamic, what?: Dynamic) =>
+export const scrollToStartAlong = <View extends Pick<PageState, 'scrollTop' | 'scrollLeft'>>(state: View, what: LinesAxisName): View =>
   what === 'rows'
     ? {
         ...state,

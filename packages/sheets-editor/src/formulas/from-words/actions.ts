@@ -1,4 +1,3 @@
-import type { Dynamic } from '../../dynamic.ts';
 import {
   isOfferLitOnItsOwn,
   isOfferEmptyWithoutAgent,
@@ -11,14 +10,16 @@ import {
 } from './offer.ts';
 import { withEntryFormulaText, askAgentForFormula } from './ask-agent.ts';
 import { withNoEffects } from '../../state/transitions.ts';
+import type { PageTransition } from '../../state/transitions.ts';
 import { commitEntryInPlaceIfEditing } from '../../editor/commit-entry.ts';
 import type { WorkbookReads } from '../../model/workbook.ts';
-import type { PageState } from '../../state/initial-state.ts';
+import type { FormulaFromWords, FormulaOfferRow, FormulaProposed, FormulaWithResult, PageState } from '../../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../../state/controller.ts';
-export function takeAgentAvailability(state: PageState, isAvailable?: Dynamic) {
-  let { formulaFromWords: formulaFromWords } = state;
+import type { KeyStep } from '../../keys/key-acts.ts';
+export function takeAgentAvailability(state: PageState, isAvailable: boolean): PageState {
+  let { formulaFromWords } = state;
   if (formulaFromWords.agent !== 'checking') return state;
-  let agentIfNot = state.mode.kind === 'editing' ? 'unavailable' : 'unchecked';
+  const agentIfNot = state.mode.kind === 'editing' ? 'unavailable' : 'unchecked';
   return {
     ...state,
     formulaFromWords: {
@@ -28,27 +29,27 @@ export function takeAgentAvailability(state: PageState, isAvailable?: Dynamic) {
     },
   };
 }
-export function takeOfferLitAlone(state: PageState, workbook: WorkbookReads) {
-  let { stage: stage } = state.formulaFromWords;
+export function takeOfferLitAlone(state: PageState, workbook: WorkbookReads): PageState {
+  const { stage } = state.formulaFromWords;
   return isOfferLitOnItsOwn(stage) && stage?.kind === 'offered' && stage.isDrawn && !isOfferEmptyWithoutAgent(stage) && stage.toWorkOut !== undefined
     ? takeWorkedOutFormula(state, workbook, stage.toWorkOut.formula)
     : state;
 }
-export function setOfferDrawn(state: PageState, isDrawn?: Dynamic, hasRested: Dynamic = false) {
-  let { stage: stage } = state.formulaFromWords;
+export function setOfferDrawn(state: PageState, isDrawn: boolean, hasRested = false): PageState {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'offered') return state;
   return stage.isDrawn === isDrawn && (!hasRested || stage.hasRested === true)
     ? state
     : withFormulaFromWordsStage(state, {
         ...stage,
-        isDrawn: isDrawn,
+        isDrawn,
         ...(hasRested && {
-          hasRested: hasRested,
+          hasRested,
         }),
       });
 }
-export function endProposalArrival(state: PageState) {
-  let { stage: stage } = state.formulaFromWords;
+export function endProposalArrival(state: PageState): PageState {
+  const { stage } = state.formulaFromWords;
   return stage?.kind === 'proposed' && stage.isArriving
     ? withFormulaFromWordsStage(state, {
         ...stage,
@@ -56,16 +57,16 @@ export function endProposalArrival(state: PageState) {
       })
     : state;
 }
-export function pickProposedFix(state: PageState, workbook: ReadsWithTextMeasurer, formula?: Dynamic) {
-  let { stage: stage } = state.formulaFromWords;
+export function pickProposedFix(state: PageState, workbook: ReadsWithTextMeasurer, formula: string): PageState | null {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'proposed' || stage.isArriving) return null;
-  let fix = stage.fixes?.find(({ formula: formula2 }: Dynamic) => formula2 === formula);
+  let fix = stage.fixes?.find(({ formula: fixOffered }) => fixOffered === formula);
   if (fix === undefined) return null;
-  let { formula: fixFormula, value: value } = fix;
-  let picked = {
+  let { formula: fixFormula, value } = fix;
+  let picked: FormulaProposed = {
     ...stage,
     formula: fixFormula,
-    value: value,
+    value,
     isDiscardHighlighted: false,
     lightsAtPart: {},
   };
@@ -73,13 +74,13 @@ export function pickProposedFix(state: PageState, workbook: ReadsWithTextMeasure
     ? withFormulaFromWordsStage(state, picked)
     : withFormulaFromWordsStage(withEntryFormulaText(state, workbook, fixFormula, 'mayBeHeld'), picked);
 }
-export function moveOfferLight(state: PageState, workbook: ReadsWithTextMeasurer, step?: Dynamic) {
-  let { stage: stage } = state.formulaFromWords;
+export function moveOfferLight(state: PageState, workbook: ReadsWithTextMeasurer, step: KeyStep): PageState {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind === 'proposed' && stage.fixes !== undefined && !stage.isArriving) {
     let rowCount = stage.fixes.length + 1;
     let lit = stage.isDiscardHighlighted
       ? stage.fixes.length
-      : stage.fixes.findIndex(({ formula: formula }: Dynamic) => formula === stage.formula);
+      : stage.fixes.findIndex(({ formula }) => formula === stage.formula);
     let next = stage.fixes[(lit + step + rowCount) % rowCount];
     return next === undefined
       ? withFormulaFromWordsStage(state, {
@@ -94,10 +95,10 @@ export function moveOfferLight(state: PageState, workbook: ReadsWithTextMeasurer
       isDiscardHighlighted: !stage.isDiscardHighlighted,
     });
   if (stage?.kind !== 'offered') return state;
-  let rows = [
-    ...(formulaReadForOffer(stage) === null ? [] : ['read']),
-    ...(stage.readOtherwise === undefined ? [] : ['readOtherwise']),
-    ...(stage.isAgentLeftOut === true ? [] : ['write']),
+  let rows: FormulaOfferRow[] = [
+    ...(formulaReadForOffer(stage) === null ? [] : (['read'] satisfies FormulaOfferRow[])),
+    ...(stage.readOtherwise === undefined ? [] : (['readOtherwise'] satisfies FormulaOfferRow[])),
+    ...(stage.isAgentLeftOut === true ? [] : (['write'] satisfies FormulaOfferRow[])),
     'keepTyping',
   ];
   let litIndex = isOfferLitOnItsOwn(stage) ? (step === 1 ? -1 : 0) : rows.indexOf(stage.highlighted);
@@ -108,9 +109,9 @@ export function moveOfferLight(state: PageState, workbook: ReadsWithTextMeasurer
     isLightMovedByPerson: true,
   });
 }
-export function entryWithOfferRowFormula(state: PageState, workbook: ReadsWithTextMeasurer, row?: Dynamic) {
-  let { stage: stage } = state.formulaFromWords;
-  let highlighted = stage?.kind === 'offered' ? stage.highlighted : 'read';
+export function entryWithOfferRowFormula(state: PageState, workbook: ReadsWithTextMeasurer, row?: FormulaOfferRow): PageState | null {
+  const { stage } = state.formulaFromWords;
+  let highlighted: FormulaOfferRow = stage?.kind === 'offered' ? stage.highlighted : 'read';
   let formula = formulaOfOfferRow(stage, row ?? highlighted);
   if (formula === null) return null;
   let entered = withEntryFormulaText(state, workbook, formula);
@@ -124,8 +125,8 @@ export function entryWithOfferRowFormula(state: PageState, workbook: ReadsWithTe
       }
     : entered;
 }
-export function chooseOfferRow(state: PageState, workbook: ReadsWithTextMeasurer, row?: Dynamic) {
-  let { stage: stage } = state.formulaFromWords;
+export function chooseOfferRow(state: PageState, workbook: ReadsWithTextMeasurer, row: FormulaOfferRow | null): PageTransition {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'offered') return withNoEffects(state);
   switch (row ?? stage.highlighted) {
     case 'read':
@@ -139,12 +140,12 @@ export function chooseOfferRow(state: PageState, workbook: ReadsWithTextMeasurer
       return withNoEffects(waveFormulaOfferOff(state));
   }
 }
-export function goBackToWords(state: PageState, workbook: ReadsWithTextMeasurer) {
-  let { stage: stage } = state.formulaFromWords;
+export function goBackToWords(state: PageState, workbook: ReadsWithTextMeasurer): PageState {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'proposed') return state;
   return withFormulaFromWordsStage(withEntryFormulaText(state, workbook, stage.words, 'wasHeld'), null);
 }
-export function formulaFromWordsPopup({ formulaFromWords: { stage: stage } }: Dynamic) {
+export function formulaFromWordsPopup({ formulaFromWords: { stage } }: PageState) {
   switch (stage?.kind) {
     case 'offered':
       if (!stage.isDrawn || isOfferEmptyWithoutAgent(stage)) return null;
@@ -161,26 +162,26 @@ export function formulaFromWordsPopup({ formulaFromWords: { stage: stage } }: Dy
       return null;
   }
 }
-export const waitForFormula = (state: PageState) => ({
+export const waitForFormula = (state: PageState): PageState => ({
   ...state,
   formulaFromWords: {
     ...state.formulaFromWords,
     actsHeld: state.formulaFromWords.actsHeld + 1,
   },
 });
-export const stopAskingForFormula = (state: PageState) =>
+export const stopAskingForFormula = (state: PageState): PageTransition =>
   state.formulaFromWords.stage?.kind === 'asked'
     ? {
         state: withFormulaFromWordsStage(state, null),
         effects: STOP_ASKING_AGENT_EFFECTS,
       }
     : withNoEffects(state);
-export const waveFormulaOfferOff = (state: PageState) =>
+export const waveFormulaOfferOff = (state: PageState): PageState =>
   state.formulaFromWords.stage?.kind === 'offered' || state.formulaFromWords.stage?.kind === 'cameToNothing'
     ? withFormulaFromWordsStage(state, null, {
         isWavedOff: true,
       })
     : state;
-export const proposedFixesOf = ({ stage: stage }: Dynamic) => (stage?.kind === 'proposed' ? (stage.fixes ?? []) : []);
-export const isFormulaAskedOrProposed = ({ formulaFromWords: { stage: stage } }: Dynamic) =>
+export const proposedFixesOf = ({ stage }: Pick<FormulaFromWords, 'stage'>): FormulaWithResult[] => (stage?.kind === 'proposed' ? (stage.fixes ?? []) : []);
+export const isFormulaAskedOrProposed = ({ formulaFromWords: { stage } }: Pick<PageState, 'formulaFromWords'>): boolean =>
   stage?.kind === 'asked' || stage?.kind === 'proposed';

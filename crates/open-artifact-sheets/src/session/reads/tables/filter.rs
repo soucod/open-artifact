@@ -84,6 +84,46 @@ impl Filter {
     fn tests(&self) -> impl Iterator<Item = &Test> {
         self.all_of.iter().flat_map(|line| &line.any_of)
     }
+
+    pub(crate) fn columns(&self) -> impl Iterator<Item = &str> {
+        self.tests().flat_map(|test| {
+            let (one, other) = match &test.asked {
+                Asked::Meets { condition: CellCondition::NumberIs { operand, .. } } => (Some(operand), None),
+                Asked::Meets { condition: CellCondition::NumberIsBetween { one_end, other_end }
+                    | CellCondition::NumberIsNotBetween { one_end, other_end } } => (Some(one_end), Some(other_end)),
+                _ => (None, None),
+            };
+            std::iter::once(test.c.as_str()).chain(one.into_iter().chain(other).filter_map(|operand| {
+                match operand {
+                    NumberOperand::SameRowInColumn { c } => Some(c.as_str()),
+                    _ => None,
+                }
+            }))
+        })
+    }
+
+    /// How many tests the filter makes, in all its lines.
+    pub(crate) fn count_of_tests(&self) -> usize {
+        self.tests().count()
+    }
+
+    /// Whether a text among the values asked for holds a control character other than a tab or a new line (a named
+    /// view refuses it, `valueInNamedViewNotAllowed`).
+    pub(crate) fn asks_for_a_value_not_allowed(&self) -> bool {
+        self.tests().any(|test| match &test.asked {
+            Asked::IsOneOf { values } | Asked::IsNoneOf { values } => values.iter().any(|value| {
+                matches!(value, Some(AskedValue::Text { value }) if value.chars().any(|c| c < ' ' && c != '\t' && c != '\n' && c != '\r'))
+            }),
+            Asked::Meets { .. } => false,
+        })
+    }
+
+    pub(crate) fn check_conditions(&self) -> Result<(), &'static str> {
+        self.tests().filter_map(|test| match &test.asked {
+            Asked::Meets { condition } => Some(condition),
+            _ => None,
+        }).try_for_each(condition_within_limits)
+    }
 }
 
 fn holds_empty_text(condition: &CellCondition) -> bool {

@@ -31,6 +31,7 @@ import type { ExportJob } from '../lib/export-formats.ts';
 import { assetName, blobRefs, canvasIndexHtml, dataUrl, exportReadme, relativePath, rewriteRefs, standaloneCanvas, standaloneDocument, TEXT_FILE, type ExportedBoard } from '../lib/export-html.ts';
 import { dirOf, frameDocument } from '../lib/frame.ts';
 import { flowPages, flowPaper, type PageSlice } from '../lib/pagination.ts';
+import { readUploadFiles, SKIP_REASONS, type ReadUpload } from '../lib/upload-reader.ts';
 import { pageBookmark, pageLinks, pageRuns } from '../lib/pdf-text.ts';
 import { useDocument } from '../state/document.ts';
 import { useView } from '../state/view.ts';
@@ -177,6 +178,10 @@ const blobOf = (bytes: Uint8Array, type: string) => new Blob([bytes as Uint8Arra
 
 let busy = false;
 
+/** Font families an export's pictures had to leave out (see `pageImage`). */
+const lostFonts = new Set<string>();
+const noteLostFonts = (families: string[]): void => families.forEach((family) => lostFonts.add(family));
+
 /** True while an export runs. */
 export const exportBusy = (): boolean => busy;
 
@@ -188,8 +193,10 @@ async function run(label: string, work: () => Promise<void>): Promise<ExportOutc
   if (busy) return { state: 'busy' };
   busy = true;
   const progress = toast.add({ title: `Exporting ${label}…`, timeout: 0 });
+  lostFonts.clear();
   try {
     await work();
+    if (lostFonts.size) toast.add({ title: 'Some fonts could not be embedded', description: `Drawn in a fallback font: ${[...lostFonts].join(', ')}` });
     return { state: 'done' };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -233,7 +240,7 @@ export function exportPng(path: string, scale: number, width?: number): Promise<
   return run('PNG', async () => {
     const entry = entryOf(path);
     const size = width ? { width, height: entry.h, fullLength: true } : { width: entry.w, height: entry.h };
-    const blob = await withBoard(path, size, (doc, w, h) => pageImage(doc, w, h, { scale }));
+    const blob = await withBoard(path, size, (doc, w, h) => pageImage(doc, w, h, { scale, onSkippedFonts: noteLostFonts }));
     const suffix = width ? ` ${width}w` : '';
     await save(fileName(`${boardName(path)}${suffix}${scale > 1 ? `@${scale}x` : ''}`, 'png'), blobOf(await optimizePng(blob), 'image/png'));
   });
@@ -243,7 +250,7 @@ export function exportPng(path: string, scale: number, width?: number): Promise<
 export function exportJpeg(path: string, scale: number): Promise<ExportOutcome> {
   return run('JPEG', async () => {
     const entry = entryOf(path);
-    const blob = await withBoard(path, { width: entry.w, height: entry.h }, (doc, w, h) => pageImage(doc, w, h, { scale, type: 'image/jpeg' }));
+    const blob = await withBoard(path, { width: entry.w, height: entry.h }, (doc, w, h) => pageImage(doc, w, h, { scale, type: 'image/jpeg', onSkippedFonts: noteLostFonts }));
     await save(fileName(`${boardName(path)}${scale > 1 ? `@${scale}x` : ''}`, 'jpg'), blob);
   });
 }
@@ -282,7 +289,8 @@ async function pdfPages(paths: readonly string[]): Promise<PdfPage[]> {
           type: 'image/jpeg',
           top: slice.top - slice.offset,
           background,
-          ...(paper ? { keep: { from: slice.offset, to: slice.offset + slice.bottom - slice.top } } : {}),
+          onSkippedFonts: noteLostFonts,
+          ...(paper ? { slice: true, keep: { from: slice.offset, to: slice.offset + slice.bottom - slice.top } } : {}),
         });
         const bookmark = pageBookmark(title, index);
         made.push({
@@ -331,7 +339,7 @@ export function exportAllPng(page: string | null): Promise<ExportOutcome> {
     for (const path of paths) {
       const entry = entryOf(path);
       const scale = maxCaptureScale(entry.w, entry.h, CAPTURE_LIMITS) >= 2 ? 2 : 1;
-      const blob = await withBoard(path, { width: entry.w, height: entry.h }, (doc, w, h) => pageImage(doc, w, h, { scale }));
+      const blob = await withBoard(path, { width: entry.w, height: entry.h }, (doc, w, h) => pageImage(doc, w, h, { scale, onSkippedFonts: noteLostFonts }));
       let name = fileName(boardName(path), 'png');
       for (let n = 2; taken.has(name); n++) name = fileName(`${boardName(path)} ${n}`, 'png');
       taken.add(name);
@@ -405,22 +413,21 @@ const runtimeCode = (): Promise<string> =>
   fetch(urls().runtime).then((response) => (response.ok ? response.text() : Promise.reject(new Error('The board runtime could not be read.'))));
 
 /** Uploads (`/_blob/…`) the text files name, read from the host; `missing` lists those that could not be read. */
-async function readUploads(files: ReadonlyMap<string, Uint8Array | string>): Promise<{ found: Map<string, { data: Uint8Array; type: string | null }>; missing: { ref: string; usedIn: string[] }[] }> {
+async function readUploads(files: ReadonlyMap<string, Uint8Array | string>): Promise<{ found: Map<string, ReadUpload>; missing: { ref: string; usedIn: string[]; why: string }[] }> {
   const usedIn = new Map<string, string[]>();
   for (const [name, data] of files) {
     if (typeof data !== 'string') continue;
     for (const ref of blobRefs(data)) usedIn.set(ref, [...(usedIn.get(ref) ?? []), name]);
   }
-  const found = new Map<string, { data: Uint8Array; type: string | null }>();
-  const missing: { ref: string; usedIn: string[] }[] = [];
-  for (const [ref, names] of usedIn) {
-    try {
-      const response = await fetch(new URL(ref, location.href));
-      if (!response.ok) throw new Error(String(response.status));
-      found.set(ref, { data: new Uint8Array(await response.arrayBuffer()), type: response.headers.get('content-type') });
-    } catch {
-      missing.push({ ref, usedIn: names });
-    }
+  const refs = [...usedIn.keys()];
+  const read = await readUploadFiles(refs.map((ref) => new URL(ref, location.href).href));
+  const found = new Map<string, ReadUpload>();
+  const missing: { ref: string; usedIn: string[]; why: string }[] = [];
+  for (const ref of refs) {
+    const url = new URL(ref, location.href).href;
+    const upload = read.found.get(url);
+    if (upload) found.set(ref, upload);
+    else missing.push({ ref, usedIn: usedIn.get(ref)!, why: SKIP_REASONS[read.skipped.get(url) ?? 'unreadable'] });
   }
   return { found, missing };
 }
@@ -429,7 +436,7 @@ async function readUploads(files: ReadonlyMap<string, Uint8Array | string>): Pro
  * Files for a folder export: uploads copied under `assets/` and every text
  * file's references to them rewritten to relative paths.
  */
-function withAssets(files: ReadonlyMap<string, Uint8Array | string>, uploads: Map<string, { data: Uint8Array; type: string | null }>): ZipEntry[] {
+function withAssets(files: ReadonlyMap<string, Uint8Array | string>, uploads: Map<string, ReadUpload>): ZipEntry[] {
   const names = new Map([...uploads].map(([ref, upload]) => [ref, assetName(ref, upload.type)]));
   const entries: ZipEntry[] = [];
   for (const [name, original] of files) {

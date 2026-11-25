@@ -199,6 +199,20 @@ describe('frame-host', () => {
     assert.equal(evil.status, 403);
   });
 
+  it('serves the page to the inner shell’s frame, the page itself and a typed-in visit, and to no other frame', async () => {
+    const index = (headers: Record<string, string>) => http(port, { path: '/_f/v/', host: `${ID}.frame.localhost:${port}`, headers });
+    const frame = { 'Sec-Fetch-Dest': 'iframe', 'Sec-Fetch-Site': 'cross-site' };
+    assert.equal((await index({ ...frame, Referer: `http://127.0.0.1:${port}/` })).status, 200, 'the inner shell');
+    assert.equal((await index({ ...frame, Referer: `http://localhost:${port}/` })).status, 200, 'the inner shell at localhost');
+    assert.equal((await index({ 'Sec-Fetch-Dest': 'iframe', 'Sec-Fetch-Site': 'same-origin' })).status, 200, 'the page reloading itself');
+    assert.equal((await index({ 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Site': 'none' })).status, 200, 'a typed-in visit');
+    assert.equal((await index({})).status, 200, 'no fetch metadata');
+    assert.equal((await index({ ...frame, Referer: 'https://evil.example/' })).status, 403, 'a website');
+    assert.equal((await index({ ...frame, Referer: 'http://127.0.0.1:1/' })).status, 403, 'another server on this computer');
+    assert.equal((await index(frame)).status, 403, 'a frame that hides its Referer');
+    assert.equal((await index({ Referer: 'https://evil.example/' })).status, 403, 'no fetch metadata, a foreign Referer');
+  });
+
   it('the content origin serves the page with the runtime first, and only this artifact', async () => {
     const root302 = await content('/');
     assert.equal(root302.status, 302);
@@ -211,7 +225,8 @@ describe('frame-host', () => {
     assert.equal(preamble, head + '<head>'.length + '<script>'.length, 'injected right after <head>');
     assert.ok(runtime > preamble && runtime < idx.text.indexOf('// artifact.json'), "before the page's own scripts");
     assert.match(idx.text, new RegExp(`"origins":\\["http://127\\.0\\.0\\.1:${port}"\\]`));
-    assert.match(String(idx.headers['content-security-policy']), /frame-ancestors http:\/\/127\.0\.0\.1:/);
+    // Every ancestor counts for frame-ancestors, the app around the Shell too (file://, app://): none is sent.
+    assert.doesNotMatch(String(idx.headers['content-security-policy'] ?? ''), /frame-ancestors/);
     const js = await content('/_runtime/open-artifact-frame.js');
     assert.equal(js.status, 200);
     assert.match(String(js.headers['content-type']), /javascript/);
@@ -324,12 +339,14 @@ describe('frame-host', () => {
     );
     assert.deepEqual((await capCall('comments', 'list', {})).result.threads[0].anchor, { slide: 's1', x: 0.5, y: 0.5 });
 
-    const sent = await capCall('comments', 'sendToAgent', { threadId, text: 'Also the title' });
+    const sent = await capCall('comments', 'sendToAgent', { threadId, text: 'Also the title', handoffNote: 'The selected item is the header' });
     assert.equal(sent.result.status, 'delivered');
     assert.equal(wakes.length, 1);
     assert.equal(wakes[0].id, ID);
     assert.equal(wakes[0].threads[0].id, threadId);
     assert.equal(wakes[0].threads[0].messages.at(-1).text, 'Also the title');
+    assert.equal(wakes[0].threads[0].pageContext, 'The selected item is the header');
+    assert.ok(!readFileSync(join(root, 'comments.json'), 'utf8').includes('The selected item is the header'));
     assert.equal((await action('open-artifact.comments.read', {})).threads[0].agent.status, 'delivered');
 
     const resolved = await action('open-artifact.comments.resolve', { thread_id: threadId, reopen: false });

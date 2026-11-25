@@ -17,13 +17,29 @@ export class ExportFonts {
   private binaries = new Map<string, Promise<string>>();
   private families = new Set<string>();
   readonly missing = new Set<string>();
+  /** Hosts that sent no response in time. Later fonts from them fail at once instead of waiting again. */
+  private silentHosts = new Set<string>();
 
   private readonly request: typeof fetch;
+  private readonly timeout: number;
 
-  constructor(request: typeof fetch = fetch) { this.request = request; }
+  constructor(request: typeof fetch = fetch, timeout = 12000) {
+    this.request = request;
+    this.timeout = timeout;
+  }
 
+  /** The response, whose body must arrive within what is left of the same timeout. */
   private async load(url: string): Promise<Response> {
-    const response = await this.request(url, { credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(12000) });
+    const host = new URL(url).origin;
+    if (this.silentHosts.has(host)) throw new Error('Font host did not respond');
+    const signal = AbortSignal.timeout(this.timeout);
+    let response: Response;
+    try {
+      response = await this.request(url, { credentials: 'omit', redirect: 'error', signal });
+    } catch (error) {
+      if (signal.aborted) this.silentHosts.add(host);
+      throw error;
+    }
     if (!response.ok) throw new Error('Font unavailable');
     return response;
   }

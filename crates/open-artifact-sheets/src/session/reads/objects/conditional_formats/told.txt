@@ -48,7 +48,10 @@ What is known of the sheet is on the one line between <sheet> and </sheet>, as J
 today: date is the day, and number what a cell holds for that day. null if the day is not known.
 rowCount, columnCount: how large the sheet is. No address goes past them.
 selected: the cells that the person is in.
-records: the table around them, less its header, a title over that and what is declared to be its footer. A row of totals that nobody has declared to be one is among them. Where the cells are part of several declared tables that have records, or only of ones that have none, records are the cells themselves, whatever they hold.
+table: all the cells of the table around them. Where they are part of several tables, it is what they hold, taken for records.
+records: its cells under its header and over its footer.
+noRecords: the rows among those that are none, each with what they are: blank, sectionLabel, which names the rows under it, or subtotal. null if they are too many to tell.
+footer: its rows of totals under the records, null if none is found. A row of totals that does not look like one may be among the records.
 columns: what was counted in the records of each column. c is its letters, and name what its header says, null if that is nothing. kind is a guess from what most of its cells hold: number, currency, percent, date, checkbox, fewWords or text. filled, blank and numbers count its cells that hold anything, that hold nothing, and that hold a number. commonest has its texts, the one that comes most often first, and no more than 8 of them. A column of the kind fewWords has no others. smallest, middle and largest are of its numbers, dates among them, and null if it has none.
 columnsLeftOut: how many more columns the table has.
 rules: the rules that the sheet has over cells of the records, the first to apply first.

@@ -11,12 +11,13 @@ pub(super) mod clipboard;
 pub(super) mod formats;
 mod lines;
 mod objects;
+pub(crate) mod pivot;
 pub(crate) mod tables;
 mod xlsx;
 
 /// Whether a request is one of the reads.
 pub fn is_read(kind: &str) -> bool {
-    [cells::KINDS, clipboard::KINDS, formats::KINDS, lines::KINDS, tables::KINDS, objects::KINDS, xlsx::KINDS].iter().any(|kinds| kinds.contains(&kind))
+    [cells::KINDS, clipboard::KINDS, formats::KINDS, lines::KINDS, tables::KINDS, objects::KINDS, pivot::KINDS, xlsx::KINDS].iter().any(|kinds| kinds.contains(&kind))
 }
 
 /// Whether a read works the formulas out first, even when the page asked to be answered before calculating: the
@@ -41,6 +42,8 @@ pub fn answer(workbook: &Workbook, request: &Json) -> String {
         tables::answer(workbook, request)
     } else if objects::KINDS.contains(&kind) {
         objects::answer(workbook, request)
+    } else if pivot::KINDS.contains(&kind) {
+        pivot::answer(workbook, request)
     } else {
         xlsx::answer(workbook, request)
     }

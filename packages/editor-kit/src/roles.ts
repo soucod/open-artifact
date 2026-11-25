@@ -27,7 +27,10 @@ export interface RoleAbilities {
   canRestore: boolean;
   /** Send requests to the agent: Ask, "Send to agent" on a comment (the owner alone). */
   canAsk: boolean;
-  /** Save files through the host's downloads, on the sharing computer (the owner alone; guests get a browser download). */
+  /**
+   * Save files through the host's downloads, on the sharing computer (the owner alone; guests get a browser download).
+   * Every role on a host whose downloads save in the browser (see `hostAbilities`).
+   */
   canSaveToHost: boolean;
   /** Call the connectors (MCP servers) set up on the sharing computer (the owner alone). */
   canUseConnectors: boolean;

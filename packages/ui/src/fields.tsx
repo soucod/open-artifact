@@ -9,12 +9,15 @@ import { Switch as BaseSwitch } from '@base-ui/react/switch';
 import { ToggleGroup } from '@base-ui/react/toggle-group';
 import { Toggle } from '@base-ui/react/toggle';
 import { Check, ChevronDown } from 'lucide-react';
-import { forwardRef, useEffect, useState, type InputHTMLAttributes, type ReactNode } from 'react';
+import { forwardRef, useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode } from 'react';
 import { cn } from './cn.ts';
-import { preventRepeatedActivation } from './keys.ts';
+import { isComposingKey, preventRepeatedActivation } from './keys.ts';
 import { POPUP_CLASS } from './menu.tsx';
 
-/** Shared look of single-line inputs. */
+/**
+ * Shared look of single-line inputs. Every field's box also carries `data-ui-field`, so a page can give the fields
+ * of one part of it another look (a compact inspector, say).
+ */
 export const INPUT_CLASS =
   'h-7 w-full min-w-0 rounded-control border border-line bg-surface-2 px-2 text-[13px] text-fg outline-none placeholder:text-fg-subtle focus:border-accent focus:bg-surface';
 
@@ -23,14 +26,16 @@ export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLIn
   { className, ...rest },
   ref,
 ) {
-  return <input ref={ref} className={cn(INPUT_CLASS, className)} {...rest} />;
+  return <input ref={ref} data-ui-field="" className={cn(INPUT_CLASS, className)} {...rest} />;
 });
 
 /** Props of {@link CommitInput}. */
 export interface CommitInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> {
   value: string;
-  /** Called on Enter or blur, only when the text changed. */
-  onCommit: (value: string) => void;
+  /** Called on Enter or blur, only when the text changed. Returning `false` refuses the text: the field shows `value` again. */
+  onCommit: (value: string) => void | boolean;
+  /** Called with the draft as it is typed, and with `value` again when Escape puts it back. */
+  onDraftChange?: (draft: string) => void;
 }
 
 /**
@@ -38,25 +43,44 @@ export interface CommitInputProps extends Omit<InputHTMLAttributes<HTMLInputElem
  * restores the last committed value. Inspector edits use it so every
  * keystroke does not become a document write.
  */
-export function CommitInput({ value, onCommit, className, ...rest }: CommitInputProps) {
+export function CommitInput({ value, onCommit, onDraftChange, className, ...rest }: CommitInputProps) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  /** Set by Enter and Escape, which already decided: the blur they cause commits nothing more. */
+  const settled = useRef(false);
   const commit = () => {
-    if (draft !== value) onCommit(draft);
+    if (settled.current) {
+      settled.current = false;
+      return;
+    }
+    if (draft !== value && onCommit(draft) === false) {
+      setDraft(value);
+      onDraftChange?.(value);
+    }
   };
   return (
     <input
+      data-ui-field=""
       className={cn(INPUT_CLASS, className)}
       value={draft}
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        onDraftChange?.(event.target.value);
+      }}
       onBlur={commit}
       onKeyDown={(event) => {
+        if (isComposingKey(event.nativeEvent)) return;
         if (event.key === 'Enter') {
           commit();
+          settled.current = true;
           (event.target as HTMLInputElement).blur();
+          settled.current = false;
         } else if (event.key === 'Escape') {
+          settled.current = true;
           setDraft(value);
+          onDraftChange?.(value);
           (event.target as HTMLInputElement).blur();
+          settled.current = false;
         }
       }}
       {...rest}
@@ -92,6 +116,7 @@ export function NumberInput({ value, onChange, onCommit, label, unit, min, max, 
       step={step}
       onValueChange={(next) => onChange?.(next)}
       onValueCommitted={(next) => onCommit(next)}
+      data-ui-field=""
       className={cn('flex h-7 min-w-0 items-center rounded-control border border-line bg-surface-2 focus-within:border-accent', className)}
     >
       {label !== undefined ? (
@@ -103,6 +128,9 @@ export function NumberInput({ value, onChange, onCommit, label, unit, min, max, 
       <BaseNumberField.Input
         placeholder={placeholder}
         aria-label={aria['aria-label']}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur();
+        }}
         className={cn('h-full w-full min-w-0 bg-transparent text-[13px] text-fg outline-none', label === undefined && 'pl-2')}
       />
       {unit ? <span className="pr-2 text-[11px] text-fg-subtle">{unit}</span> : null}
@@ -134,6 +162,7 @@ export function SelectInput<T extends string>({ value, options, onChange, placeh
     <BaseSelect.Root value={value} onValueChange={(next) => next !== null && onChange(next as T)}>
       <BaseSelect.Trigger
         aria-label={aria['aria-label']}
+        data-ui-field=""
         className={cn(INPUT_CLASS, 'flex items-center justify-between gap-1 text-left', className)}
       >
         <BaseSelect.Value>
@@ -174,20 +203,28 @@ export interface SegmentedProps<T extends string> {
   value: T | null;
   options: Option<T>[];
   onChange: (value: T) => void;
+  /**
+   * Called with the picked option when it is pressed again (to let the pick go, say). Without it, that press does
+   * nothing and the pick stays.
+   */
+  onRepick?: (value: T) => void;
   className?: string;
   'aria-label'?: string;
 }
 
 /** A segmented control (one of a few options, all visible). */
-export function Segmented<T extends string>({ value, options, onChange, className, ...aria }: SegmentedProps<T>) {
+export function Segmented<T extends string>({ value, options, onChange, onRepick, className, ...aria }: SegmentedProps<T>) {
   return (
     <ToggleGroup
       value={value === null ? [] : [value]}
       onValueChange={(next) => {
         const picked = next[0];
+        // Pressing the pressed option again leaves the group empty.
         if (picked !== undefined) onChange(picked as T);
+        else if (value !== null) onRepick?.(value);
       }}
       aria-label={aria['aria-label']}
+      data-ui-field=""
       className={cn('flex h-7 items-center gap-0.5 rounded-control bg-surface-2 p-0.5', className)}
     >
       {options.map((option) => (
@@ -196,7 +233,7 @@ export function Segmented<T extends string>({ value, options, onChange, classNam
           value={option.value}
           aria-label={option.title}
           title={option.title}
-          className="flex h-full flex-1 items-center justify-center rounded-[4px] px-1.5 text-fg-muted outline-none hover:text-fg data-[pressed]:bg-surface data-[pressed]:text-fg data-[pressed]:shadow-sm focus-visible:outline-2 focus-visible:outline-accent"
+          className="flex h-full flex-1 items-center justify-center whitespace-nowrap rounded-[4px] px-1.5 text-fg-muted outline-none hover:text-fg data-[pressed]:bg-surface data-[pressed]:text-fg data-[pressed]:shadow-sm focus-visible:outline-2 focus-visible:outline-accent"
         >
           {option.label}
         </Toggle>

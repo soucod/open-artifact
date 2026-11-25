@@ -15,7 +15,7 @@ It prints a local address with a secret path, `http://127.0.0.1:4891/mcp/<secret
 1. Expose port 4891 over HTTPS: OpenAI's Secure MCP Tunnel, or `cloudflared tunnel --url http://127.0.0.1:4891`.
 2. In ChatGPT (chatgpt.com/plugins), add a custom MCP server: the tunnel's `https://…` address followed by
    `/mcp/<secret>`, with no authentication.
-3. In a chat, pick it and ask for a deck, a design, a board or a dashboard.
+3. In a chat, pick it and ask for a deck, a design, a board, a spreadsheet, a dashboard, a doc or a short animation.
 
 The secret path is the only key: anyone who has it can make and change artifacts under the workspace. Keep it to
 yourself; `--rotate` makes a new one. New artifacts go in `<workspace>/artifacts/`.

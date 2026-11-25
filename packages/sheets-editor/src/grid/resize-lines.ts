@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ColumnId, Edit, RowId, SheetId } from '@open-artifact/sheets-core';
 import { shownRowRunsBetween } from '../model/cell-blocks.ts';
 import { selectedArea, selectionOfArea, selectionAreaAndKind } from '../selection/model.ts';
 import { withNoEffects } from '../state/transitions.ts';
@@ -11,24 +11,58 @@ import { isRowUnderStuckHeader } from './sticky-headers.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function setRowHeightsEdit(view: Dynamic, reads: WorkbookReads, oneRowId?: Dynamic, otherRowId?: Dynamic, heightInPixels?: Dynamic) {
-  let { sheetId: sheetId } = view;
+import type { CellSelection } from '../selection/model.ts';
+import type { LineToResize, ResizingDrag } from '../selection/pointer.ts';
+import type { PagePoint } from '../comments/page-comments.ts';
+import type { DoneWithDetail, PageContext, PointerPressed } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+export type SetRowHeightsEdit = Extract<Edit, { kind: 'setRowHeights' }>;
+export type SetColumnWidthsEdit = Extract<Edit, { kind: 'setColumnWidths' }>;
+/** An edit that sizes rows or columns, or fits columns to their text. */
+export type LineSizeEdit = Extract<Edit, { kind: 'setRowHeights' | 'setColumnWidths' | 'fitColumns' }>;
+export type RowToResize = Extract<LineToResize, { isA: 'row' }>;
+export type ColumnToResize = Extract<LineToResize, { isA: 'column' }>;
+/** A pointer over the grid, and whether it is a finger and was told of late. */
+export type PointerOverLines = PagePoint & Pick<PointerPressed, 'isByFinger' | 'isToldOfLate'>;
+/** The last shown column of a selection of columns, and where its right edge is on screen. */
+export interface ColumnEdgeInSight {
+  columnIndex: number;
+  edge: number;
+  showFrom: number;
+}
+/** The row or column edge under the pointer, and its size now. */
+export interface LineUnderPointer {
+  line: LineToResize;
+  sizeInPixels: number;
+}
+export function setRowHeightsEdit(
+  view: PageState,
+  reads: WorkbookReads,
+  oneRowId: RowId,
+  otherRowId: RowId,
+  heightInPixels: number | null,
+): SetRowHeightsEdit | null {
+  let { sheetId } = view;
   let rows = shownRowRunsBetween(view, reads, sheetId, oneRowId, otherRowId);
   return rows === null
     ? null
     : {
         kind: 'setRowHeights',
-        sheetId: sheetId,
-        rows: rows,
-        heightInPixels: heightInPixels,
+        sheetId,
+        rows,
+        heightInPixels,
       };
 }
-export function resizeSelectedLines(state: PageState, reads: WorkbookReads, editForSelection?: Dynamic) {
+export function resizeSelectedLines(
+  state: PageState,
+  reads: WorkbookReads,
+  editForSelection: (selection: CellSelection) => SetRowHeightsEdit | SetColumnWidthsEdit | null,
+): PageTransition {
   let area = selectedArea(state, reads);
   let selection = area === null ? null : selectionOfArea(state, reads, area);
   let edit = selection === null ? null : editForSelection(selection);
   if (edit === null) return withNoEffects(state);
-  let done =
+  let done: DoneWithDetail =
     edit.kind === 'setRowHeights'
       ? {
           what: 'rowsSized',
@@ -41,31 +75,31 @@ export function resizeSelectedLines(state: PageState, reads: WorkbookReads, edit
   return queueEdit(state, edit, {
     ...IF_QUEUED_DEFAULTS,
     select: state,
-    done: done,
+    done,
   });
 }
-export function lastShownColumnEdge(state: PageState, reads: ReadsWithTextMeasurer, isSuppressed?: Dynamic) {
+export function lastShownColumnEdge(state: PageState, reads: ReadsWithTextMeasurer, isSuppressed: boolean): ColumnEdgeInSight | null {
   if (isSuppressed || state.mode.kind === 'editing') return null;
   let selectionArea = selectionAreaAndKind(state, reads);
   if (selectionArea?.kind !== 'columns') return null;
   let layout = layoutOfView(state, reads);
-  let { across: across } = rangeSpansOnScreen(selectionArea.area, state, layout, state);
+  let { across } = rangeSpansOnScreen(selectionArea.area, state, layout, state);
   if (!isSpanEndInSight(across)) return null;
-  let columnIndex: Dynamic = selectionArea.area.leftColumnIndex + selectionArea.area.columnCount - 1;
+  let columnIndex = selectionArea.area.leftColumnIndex + selectionArea.area.columnCount - 1;
   while (columnIndex >= selectionArea.area.leftColumnIndex && layout.columnEdges.sizeOf(columnIndex) === 0) columnIndex -= 1;
   if (columnIndex < selectionArea.area.leftColumnIndex) return null;
   return {
-    columnIndex: columnIndex,
+    columnIndex,
     edge: across.end,
     showFrom: across.showFrom,
   };
 }
-export function columnResizeUnderFinger(state: PageState, pointer: Dynamic, reads: ReadsWithTextMeasurer) {
+export function columnResizeUnderFinger(state: PageState, pointer: PagePoint, reads: ReadsWithTextMeasurer): number | null {
   let columnEdge = lastShownColumnEdge(state, reads, false);
   if (columnEdge === null) return null;
   let grab = FINGER_RESIZE_GRAB / state.zoom;
-  let { columnEdges: columnEdges, columnCount: columnCount } = layoutOfView(state, reads);
-  let nextColumnIndex: Dynamic = columnEdge.columnIndex + 1;
+  let { columnEdges, columnCount } = layoutOfView(state, reads);
+  let nextColumnIndex = columnEdge.columnIndex + 1;
   while (nextColumnIndex < columnCount && columnEdges.sizeOf(nextColumnIndex) === 0) nextColumnIndex += 1;
   let grabBefore = Math.min(grab, columnEdges.sizeOf(columnEdge.columnIndex) / 3);
   let grabAfter = nextColumnIndex < columnCount ? Math.min(grab, columnEdges.sizeOf(nextColumnIndex) / 3) : 0;
@@ -76,7 +110,11 @@ export function columnResizeUnderFinger(state: PageState, pointer: Dynamic, read
     ? columnEdge.columnIndex
     : null;
 }
-export function resizeLineUnderPointer(state: PageState, pointer: Dynamic, { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) {
+export function resizeLineUnderPointer(
+  state: PageState,
+  pointer: PointerOverLines,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): LineUnderPointer | null {
   if (refusalOfEveryEdit !== null || state.mode.kind === 'editing') return null;
   if (pointer.isByFinger && pointer.isToldOfLate === true) return null;
   let layout = layoutOfView(state, reads);
@@ -102,10 +140,10 @@ export function resizeLineUnderPointer(state: PageState, pointer: Dynamic, { rea
     sizeInPixels: layout.columnEdges.sizeOf(columnIndex),
   };
 }
-export function selectionCoveringLine(state: PageState, reads: ReadsWithTextMeasurer, line?: Dynamic) {
+export function selectionCoveringLine(state: PageState, reads: ReadsWithTextMeasurer, line: LineToResize): CellSelection | null {
   let selectionArea = selectionAreaAndKind(state, reads);
   if (selectionArea === null) return null;
-  let { area: area, kind: kind } = selectionArea;
+  let { area, kind } = selectionArea;
   let layout = layoutOfView(state, reads);
   if (!(area.rowCount === layout.rowCount && area.columnCount === layout.columnCount) && kind !== (line.isA === 'row' ? 'rows' : 'columns'))
     return null;
@@ -115,18 +153,27 @@ export function selectionCoveringLine(state: PageState, reads: ReadsWithTextMeas
       : [reads.columnIndexOf(state.sheetId, line.columnId), area.leftColumnIndex, area.columnCount];
   return lineIndex !== null && lineIndex >= firstIndex && lineIndex < firstIndex + count ? selectionOfArea(state, reads, area) : null;
 }
-export function rowHeightsEditForLine(state: PageState, reads: ReadsWithTextMeasurer, line?: Dynamic, heightInPixels?: Dynamic) {
+export function rowHeightsEditForLine(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  line: RowToResize,
+  heightInPixels: number | null,
+): SetRowHeightsEdit | null {
   let selection = selectionCoveringLine(state, reads, line);
   return selection === null
     ? setRowHeightsEdit(state, reads, line.rowId, line.rowId, heightInPixels)
     : setRowHeightsEdit(state, reads, selection.activeCell.rowId, selection.selectionCorner.rowId, heightInPixels);
 }
-export function columnsToResizeForLine(state: PageState, reads: ReadsWithTextMeasurer, line?: Dynamic) {
+export function columnsToResizeForLine(state: PageState, reads: ReadsWithTextMeasurer, line: ColumnToResize): [ColumnId, ColumnId] {
   let selection = selectionCoveringLine(state, reads, line);
   return selection === null ? [line.columnId, line.columnId] : [selection.activeCell.columnId, selection.selectionCorner.columnId];
 }
-export function finishResizeDrag(state: PageState, drag: Dynamic, { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) {
-  let { line: line, sizeAtPress: sizeAtPress } = drag;
+export function finishResizeDrag(
+  state: PageState,
+  drag: ResizingDrag,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition {
+  let { line, sizeAtPress } = drag;
   let view = endDragKeepingScroll(state, reads);
   let sizeInPixels = lineBeingResized(state, reads)?.sizeInPixels;
   let isUnchanged = sizeInPixels === sizeAtPress || drag.sizeInPixels === sizeAtPress;
@@ -143,38 +190,42 @@ export function finishResizeDrag(state: PageState, drag: Dynamic, { reads: reads
   let edit =
     line.isA === 'row'
       ? rowHeightsEditForLine(state, reads, line, sizeInPixels)
-      : (setColumnWidthsEdit as Dynamic)(state.sheetId, ...columnsToResizeForLine(state, reads, line), sizeInPixels);
+      : setColumnWidthsEdit(state.sheetId, ...columnsToResizeForLine(state, reads, line), sizeInPixels);
   return edit === null ? withNoEffects(view) : holdUntilAnswered(queueResizeEdit(view, edit), drag);
 }
-export function resetRowHeightOnDoublePress(state: PageState, message?: Dynamic, context?: Dynamic) {
-  let line = resizeLineUnderPointer(state, message, context)?.line;
+export function resetRowHeightOnDoublePress(
+  state: PageState,
+  pointer: PointerOverLines,
+  context: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition | null {
+  let line = resizeLineUnderPointer(state, pointer, context)?.line;
   if (line?.isA !== 'row') return null;
   let edit = rowHeightsEditForLine(state, context.reads, line, null);
   return edit === null ? withNoEffects(state) : queueResizeEdit(state, edit);
 }
-export const setColumnWidthsEdit = (sheetId?: Dynamic, oneColumn?: Dynamic, otherColumn?: Dynamic, widthInPixels?: Dynamic) => ({
+export const setColumnWidthsEdit = (sheetId: SheetId, oneColumn: ColumnId, otherColumn: ColumnId, widthInPixels: number): SetColumnWidthsEdit => ({
   kind: 'setColumnWidths',
-  sheetId: sheetId,
-  oneColumn: oneColumn,
-  otherColumn: otherColumn,
-  widthInPixels: widthInPixels,
+  sheetId,
+  oneColumn,
+  otherColumn,
+  widthInPixels,
 });
-export const chooseColumnWidth = (state: PageState, reads: WorkbookReads, widthInPixels?: Dynamic) =>
+export const chooseColumnWidth = (state: PageState, reads: WorkbookReads, widthInPixels: number): PageTransition =>
   resizeSelectedLines(
     state,
     reads,
-    ({ activeCell: activeCell, selectionCorner: selectionCorner }: Dynamic) =>
+    ({ activeCell, selectionCorner }) =>
       setColumnWidthsEdit(state.sheetId, activeCell.columnId, selectionCorner.columnId, clampColumnWidth(widthInPixels)),
   );
-export const chooseRowHeight = (state: PageState, reads: WorkbookReads, heightInPixels?: Dynamic) =>
+export const chooseRowHeight = (state: PageState, reads: WorkbookReads, heightInPixels: number | null): PageTransition =>
   resizeSelectedLines(
     state,
     reads,
-    ({ activeCell: activeCell, selectionCorner: selectionCorner }: Dynamic) =>
+    ({ activeCell, selectionCorner }) =>
       setRowHeightsEdit(state, reads, activeCell.rowId, selectionCorner.rowId, heightInPixels === null ? null : clampRowHeight(heightInPixels)),
   );
 export const FINGER_RESIZE_GRAB = 20;
-export const queueResizeEdit = (state?: Dynamic, edit?: Dynamic) =>
+export const queueResizeEdit = (state: PageState, edit: LineSizeEdit): PageTransition =>
   queueEdit(
     {
       ...state,
@@ -187,7 +238,7 @@ export const queueResizeEdit = (state?: Dynamic, edit?: Dynamic) =>
       done: null,
     },
   );
-export const endDragKeepingScroll = (state: Dynamic, reads: ReadsWithTextMeasurer) =>
+export const endDragKeepingScroll = (state: PageState, reads: ReadsWithTextMeasurer): PageState =>
   clampScrollOfView(
     {
       ...state,

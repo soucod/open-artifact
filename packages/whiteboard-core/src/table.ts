@@ -12,7 +12,7 @@
  * Node (the agent's checks).
  */
 
-import type { TableColumn, TableElement, TableRow, TextSize } from './schema.ts';
+import { HEX_COLOR_PATTERN, NOTE_COLORS, type FillColor, type HexColor, type NoteColor, type TableColumn, type TableElement, type TableHeat, type TableRow, type TextSize } from './schema.ts';
 
 /** Most cells one table holds, and most bytes of its JSON. */
 export const TABLE_LIMITS = { cells: 3000, bytes: 194_560 } as const;
@@ -120,6 +120,13 @@ export function hasTableCell(table: TableData, rowId: string, columnId: string):
 export function tableCellGrid(table: TableData): string[][] {
   const columns = tableColumnIds(table);
   return tableRowIds(table).map((rowId) => columns.map((columnId) => tableCellValue(table, rowId, columnId)));
+}
+
+/** A cell fill or heat-map color: a block color name or `#rrggbb` (lower-cased); `undefined` for anything else, `""` included. */
+export function tableTintColor(value: unknown): FillColor | undefined {
+  if (typeof value !== 'string') return undefined;
+  if ((NOTE_COLORS as readonly string[]).includes(value)) return value as NoteColor;
+  return HEX_COLOR_PATTERN.test(value) ? (value.toLowerCase() as HexColor) : undefined;
 }
 
 /** True when a grid of this size would exceed {@link TABLE_LIMITS}. */
@@ -358,13 +365,29 @@ function mapObjectValues<V, R>(record: Readonly<Record<string, V>>, map: (value:
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, map(value, key)]));
 }
 
+/** The colors of `raw` (key → color) whose key `keep` accepts, sorted by key; `undefined` when none is left. */
+function tintColorMap(raw: unknown, keep: (key: string) => boolean): Record<string, FillColor> | undefined {
+  const entries = (isRecord(raw) ? Object.entries(raw) : []).flatMap(([key, value]): [string, FillColor][] => {
+    const color = tableTintColor(value);
+    return color !== undefined && keep(key) ? [[key, color]] : [];
+  });
+  return entries.length > 0 ? sortedEntriesObject(entries) : undefined;
+}
+
 /**
  * Cleans up a table's `cols` and `rows`: valid keys only (sorted, capped),
  * columns derived from the cells when missing, cells as strings, and at
  * least one row and one column. Empty cells of unknown columns are kept as
  * `""` (they are tombstones a concurrent column delete left).
+ *
+ * `fills` and `heat` keep valid colors of rows and columns that exist. A
+ * cell written as `{text, color}` reads as its text, with its color as the
+ * cell's fill unless `fills` names that cell.
  */
-export function normalizeTable(raw: { cols?: unknown; rows?: unknown }, cellText: (text: string) => string): Pick<TableElement, 'cols' | 'rows'> {
+export function normalizeTable(
+  raw: { cols?: unknown; rows?: unknown; fills?: unknown; heat?: unknown; head?: unknown },
+  cellText: (text: string) => string,
+): Pick<TableElement, 'cols' | 'rows' | 'fills' | 'heat'> {
   const entriesOf = (record: unknown, limit: number): [string, Record<string, unknown>][] => {
     const entries = Object.fromEntries(
       (isRecord(record) ? Object.entries(record) : []).filter((entry): entry is [string, Record<string, unknown>] => isTableKey(entry[0]) && isRecord(entry[1])),
@@ -385,8 +408,9 @@ export function normalizeTable(raw: { cols?: unknown; rows?: unknown }, cellText
     return [key, { ...atField(column.at), ...(width !== undefined ? { w: clampColumnWidth(width) } : {}) }];
   });
   if (normalizedCols.length === 0) normalizedCols.push(['c1', {}]);
-  const cellValue = (value: unknown): string | undefined =>
+  const plainCellValue = (value: unknown): string | undefined =>
     typeof value === 'string' ? cellText(value) : typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
+  const cellValue = (value: unknown): string | undefined => plainCellValue(isRecord(value) ? value.text : value);
   const columnIds = new Set(normalizedCols.map(([key]) => key));
   const emptyCells = (row: Record<string, unknown>): [string, string][] =>
     Object.keys(row).flatMap((key): [string, string][] => (row[key] === '' && !columnIds.has(key) && isTableKey(key) ? [[key, '']] : []));
@@ -401,7 +425,36 @@ export function normalizeTable(raw: { cols?: unknown; rows?: unknown }, cellText
     ]),
   ]);
   if (normalizedRows.length === 0) normalizedRows.push(['r1', {}]);
-  return { cols: sortedEntriesObject(normalizedCols), rows: sortedEntriesObject(normalizedRows) };
+  const rowIds = new Set(normalizedRows.map(([key]) => key));
+  const rawRows = new Map(keptRows);
+  const rawFills = isRecord(raw.fills) ? raw.fills : {};
+  const fills = normalizedRows.flatMap(([rowId]): [string, Record<string, FillColor>][] => {
+    const legacy = Object.fromEntries(Object.entries(rawRows.get(rowId) ?? {}).flatMap(([key, cell]) => (isRecord(cell) ? [[key, cell.color]] : [])));
+    const ownFills = rawFills[rowId];
+    const cells = tintColorMap({ ...legacy, ...(isRecord(ownFills) ? ownFills : {}) }, (key) => columnIds.has(key));
+    return cells !== undefined ? [[rowId, cells]] : [];
+  });
+  const rawHeat = isRecord(raw.heat) ? raw.heat : {};
+  const heatCols = tintColorMap(rawHeat.cols, (key) => columnIds.has(key));
+  const headRowId = raw.head !== false ? sortedTableKeys(Object.fromEntries(normalizedRows))[0] : undefined;
+  const heatRows = tintColorMap(rawHeat.rows, (key) => rowIds.has(key) && key !== headRowId);
+  const heat: TableHeat = { ...(heatCols !== undefined ? { cols: heatCols } : {}), ...(heatRows !== undefined ? { rows: heatRows } : {}) };
+  return {
+    cols: sortedEntriesObject(normalizedCols),
+    rows: sortedEntriesObject(normalizedRows),
+    ...(fills.length > 0 ? { fills: sortedEntriesObject(fills) } : {}),
+    ...(heatCols !== undefined || heatRows !== undefined ? { heat } : {}),
+  };
+}
+
+/** True when a fill or a heat map tints the row. */
+export function tableRowIsTinted(table: Pick<TableElement, 'fills' | 'heat'>, rowId: string): boolean {
+  return table.heat?.rows?.[rowId] !== undefined || Object.keys(table.fills?.[rowId] ?? {}).length > 0;
+}
+
+/** True when a fill or a heat map tints the column. */
+export function tableColumnIsTinted(table: Pick<TableElement, 'fills' | 'heat'>, columnId: string): boolean {
+  return table.heat?.cols?.[columnId] !== undefined || Object.values(table.fills ?? {}).some((cells) => cells[columnId] !== undefined);
 }
 
 /** A table from a grid of texts (rows of cells). */
@@ -580,20 +633,22 @@ export function scaleTableWidth<T extends TableData>(table: T, width: number, re
 
 /**
  * Undo/redo of a table edit applied over current content: takes the
- * incoming rows and columns but keeps column widths that changed locally
- * since `base`.
+ * incoming rows, columns, fills and heat maps but keeps column widths that
+ * changed locally since `base`.
  */
 export function mergeTableEdit<T extends { type: string }>(current: T, incoming: { type: string }, base?: { type: string }): T {
   if (current.type !== 'table' || incoming.type !== 'table') return current;
   const local = current as unknown as TableElement;
   const remote = incoming as TableElement;
   const baseTable = base?.type === 'table' ? (base as TableElement) : undefined;
-  if (local.cols === remote.cols && local.rows === remote.rows) return current;
+  if (local.cols === remote.cols && local.rows === remote.rows && local.fills === remote.fills && local.heat === remote.heat) return current;
   const cols = mapObjectValues(remote.cols, (column, key): TableColumn => {
     const width = baseTable !== undefined && local.cols[key] !== undefined && baseTable.cols[key]?.w !== local.cols[key]?.w ? local.cols[key]?.w : column.w;
     return { ...atField(column.at), ...(width !== undefined ? { w: width } : {}) };
   });
-  return { ...current, cols, rows: remote.rows };
+  const merged = { ...current, cols, rows: remote.rows, fills: remote.fills, heat: remote.heat };
+  for (const field of ['fills', 'heat'] as const) if (merged[field] === undefined) Reflect.deleteProperty(merged, field);
+  return merged;
 }
 
 /* -------------------------------------------------------------------------- */

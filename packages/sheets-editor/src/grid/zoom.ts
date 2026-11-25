@@ -1,15 +1,35 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CSSProperties } from 'react';
 import { useStore } from 'zustand';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import { ROW_HEADER_WIDTH } from './cell-metrics-values.ts';
 import { COLUMN_HEADER_HEIGHT } from './cell-metrics.ts';
-export function zoomStepFrom(zoom?: Dynamic, direction?: Dynamic, minZoom?: Dynamic, maxZoom?: Dynamic) {
-  let steps = ZOOM_STEPS_OFFERED.filter((step?: Dynamic) => step > minZoom + 0.005 && step < maxZoom - 0.005);
-  return direction === 1
-    ? (steps.find((step?: Dynamic) => step > zoom + 0.005) ?? maxZoom)
-    : (steps.filter((step?: Dynamic) => step < zoom - 0.005).at(-1) ?? minZoom);
+import type { GridPoint } from './geometry.ts';
+import type { SizeOnPage } from '../view/page-view.ts';
+/** Which way a zoom step goes: in (1) or out (-1). */
+export type ZoomDirection = 1 | -1;
+/** A zoom that fits something in view, and the zoom to go back to when it is asked for again. */
+export interface ZoomFit {
+  of: string;
+  zoom: number;
+  zoomBefore: number;
 }
-export function zoomForFitting(fitOf?: Dynamic, fitZoom?: Dynamic, zoomNow?: Dynamic, lastFit?: Dynamic) {
+/** The zoom to set when fitting is asked for, and the fit it makes (none when it goes back). */
+export interface ZoomForFitting {
+  zoom: number;
+  fit: ZoomFit | null;
+}
+/** A box by its top left corner and its size, in pixels. */
+export interface PointBox extends GridPoint {
+  width: number;
+  height: number;
+}
+export function zoomStepFrom(zoom: number, direction: ZoomDirection, minZoom: number, maxZoom: number): number {
+  let steps = ZOOM_STEPS_OFFERED.filter((step: number) => step > minZoom + 0.005 && step < maxZoom - 0.005);
+  return direction === 1
+    ? (steps.find((step: number) => step > zoom + 0.005) ?? maxZoom)
+    : (steps.filter((step: number) => step < zoom - 0.005).at(-1) ?? minZoom);
+}
+export function zoomForFitting(fitOf: string, fitZoom: number, zoomNow: number, lastFit: ZoomFit | null): ZoomForFitting {
   let fit = lastFit !== null && isSameZoom(zoomNow, lastFit.zoom) ? lastFit : null;
   if (fit?.of === fitOf)
     return {
@@ -31,7 +51,7 @@ export function zoomForFitting(fitOf?: Dynamic, fitZoom?: Dynamic, zoomNow?: Dyn
     },
   };
 }
-export function readStoredZoom(getStorage?: Dynamic) {
+export function readStoredZoom(getStorage: () => Storage): number {
   try {
     return clampZoom(Number.parseFloat(getStorage().getItem(ZOOM_STORAGE_KEY) ?? ''));
   } catch {
@@ -67,15 +87,15 @@ export function createZoomStore(getStorage: () => Storage): ZoomStore {
 }
 const zoomOf = (state: ZoomState): number => state.zoom;
 export const useZoom = (zoom: ZoomStore): number => useStore(zoom.store, zoomOf);
-export function pointInZoomedElement(element: Dynamic, zoom: Dynamic, { clientX: clientX, clientY: clientY }: Dynamic) {
-  let { left: left, top: top } = element.getBoundingClientRect();
+export function pointInZoomedElement(element: Element, zoom: number, { clientX, clientY }: Pick<MouseEvent, 'clientX' | 'clientY'>): GridPoint {
+  let { left, top } = element.getBoundingClientRect();
   return {
     x: unzoomLength(clientX - left - element.clientLeft, zoom),
     y: unzoomLength(clientY - top - element.clientTop, zoom),
   };
 }
-export function boxOnScreen(element: Dynamic, zoom: Dynamic, { x: x, y: y, width: width, height: height }: Dynamic) {
-  let { left: left, top: top } = element.getBoundingClientRect();
+export function boxOnScreen(element: Element, zoom: number, { x, y, width, height }: PointBox): PointBox {
+  let { left, top } = element.getBoundingClientRect();
   return {
     x: left + element.clientLeft + x * zoom,
     y: top + element.clientTop + y * zoom,
@@ -87,13 +107,13 @@ export const ZOOM_STEPS_OFFERED = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.
 export const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2];
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 2;
-export const nextZoomStep = (zoom?: Dynamic, direction?: Dynamic) => zoomStepFrom(zoom, direction, MIN_ZOOM, MAX_ZOOM);
+export const nextZoomStep = (zoom: number, direction: ZoomDirection): number => zoomStepFrom(zoom, direction, MIN_ZOOM, MAX_ZOOM);
 export const ZOOM_STEP_FACTOR = 1.25;
-export const zoomPercent = (zoom?: Dynamic) => Math.round(zoom * 100);
+export const zoomPercent = (zoom: number): number => Math.round(zoom * 100);
 export const ZOOM_STORAGE_KEY = 'sheets-zoom';
-export const clampZoom = (zoom?: Dynamic) => (Number.isFinite(zoom) && zoom > 0 ? Math.max(MIN_ZOOM, Math.min(zoom, MAX_ZOOM)) : 1);
+export const clampZoom = (zoom: number): number => (Number.isFinite(zoom) && zoom > 0 ? Math.max(MIN_ZOOM, Math.min(zoom, MAX_ZOOM)) : 1);
 export const FIT_ZOOM_MARGIN = 8;
-export const zoomToFit = (content?: Dynamic, room?: Dynamic) =>
+export const zoomToFit = (content: SizeOnPage, room: SizeOnPage): number =>
   clampZoom(
     Math.min(
       1,
@@ -101,15 +121,15 @@ export const zoomToFit = (content?: Dynamic, room?: Dynamic) =>
       room.height / (COLUMN_HEADER_HEIGHT + content.height + 2 * FIT_ZOOM_MARGIN),
     ),
   );
-export const isSameZoom = (zoom?: Dynamic, other?: Dynamic) => Math.abs(zoom - other) < 0.005;
-export const withFitZoom = (fit?: Dynamic, zoom?: Dynamic) => ({
+export const isSameZoom = (zoom: number, other: number): boolean => Math.abs(zoom - other) < 0.005;
+export const withFitZoom = (fit: ZoomFit, zoom: number): ZoomFit => ({
   ...fit,
-  zoom: zoom,
+  zoom,
   zoomBefore: isSameZoom(fit.zoomBefore, zoom) ? 1 : fit.zoomBefore,
 });
 export const NEAR_FULL_ZOOM_TOLERANCE = 0.04;
-export const isNearFullZoom = (zoom?: Dynamic) => Math.abs(zoom - 1) <= NEAR_FULL_ZOOM_TOLERANCE;
-export const zoomedStyle = (zoom?: Dynamic) =>
+export const isNearFullZoom = (zoom: number): boolean => Math.abs(zoom - 1) <= NEAR_FULL_ZOOM_TOLERANCE;
+export const zoomedStyle = (zoom: number): CSSProperties =>
   zoom === 1
     ? {}
     : {
@@ -117,4 +137,4 @@ export const zoomedStyle = (zoom?: Dynamic) =>
         height: `${100 / zoom}%`,
         transform: `scale(${zoom})`,
       };
-export const unzoomLength = (length?: Dynamic, zoom?: Dynamic) => length / zoom;
+export const unzoomLength = (length: number, zoom: number): number => length / zoom;

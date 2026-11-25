@@ -5,6 +5,7 @@
 
 import { create } from 'zustand';
 import type { BoardError, BoardRect, BoardSize, TextFormats } from '@open-artifact/dc';
+import type { ClosedNotices } from '../lib/board-errors.ts';
 
 /** Screen = world × zoom + (x, y). */
 export interface Camera {
@@ -94,6 +95,12 @@ export interface ViewState {
   toolbarTop: boolean;
   /** Image crop mode: the `<img>` (or `<video>`) being cropped. */
   crop: { board: string; tid: number; path: number[] } | null;
+  /** The list of artboards with errors (top right) is open. */
+  errorsOpen: boolean;
+  /** Error notices this viewer closed (lib/board-errors.ts). */
+  closedNotices: ClosedNotices;
+  /** A fix request the agent could not be reached with, for the viewer to copy; `key` is the errors it was made from. */
+  unsentFix: { key: string; text: string } | null;
 }
 
 /** Stroke of the pencil tool. */
@@ -133,6 +140,9 @@ export interface ViewActions {
   setFindOpen(open: boolean): void;
   setToolbarTop(top: boolean): void;
   setCrop(crop: ViewState['crop']): void;
+  setErrorsOpen(open: boolean): void;
+  setClosedNotices(closed: ClosedNotices): void;
+  setUnsentFix(fix: ViewState['unsentFix']): void;
 }
 
 const TOOLBAR_KEY = 'mc-toolbar/top';
@@ -169,6 +179,9 @@ export const useView = create<ViewState & ViewActions>()((set, get) => ({
   findOpen: false,
   toolbarTop: storedToolbarTop(),
   crop: null,
+  errorsOpen: false,
+  closedNotices: {},
+  unsentFix: null,
 
   setCamera(camera) {
     const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, camera.zoom));
@@ -263,6 +276,15 @@ export const useView = create<ViewState & ViewActions>()((set, get) => ({
   },
   setCrop(crop) {
     set({ crop });
+  },
+  setErrorsOpen(errorsOpen) {
+    if (get().errorsOpen !== errorsOpen) set({ errorsOpen });
+  },
+  setClosedNotices(closedNotices) {
+    if (get().closedNotices !== closedNotices) set({ closedNotices });
+  },
+  setUnsentFix(unsentFix) {
+    set({ unsentFix });
   },
 }));
 

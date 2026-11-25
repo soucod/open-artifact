@@ -18,65 +18,65 @@ export function figuresOfShownCells(
   let numbers: number[] = [];
   let count: number = 0;
   let pattern: string | null = null;
-  let value: boolean = true;
-  for (let item of ranges)
-    for (let value5 of reads.cellsOnShowIn(sheetId, item)) {
-      let nonEmptyValueOfCell2 = nonEmptyValueOfCell(reads, value5);
-      if (nonEmptyValueOfCell2 === null || isLeftOut(value5)) continue;
-      let value6 = seenCells === null ? '' : `${value5.rowId} ${value5.columnId}`;
-      if (seenCells?.has(value6) === true) continue;
-      seenCells?.add(value6);
+  let areAllGeneral: boolean = true;
+  for (let range of ranges)
+    for (let cellId of reads.cellsOnShowIn(sheetId, range)) {
+      let cellValue = nonEmptyValueOfCell(reads, cellId);
+      if (cellValue === null || isLeftOut(cellId)) continue;
+      let cellKey = seenCells === null ? '' : `${cellId.rowId} ${cellId.columnId}`;
+      if (seenCells?.has(cellKey) === true) continue;
+      seenCells?.add(cellKey);
       count += 1;
-      if (nonEmptyValueOfCell2.kind !== 'number') continue;
-      let numberFormatOfCell2 = numberFormatOfCell(reads, value5);
-      if (DATE_TIME_FORMAT_KINDS.has(numberFormatOfCell2.kind)) continue;
-      pattern = numbers.length === 0 || pattern === numberFormatOfCell2.pattern ? numberFormatOfCell2.pattern : null;
-      value &&= isGeneralPattern(numberFormatOfCell2.pattern);
-      numbers.push(nonEmptyValueOfCell2.value);
+      if (cellValue.kind !== 'number') continue;
+      let numberFormat = numberFormatOfCell(reads, cellId);
+      if (DATE_TIME_FORMAT_KINDS.has(numberFormat.kind)) continue;
+      pattern = numbers.length === 0 || pattern === numberFormat.pattern ? numberFormat.pattern : null;
+      areAllGeneral &&= isGeneralPattern(numberFormat.pattern);
+      numbers.push(cellValue.value);
     }
   if (count === 0) return null;
-  let state: FiguresOfCount = {
+  let figuresOfCount: FiguresOfCount = {
     count: {
       value: count,
       written: null,
     },
   };
-  let value2 = numbers.length === 0 ? null : sumFigures(numbers, value);
-  if (value2 === null) return state;
-  let value3 = value ? null : pattern;
-  let value4 = (figureValue: number, valueWritten: number = figureValue): Figure => {
-    let value5 =
-      value3 === null
+  let numberFigures = numbers.length === 0 ? null : sumFigures(numbers, areAllGeneral);
+  if (numberFigures === null) return figuresOfCount;
+  let sharedPattern = areAllGeneral ? null : pattern;
+  let figureOf = (figureValue: number, valueWritten: number = figureValue): Figure => {
+    let written =
+      sharedPattern === null
         ? null
         : reads.shownWithRoomForAll(
             {
               kind: 'number',
               value: valueWritten,
             },
-            value3,
+            sharedPattern,
           );
     return {
       value: figureValue,
-      written: value5 === '' ? null : value5,
+      written: written === '' ? null : written,
     };
   };
   return {
-    sum: value4(value2.sum),
-    average: value4(value2.average, value2.sum / numbers.length),
-    min: value4(value2.min),
-    max: value4(value2.max),
-    ...state,
+    sum: figureOf(numberFigures.sum),
+    average: figureOf(numberFigures.average, numberFigures.sum / numbers.length),
+    min: figureOf(numberFigures.min),
+    max: figureOf(numberFigures.max),
+    ...figuresOfCount,
   };
 }
 export function updateFiguresOfSelection(stateBefore: PageState | null, state: PageState, reads: WorkbookReads, isDue: boolean): PageState {
-  let figuresOfSelection2 = state.figuresOfSelection;
-  let value =
+  let figuresBefore = state.figuresOfSelection;
+  let isWorkbookUnchanged =
     stateBefore !== null &&
     state.workbookChangeCount === stateBefore.workbookChangeCount &&
     state.formulasWorkedOutCount === stateBefore.formulasWorkedOutCount;
   if (
     (stateBefore !== null &&
-      value &&
+      isWorkbookUnchanged &&
       state.sheetId === stateBefore.sheetId &&
       state.mode.kind === stateBefore.mode.kind &&
       isSameCell(state.activeCell, stateBefore.activeCell) &&
@@ -84,48 +84,48 @@ export function updateFiguresOfSelection(stateBefore: PageState | null, state: P
       state.rangeWalked === stateBefore.rangeWalked &&
       state.otherRanges === stateBefore.otherRanges &&
       state.rowsOutOfViewByOwnFilters === stateBefore.rowsOutOfViewByOwnFilters &&
-      !(isDue && figuresOfSelection2.areDue)) ||
+      !(isDue && figuresBefore.areDue)) ||
     state.mode.kind === 'editing'
   )
     return state;
-  let value2 = (nextFigures: FiguresOfSelection): PageState =>
-    nextFigures === figuresOfSelection2
+  let withFigures = (nextFigures: FiguresOfSelection): PageState =>
+    nextFigures === figuresBefore
       ? state
       : {
           ...state,
           figuresOfSelection: nextFigures,
         };
-  let areasOfAllRanges2 = areasOfAllRanges(state, reads);
-  let [firstArea] = areasOfAllRanges2;
-  let mergedAreaOrCellOf2 = mergedAreaOrCellOf(reads, state.activeCell);
-  let value3 =
-    areasOfAllRanges2.length === 1 && firstArea !== undefined && mergedAreaOrCellOf2 !== null && isSameArea(firstArea, mergedAreaOrCellOf2);
-  let coveredCellCount2 = coveredCellCount(areasOfAllRanges2);
-  if (coveredCellCount2 < 2 || value3 || coveredCellCount2 > MAX_CELLS_FIGURED) return value2(NO_FIGURES_OF_SELECTION);
-  let value4 = [
+  let areas = areasOfAllRanges(state, reads);
+  let [firstArea] = areas;
+  let activeArea = mergedAreaOrCellOf(reads, state.activeCell);
+  let isOneMergedArea =
+    areas.length === 1 && firstArea !== undefined && activeArea !== null && isSameArea(firstArea, activeArea);
+  let cellCount = coveredCellCount(areas);
+  if (cellCount < 2 || isOneMergedArea || cellCount > MAX_CELLS_FIGURED) return withFigures(NO_FIGURES_OF_SELECTION);
+  let cellsKey = [
     state.sheetId,
-    ...areasOfAllRanges2.flatMap(
+    ...areas.flatMap(
       (area) => shownPiecesOfArea(state, reads, area).map((piece: CellArea) => Object.values(piece).join(',')),
     ),
   ].join(' ');
-  let value5 = `${state.workbookChangeCount} ${state.formulasWorkedOutCount}`;
-  let value6 = value ? value4 === figuresOfSelection2.ofCells : stateBefore !== null && isSameSelection(stateBefore, state);
-  if (value6 && value5 === figuresOfSelection2.ofWorkbook && !figuresOfSelection2.areDue) return state;
-  if (!isDue && coveredCellCount2 > MAX_CELLS_FIGURED_AT_ONCE) {
-    if (value6 && figuresOfSelection2.areDue) return state;
-    return value2({
-      ...figuresOfSelection2,
-      figures: value6 ? figuresOfSelection2.figures : null,
+  let workbookKey = `${state.workbookChangeCount} ${state.formulasWorkedOutCount}`;
+  let areSameCells = isWorkbookUnchanged ? cellsKey === figuresBefore.ofCells : stateBefore !== null && isSameSelection(stateBefore, state);
+  if (areSameCells && workbookKey === figuresBefore.ofWorkbook && !figuresBefore.areDue) return state;
+  if (!isDue && cellCount > MAX_CELLS_FIGURED_AT_ONCE) {
+    if (areSameCells && figuresBefore.areDue) return state;
+    return withFigures({
+      ...figuresBefore,
+      figures: areSameCells ? figuresBefore.figures : null,
       areDue: true,
-      ofCells: value4,
+      ofCells: cellsKey,
     });
   }
-  let value7 = figuresOfShownCells(reads, state.sheetId, areasOfAllRanges2, makeIsCellFilteredOut(state, reads));
-  return value2({
-    figures: value7,
+  let figures = figuresOfShownCells(reads, state.sheetId, areas, makeIsCellFilteredOut(state, reads));
+  return withFigures({
+    figures,
     areDue: false,
-    ofCells: value4,
-    ofWorkbook: value5,
+    ofCells: cellsKey,
+    ofWorkbook: workbookKey,
   });
 }
 export const MAX_CELLS_FIGURED_AT_ONCE = 5000;

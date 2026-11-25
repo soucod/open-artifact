@@ -32,6 +32,8 @@ export interface ViewContextInput {
   snapshot: PageSnapshot | null;
   /** The data's notice shows above the page (the check notice waits). */
   noticeShown: boolean;
+  /** The format picked on the empty page, told to the agent while the picker shows (`null`: not told). */
+  form: string | null;
 }
 
 export interface ViewContext {
@@ -47,7 +49,7 @@ export interface ViewContext {
   dismiss: () => void;
 }
 
-export function useViewContext({ data, snapshot, noticeShown }: ViewContextInput): ViewContext {
+export function useViewContext({ data, snapshot, noticeShown, form }: ViewContextInput): ViewContext {
   const shown = useShownContent();
   const storedFiles = useDocument((state) => state.content.files);
   const status = useDocument((state) => state.status);
@@ -79,7 +81,7 @@ export function useViewContext({ data, snapshot, noticeShown }: ViewContextInput
     dirty,
     shown: sourcesOpen ? selected : null,
     filters,
-    form: null,
+    form,
     draft: shown.mode === 'draft' ? (shown.draftId ?? null) : null,
   });
 

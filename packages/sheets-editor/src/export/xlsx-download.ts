@@ -1,21 +1,28 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { XlsxFileOutcome } from '../state/controller.ts';
 import { createFileExport } from './file-export.ts';
+import type { FileExport, FileExportDeps, MadeFile } from './file-export.ts';
 import { zipXlsxParts } from './zip.ts';
-export function createXlsxDownload(shell?: Dynamic, compress?: Dynamic) {
-  let { offer: offerFile, isFileOnItsWay: isFileOnItsWay } = createFileExport('xlsx', shell);
+import type { ZipCompressor } from './zip.ts';
+/** Writes the workbook's xlsx file, with or without its charts, named after the title given. */
+export type MakeXlsxFile = (withCharts: boolean, fileTitle: string | null) => Promise<XlsxFileOutcome>;
+export interface XlsxDownload extends Pick<FileExport, 'isFileOnItsWay'> {
+  offer(makeXlsx: MakeXlsxFile | null): void;
+}
+export function createXlsxDownload(exportDeps: FileExportDeps, compress: ZipCompressor | null): XlsxDownload {
+  let { offer: offerFile, isFileOnItsWay } = createFileExport('xlsx', exportDeps);
   return {
-    isFileOnItsWay: isFileOnItsWay,
-    offer: (makeXlsx?: Dynamic) =>
+    isFileOnItsWay,
+    offer: (makeXlsx) =>
       offerFile(
         makeXlsx === null
           ? null
-          : async (reason?: Dynamic): Promise<Dynamic> => {
-              let made = await makeXlsx(true, reason);
+          : async (title): Promise<MadeFile | 'threw' | null> => {
+              let made = await makeXlsx(true, title);
               if (made === null || made === 'threw') return made;
-              let { filename: filename, onSaved: onSaved } = made;
+              let { filename, onSaved } = made;
               let zipped = await zipXlsxParts(made, compress);
               return {
-                filename: filename,
+                filename,
                 data: zipped,
                 onSaved: () => onSaved('downloaded', null),
               };

@@ -6,7 +6,7 @@
  */
 
 import { DEFAULT_DASHBOARD_TITLE, type Dataset } from '@open-artifact/data-core';
-import { saveFile, type SavedFile } from '@open-artifact/editor-kit';
+import { assertMayExport, saveFile, type SavedFile } from '@open-artifact/editor-kit';
 import { toast } from '@open-artifact/ui';
 import { maybeDataEngine, type DataEngine } from '../data/engine.ts';
 import { partitionUsedDatasets } from '../data/status.ts';
@@ -23,7 +23,8 @@ import {
   type DashboardExportAvailability,
   type DashboardExportFormat,
 } from './formats.ts';
-import { installDashboardPrint, printDashboard } from './print.ts';
+import { canAskAgent, sendPageRequest } from '../drafts/request.ts';
+import { installDashboardPrint, hasPagePrintLayout, printDashboard } from './print.ts';
 import { buildStaticHtmlCopy, canCopyStaticPage } from './static-html.ts';
 
 const NOT_SETTLED_REASON = 'Available once the page has finished loading.';
@@ -105,6 +106,9 @@ let busy = false;
 /** Runs an export: opens the print dialog for `pdf`, else makes the file and saves it. */
 export async function exportDashboard(format: DashboardExportFormat): Promise<DashboardExportOutcome> {
   if (format === 'pdf') {
+    // A print is no download, but the PDF button follows the owner's export switch like the others (a viewer refused
+    // on a host). Only the product's own button: the browser's print and a screenshot stay open to anyone who sees it.
+    await assertMayExport(maybeSession()?.downloads);
     await printDashboard();
     return { format, printed: true };
   }
@@ -116,6 +120,9 @@ export async function exportDashboard(format: DashboardExportFormat): Promise<Da
 const isDeclined = (error: unknown): boolean =>
   (error instanceof DOMException && error.name === 'AbortError') ||
   (typeof error === 'object' && error !== null && 'code' in error && (error as { code: unknown }).code === 'declined');
+
+/** The host said no (a viewer, while the owner does not let viewers export): its words are the whole message. */
+const isRefused = (error: unknown): boolean => typeof error === 'object' && error !== null && 'code' in error && (error as { code: unknown }).code === 'not_writer';
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -133,7 +140,8 @@ export async function downloadDashboardExport(format: DashboardExportFormat): Pr
     if (outcome.format !== 'pdf')
       toast.add({ title: outcome.saved.to === 'host' ? `Saved ${outcome.filename}` : `Downloaded ${outcome.filename}` });
   } catch (error) {
-    if (!isDeclined(error)) toast.add({ title: 'Export failed. Try again.', description: errorText(error), type: 'error' });
+    if (isRefused(error)) toast.add({ title: errorText(error), type: 'error' });
+    else if (!isDeclined(error)) toast.add({ title: 'Export failed. Try again.', description: errorText(error), type: 'error' });
   } finally {
     busy = false;
   }
@@ -194,16 +202,43 @@ export function startDashboardExports(): () => void {
     schedule();
   };
   watch();
+  let hintedPrintLayout = false;
+  const onAfterPrint = (): void => {
+    if (hintedPrintLayout || !canAskAgent()) return;
+    const files = pageExportSnapshot()?.snapshot.files;
+    if (!files || files.length === 0 || hasPagePrintLayout(files)) return;
+    hintedPrintLayout = true;
+    toast.add({
+      title: 'Some parts might not print.',
+      actionProps: {
+        children: 'Add a print layout',
+        onClick: () => {
+          void sendPageRequest({
+            title: 'Add a print layout',
+            request: 'Add a print layout to this dashboard so every tab, chapter and scrolled section prints cleanly (see "Printing" in reference/design-defaults.md).',
+            selection: { label: 'Print layout', chip: { kind: 'print-layout' }, text: '' },
+          });
+        },
+      },
+    });
+  };
+  if (typeof window !== 'undefined') window.addEventListener('afterprint', onAfterPrint);
+
   const stops = [
     usePageRuntime.subscribe((state, previous) => {
-      if (state.page !== previous.page) watch();
-      else schedule();
+      if (state.page !== previous.page) {
+        hintedPrintLayout = false;
+        watch();
+      } else schedule();
     }),
     useShown.subscribe(schedule),
     onShellCommand((command) => {
       if (command.cmd === 'export_format') void runShellExport(command.request, command.format, command.variant);
     }),
     installDashboardPrint(),
+    () => {
+      if (typeof window !== 'undefined') window.removeEventListener('afterprint', onAfterPrint);
+    },
   ];
   return () => {
     stopPage();

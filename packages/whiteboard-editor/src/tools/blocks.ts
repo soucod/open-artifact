@@ -1,8 +1,8 @@
 /**
- * The placing tools: Sticky note, Text, Shape, Section and Table.
+ * The placing tools: Note, Text, Shape, Section and Table.
  *
- * - Note: a click drops a note centered on it; a press on an existing item
- *   switches to Select and acts as a Select press.
+ * - Note: a click drops a note centered on it, over an item too (the tool
+ *   stays the Note tool).
  * - Text: a click starts a new text whose first line sits on it.
  * - Shape and Section: drag out a box (Shift keeps it square); a click
  *   drops one of the default size.
@@ -24,8 +24,7 @@ import { addedMessage, announce } from '../services/announce.ts';
 import { editContent } from '../services/actions.ts';
 import { useSelection } from '../state/selection.ts';
 import { useTool } from '../state/tool.ts';
-import { pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
-import { hitContext, hitElementAt } from './hit.ts';
+import { gestureKey, pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
 import {
   DEFAULT_PLACE_SIZE,
   createContainer,
@@ -37,7 +36,7 @@ import {
   ensureRoom,
   placeElement,
 } from './place.ts';
-import { forgetTap, gestureKey, selectPress } from './select.ts';
+import { forgetTap } from './select.ts';
 
 /** A gesture that places something when the press is released without dragging far. */
 function placeOnRelease(place: (at: Point) => void): Gesture {
@@ -49,13 +48,9 @@ function placeOnRelease(place: (at: Point) => void): Gesture {
   };
 }
 
-/** The Sticky note tool's press. */
+/** The Note tool's press. */
 export function notePress(sample: PointerSample): Gesture | null {
   forgetTap();
-  if (hitElementAt(hitContext(), sample.board, sample.event.pointerType) !== undefined) {
-    useTool.getState().pick({ tool: 'select' });
-    return selectPress(sample);
-  }
   if (!ensureRoom()) return null;
   const at = sample.board;
   return placeOnRelease(() => placeElement(createNoteAt(at), { label: 'Add note' }));

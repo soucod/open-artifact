@@ -1,20 +1,34 @@
-import type { Dynamic } from '../dynamic.ts';
 import { sheetLoadedText } from './sheet-status.ts';
-export function createWordsOfLoad(announce?: Dynamic, page?: Dynamic, clock?: Dynamic) {
-  let load: Dynamic = null;
-  let generation: Dynamic = 0;
-  let areWordsToCome: Dynamic = false;
-  let listeners = new (Set as Dynamic)();
-  let setWordsToCome = (next?: Dynamic) => {
+/** What the announcer asks of the page. */
+export interface PageOfLoad {
+  doCellsHaveKeyboard(): boolean;
+  isLoadUnseen(): boolean;
+}
+/** Says to screen readers that the sheet is loading, then that it has loaded. */
+export interface WordsOfLoad {
+  /** Words about the load are yet to be said or are being said. */
+  areWordsToCome(): boolean;
+  onChanged(listener: () => void): () => void;
+  loadIsOnItsWay(inWords: string): void;
+  loadHasStopped(): void;
+  cellsAreDrawn(): void;
+  cellsTakeKeyboard(): void;
+}
+export function createWordsOfLoad(announce: (words: string) => void, page: PageOfLoad, clock: Pick<Window, 'setTimeout'>): WordsOfLoad {
+  let load: { inWords: string; isInLine: boolean } | null = null;
+  let generation = 0;
+  let areWordsToCome = false;
+  let listeners = new Set<() => void>();
+  let setWordsToCome = (next: boolean) => {
     if (next === areWordsToCome) return;
     areWordsToCome = next;
-    for (let listener of listeners as Dynamic) listener();
+    for (let listener of listeners) listener();
   };
   let clearWords = () => {
     announce('');
     setWordsToCome(false);
   };
-  let after = (delayMs?: Dynamic, then?: Dynamic) => {
+  let after = (delayMs: number, then: () => void) => {
     let generationAtStart = generation;
     clock.setTimeout(() => {
       if (generation === generationAtStart) then();
@@ -22,18 +36,18 @@ export function createWordsOfLoad(announce?: Dynamic, page?: Dynamic, clock?: Dy
   };
   return {
     areWordsToCome: () => areWordsToCome,
-    onChanged(listener?: Dynamic) {
+    onChanged(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
-    loadIsOnItsWay(inWords?: Dynamic) {
+    loadIsOnItsWay(inWords) {
       if (load !== null) {
         if (load.isInLine && load.inWords !== inWords) announce(inWords);
         load.inWords = inWords;
         return;
       }
       let nextLoad = {
-        inWords: inWords,
+        inWords,
         isInLine: false,
       };
       load = nextLoad;
@@ -73,7 +87,7 @@ export const LOAD_WORDS_DELAY_MS = 2000;
 export const LOADED_WORDS_DELAY_MS = 1000;
 export const LOADED_WORDS_CLEAR_MS = 5000;
 export const WORDS_TO_COME_END_MS = 1500;
-export const NO_WORDS_OF_LOAD = {
+export const NO_WORDS_OF_LOAD: Pick<WordsOfLoad, 'areWordsToCome' | 'onChanged'> = {
   areWordsToCome: () => false,
   onChanged: () => () => {},
 };

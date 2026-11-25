@@ -3,20 +3,30 @@
  * plugins and @open-artifact/cli, and the DSH plugin):
  *
  *   vendor/type-server/                       the built server (scripts/build.mjs's dist/server/): cli.mjs, every
- *                                             editor, support.js, sheets.wasm, the PDF reader, the Shell
+ *                                             editor, support.js, sheets.wasm, motion-tools.html, the PDF reader, the Shell
  *   vendor/artifact-types/<type>/             each type's own files (manifest, SKILL.md, references), without scripts/
  *   vendor/artifact-types/<type>/scripts/cli.mjs
- *                                             a few lines that run the shared server's CLI
+ *                                             a few lines that run the shared server's CLI (not for a page type:
+ *                                             frame-host, vendored beside the daemon, runs its artifacts)
  *
  * In the repository each type's scripts/ is a whole copy of dist/server/, so a type folder works on its own once
  * installed; every copy carries every editor, as one background server serves every type. Seven such copies made the
  * bundles over 300 MB, so here they share one. The server finds its editors and engines beside its own file
  * (import.meta.url), and starts its background server from that file, so the shared copy serves every type.
  */
-import { cpSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, sep } from 'node:path';
 
 const isDir = (path) => existsSync(path) && statSync(path).isDirectory();
+
+/** Whether the type folder is a page type: its artifact-type.json says openArtifact.style "page". */
+function isPageType(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, 'artifact-type.json'), 'utf8'))?.openArtifact?.style === 'page';
+  } catch {
+    return false;
+  }
+}
 
 /** What a type's scripts/cli.mjs says: run the shared server's CLI (vendor/type-server/cli.mjs). */
 const SHIM = `#!/usr/bin/env node
@@ -60,7 +70,8 @@ export function vendorTypes({ repo, vendor, types, warn, log = () => {} }) {
       recursive: true,
       filter: (path) => basename(path) !== 'node_modules' && !(path + sep).startsWith(ownScripts),
     });
-    if (built) {
+    // A page type (openArtifact.style "page") has no CLI of its own: frame-host runs its artifacts.
+    if (built && !isPageType(from)) {
       mkdirSync(join(to, 'scripts'), { recursive: true });
       writeFileSync(join(to, 'scripts', 'cli.mjs'), SHIM, { mode: 0o755 });
     }

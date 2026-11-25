@@ -34,10 +34,10 @@ import { editContent, viewerAuthor } from '../services/actions.ts';
 import { useRecentStickers } from '../state/recent-stickers.ts';
 import { useSelection } from '../state/selection.ts';
 import { useTool, type StickerChoice } from '../state/tool.ts';
-import { pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
+import { gestureKey, pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
 import { hitContext, type HitContext } from './hit.ts';
 import { DOUBLE_TAP, ensureRoom } from './place.ts';
-import { forgetTap, gestureKey, selectPress } from './select.ts';
+import { forgetTap, selectPress } from './select.ts';
 
 export { FACE_STICKER_GLYPH, FACE_STICKER_INSET, FACE_STICKER_SIZE, FACE_STICKER_SPACING } from '../lib/votes.ts';
 /** Hold-to-grow: each step multiplies the size by `factor`, every `everyMs`, at most `times` times. */

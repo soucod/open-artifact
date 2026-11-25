@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/sheets-core",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The Sheets type's model, free of DOM and React: the workbook engine's requests and answers, the page and server protocol, A1 addresses, the agent's reads and edits worked out into engine operations, charts and widgets, version history, xlsx export and the view context.",
@@ -11,8 +11,8 @@
     "./stock-charts": "./src/agent/stock-charts.ts"
   },
   "dependencies": {
-    "@open-artifact/runtime": "0.9.2",
-    "@open-artifact/wasm-sheets": "0.9.2",
+    "@open-artifact/runtime": "0.14.6",
+    "@open-artifact/wasm-sheets": "0.14.6",
     "acorn": "8.19.0",
     "acorn-jsx": "5.3.2"
   },

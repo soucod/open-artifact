@@ -11,7 +11,7 @@ use crate::workbook::Input;
 
 /// A range of cells: its top, left, bottom and right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Rect {
+pub(in crate::session::reads::tables::guess) struct Rect {
     pub top: usize,
     pub left: usize,
     pub bottom: usize,
@@ -19,6 +19,10 @@ pub(super) struct Rect {
 }
 
 impl Rect {
+    pub(in crate::session::reads::tables::guess) fn holds(&self, row: usize, column: usize) -> bool {
+        self.top <= row && row <= self.bottom && self.left <= column && column <= self.right
+    }
+
     pub(super) fn meets(&self, other: &Rect) -> bool {
         other.top <= self.bottom && self.top <= other.bottom && other.left <= self.right && self.left <= other.right
     }

@@ -65,7 +65,7 @@ gaps; leave at least 223 px above a row that has a title note.
 
 ## Notes
 
-Keyed by id (`[A-Za-z0-9_-]{1,40}`), fewer than 1000. Every note has `x` and `y`. Stickies and titles also have `text`.
+Keyed by id (`[A-Za-z0-9_-]{1,40}`), as many as you need while the whole index stays under 1 MiB. Every note has `x` and `y`. Stickies and titles also have `text`.
 
 - `kind: "title1"` is a title over SEVERAL artboards, never over one (a frame's name strip already
   shows its `title` or file name): one bold 72 px line. Set `maxW` to its row's width (`maxH` if it is

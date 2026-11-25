@@ -203,35 +203,6 @@ body {
   z-index: 1;
 }
 
-/* ---- The canvas engine (engine/board.ts) ---------------------------------- */
-
-/* Between the element layer (seen through its holes) and the live layer. */
-.wb-engine-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  z-index: 1;
-  touch-action: none;
-}
-
-/* While the camera or a drag moves, sprites draw all text: the element views under the canvas and the selection overlay rest. */
-.wb-surface[data-wb-moving] > .wb-layer:not(.wb-live-layer),
-.wb-surface[data-wb-moving] .wb-sel {
-  visibility: hidden;
-}
-
-/* Tools the engine does not run keep the surface's cursor. */
-.wb-surface:not(.wb-tool-select, .wb-tool-hand) > .wb-engine-canvas {
-  cursor: inherit !important;
-}
-
-/* The canvas draws peers' selections and cursor arrows; their names stay DOM. */
-.wb-surface[data-wb-engine="on"] :is(.wb-peer-ring, .wb-cursor-arrow) {
-  display: none;
-}
-
 /* Screen-space overlays (selection handles, cursors, pins). */
 .wb-overlay {
   position: absolute;
@@ -276,7 +247,7 @@ body {
 }
 /* The Note and Sticker tools' ghost is the pointer (canvas/PlaceGhost.tsx). */
 .wb-surface:is(.wb-tool-note, .wb-tool-sticker)[data-wb-ghost],
-.wb-surface:is(.wb-tool-note, .wb-tool-sticker)[data-wb-ghost] :is(.wb-el, .wb-text, .wb-engine-canvas) {
+.wb-surface:is(.wb-tool-note, .wb-tool-sticker)[data-wb-ghost] :is(.wb-el, .wb-text) {
   cursor: none;
 }
 .wb-surface[data-wb-ghost] .wb-layer * {
@@ -890,3 +861,15 @@ html[data-frame-capture] :is(.wb-history-panel, .wb-history-preview) {
 .wb-paused-media { display: grid; place-items: center; border: 1px dashed currentColor; opacity: .7; }
 .wb-corner-zoom { position: absolute; z-index: 30; right: 12px; bottom: 12px; padding: 4px; }
 .wb-pill:empty { display: none; }
+.wb-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--wb-paper);
+  color: var(--wbc-muted);
+  font-size: 12px;
+}

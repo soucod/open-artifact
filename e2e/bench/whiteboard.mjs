@@ -1,24 +1,21 @@
 #!/usr/bin/env node
-// Performance benchmark of the Whiteboard: a large generated board opened in headless Chrome, drawn by the canvas
-// engine or (open_artifact_engine=off) by the DOM.
+// Performance benchmark of the Whiteboard: a large generated board opened in headless Chrome.
 //
 //   node e2e/bench/whiteboard.mjs                          2,000 elements, artifact-types/ (build first)
 //   node e2e/bench/whiteboard.mjs --elements 5000
-//   node e2e/bench/whiteboard.mjs --params open_artifact_engine=off   the DOM board
 //   node e2e/bench/whiteboard.mjs --shots shots/           screenshots of the smoke check and of each view
-//   node e2e/bench/whiteboard.mjs --label dom --out results.json
-//   node e2e/bench/whiteboard.mjs --compare 2000,5000      the canvas engine against open_artifact_engine=off at each size, as a table
+//   node e2e/bench/whiteboard.mjs --label before --out results.json
+//   node e2e/bench/whiteboard.mjs --compare 800,2000       one run per size, as a table
 //
 // A stored board holds at most 800 elements, so the page opens a small stored board (the smoke check's) and then shows
-// the generated one through its benchmark hook (`?open_artifact_bench=1`, packages/whiteboard-editor/src/engine/bench.ts): in the
+// the generated one through its benchmark hook (`?open_artifact_bench=1`, packages/whiteboard-editor/src/services/bench.ts): in the
 // page only, nothing saved. The board mixes sections, shapes and stickies with text, connectors, free text and ink.
 //
 // What it measures (see docs/zh-CN/rust-wasm-core.md §10, W2/W3):
 //   smoke     on the stored board: click a shape, drag it (its connector must follow while dragging and the move must
 //             reach the board's documents), a marquee over two items, Escape; each check passes or says why not
-//   load      from showing the generated board until it is drawn and the page answers again (two frames later, with
-//             the engine once the DOM text layer is in place), then DOM nodes, JS heap (after a GC) and the Chrome
-//             process tree's RSS
+//   load      from showing the generated board until it is drawn and the page answers again (two frames later), then
+//             DOM nodes, JS heap (after a GC) and the Chrome process tree's RSS
 //   overview  wheel panning and Ctrl+wheel zooming with the whole board in view
 //   mid       wheel panning at 50 % (text drawn, hundreds of items in view)
 //   work      wheel panning at 100 %
@@ -140,14 +137,9 @@ const RECORDER = `(() => {
   return true;
 })()`;
 
-/** Resolves once the page has drawn twice and, with the engine, its DOM text layer is in place (ms since `t0`). */
+/** Resolves once the page has drawn twice (ms since `t0`). */
 const SETTLED = t0 => `new Promise(resolve => {
-  const surface = document.querySelector('[data-testid="board-surface"]');
-  const check = () => requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (surface && surface.dataset.wbMoving !== undefined) setTimeout(check, 16);
-    else resolve(performance.now() - ${t0});
-  }));
-  check();
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - ${t0})));
 })`;
 
 /* --------------------------------- driving -------------------------------- */
@@ -306,8 +298,7 @@ async function main() {
   const browser = await launch();
   const result = { label: LABEL, elements: ELEMENTS, params: PARAMS };
   try {
-    const page = await browser.load(url, { ready: `window.__openArtifactWhiteboard && window.__openArtifactWhiteboard.state().elements > 0 && window.__openArtifactWhiteboard.state().engine !== 'starting'`, settle: 500, timeout: 60000 });
-    result.engine = (await wb(page, 'state()')).engine;
+    const page = await browser.load(url, { ready: `window.__openArtifactWhiteboard && window.__openArtifactWhiteboard.state().elements > 0`, settle: 500, timeout: 60000 });
     result.smoke = await smoke(page, root);
 
     // The generated board, the whole of it in view.
@@ -326,7 +317,7 @@ async function main() {
     await page.cdp('HeapProfiler.collectGarbage').catch(() => {});
     const metrics = await metricsOf(page);
     const state = await wb(page, 'state()');
-    result.load = { shown: shown.kept, interactiveMs: shown.ms, zoom: Math.round(fit * 1000) / 1000, nodes: metrics.Nodes, elementViews: state.elementViews, engineItems: state.stats?.items ?? null };
+    result.load = { shown: shown.kept, interactiveMs: shown.ms, zoom: Math.round(fit * 1000) / 1000, nodes: metrics.Nodes, elementViews: state.elementViews };
     result.memory = { jsHeapMB: Math.round(metrics.JSHeapUsedSize / 1048576), chromeRssMB: rssOfTree(browser.pid) };
     await shot(page, 'overview');
 
@@ -360,24 +351,22 @@ async function main() {
 
 /* -------------------------------- compare --------------------------------- */
 
-/** Runs this script once per size and renderer, and prints the results side by side. */
+/** Runs this script once per size, and prints the results side by side. */
 function compare() {
   const sizes = COMPARE.split(',').map(Number);
   const rows = [];
   for (const elements of sizes) {
-    for (const [label, params] of [['engine', PARAMS], ['dom', [PARAMS, 'open_artifact_engine=off'].filter(Boolean).join('&')]]) {
-      console.error(`… ${elements} elements, ${label}`);
-      const argv = [process.argv[1], '--elements', String(elements), '--label', label, ...(params ? ['--params', params] : []), ...(SHOTS ? ['--shots', SHOTS] : [])];
-      const out = execFileSync(process.execPath, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 1 << 26 });
-      rows.push(JSON.parse(out));
-    }
+    console.error(`… ${elements} elements`);
+    const argv = [process.argv[1], '--elements', String(elements), '--label', LABEL, ...(PARAMS ? ['--params', PARAMS] : []), ...(SHOTS ? ['--shots', SHOTS] : [])];
+    const out = execFileSync(process.execPath, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 1 << 26 });
+    rows.push(JSON.parse(out));
   }
   const pair = r => `${r.fps} / ${r.p95} / ${r.worst}`;
   const lines = [
-    '| elements | board | interactive ms | DOM nodes (overview / 50 %) | heap MB | Chrome RSS MB | overview pan fps / p95 / worst ms | overview zoom | 50 % pan | 100 % pan | smoke |',
-    '|---|---|---|---|---|---|---|---|---|---|---|',
+    '| elements | interactive ms | DOM nodes (overview / 50 %) | heap MB | Chrome RSS MB | overview pan fps / p95 / worst ms | overview zoom | 50 % pan | 100 % pan | smoke |',
+    '|---|---|---|---|---|---|---|---|---|---|',
     ...rows.map(r =>
-      `| ${r.elements} | ${r.engine === 'on' ? 'engine' : 'DOM'} | ${r.load.interactiveMs} | ${r.load.nodes} / ${r.mid.nodes} | ${r.memory.jsHeapMB} | ${r.memory.chromeRssMB} | ${pair(r.overviewPan)} | ${pair(r.overviewZoom)} | ${pair(r.midPan)} | ${pair(r.workPan)} | ${r.smoke.filter(c => c.ok).length}/${r.smoke.length} |`,
+      `| ${r.elements} | ${r.load.interactiveMs} | ${r.load.nodes} / ${r.mid.nodes} | ${r.memory.jsHeapMB} | ${r.memory.chromeRssMB} | ${pair(r.overviewPan)} | ${pair(r.overviewZoom)} | ${pair(r.midPan)} | ${pair(r.workPan)} | ${r.smoke.filter(c => c.ok).length}/${r.smoke.length} |`,
     ),
   ];
   console.log(lines.join('\n'));

@@ -317,6 +317,43 @@ export function flattenSvgPath(path: unknown, maxChars = 4000, coordinateLimit =
   return polylines;
 }
 
+/** A path's arcs (each as its larger radius) and the same path with every arc drawn as a straight line. */
+export interface SvgPathArcs {
+  radii: number[];
+  lines: string;
+}
+
+/** Splits the arcs out of path data; `undefined` when the data cannot be read. */
+export function splitSvgPathArcs(path: string): SvgPathArcs | undefined {
+  if (path.replace(SVG_PATH_TOKEN_PATTERN, '').replace(/[\s,]/g, '') !== '') return undefined;
+  const tokens: Array<string | number> = [...path.matchAll(SVG_PATH_TOKEN_PATTERN)].map((match) => (match[1] !== undefined ? match[1] : Number(match[2])));
+  const radii: number[] = [];
+  const parts: string[] = [];
+  let command = '';
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (typeof token === 'string') {
+      command = token;
+      index += 1;
+      if (command.toUpperCase() !== 'A') parts.push(command);
+      continue;
+    }
+    const argCount = SVG_PATH_ARG_COUNTS[command.toUpperCase()] ?? 0;
+    const args = tokens.slice(index, index + argCount);
+    if (argCount === 0 || args.length < argCount || args.some((arg) => typeof arg !== 'number')) return undefined;
+    index += argCount;
+    if (command.toUpperCase() === 'A') {
+      radii.push(Math.max(Math.abs(Number(args[0])), Math.abs(Number(args[1]))));
+      parts.push(command === 'a' ? 'l' : 'L', String(args[5]), String(args[6]));
+    } else parts.push(...args.map(String));
+    // Coordinate pairs after a moveto are implicit linetos.
+    if (command === 'M') command = 'L';
+    else if (command === 'm') command = 'l';
+  }
+  return { radii, lines: parts.join(' ') };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Shapes                                                                      */
 /* -------------------------------------------------------------------------- */

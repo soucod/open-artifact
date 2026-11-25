@@ -96,12 +96,19 @@ export interface CalculationSource {
   withheld?: string;
 }
 
+/** Saved rows: a collection or a document under `data/` that the page writes (see `saved-rows.ts`). */
+export interface StoreSource {
+  kind: 'store';
+  /** As written; `data/users/me/…` is read as the viewer's own. Empty when the path can't hold saved rows. */
+  path: string;
+}
+
 export interface UnsupportedSource {
   kind: 'unsupported';
   rawKind: string;
 }
 
-export type DatasetSource = QuerySource | FileSource | CalculationSource | UnsupportedSource;
+export type DatasetSource = QuerySource | FileSource | StoreSource | CalculationSource | UnsupportedSource;
 
 export interface ViewerIdentity {
   id: string;
@@ -206,6 +213,9 @@ export type LoadWording =
         | 'fileNotStored'
         | 'fileFailed'
         | 'fileNoRows'
+        | 'savedRowsUnavailable'
+        | 'savedRowsSilent'
+        | 'savedRowsFailed'
         | 'noConnector'
         | 'noTool'
         | 'noQuery'

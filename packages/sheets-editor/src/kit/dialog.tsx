@@ -44,6 +44,31 @@ const AlertContext = React.createContext(false);
 
 const keepSelection = (event: React.MouseEvent<HTMLDivElement>): void => event.preventDefault();
 
+/**
+ * The rest of a double click that opened a dialog lands on its backdrop, which would close it
+ * again. From the moment the backdrop appears, presses that continue a multi-click on it or on the
+ * page root are swallowed, until a fresh single press or the window regaining focus.
+ */
+function useSwallowRepeatClicksOnBackdrop(backdrop: HTMLDivElement | null): void {
+  React.useLayoutEffect(() => {
+    const win = backdrop?.ownerDocument.defaultView;
+    if (!backdrop || !win) return undefined;
+    const root = win.document.documentElement;
+    const watching = new win.AbortController();
+    const onPress = (event: MouseEvent): void => {
+      if (event.detail > 1) {
+        if (event.target !== backdrop && event.target !== root) return;
+        event.preventDefault();
+        event.stopPropagation();
+      } else if (event.type === 'mousedown') watching.abort();
+    };
+    win.addEventListener('mousedown', onPress, { capture: true, signal: watching.signal });
+    win.addEventListener('click', onPress, { capture: true, signal: watching.signal });
+    win.addEventListener('focus', () => watching.abort(), { signal: watching.signal });
+    return () => watching.abort();
+  }, [backdrop]);
+}
+
 export type DialogRootProps = BaseDialog.Root.Props;
 export type AlertDialogRootProps = BaseAlertDialog.Root.Props;
 
@@ -90,11 +115,13 @@ const DialogPopup = React.forwardRef<HTMLDivElement, DialogPopupProps>(function 
     { onPointerDownCapture, onMouseDownCapture, onClickCapture, onAuxClickCapture, onKeyDownCapture, onSubmitCapture },
     'data-closed',
   );
+  const [backdrop, setBackdrop] = React.useState<HTMLDivElement | null>(null);
+  useSwallowRepeatClicksOnBackdrop(backdrop);
   return (
     <BaseDialog.Portal>
       <PopupScope className="relative" style={layer.style}>
         <LayerBaseContext.Provider value={layer.base}>
-          <BaseDialog.Backdrop forceRender className={BACKDROP_CLASSES} onMouseDown={keepSelection} />
+          <BaseDialog.Backdrop ref={setBackdrop} forceRender className={BACKDROP_CLASSES} onMouseDown={keepSelection} />
           <BaseDialog.Popup
             ref={ref}
             data-ui="Dialog"

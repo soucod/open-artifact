@@ -2,49 +2,25 @@
  * What the find bar does to the editor shown now: searches it, steps through the matches, replaces them and lands on
  * one when it closes. The editor's matches live in its state (plugin.ts); the bar's words in its store (store.ts).
  */
+import { chipText, isChipKind } from '@open-artifact/docs-core';
 import { stepIndex } from '@open-artifact/editor-kit';
-import type { Node as PMNode } from 'prosemirror-model';
 import { redo, undo } from 'prosemirror-history';
-import { type EditorState, TextSelection } from 'prosemirror-state';
+import { NodeSelection, TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
+import { usePeopleNames } from '../app/people.ts';
 import { getDocs, setDocs, useDocs } from '../app/store.ts';
-import { foldedIds, toggleFold } from '../editor/fold.ts';
+import { unfoldTo } from '../editor/fold.ts';
 import { currentView, useEditor } from '../editor/format.ts';
-import { schema } from '../editor/schema.ts';
+import { pageChips } from '../editor/node-views.ts';
+import { chipNamesKey } from './other-tabs.ts';
 import { type FindMeta, findKey, findState } from './plugin.ts';
-import { type ReplaceOutcome, planReplace, writeReplacements } from './search.ts';
+import { type ChipWords, type ReplaceOutcome, planReplace, writeReplacements } from './search.ts';
 import { getFindBar, setFindBar } from './store.ts';
 
+/** A chip's words as the editor shows them now. */
+export const chipWordsOnPage: ChipWords = node => (isChipKind(node.type.name) ? chipText(node.type.name, node.attrs, pageChips) : null);
+
 const send = (view: EditorView, meta: FindMeta) => view.dispatch(view.state.tr.setMeta(findKey, meta).setMeta('addToHistory', false));
-
-const headingLevel = (node: PMNode) => (node.type === schema.nodes.paragraph ? ((node.attrs.heading as number | null) ?? 0) : 0);
-
-/** The folded heading that hides `pos`, if one does. */
-function foldHiding(state: EditorState, pos: number): string | null {
-  const folded = foldedIds(state);
-  if (!folded.size) return null;
-  const { doc } = state;
-  const index = doc.resolve(pos).index(0);
-  let hiding = 0;
-  let by: string | null = null;
-  for (let at = 0; at <= index && at < doc.childCount; at++) {
-    const node = doc.child(at);
-    const level = headingLevel(node);
-    if (hiding && level && level <= hiding) {
-      hiding = 0;
-      by = null;
-    }
-    if (hiding) {
-      if (at === index) return by;
-      continue;
-    }
-    if (level && node.attrs.bid && folded.has(node.attrs.bid as string)) {
-      hiding = level;
-      by = node.attrs.bid as string;
-    }
-  }
-  return null;
-}
 
 /** Scrolls the page so `pos` is in sight, a third of the way down, when it is not already. */
 function scrollToPos(view: EditorView, pos: number): void {
@@ -67,11 +43,7 @@ export function revealCurrent(view: EditorView): void {
   const { matches, current } = findState(view.state);
   const match = matches[current];
   if (!match) return;
-  for (let tries = 0; tries < 6; tries++) {
-    const heading = foldHiding(view.state, match.from);
-    if (!heading) break;
-    toggleFold(heading)(view.state, view.dispatch);
-  }
+  unfoldTo(view, match.from);
   scrollToPos(view, match.from);
 }
 
@@ -136,7 +108,17 @@ export function replace(all: boolean): boolean {
     all,
     again: all && bar.lastReplaceAll === text,
   });
-  const outcome: ReplaceOutcome = { serial: (bar.outcome?.serial ?? 0) + 1, all, replaced: 0, frozen: plan.frozen, already: plan.already, left: plan.left, more: plan.more, refused: false };
+  const outcome: ReplaceOutcome = {
+    serial: (bar.outcome?.serial ?? 0) + 1,
+    all,
+    replaced: 0,
+    frozen: plan.frozen,
+    chips: plan.chips,
+    already: plan.already,
+    left: plan.left,
+    more: plan.more,
+    refused: false,
+  };
   if (!plan.targets.length) {
     setFindBar({ outcome });
     if (!all && found.matches.length > 1) {
@@ -151,7 +133,7 @@ export function replace(all: boolean): boolean {
   const before = view.state.doc;
   view.dispatch(tr);
   if (view.state.doc === before) {
-    setFindBar({ outcome: { ...outcome, frozen: 0, already: 0, left: 0, more: false, refused: true } });
+    setFindBar({ outcome: { ...outcome, frozen: 0, chips: 0, already: 0, left: 0, more: false, refused: true } });
     return false;
   }
   setFindBar({ outcome: { ...outcome, replaced: plan.targets.length }, lastReplaceAll: all ? text : bar.lastReplaceAll });
@@ -174,7 +156,10 @@ export function closeFind(land: boolean): void {
   if (view && land) {
     const { matches, current } = findState(view.state);
     const match = matches[current];
-    if (match) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, match.from, match.to)).scrollIntoView());
+    if (match) {
+      const selection = match.chip ? NodeSelection.create(view.state.doc, match.from) : TextSelection.create(view.state.doc, match.from, match.to);
+      view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+    }
   }
   setFindBar({ outcome: null, undoable: 0, redoable: 0, firstOnOpen: false });
   if (getDocs().find !== 'closed') setDocs({ find: 'closed' });
@@ -189,11 +174,18 @@ export function watchFind(): () => void {
     if (first) setFindBar({ firstOnOpen: false });
     searchView(state.view, first ? 0 : undefined);
   });
+  const relabel = () => {
+    const view = currentView();
+    if (getDocs().find !== 'closed' && view && findState(view.state).query) send(view, { kind: 'relabel' });
+  };
   const stopDocs = useDocs.subscribe((state, before) => {
     if ((state.find === 'closed') !== (before.find === 'closed')) searchView();
+    else if (state.project !== before.project && chipNamesKey(state.project) !== chipNamesKey(before.project)) relabel();
   });
+  const stopPeople = usePeopleNames.subscribe(relabel);
   return () => {
     stopEditor();
     stopDocs();
+    stopPeople();
   };
 }

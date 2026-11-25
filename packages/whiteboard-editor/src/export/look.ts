@@ -23,6 +23,7 @@ import {
   shapeFillForColor,
   shapeTextColor,
   tableCellValue,
+  tableColumnIds,
   tableRowIds,
   themedInkColor,
   type ArrowGeometry,
@@ -32,6 +33,8 @@ import {
   type NoteElement,
   type Rgba,
   type ShapeElement,
+  type TableCellMap,
+  type TableCellPaint,
   type TableElement,
   type TextAlign,
 } from '@open-artifact/whiteboard-core';
@@ -156,6 +159,33 @@ export function tableHeadColors(table: Pick<TableElement, 'color' | 'ink'>, sche
 /** The weight of a table's header text (at least medium). */
 export function tableHeadWeight(table: Pick<TableElement, 'size'>): number {
   return Math.max(500, TEXT_SIZE_STYLES[table.size ?? 'body'].weight);
+}
+
+/** Which sides of a tinted cell meet another tinted cell: there the board draws a divider in the paper color. */
+export interface TableCellDividers {
+  right: boolean;
+  bottom: boolean;
+}
+
+/** The dividers of each tinted cell that has a tinted neighbor on its right or below it. */
+export function tableTintDividers(
+  table: Pick<TableElement, 'rows' | 'cols'>,
+  paints: TableCellMap<TableCellPaint>,
+): TableCellMap<TableCellDividers> {
+  const rowIds = tableRowIds(table);
+  const columnIds = tableColumnIds(table);
+  const dividers: TableCellMap<TableCellDividers> = {};
+  rowIds.forEach((rowId, rowIndex) => {
+    columnIds.forEach((columnId, columnIndex) => {
+      if (paints[rowId]?.[columnId] === undefined) return;
+      const nextColumn = columnIds[columnIndex + 1];
+      const nextRow = rowIds[rowIndex + 1];
+      const right = nextColumn !== undefined && paints[rowId]?.[nextColumn] !== undefined;
+      const bottom = nextRow !== undefined && paints[nextRow]?.[columnId] !== undefined;
+      if (right || bottom) (dividers[rowId] ??= {})[columnId] = { right, bottom };
+    });
+  });
+  return dividers;
 }
 
 /**

@@ -1,27 +1,31 @@
 {
   "name": "@open-artifact/type-server",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
-  "description": "Local type server and command line of the Design, Design System, Slides, Whiteboard, Data and Docs artifact types.",
+  "description": "Local type server and command line of the Design, Design System, Slides, Whiteboard, Data, Docs, Sheets and Motion artifact types.",
   "bin": {
     "open-artifact-type-server": "./src/cli.ts"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./archive": "./src/archive.ts"
   },
   "dependencies": {
-    "@open-artifact/protocol": "0.9.2",
-    "@open-artifact/server-sdk": "0.9.2",
-    "@open-artifact/runtime": "0.9.2",
-    "@open-artifact/design-core": "0.9.2",
-    "@open-artifact/design-system-core": "0.9.2",
-    "@open-artifact/slides-core": "0.9.2",
-    "@open-artifact/whiteboard-core": "0.9.2",
-    "@open-artifact/data-core": "0.9.2",
-    "@open-artifact/docs-core": "0.9.2",
-    "@open-artifact/sheets-core": "0.9.2",
-    "@open-artifact/wasm-sheets": "0.9.2",
+    "@open-artifact/protocol": "0.14.6",
+    "@open-artifact/server-sdk": "0.14.6",
+    "@open-artifact/runtime": "0.14.6",
+    "@open-artifact/design-core": "0.14.6",
+    "@open-artifact/design-system-core": "0.14.6",
+    "@open-artifact/slides-core": "0.14.6",
+    "@open-artifact/whiteboard-core": "0.14.6",
+    "@open-artifact/data-core": "0.14.6",
+    "@open-artifact/docs-core": "0.14.6",
+    "@open-artifact/sheets-core": "0.14.6",
+    "@open-artifact/wasm-sheets": "0.14.6",
+    "@open-artifact/motion-core": "0.14.6",
+    "@open-artifact/motion-stage": "0.14.6",
+    "acorn": "8.19.0",
     "pdfjs-dist": "6.4.299"
   },
   "license": "Apache-2.0"

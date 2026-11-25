@@ -1,4 +1,3 @@
-import type { Dynamic } from '../../dynamic.ts';
 import {
   areRangesOneSameColumn,
   firstColumnOfRule,
@@ -43,25 +42,62 @@ import {
 } from './pane-state.ts';
 import { withNoEffects } from '../../state/transitions.ts';
 import { askAgentForRulesFromWords } from './agent-rules.ts';
+import type {
+  CellCondition,
+  ColumnOfRecords,
+  ColumnReading,
+  Edit,
+  Effect,
+  FormatOfACondition,
+  KindOfAColumn,
+  MiddleAnchor,
+  NumberOperand,
+  RangeCorners,
+  RuleInIds,
+  SheetId,
+  Test,
+} from '@open-artifact/sheets-core';
 import type { PageState } from '../../state/initial-state.ts';
+import type { PageTransition } from '../../state/transitions.ts';
 import type { WorkbookReads } from '../../model/workbook.ts';
-export function testRetargeterForRanges(reads: WorkbookReads, sheetId?: Dynamic, newRule?: Dynamic, edited?: Dynamic) {
+import type { CellArea } from '../../selection/model.ts';
+import type { SeveralRanges } from '../../selection/several-ranges.ts';
+import type { ConditionalFormatDone } from '../../messages/conditional-format.ts';
+import type { TableOfRecords } from './conditions.ts';
+import type { NumberOperandField } from './editor-view.ts';
+import type { ColorScaleEffect, FormatWhereRule } from './rule-edits.ts';
+import type { ConditionalFormatsPane, RefusedTyping, RuleEditorState, RuleField, RulesPaneAction } from './pane-state.ts';
+/** A rule, with the table of records its cells lie in. */
+export interface RuleAndTable {
+  rule: RuleInIds;
+  table: TableOfRecords | null;
+}
+/** A rule being edited, with what is needed to read what is typed for it. */
+export interface RuleBeingEdited extends RuleAndTable {
+  reads: WorkbookReads;
+  sheetId: SheetId;
+}
+/** Points a test at other cells when the cells of its rule move. */
+export type RetargetTest = (test: Test) => Test;
+/** What the page tells when a saved rule was changed by more than what was asked. */
+type NoticeOfSavedRule = 'movedToNumbers' | 'scaleColorsNothing';
+export function testRetargeterForRanges(reads: WorkbookReads, sheetId: SheetId, newRule: RuleInIds, edited: RuleAndTable): RetargetTest | null {
   if (areRangesOneSameColumn(newRule.ranges) || !areRangesOneSameColumn(edited.rule.ranges)) return null;
   let newAreas = areasOfRuleRanges(reads, sheetId, newRule.ranges);
   let oldAreas = areasOfRuleRanges(reads, sheetId, edited.rule.ranges);
-  if (!newAreas.some((newArea?: Dynamic) => oldAreas.some((oldArea?: Dynamic) => areasOverlap(newArea, oldArea)))) return null;
-  let filledColumns = (edited.table?.columns ?? []).filter(({ c: c, filled: filled }: Dynamic) => {
+  if (!newAreas.some((newArea) => oldAreas.some((oldArea) => areasOverlap(newArea, oldArea)))) return null;
+  let filledColumns = (edited.table?.columns ?? []).filter(({ c, filled }) => {
     let columnIndex = reads.columnIndexOf(sheetId, c) ?? -1;
     return (
       filled > 0 &&
       newAreas.some(
-        ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) => isInSpan(columnIndex, leftColumnIndex, columnCount),
+        ({ leftColumnIndex, columnCount }) => isInSpan(columnIndex, leftColumnIndex, columnCount),
       )
     );
   });
   let testedColumn = tableColumnSummary(edited.table, firstColumnOfRule(edited.rule));
-  return (test?: Dynamic) =>
-    filledColumns.every((column?: Dynamic) => doesConditionFitColumn(test.condition, column, testedColumn))
+  return (test) =>
+    filledColumns.every((column) => doesConditionFitColumn(test.condition, column, testedColumn))
       ? test
       : {
           ...test,
@@ -71,29 +107,29 @@ export function testRetargeterForRanges(reads: WorkbookReads, sheetId?: Dynamic,
           },
         };
 }
-export function refitTestsToRanges(rule?: Dynamic, table?: Dynamic, edited?: Dynamic, retarget?: Dynamic) {
-  let { effect: effect } = rule;
+export function refitTestsToRanges(rule: RuleInIds, table: TableOfRecords | null, edited: RuleAndTable, retarget: RetargetTest | null): RuleInIds {
+  let { effect } = rule;
   if (effect.kind !== 'formatWhere') return rule;
   let refitted = effect.allOf.reduce(
-    (effect2?: Dynamic, test?: Dynamic, testIndex?: Dynamic) =>
-      updateRuleTest(effect2, testIndex, (test2?: Dynamic) => {
-        if (test2.tested.kind === 'theCellItself' && retarget !== null) return retarget(test2);
+    (refittedEffect, test, testIndex) =>
+      updateRuleTest(refittedEffect, testIndex, (testToRefit) => {
+        if (testToRefit.tested.kind === 'theCellItself' && retarget !== null) return retarget(testToRefit);
         let condition = conditionForNewColumn(
-          test2.condition,
-          testedColumnSummary(rule, table, test2),
-          testedColumnSummary(edited.rule, edited.table, test2),
+          testToRefit.condition,
+          testedColumnSummary(rule, table, testToRefit),
+          testedColumnSummary(edited.rule, edited.table, testToRefit),
         );
-        return 'text' in condition && 'text' in test2.condition
+        return 'text' in condition && 'text' in testToRefit.condition
           ? {
-              ...test2,
+              ...testToRefit,
               condition: {
                 ...condition,
-                text: test2.condition.text,
+                text: testToRefit.condition.text,
               },
             }
           : {
-              ...test2,
-              condition: condition,
+              ...testToRefit,
+              condition,
             };
       }),
     effect,
@@ -103,9 +139,9 @@ export function refitTestsToRanges(rule?: Dynamic, table?: Dynamic, edited?: Dyn
     effect: refitted,
   };
 }
-export function rangesOfAreas(reads: WorkbookReads, sheetId?: Dynamic, areas?: Dynamic) {
-  let [firstRange, ...otherRanges] = areas.flatMap((area?: Dynamic) => {
-    let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = area;
+export function rangesOfAreas(reads: WorkbookReads, sheetId: SheetId, areas: CellArea[]): RangeCorners[] | null {
+  let [firstRange, ...otherRanges] = areas.flatMap((area) => {
+    let { topRowIndex, leftColumnIndex, rowCount, columnCount } = area;
     let topLeftCell = reads.cellIdAt(sheetId, topRowIndex, leftColumnIndex);
     let bottomRightCell = reads.cellIdAt(sheetId, topRowIndex + rowCount - 1, leftColumnIndex + columnCount - 1);
     return topLeftCell === null || bottomRightCell === null
@@ -127,28 +163,28 @@ export function rangesOfAreas(reads: WorkbookReads, sheetId?: Dynamic, areas?: D
   let isOverRangeLimit = areas.length > reads.limitsOfConditionalFormats().mostRangesInAConditionalFormat;
   return firstRange === undefined || !isEveryAreaInRange || isOverRangeLimit ? null : [firstRange, ...otherRanges];
 }
-export function rangesFromA1Text(reads: WorkbookReads, sheetId?: Dynamic, a1Text?: Dynamic) {
-  let sheet = reads.listSheets().find((sheet2?: Dynamic) => sheet2.sheetId === sheetId);
+export function rangesFromA1Text(reads: WorkbookReads, sheetId: SheetId, a1Text: string): RangeCorners[] | null {
+  let sheet = reads.listSheets().find((listed) => listed.sheetId === sheetId);
   if (sheet === undefined) return null;
-  let areas = a1Text.split(',').flatMap((part?: Dynamic) => parseA1AreasAsSeen(part, sheet) ?? [null]);
+  let areas = a1Text.split(',').flatMap((part) => parseA1AreasAsSeen(part, sheet) ?? [null]);
   return areas.includes(null)
     ? null
     : rangesOfAreas(
         reads,
         sheetId,
-        areas.filter((area?: Dynamic) => area !== null),
+        areas.filter((area) => area !== null),
       );
 }
-export function numberReadAs(reads: WorkbookReads, numberFormat?: Dynamic, text?: Dynamic) {
+export function numberReadAs(reads: WorkbookReads, numberFormat: ColumnReading, text: string): number | null {
   let [reading] = reads.textsUnderAColumnReading(numberFormat, [text])?.read ?? [];
   return reading?.kind === 'fits' && reading.input.kind === 'number' ? reading.input.value : null;
 }
-export function numberTypedFor(reads: WorkbookReads, text?: Dynamic, columnKind?: Dynamic) {
+export function numberTypedFor(reads: WorkbookReads, text: string, columnKind: KindOfAColumn): number | null {
   let decimals = {
     decimalSign: reads.decimalSign,
     decimalPlaces: 0,
   };
-  let currencySymbol2 = /\p{Sc}/u.exec(text)?.[0];
+  let currencySymbol = /\p{Sc}/u.exec(text)?.[0];
   if (columnKind === 'percent' || text.includes('%'))
     return numberReadAs(
       reads,
@@ -159,7 +195,7 @@ export function numberTypedFor(reads: WorkbookReads, text?: Dynamic, columnKind?
       },
       text,
     );
-  return currencySymbol2 === undefined
+  return currencySymbol === undefined
     ? numberReadAs(
         reads,
         {
@@ -174,16 +210,22 @@ export function numberTypedFor(reads: WorkbookReads, text?: Dynamic, columnKind?
         {
           kind: 'currency',
           ...decimals,
-          symbol: currencySymbol2,
+          symbol: currencySymbol,
         },
         text,
       );
 }
-export function wholeNumberIn(text?: Dynamic, least?: Dynamic, most: Dynamic = Number.MAX_SAFE_INTEGER) {
+export function wholeNumberIn(text: string, least: number, most = Number.MAX_SAFE_INTEGER): number | null {
   let number = /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
   return number !== null && number >= least && number <= most ? number : null;
 }
-export function conditionWithTypedField(condition: Dynamic, field: Dynamic, typed: Dynamic, { kind: kind }: Dynamic, reads: WorkbookReads) {
+export function conditionWithTypedField(
+  condition: CellCondition,
+  field: string,
+  typed: string,
+  { kind }: Pick<ColumnOfRecords, 'kind'>,
+  reads: WorkbookReads,
+): CellCondition | null {
   if (field === 'text')
     return 'text' in condition && typed.trim() !== ''
       ? {
@@ -208,7 +250,7 @@ export function conditionWithTypedField(condition: Dynamic, field: Dynamic, type
       ? null
       : withOperand(condition, field, {
           kind: 'number',
-          number: number,
+          number,
         });
   }
   let days = operand?.kind === 'daysFromToday' ? wholeNumberIn(typed, 1) : null;
@@ -219,8 +261,8 @@ export function conditionWithTypedField(condition: Dynamic, field: Dynamic, type
         days: operand.days < 0 ? -days : days,
       });
 }
-export function ruleWithTypedField({ rule: rule, table: table, reads: reads, sheetId: sheetId }: Dynamic, field?: Dynamic, typed?: Dynamic) {
-  let { effect: effect } = rule;
+export function ruleWithTypedField({ rule, table, reads, sheetId }: RuleBeingEdited, field: RuleField, typed: string): RuleInIds | null {
+  let { effect } = rule;
   if (field === 'cells') {
     let end = rangesFromA1Text(reads, sheetId, typed);
     return end === null
@@ -233,19 +275,19 @@ export function ruleWithTypedField({ rule: rule, table: table, reads: reads, she
   if (field === 'lowest' || field === 'middle' || field === 'highest') {
     let end = effect.kind === 'colorScale' ? effect[field] : null;
     if (effect.kind !== 'colorScale' || end === null) return null;
-    let { anchor: anchor } = end;
+    let { anchor } = end;
     let number = anchor.kind === 'number' ? numberTypedFor(reads, typed, tableColumnSummary(table, firstColumnOfRule(rule)).kind) : null;
     let percentile = anchor.kind === 'percentile' ? wholeNumberIn(typed, 0, 100) : null;
-    let newAnchor =
+    let newAnchor: MiddleAnchor | null =
       number !== null
         ? {
             kind: 'number',
-            number: number,
+            number,
           }
         : percentile !== null
           ? {
               kind: 'percentile',
-              percentile: percentile,
+              percentile,
             }
           : null;
     let scale =
@@ -276,34 +318,34 @@ export function ruleWithTypedField({ rule: rule, table: table, reads: reads, she
         effect: updateRuleTest(
           effect,
           Number(testIndexText),
-          (test2?: Dynamic) => ({
-            ...test2,
-            condition: condition,
+          (testBefore) => ({
+            ...testBefore,
+            condition,
           }),
         ),
       };
 }
 export function ruleAfterEditorAction(
-  { rule: rule, table: table, reads: reads, sheetId: sheetId }: Dynamic,
-  selection?: Dynamic,
-  action?: Dynamic,
-) {
-  let { effect: effect } = rule;
-  let ruleWhere =
+  { rule, table, reads, sheetId }: RuleBeingEdited,
+  selection: SeveralRanges,
+  action: RulesPaneAction,
+): RuleInIds | null {
+  let { effect } = rule;
+  let ruleWhere: FormatWhereRule | null =
     effect.kind === 'formatWhere'
       ? {
           ...rule,
-          effect: effect,
+          effect,
         }
       : null;
-  let withEffect = (effect2?: Dynamic) =>
-    effect2 === null
+  let withEffect = (newEffect: Effect | null) =>
+    newEffect === null
       ? null
       : {
           ...rule,
-          effect: effect2,
+          effect: newEffect,
         };
-  let changeTest = (testIndex?: Dynamic, change?: Dynamic) => {
+  let changeTest = (testIndex: number, change: (test: Test, column: ColumnOfRecords) => CellCondition | null) => {
     let test = ruleWhere?.effect.allOf[testIndex];
     if (ruleWhere === null || test === undefined) return null;
     let condition = change(test, testedColumnSummary(rule, table, test));
@@ -313,38 +355,38 @@ export function ruleAfterEditorAction(
           updateRuleTest(
             ruleWhere.effect,
             testIndex,
-            (test2?: Dynamic) => ({
-              ...test2,
-              condition: condition,
+            (testBefore) => ({
+              ...testBefore,
+              condition,
             }),
           ),
         );
   };
-  let withFormat = (format?: Dynamic) =>
+  let withFormat = (format: FormatOfACondition) =>
     ruleWhere === null || !isFormatNonEmpty(format)
       ? null
       : withEffect({
           ...ruleWhere.effect,
-          format: format,
+          format,
         });
-  let changeScale = (change?: Dynamic) => (effect.kind === 'colorScale' ? withEffect(orderScaleAnchors(change(effect))) : null);
+  let changeScale = (change: (scale: ColorScaleEffect) => ColorScaleEffect) => (effect.kind === 'colorScale' ? withEffect(orderScaleAnchors(change(effect))) : null);
   switch (action.kind) {
     case 'chooseKindOfEffect':
       return table === null ? null : ruleWithEffectKind(rule, action.effect, table);
     case 'useSelection': {
-      let value = rangesOfAreas(reads, sheetId, areasOfAllRanges(selection, reads));
-      return value === null
+      let selectedRanges = rangesOfAreas(reads, sheetId, areasOfAllRanges(selection, reads));
+      return selectedRanges === null
         ? null
         : {
             ...rule,
-            ranges: value,
+            ranges: selectedRanges,
           };
     }
     case 'chooseTested':
       return ruleWhere === null
         ? null
         : withEffect(
-            updateRuleTest(ruleWhere.effect, action.test, (test?: Dynamic) => {
+            updateRuleTest(ruleWhere.effect, action.test, (test) => {
               let testWithTested = {
                 ...test,
                 tested: action.tested,
@@ -354,7 +396,7 @@ export function ruleAfterEditorAction(
               let columnIndex = reads.columnIndexOf(sheetId, oldColumn.c) ?? -1;
               return action.tested.kind === 'theCellItself' &&
                 areasOfRuleRanges(reads, sheetId, rule.ranges).some(
-                  ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) =>
+                  ({ leftColumnIndex, columnCount }) =>
                     isInSpan(columnIndex, leftColumnIndex, columnCount),
                 ) &&
                 'text' in condition &&
@@ -368,17 +410,17 @@ export function ruleAfterEditorAction(
                   }
                 : {
                     ...testWithTested,
-                    condition: condition,
+                    condition,
                   };
             }),
           );
     case 'chooseCondition':
       return changeTest(
         action.test,
-        ({ condition: condition }: Dynamic, column?: Dynamic) => conditionWithOperator(action.choice, condition, column),
+        ({ condition }, column) => conditionWithOperator(action.choice, condition, column),
       );
     case 'chooseOperand':
-      return changeTest(action.test, ({ condition: condition }: Dynamic, column?: Dynamic) => {
+      return changeTest(action.test, ({ condition }, column) => {
         let operand = numberConditionOperand(condition, action.slot);
         let newOperand = operand === null || table === null ? null : operandForChoice(action.choice, operand, column, table);
         return newOperand === null ? null : withOperand(condition, action.slot, newOperand);
@@ -386,14 +428,14 @@ export function ruleAfterEditorAction(
     case 'chooseOperandColumn':
       return changeTest(
         action.test,
-        ({ condition: condition }: Dynamic) =>
+        ({ condition }) =>
           withOperand(condition, action.slot, {
             kind: 'sameRowInColumn',
             c: action.c,
           }),
       );
     case 'chooseDay':
-      return changeTest(action.test, ({ condition: condition }: Dynamic) => {
+      return changeTest(action.test, ({ condition }) => {
         let dayNumber = dayNumberOf(reads, action.day);
         return dayNumber === null
           ? null
@@ -405,7 +447,7 @@ export function ruleAfterEditorAction(
     case 'chooseText':
       return changeTest(
         action.test,
-        ({ condition: condition }: Dynamic) =>
+        ({ condition }) =>
           'text' in condition
             ? {
                 ...condition,
@@ -416,33 +458,31 @@ export function ruleAfterEditorAction(
     case 'removeTest':
       return ruleWhere === null ? null : withEffect(removeRuleTest(ruleWhere.effect, action.test));
     case 'choosePreset':
-      return withFormat(RULE_FORMAT_PRESETS.find(({ key: key }: Dynamic) => key === action.preset)?.format ?? {});
+      return withFormat(RULE_FORMAT_PRESETS.find(({ key }) => key === action.preset)?.format ?? {});
     case 'chooseColor':
       return ruleWhere === null ? null : withFormat(withFormatColor(ruleWhere.effect.format, action.property, action.color));
     case 'toggleStyle':
       return ruleWhere === null ? null : withFormat(toggleFontStyle(ruleWhere.effect.format, action.style));
     case 'chooseAnchor': {
-      let { smallest: value, middle: middleValue, largest: largest } = tableColumnSummary(table, firstColumnOfRule(rule));
+      let { smallest: smallestValue, middle: middleValue, largest } = tableColumnSummary(table, firstColumnOfRule(rule));
       let anchorValue =
-        (
-          {
-            lowest: value,
-            middle: middleValue,
-            highest: largest,
-          } as Dynamic
-        )[action.stop] ?? 0;
-      let withAnchorAt = (value2?: Dynamic) =>
-        changeScale((scale?: Dynamic) => withScalePointAnchor(scale, action.stop, action.choice, value2));
+        {
+          lowest: smallestValue,
+          middle: middleValue,
+          highest: largest,
+        }[action.stop] ?? 0;
+      let withAnchorAt = (anchorAt: number) =>
+        changeScale((scale) => withScalePointAnchor(scale, action.stop, action.choice, anchorAt));
       return withAnchorAt(anchorValue) ?? withAnchorAt(action.stop === 'lowest' ? anchorValue - 1 : anchorValue + 1);
     }
     case 'chooseStopDay': {
-      let value = dayNumberOf(reads, action.day);
-      return value === null ? null : changeScale((scale?: Dynamic) => withScalePointAnchor(scale, action.stop, 'number', value));
+      let stopDay = dayNumberOf(reads, action.day);
+      return stopDay === null ? null : changeScale((scale) => withScalePointAnchor(scale, action.stop, 'number', stopDay));
     }
     case 'chooseStopColor':
-      return changeScale((scale?: Dynamic) => withScalePointColor(scale, action.stop, action.color));
+      return changeScale((scale) => withScalePointColor(scale, action.stop, action.color));
     case 'setMiddleStop':
-      return changeScale((scale?: Dynamic) => withScaleMidpoint(scale, action.isOn));
+      return changeScale((scale) => withScaleMidpoint(scale, action.isOn));
     case 'addTest':
     case 'pointAtSuggestion':
     case 'takeSuggestion':
@@ -469,17 +509,23 @@ export function ruleAfterEditorAction(
       return null;
   }
 }
-export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: Dynamic, editor?: Dynamic, action?: Dynamic) {
-  let { sheetId: sheetId } = pane;
-  let { conditionalFormatId: conditionalFormatId, table: table, typed: typed, testBeingAdded: testBeingAdded } = editor;
+export function actInRuleEditor(
+  state: PageState,
+  reads: WorkbookReads,
+  pane: ConditionalFormatsPane,
+  editor: RuleEditorState,
+  action: RulesPaneAction,
+): PageTransition {
+  let { sheetId } = pane;
+  let { conditionalFormatId, table, typed, testBeingAdded } = editor;
   let savedRule = conditionalFormatRuleById(reads, sheetId, conditionalFormatId);
   let currentRule = savedRule === null ? null : ruleWithTestBeingAdded(savedRule, testBeingAdded);
-  let withEditor = (editor2?: Dynamic, paneChanges: Dynamic = {}) =>
+  let withEditor = (editorNow: RuleEditorState | null, paneChanges: Partial<ConditionalFormatsPane> = {}) =>
     withNoEffects(
       withConditionalFormatsPane(state, {
         ...pane,
         ...paneChanges,
-        editor: editor2,
+        editor: editorNow,
       }),
     );
   if (action.kind === 'leaveEditor' || currentRule === null)
@@ -487,10 +533,10 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
       offer: null,
     });
   if (action.kind === 'removeRule') {
-    let state2 = {
+    let removal: Edit = {
       kind: 'removeConditionalFormat',
-      sheetId: sheetId,
-      conditionalFormatId: conditionalFormatId,
+      sheetId,
+      conditionalFormatId,
     };
     return {
       ...withEditor({
@@ -498,7 +544,7 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
         typed: null,
       }),
       effects: [
-        queueRuleEditEffect(state2, {
+        queueRuleEditEffect(removal, {
           what: 'ruleRemoved',
           isSaved: false,
         }),
@@ -510,57 +556,57 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
     return withEditor(editor, {
       offer: null,
     });
-  let refusalsNotOf = (field?: Dynamic) => (editor.refused ?? []).filter((refusal?: Dynamic) => refusal.field !== field);
+  let refusalsNotOf = (field: RuleField): RefusedTyping[] => (editor.refused ?? []).filter((refusal) => refusal.field !== field);
   if (action.kind === 'dropTyped')
     return withEditor({
       ...editor,
       typed: null,
       refused: refusalsNotOf(action.field),
     });
-  let refitToRanges = (rule?: Dynamic, oldRule?: Dynamic) => {
+  let refitToRanges = (rule: RuleInIds, oldRule: RuleInIds): RuleInIds => {
     if (isSameRulesJson(rule.ranges, oldRule.ranges)) return rule;
     let oldTable = oldRule === currentRule ? table : tableOfRuleRange(reads, sheetId, oldRule);
-    let retargetFrom = {
+    let retargetFrom: RuleAndTable = {
       rule: oldRule,
       table: oldTable,
     };
     let retarget = testRetargeterForRanges(reads, sheetId, rule, retargetFrom);
-    let { effect: effect2 } = rule;
+    let { effect: ruleEffect } = rule;
     let tableOfRule =
       retarget === null ||
-      (effect2.kind === 'formatWhere' && effect2.allOf.some(({ tested: tested }: Dynamic) => tested.kind !== 'theCellItself'))
+      (ruleEffect.kind === 'formatWhere' && ruleEffect.allOf.some(({ tested }) => tested.kind !== 'theCellItself'))
         ? tableOfRuleRange(reads, sheetId, rule)
         : null;
     return refitTestsToRanges(rule, tableOfRule, retargetFrom, retarget);
   };
   if (action.kind === 'type') {
-    let value = typed?.field === action.field ? typed.ruleWithBox : null;
-    let state2 = {
-      rule: value ?? currentRule,
-      table: table,
-      reads: reads,
-      sheetId: sheetId,
+    let ruleWithBoxIfSame = typed?.field === action.field ? typed.ruleWithBox : null;
+    let beingEdited: RuleBeingEdited = {
+      rule: ruleWithBoxIfSame ?? currentRule,
+      table,
+      reads,
+      sheetId,
     };
-    let value2 = action.field.endsWith('.text')
-      ? Array.from<Dynamic>(action.text.replace(controlCharacterPattern, ''))
+    let textToRead = action.field.endsWith('.text')
+      ? Array.from(action.text.replace(controlCharacterPattern, ''))
           .slice(0, reads.limitsOfConditionalFormats().longestTextOfAConditionInCharacters)
           .join('')
       : action.text;
-    let typedRule = ruleWithTypedField(state2, action.field, value2);
+    let typedRule = ruleWithTypedField(beingEdited, action.field, textToRead);
     return withEditor({
       ...editor,
       refused: refusalsNotOf(action.field),
       typed: {
         field: action.field,
-        text: value2,
-        rule: typedRule === null ? null : refitToRanges(typedRule, state2.rule),
-        ruleWithBox: value,
+        text: textToRead,
+        rule: typedRule === null ? null : refitToRanges(typedRule, beingEdited.rule),
+        ruleWithBox: ruleWithBoxIfSame,
       },
     });
   }
-  let chosenTest: Dynamic = null;
-  let saveRule = (rule?: Dynamic, paneChanges: Dynamic = {}, notice: Dynamic = null) => {
-    let done =
+  let chosenTest: Test | null = null;
+  let saveRule = (rule: RuleInIds | null, paneChanges: Partial<ConditionalFormatsPane> = {}, notice: NoticeOfSavedRule | null = null) => {
+    let done: ConditionalFormatDone | undefined =
       rule === null || notice === null
         ? undefined
         : notice === 'scaleColorsNothing'
@@ -581,7 +627,7 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
           ...editor,
           typed: null,
           ...(action.kind === 'removeTest' && {
-            refused: (editor.refused ?? []).filter(({ field: field }: Dynamic) => !/^\d/.test(field)),
+            refused: (editor.refused ?? []).filter(({ field }) => !/^\d/.test(field)),
           }),
           testBeingAdded: chosenTest ?? (change === null ? testBeingAdded : null),
           cellsPickedByPage: keepsPicked ? editor.cellsPickedByPage : notice === 'movedToNumbers' ? notice : null,
@@ -592,19 +638,19 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
     };
   };
   if (action.kind === 'enterTyped' && typed !== null && typed.rule === null && typed.text.trim() !== '') {
-    let { field: value, text: value2 } = typed;
-    let items = [
-      ...refusalsNotOf(value),
+    let { field: unreadField, text: unreadText } = typed;
+    let refusals = [
+      ...refusalsNotOf(unreadField),
       {
-        field: value,
-        text: value2,
+        field: unreadField,
+        text: unreadText,
         over: currentRule,
       },
     ];
     return withEditor({
       ...editor,
       typed: null,
-      refused: items,
+      refused: refusals,
     });
   }
   if (action.kind === 'enterTyped') return saveRule(typed?.rule ?? null);
@@ -613,7 +659,7 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
       offer: null,
     });
   let ruleShown = typed?.rule ?? typed?.ruleWithBox ?? currentRule;
-  let ruleWhere =
+  let ruleWhere: FormatWhereRule | null =
     ruleShown.effect.kind === 'formatWhere'
       ? {
           ...ruleShown,
@@ -621,8 +667,8 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
         }
       : null;
   if (action.kind === 'addTest') {
-    let { mostTestsInAConditionalFormat: value } = reads.limitsOfConditionalFormats();
-    return ruleWhere === null || table === null || testBeingAdded !== null || ruleWhere.effect.allOf.length >= value
+    let { mostTestsInAConditionalFormat: mostTests } = reads.limitsOfConditionalFormats();
+    return ruleWhere === null || table === null || testBeingAdded !== null || ruleWhere.effect.allOf.length >= mostTests
       ? withNoEffects(state)
       : withEditor({
           ...editor,
@@ -648,15 +694,15 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
         testBeingAdded: null,
       });
     if (action.kind !== 'chooseCondition') return withNoEffects(state);
-    let state2 = {
+    let notBlankTest: Test = {
       tested: testBeingAdded.tested,
       condition: {
         kind: 'isNotBlank',
       },
     };
     chosenTest = {
-      ...state2,
-      condition: conditionWithOperator(action.choice, state2.condition, testedColumnSummary(ruleShown, table, state2)),
+      ...notBlankTest,
+      condition: conditionWithOperator(action.choice, notBlankTest.condition, testedColumnSummary(ruleShown, table, notBlankTest)),
     };
   }
   let editedRule =
@@ -668,18 +714,18 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
       : ruleAfterEditorAction(
           {
             rule: ruleShown,
-            table: table,
-            reads: reads,
-            sheetId: sheetId,
+            table,
+            reads,
+            sheetId,
           },
           state,
           action,
         );
   if (editedRule === null) return withNoEffects(state);
   let refittedRule = refitToRanges(editedRule, ruleShown);
-  let { effect: effect } = refittedRule;
+  let { effect } = refittedRule;
   let emptyTextTestIndex =
-    effect.kind === 'formatWhere' ? effect.allOf.findIndex(({ condition: condition }: Dynamic) => hasEmptyTextOperand(condition)) : -1;
+    effect.kind === 'formatWhere' ? effect.allOf.findIndex(({ condition }) => hasEmptyTextOperand(condition)) : -1;
   if (emptyTextTestIndex !== -1)
     return withEditor({
       ...editor,
@@ -704,7 +750,7 @@ export function actInRuleEditor(state: PageState, reads: WorkbookReads, pane?: D
         : null,
   );
 }
-export const dayNumberOf = (reads: WorkbookReads, text?: Dynamic) =>
+export const dayNumberOf = (reads: WorkbookReads, text: string): number | null =>
   numberReadAs(
     reads,
     {
@@ -714,7 +760,7 @@ export const dayNumberOf = (reads: WorkbookReads, text?: Dynamic) =>
     },
     text,
   );
-export const withOperand = (condition?: Dynamic, slot?: Dynamic, operand?: Dynamic) =>
+export const withOperand = (condition: CellCondition, slot: NumberOperandField, operand: NumberOperand): CellCondition =>
   numberConditionOperand(condition, slot) === null
     ? condition
     : {

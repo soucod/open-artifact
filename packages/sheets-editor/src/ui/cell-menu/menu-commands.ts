@@ -1,5 +1,15 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { SortDirection } from '@open-artifact/sheets-core';
+import type { MenuCommand } from '../search-menu/matching.ts';
+import type { PageView } from '../../view/page-view.ts';
+import type { OwnFilterByCellChosen, SheetChange, SortPaneAsked } from '../../state/event-reducer.ts';
+import type { FormatCommand } from '../../format/format-commands.ts';
+import type { PasteAsked, WhatLastPutHereHolds } from '../../clipboard/page-clipboard.ts';
+import type { KeyInstead } from '../../i18n/notice-labels.ts';
+import type { FreezeChoice } from '../../grid/freeze.ts';
+import type { LinesAxisName } from '../../grid/geometry.ts';
+import type { CommandWithSynonyms } from '../../messages/command-search.ts';
 import { oneRangeActOfCommand } from '../../selection/several-ranges.ts';
+import type { CommandOfOneRange } from '../../selection/several-ranges.ts';
 import { commandSearchSynonyms } from '../../messages/command-search.ts';
 import { oneRangeNeededText, pasteFromMenuHint, pasteValuesFromMenuHint } from '../../i18n/notice-labels.ts';
 import {
@@ -32,45 +42,108 @@ import { sheetMessages, textStyleLabel } from '../../i18n/sheet-messages.ts';
 import { shortcutKeysFor } from '../../keys/shortcut-list.ts';
 import { expandGroupsLabel, collapseGroupsLabel, groupLinesLabel, ungroupLinesLabel } from '../../messages/line-groups.ts';
 import { shortcutFor } from '../../keys/key-press.ts';
-import { linkEditMessages } from '../../links/link-hover-card.ts';
-import { OPEN_LINK_SHORTCUT } from '../../links/cell-links-view.ts';
+import { linkEditMessages } from '../../links/link-hover-card.tsx';
+import { OPEN_LINK_SHORTCUT } from '../../links/cell-links-view.tsx';
 import { suggestedFreezeChoice } from '../../grid/freeze.ts';
 import { filterMessages, showOnlyValueLabel, leaveOutValueLabel } from '../../tables/filter-messages.ts';
 import { FONT_MARKS } from '../../editor/text-looks.ts';
-import { formatToggleShortcut } from '../toolbar/text-menus.ts';
+import { formatToggleShortcut } from '../toolbar/text-menus.tsx';
 import { CONDITIONAL_FORMATTING_WORDS } from '../../messages/conditional-format.ts';
-import { cellHistoryMessages } from '../../history/cell-history-popover.ts';
-export function cellMenuCommands(props?: Dynamic) {
-  let { selectionIsOf: selectionIsOf, selectedRowCount: selectedRowCount, selectedColumnCount: selectedColumnCount } = props;
-  let {
-    isOneRangeNeeded: isOneRangeNeeded,
-    heldToPaste: heldToPaste,
-    keyThatPastes: keyThatPastes,
-    formatOfSelection: formatOfSelection,
+import { cellHistoryMessages } from '../../history/cell-history-popover.tsx';
+import { pivotTableMessages } from '../../tables/pivot-table-messages.tsx';
+/** What the cell menu offers, as the page sees it, and what it does when a command is chosen. */
+export interface CellMenuCommandsProps
+  extends Pick<
+    PageView,
+    | 'selectionIsOf'
+    | 'selectedRowCount'
+    | 'selectedColumnCount'
+    | 'selectedCellCount'
+    | 'rowCountToSize'
+    | 'columnCountToSize'
+    | 'isOneRangeNeeded'
+    | 'canMergeSelection'
+    | 'canUnmergeSelection'
+    | 'canMoveSelectionBack'
+    | 'canMoveSelectionOn'
+    | 'freezeChoices'
+    | 'groupChoices'
+    | 'canDeleteSelectedRows'
+    | 'canDeleteSelectedColumns'
+    | 'areWholeRowsSelected'
+    | 'areWholeColumnsSelected'
+    | 'columnToSortBy'
+    | 'canSortSelectedRange'
+    | 'canSortTableAtCell'
+    | 'formatOfSelection'
+    | 'ownFilterOffers'
+    | 'formatAsTableOffer'
+    | 'linkByHandOffered'
+    | 'doesKeyOpenLinkForm'
+    | 'isCommentOffered'
+  > {
+  linkUrl: PageView['linkOfActiveCell'];
+  linkInWordsUrl: PageView['linkOfActiveCell'];
+  heldToPaste: WhatLastPutHereHolds | null;
+  keyThatPastes: KeyInstead;
+  areDropdownsSelected: boolean;
+  isCellHistoryOffered: boolean;
+  iconOfChange(change: SheetChange): MenuCommand['icon'];
+  onChangeChosen(change: SheetChange): void;
+  onSortPaneAsked(of: SortScope): void;
+  onFreezeChosen(lines: LinesAxisName, count: number): void;
+  onLinkOpened(url: NonNullable<PageView['linkOfActiveCell']>): void;
+  onLinkCopied(url: NonNullable<PageView['linkOfActiveCell']>): void;
+  onLinkFormAsked(): void;
+  onCopyOrCutChosen(asked: 'copy' | 'cut'): void;
+  onPasteChosen(asked: PasteAsked): void;
+  onCommentChosen(): void;
+  onClearChosen(): void;
+  onSortAndFilterAsked(): void;
+  onOwnFilterByCellChosen(keeps: OwnFilterByCellChosen['keeps']): void;
+  onOwnFilterRemoved(tableKey: string): void;
+  onFormatAsTableChosen(isOn: boolean): void;
+  onFormatChosen(choice: FormatCommand): void;
+  onConditionalFormatsAsked(askedFrom: 'menu'): void;
+  onCellHistoryAsked(): void;
+  isActiveCellOfPivotTable: boolean;
+  onPivotTableAsked(): void;
+}
+/** Where a sort goes: the whole sheet's table, or the selected range alone. */
+export type SortScope = SortPaneAsked['of'];
+/** What a sheet change's command may carry besides its id, label, icon and run. */
+type ChangeCommandParts = Partial<Pick<MenuCommand, 'actsOn' | 'keys' | 'isWeighty' | 'whyNot'>>;
+export function cellMenuCommands(props: CellMenuCommandsProps): MenuCommand[] {
+  const { selectionIsOf, selectedRowCount, selectedColumnCount } = props;
+  const {
+    isOneRangeNeeded,
+    heldToPaste,
+    keyThatPastes,
+    formatOfSelection,
   } = props;
-  let changeCommand = (change?: Dynamic, label?: Dynamic, { whyNot = null, actsOn = 'cells', ...rest }: Dynamic = {}) => {
+  const changeCommand = (change: SheetChange, label: string, { whyNot = null, actsOn = 'cells', ...rest }: ChangeCommandParts = {}): MenuCommand => {
     let oneRangeAct = isOneRangeNeeded ? oneRangeActOfCommand(change) : null;
     let otherWordsKey = OTHER_WORDS_KEYS_OF_CHANGES[change];
     return {
       id: `menu.${change}`,
-      label: label,
+      label,
       ...(otherWordsKey !== undefined && {
         otherWords: commandSearchSynonyms(otherWordsKey),
       }),
       icon: props.iconOfChange(change),
-      actsOn: actsOn,
+      actsOn,
       whyNot: oneRangeAct === null ? whyNot : oneRangeNeededText(oneRangeAct),
       ...rest,
       run: () => props.onChangeChosen(change),
     };
   };
-  let sortCommands = (scope?: Dynamic, heading?: Dynamic, needsTable: Dynamic = false) => {
-    let shared = {
+  const sortCommands = (scope: SortScope, heading: string, needsTable = false) => {
+    const shared: ChangeCommandParts = {
       isWeighty: true,
       actsOn: scope === 'sheet' ? 'sheet' : 'cells',
       ...(needsTable &&
         !props.canSortTableAtCell && {
-          whyNot: sortTableUnclearHint(),
+          whyNot: sortTableUnclearHint(props.isActiveCellOfPivotTable),
         }),
     };
     return [
@@ -78,7 +151,7 @@ export function cellMenuCommands(props?: Dynamic) {
       changeCommand(SORT_CHANGES[scope].descending, toolLabelWithValue(heading, descendingLabel()), shared),
     ];
   };
-  let customSortCommand = (scope?: Dynamic, heading?: Dynamic) => ({
+  const customSortCommand = (scope: SortScope, heading: string | null): MenuCommand => ({
     id: `menu.customSort.${scope}`,
     label: heading === null ? customSortMessages.customSort() : toolLabelWithValue(heading, customSortMessages.customSort()),
     otherWords: commandSearchSynonyms('customSort'),
@@ -88,7 +161,11 @@ export function cellMenuCommands(props?: Dynamic) {
     whyNot: isOneRangeNeeded && scope === 'range' ? oneRangeNeededText(oneRangeActOfCommand(SORT_CHANGES.range.ascending) ?? 'sortCells') : null,
     run: () => props.onSortPaneAsked(scope),
   });
-  let freezeCommand = (lines: Dynamic, { count: count, isRoom: isRoom }: Dynamic, labelled?: Dynamic) => ({
+  const freezeCommand = (
+    lines: LinesAxisName,
+    { count, isRoom }: Pick<FreezeChoice, 'count' | 'isRoom'>,
+    labelled: Pick<MenuCommand, 'label' | 'icon' | 'isTicked'>,
+  ): MenuCommand => ({
     id: `menu.freeze.${lines}.${count}`,
     ...labelled,
     otherWords: commandSearchSynonyms(FREEZE_OTHER_WORDS_KEYS[lines][count === 0 ? 'none' : 'some']),
@@ -96,18 +173,18 @@ export function cellMenuCommands(props?: Dynamic) {
     whyNot: isRoom ? null : lines === 'rows' ? sheetMessages.tooManyRowsToFreeze() : sheetMessages.tooManyColumnsToFreeze(),
     run: () => props.onFreezeChosen(lines, count),
   });
-  let groupCommand = (change?: Dynamic, label?: Dynamic, shortcutName?: Dynamic) =>
+  const groupCommand = (change: SheetChange, label: string, shortcutName: string) =>
     changeCommand(change, label, {
       keys: shortcutKeysFor(shortcutName),
       isWeighty: true,
     });
-  let groupCommandsOf = ({
+  const groupCommandsOf = ({
     of: lines,
-    canUngroup: canUngroup,
-    collapseCount: collapseCount,
-    expandCount: expandCount,
-  }: Dynamic) => {
-    let { group: groupChange, ungroup: ungroupChange, collapse: collapseChange, expand: expandChange } = GROUP_CHANGES[lines];
+    canUngroup,
+    collapseCount,
+    expandCount,
+  }: NonNullable<PageView['groupChoices']>) => {
+    const { group: groupChange, ungroup: ungroupChange, collapse: collapseChange, expand: expandChange } = GROUP_CHANGES[lines];
     return [
       ...(expandCount > 0 ? [groupCommand(expandChange, expandGroupsLabel(expandCount), 'expandGroup')] : []),
       ...(collapseCount > 0 ? [groupCommand(collapseChange, collapseGroupsLabel(collapseCount), 'collapseGroup')] : []),
@@ -115,18 +192,18 @@ export function cellMenuCommands(props?: Dynamic) {
       ...(canUngroup ? [groupCommand(ungroupChange, ungroupLinesLabel(lines), 'ungroup')] : []),
     ];
   };
-  let isSelectionOf = (input?: Dynamic) => selectionIsOf === input;
-  let shortcutUnlessCells = (input?: Dynamic) =>
+  const isSelectionOf = (kind: PageView['selectionIsOf']) => selectionIsOf === kind;
+  const shortcutUnlessCells = (act: string) =>
     isSelectionOf('cells')
       ? {}
       : {
-          keys: shortcutFor(input),
+          keys: shortcutFor(act),
         };
-  let canActOnRows = isSelectionOf('cells') || isSelectionOf('rows');
-  let canActOnColumns = isSelectionOf('cells') || isSelectionOf('columns');
-  let { linkUrl: linkUrl, linkInWordsUrl: linkInWordsUrl } = props;
-  let isLinkEdit = isSelectionOf('cells') && props.linkByHandOffered === 'edit';
-  let linkByHandCommand = {
+  const canActOnRows = isSelectionOf('cells') || isSelectionOf('rows');
+  const canActOnColumns = isSelectionOf('cells') || isSelectionOf('columns');
+  const { linkUrl, linkInWordsUrl } = props;
+  const isLinkEdit = isSelectionOf('cells') && props.linkByHandOffered === 'edit';
+  const linkByHandCommand: MenuCommand = {
     id: 'menu.linkByHand',
     label: isLinkEdit ? sheetMessages.editLink() : linkEditMessages.insertLink(),
     otherWords: commandSearchSynonyms('linkByHand'),
@@ -138,10 +215,10 @@ export function cellMenuCommands(props?: Dynamic) {
     whyNot: props.linkByHandOffered === 'notOnFormula' ? linkEditMessages.whyNoLinkByHand() : null,
     run: props.onLinkFormAsked,
   };
-  let ownFilter = props.ownFilterOffers?.filter;
-  let valueOfCellToFilter = props.ownFilterOffers?.valueOfCell ?? null;
-  let { formatAsTableOffer: formatAsTableOffer } = props;
-  let formatAsTableCommands =
+  const ownFilter = props.ownFilterOffers?.filter;
+  const valueOfCellToFilter = props.ownFilterOffers?.valueOfCell ?? null;
+  const { formatAsTableOffer } = props;
+  const formatAsTableCommands: MenuCommand[] =
     formatAsTableOffer === null
       ? []
       : [
@@ -176,7 +253,7 @@ export function cellMenuCommands(props?: Dynamic) {
             whyNot: null,
             run: props.onCommentChosen,
           },
-        ]
+        ] satisfies MenuCommand[]
       : []),
     ...(linkUrl === null
       ? []
@@ -192,7 +269,7 @@ export function cellMenuCommands(props?: Dynamic) {
             isWeighty: true,
             run: () => props.onLinkOpened(linkUrl),
           },
-        ]),
+        ] satisfies MenuCommand[]),
     ...(linkInWordsUrl === null
       ? []
       : [
@@ -205,7 +282,7 @@ export function cellMenuCommands(props?: Dynamic) {
             whyNot: null,
             run: () => props.onLinkCopied(linkInWordsUrl),
           },
-        ]),
+        ] satisfies MenuCommand[]),
     ...(isLinkEdit ? [linkByHandCommand] : []),
     {
       id: 'menu.cut',
@@ -249,14 +326,14 @@ export function cellMenuCommands(props?: Dynamic) {
       isWeighty: true,
       run: () => props.onPasteChosen('valuesOnly'),
     },
-    ...['rows', 'columns'].flatMap((input?: Dynamic) => {
-      let value = isSelectionOf(input) ? suggestedFreezeChoice(props.freezeChoices?.[input] ?? []) : null;
-      if (value === null) return [];
-      let value2 = (input === 'rows' ? freezeRowsLabel : freezeColumnsLabel)(value.count);
+    ...(['rows', 'columns'] satisfies LinesAxisName[]).flatMap((lines) => {
+      const choice = isSelectionOf(lines) ? suggestedFreezeChoice(props.freezeChoices?.[lines] ?? []) : null;
+      if (choice === null) return [];
+      const label = (lines === 'rows' ? freezeRowsLabel : freezeColumnsLabel)(choice.count);
       return [
-        freezeCommand(input, value, {
-          label: value2,
-          icon: value.count === 0 ? 'PinSlash' : 'Pin',
+        freezeCommand(lines, choice, {
+          label,
+          icon: choice.count === 0 ? 'PinSlash' : 'Pin',
         }),
       ];
     }),
@@ -336,7 +413,7 @@ export function cellMenuCommands(props?: Dynamic) {
                 removesDropdown: true,
               }),
           },
-        ]
+        ] satisfies MenuCommand[]
       : []),
     ...(canActOnRows
       ? [
@@ -387,24 +464,24 @@ export function cellMenuCommands(props?: Dynamic) {
             id: 'menu.sortAndFilter',
             label: sortAndFilterMessages.sortAndFilter(),
             otherWords: commandSearchSynonyms('sortAndFilter'),
-            icon: 'Filter',
+            icon: 'FilterLines',
             actsOn: 'opens',
             home: 'toolbar',
             whyNot: null,
             run: props.onSortAndFilterAsked,
-          },
+          } satisfies MenuCommand,
           ...(ownFilter.kind === 'turnOn'
             ? []
             : [
                 {
                   id: 'menu.clearOwnFilter',
                   label: filterMessages.clearFilter(),
-                  icon: 'Filter',
+                  icon: 'FilterLines',
                   actsOn: 'view',
                   whyNot: null,
                   run: () => props.onOwnFilterRemoved(ownFilter.tableKey),
                 },
-              ]),
+              ] satisfies MenuCommand[]),
         ]),
     ...(valueOfCellToFilter === null
       ? []
@@ -412,7 +489,7 @@ export function cellMenuCommands(props?: Dynamic) {
           {
             id: 'menu.ownFilter.only',
             label: showOnlyValueLabel(valueOfCellToFilter),
-            icon: 'Filter',
+            icon: 'FilterLines',
             actsOn: 'view',
             whyNot: null,
             run: () => props.onOwnFilterByCellChosen('only'),
@@ -420,22 +497,22 @@ export function cellMenuCommands(props?: Dynamic) {
           {
             id: 'menu.ownFilter.allBut',
             label: leaveOutValueLabel(valueOfCellToFilter),
-            icon: 'Filter',
+            icon: 'FilterLines',
             actsOn: 'view',
             whyNot: null,
             run: () => props.onOwnFilterByCellChosen('allBut'),
           },
-        ]),
+        ] satisfies MenuCommand[]),
     ...(isSelectionOf('cells')
-      ? ['rows', 'columns'].flatMap(
-          (input?: Dynamic) =>
-            (props.freezeChoices?.[input] ?? []).map((input2?: Dynamic) => {
-              let value = input === 'rows' ? rowsFromFirstLabel : columnsFromFirstLabel;
-              let value2 = toolLabelWithValue(sheetMessages.freeze(), value(input2.count));
-              return freezeCommand(input, input2, {
-                label: value2,
+      ? (['rows', 'columns'] satisfies LinesAxisName[]).flatMap(
+          (lines) =>
+            (props.freezeChoices?.[lines] ?? []).map((choice) => {
+              const linesFromFirstLabel = lines === 'rows' ? rowsFromFirstLabel : columnsFromFirstLabel;
+              const label = toolLabelWithValue(sheetMessages.freeze(), linesFromFirstLabel(choice.count));
+              return freezeCommand(lines, choice, {
+                label,
                 icon: 'Pin',
-                isTicked: input2.isInForce,
+                isTicked: choice.isInForce,
               });
             }),
         )
@@ -465,17 +542,17 @@ export function cellMenuCommands(props?: Dynamic) {
               ]
             : []),
           ...FONT_MARKS.map(
-            (input?: Dynamic) => ({
-              id: `menu.${input}`,
-              label: textStyleLabel(input),
+            (mark): MenuCommand => ({
+              id: `menu.${mark}`,
+              label: textStyleLabel(mark),
               icon: null,
-              keys: formatToggleShortcut(input),
-              isTicked: formatOfSelection.togglesOn[input],
+              keys: formatToggleShortcut(mark),
+              isTicked: formatOfSelection.togglesOn[mark],
               actsOn: 'cells',
               whyNot: null,
               run: () =>
                 props.onFormatChosen({
-                  toggle: input,
+                  toggle: mark,
                 }),
             }),
           ),
@@ -492,7 +569,7 @@ export function cellMenuCommands(props?: Dynamic) {
               props.onFormatChosen({
                 clearsFormatting: true,
               }),
-          },
+          } satisfies MenuCommand,
           ...formatAsTableCommands,
           {
             id: 'menu.conditionalFormatting',
@@ -503,7 +580,23 @@ export function cellMenuCommands(props?: Dynamic) {
             home: 'toolbar',
             whyNot: null,
             run: () => props.onConditionalFormatsAsked('menu'),
-          },
+          } satisfies MenuCommand,
+          {
+            id: 'menu.pivotTable',
+            label: props.isActiveCellOfPivotTable ? pivotTableMessages.edit() : pivotTableMessages.pivotTable(),
+            otherWords: commandSearchSynonyms('pivotTable'),
+            icon: 'Table',
+            ...(props.isActiveCellOfPivotTable
+              ? {
+                  actsOn: 'opens',
+                  home: 'pane',
+                }
+              : {
+                  actsOn: 'file',
+                }),
+            whyNot: null,
+            run: props.onPivotTableAsked,
+          } satisfies MenuCommand,
         ]),
     ...(props.isCellHistoryOffered
       ? [
@@ -516,30 +609,34 @@ export function cellMenuCommands(props?: Dynamic) {
             whyNot: null,
             run: props.onCellHistoryAsked,
           },
-        ]
+        ] satisfies MenuCommand[]
       : []),
   ];
 }
+/** How merged commands run: as from the cell menu, or as from the bar. */
+export interface MergedCommandsRun {
+  runsAs: 'menu' | 'bar';
+}
 export function mergeMenuAndBarCommands(
-  menuCommands?: Dynamic,
-  barCommands?: Dynamic,
-  { runsAs: runsAs }: Dynamic = {
+  menuCommands: readonly MenuCommand[],
+  barCommands: readonly MenuCommand[],
+  { runsAs }: MergedCommandsRun = {
     runsAs: 'menu',
   },
-) {
-  let barCommandById = new (Map as Dynamic)(barCommands.map((input?: Dynamic) => [input.id, input]));
-  let mergedBarIds = new (Set as Dynamic)();
+): MenuCommand[] {
+  const barCommandById = new Map(barCommands.map((command) => [command.id, command]));
+  const mergedBarIds = new Set<string>();
   return [
-    ...menuCommands.map((command?: Dynamic) => {
-      let barCommand = barCommandById.get(BAR_COMMAND_OF_MENU_COMMAND[command.id] ?? '');
+    ...menuCommands.map((command) => {
+      const barCommand = barCommandById.get(BAR_COMMAND_OF_MENU_COMMAND[command.id] ?? '');
       if (barCommand === undefined) return command;
       mergedBarIds.add(barCommand.id);
-      let otherWords = [...new (Set as Dynamic)([...(command.otherWords ?? []), ...(barCommand.otherWords ?? [])])];
+      const otherWords = [...new Set([...(command.otherWords ?? []), ...(barCommand.otherWords ?? [])])];
       return {
         ...command,
         icon: command.icon ?? barCommand.icon,
         ...(otherWords.length > 0 && {
-          otherWords: otherWords,
+          otherWords,
         }),
         ...(runsAs === 'bar' &&
           TEXT_STYLE_MENU_COMMAND_IDS.has(command.id) && {
@@ -547,10 +644,10 @@ export function mergeMenuAndBarCommands(
           }),
       };
     }),
-    ...barCommands.filter(({ id: id }: Dynamic) => !mergedBarIds.has(id)),
+    ...barCommands.filter(({ id }) => !mergedBarIds.has(id)),
   ];
 }
-export const SORT_CHANGES = {
+export const SORT_CHANGES: Record<SortScope, Record<SortDirection, SheetChange & CommandOfOneRange>> = {
   sheet: {
     ascending: 'sortAscending',
     descending: 'sortDescending',
@@ -560,7 +657,14 @@ export const SORT_CHANGES = {
     descending: 'sortRangeDescending',
   },
 };
-export const GROUP_CHANGES = {
+/** The sheet changes that group, ungroup, collapse and expand rows or columns. */
+export interface GroupChanges {
+  group: SheetChange;
+  ungroup: SheetChange;
+  collapse: SheetChange;
+  expand: SheetChange;
+}
+export const GROUP_CHANGES: Record<LinesAxisName, GroupChanges> = {
   rows: {
     group: 'groupRows',
     ungroup: 'ungroupRows',
@@ -574,7 +678,7 @@ export const GROUP_CHANGES = {
     expand: 'expandColumns',
   },
 };
-export const OTHER_WORDS_KEYS_OF_CHANGES = {
+export const OTHER_WORDS_KEYS_OF_CHANGES: Partial<Record<SheetChange, CommandWithSynonyms>> = {
   insertRowAbove: 'insertRowAbove',
   insertRowBelow: 'insertRowBelow',
   insertColumnLeft: 'insertColumnLeft',
@@ -603,7 +707,7 @@ export const OTHER_WORDS_KEYS_OF_CHANGES = {
   unmergeCells: 'unmergeCells',
   convertTexts: 'convertTexts',
 };
-export const FREEZE_OTHER_WORDS_KEYS = {
+export const FREEZE_OTHER_WORDS_KEYS: Record<LinesAxisName, Record<'none' | 'some', CommandWithSynonyms>> = {
   rows: {
     none: 'unfreezeRows',
     some: 'freezeRows',
@@ -613,7 +717,7 @@ export const FREEZE_OTHER_WORDS_KEYS = {
     some: 'freezeColumns',
   },
 };
-export const BAR_COMMAND_OF_MENU_COMMAND = {
+export const BAR_COMMAND_OF_MENU_COMMAND: Partial<Record<string, string>> = {
   'menu.bold': 'bar.bold',
   'menu.italic': 'bar.italic',
   'menu.underline': 'bar.underline',
@@ -629,5 +733,5 @@ export const BAR_COMMAND_OF_MENU_COMMAND = {
   'menu.customSort.range': 'bar.customSort',
   'menu.sortAndFilter': 'bar.sortAndFilter',
 };
-export const TEXT_STYLE_MENU_COMMAND_IDS = new (Set as Dynamic)(['menu.bold', 'menu.italic', 'menu.underline', 'menu.strikethrough']);
-export const isTextStyleMenuCommand = (id?: Dynamic) => TEXT_STYLE_MENU_COMMAND_IDS.has(id);
+export const TEXT_STYLE_MENU_COMMAND_IDS: ReadonlySet<string> = new Set(['menu.bold', 'menu.italic', 'menu.underline', 'menu.strikethrough']);
+export const isTextStyleMenuCommand = (id: string) => TEXT_STYLE_MENU_COMMAND_IDS.has(id);

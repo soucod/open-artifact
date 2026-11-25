@@ -20,9 +20,11 @@
 //! A formula that reads a cell another's array could fill reads that formula (`=UNIQUE(A2:A4)` in A1 reads itself).
 
 use std::collections::BTreeMap;
-use hashbrown::HashMap;
 use std::hash::Hasher;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
+
+use hashbrown::{HashMap, HashSet};
 
 use crate::brought::Brought;
 use crate::evaluate::{Operand, Place};
@@ -34,6 +36,9 @@ use crate::value::{Array, CellError, Value};
 use crate::workbook::{Input, Workbook};
 
 mod reach;
+
+use crate::formula::pivot::{Criterion, Formula as PivotFormula, Source as PivotSource};
+use crate::session::reads::pivot as pivot_read;
 
 /// What a formula worked out.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,16 +59,44 @@ pub struct Outcome {
 pub enum SpillOutcome {
     /// The array fills its cells, to `to` (row and column positions); `formats`: what each of its values brings
     /// (row by row), when its function picked them from cells.
-    Fills { array: Rc<Array>, to: (usize, usize), formats: Option<Rc<[Option<Brought>]>> },
+    Fills { array: Rc<Array>, to: (usize, usize), formats: Option<SpillFormats> },
     /// The array cannot spill; it would fill to `would_fill_to` (inside the sheet).
     Blocked { by: BlockedBy, would_fill_to: (usize, usize) },
+}
+
+/// Number formats can occupy the same sparse positions as the values they display.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpillFormats {
+    Dense(Rc<[Option<Brought>]>),
+    Sparse(Rc<BTreeMap<(usize, usize), Brought>>),
+}
+
+impl SpillFormats {
+    pub(crate) fn get(&self, columns: usize, position: (usize, usize)) -> Option<&Brought> {
+        match self {
+            Self::Dense(values) => values.get(position.0 * columns + position.1)?.as_ref(),
+            Self::Sparse(values) => values.get(&position),
+        }
+    }
+
+    fn crop(&self, stride: usize, rows: usize, columns: usize) -> Self {
+        match self {
+            Self::Dense(_) => Self::Dense((0..rows).flat_map(|r| {
+                (0..columns).map(move |c| self.get(stride, (r, c)).cloned())
+            }).collect()),
+            Self::Sparse(values) => Self::Sparse(Rc::new(values.iter()
+                .filter(|&(&(r, c), _)| r < rows && c < columns)
+                .map(|(position, format)| (*position, format.clone()))
+                .collect())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BlockedBy {
     FilledCell((usize, usize)),
     EarlierFormula((usize, usize)),
-    EndOfSheet,
+    EndOfSheet((usize, usize)),
 }
 
 /// The most passes a calculation makes while spills change.
@@ -71,6 +104,78 @@ const MOST_PASSES: usize = 8;
 
 /// (sheet, row, column), by position.
 pub(crate) type CellKey = (usize, usize, usize);
+
+/// Dense spills have a cell index. Sparse spills reserve their rectangle with one item per formula.
+#[derive(Default)]
+pub(crate) struct SpillCoverage {
+    cells: HashMap<CellKey, usize>,
+    rectangles: Vec<(usize, Place, Rc<Array>)>,
+}
+
+impl PartialEq for SpillCoverage {
+    fn eq(&self, other: &Self) -> bool {
+        let footprint = |(owner, place, _): &(usize, Place, Rc<Array>)| (*owner, *place);
+        self.cells == other.cells
+            && self.rectangles.iter().map(footprint).eq(other.rectangles.iter().map(footprint))
+    }
+}
+
+impl SpillCoverage {
+    fn get(&self, key: CellKey) -> Option<usize> {
+        self.cells.get(&key).copied().or_else(|| self.meeting(&Place {
+            sheet: key.0, top: key.1, bottom: key.1, left: key.2, right: key.2,
+        }).next().map(|(_, owner)| owner))
+    }
+
+    fn meeting<'a>(&'a self, area: &'a Place) -> impl Iterator<Item = ((usize, usize), usize)> + 'a {
+        self.rectangles.iter().filter_map(|&(owner, rect, _)| {
+            if !meet(&rect, area) {
+                return None;
+            }
+            let first = (rect.top.max(area.top), rect.left.max(area.left));
+            if first != (rect.top, rect.left) {
+                return Some((first, owner));
+            }
+            if rect.right.min(area.right) > first.1 {
+                return Some(((first.0, first.1 + 1), owner));
+            }
+            (rect.bottom.min(area.bottom) > first.0).then_some(((first.0 + 1, first.1), owner))
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cells.is_empty() && self.rectangles.is_empty()
+    }
+
+    pub(crate) fn add(&mut self, owner: usize, area: Place, array: &Rc<Array>) {
+        if array.is_sparse() {
+            self.rectangles.push((owner, area, array.clone()));
+            return;
+        }
+        for row in area.top..=area.bottom {
+            for column in area.left..=area.right {
+                if (row, column) != (area.top, area.left) {
+                    self.cells.insert((area.sheet, row, column), owner);
+                }
+            }
+        }
+    }
+
+    /// Rows of a pivot source can have spilled values. Visit stored values of sparse spill ranges.
+    pub(crate) fn add_rows(&self, place: Place, rows: &mut HashSet<usize>) {
+        let within = |r, c| (place.top..=place.bottom).contains(&r) && (place.left..=place.right).contains(&c);
+        rows.extend(self.cells.keys().filter_map(|&(s, r, c)| (s == place.sheet && within(r, c)).then_some(r)));
+        for (_, area, array) in &self.rectangles {
+            if !meet(&place, area) {
+                continue;
+            }
+            rows.extend(array.entries().filter_map(|((r, c), _)| {
+                let (r, c) = (r + area.top, c + area.left);
+                within(r, c).then_some(r)
+            }));
+        }
+    }
+}
 
 pub(crate) enum Slot {
     Constant(Value),
@@ -100,6 +205,7 @@ pub(crate) struct FormulaCell {
     pub places: Vec<Option<Place>>,
     /// Whether the formula contains a subtotal or aggregate, including inside a conditional branch.
     pub contains_total: bool,
+    pub pivot_records: Option<Rc<[RangeInclusive<usize>]>>,
     /// The places whose cells the formula reads.
     pub reads: Vec<Place>,
     /// The formulas it reads, by index, sorted.
@@ -133,9 +239,9 @@ pub struct Calculation {
     pub(crate) grids: Vec<Grid>,
     pub(crate) formulas: Vec<FormulaCell>,
     /// The cells spilled into in this pass, and by which formula.
-    pub(crate) covered: HashMap<CellKey, usize>,
+    pub(crate) covered: SpillCoverage,
     /// The cells spilled into when the last pass ended.
-    pub(crate) covered_before: HashMap<CellKey, usize>,
+    pub(crate) covered_before: SpillCoverage,
     /// The cells each array that is not kept out could fill, by formula.
     pub(crate) may_fill: Vec<(usize, Place)>,
     /// The names LET has given values, what each brings and the link it is, innermost last.
@@ -151,7 +257,7 @@ pub struct Calculation {
     pub(crate) working: Vec<usize>,
     /// What each value of the arrays functions picked from cells brings (see `CallContext::sources`), by array, while
     /// a formula is worked out (the array is kept so that no other is made where it is).
-    pub(crate) array_formats: HashMap<*const Array, (Rc<Array>, Rc<[Option<Brought>]>)>,
+    pub(crate) array_formats: HashMap<*const Array, (Rc<Array>, SpillFormats)>,
     pub(crate) now: Option<f64>,
     /// The workbook's seed, which RAND's numbers are drawn from.
     pub(crate) seed: u32,
@@ -163,6 +269,7 @@ impl Calculation {
     pub fn new(workbook: &Workbook, now: Option<f64>) -> Calculation {
         let mut grids = Vec::with_capacity(workbook.sheets.len());
         let mut formulas = Vec::new();
+        let mut pivot_sources = HashMap::new();
         for (s, sheet) in workbook.sheets.iter().enumerate() {
             let mut slots = BTreeMap::new();
             let mut formats = HashMap::new();
@@ -194,12 +301,20 @@ impl Calculation {
                         let parsed = cell.parsed.clone().expect("a formula is read when it is set");
                         let places: Vec<Option<Place>> =
                             formula.references.iter().map(|reference| resolve(workbook, reference)).collect();
+                        let pivot = parsed.as_ref().as_ref().ok()
+                            .and_then(PivotFormula::from_expr).and_then(Result::ok);
+                        let pivot_records = pivot.as_ref()
+                            .and_then(|pivot| pivot_records(workbook, pivot, formula, &mut pivot_sources))
+                            .map(Rc::from);
                         let (contains_total, reads) = match &*parsed {
                             Ok(expr) => {
                                 let mut read = Vec::new();
                                 read_references(expr, &mut read);
                                 let contains_total = calls(expr, "SUBTOTAL") || calls(expr, "AGGREGATE");
-                                let places_read = read.into_iter().filter_map(|i| places.get(i).copied().flatten()).collect();
+                                let places_read = match (&pivot, &pivot_records) {
+                                    (Some(pivot), Some(records)) => pivot_reads(pivot, records, &places),
+                                    _ => read.into_iter().filter_map(|i| places.get(i).copied().flatten()).collect(),
+                                };
                                 (contains_total, places_read)
                             }
                             Err(_) => (false, Vec::new()),
@@ -211,6 +326,7 @@ impl Calculation {
                             parsed,
                             places,
                             contains_total,
+                            pivot_records,
                             reads,
                             reads_formulas: Vec::new(),
                             in_cycle: false,
@@ -276,8 +392,8 @@ impl Calculation {
         let mut calculation = Calculation {
             grids,
             formulas,
-            covered: HashMap::new(),
-            covered_before: HashMap::new(),
+            covered: SpillCoverage::default(),
+            covered_before: SpillCoverage::default(),
             may_fill,
             scopes: Vec::new(),
             lifting: false,
@@ -371,8 +487,9 @@ impl Calculation {
             let in_place = |&(s, r, c): &CellKey| {
                 s == place.sheet && (place.top..=place.bottom).contains(&r) && (place.left..=place.right).contains(&c)
             };
-            let covered = self.covered.iter().filter(|(key, j)| in_place(key) && wanted(**j));
-            may_fill.chain(covered.map(|(&(_, r, c), &j)| ((r, c), j))).min().map(|(_, j)| j)
+            let covered = self.covered.cells.iter().filter(|(key, j)| in_place(key) && wanted(**j));
+            let sparse = self.covered.meeting(place).filter(|(_, j)| wanted(*j));
+            may_fill.chain(covered.map(|(&(_, r, c), &j)| ((r, c), j))).chain(sparse).min().map(|(_, j)| j)
         })
     }
 
@@ -382,10 +499,19 @@ impl Calculation {
         if self.covered.is_empty() {
             return false;
         }
-        let covered: BTreeMap<CellKey, usize> = self.covered.iter().map(|(k, v)| (*k, *v)).collect();
+        let covered: BTreeMap<CellKey, usize> = self.covered.cells.iter().map(|(k, v)| (*k, *v)).collect();
         let mut added = false;
         for f in self.formulas.iter_mut().filter(|f| f.kept_out_by.is_none()) {
             for place in &f.reads {
+                for (_, anchor) in self.covered.meeting(place) {
+                    if let Err(at) = f.reads_formulas.binary_search(&anchor) {
+                        f.reads_formulas.insert(at, anchor);
+                        added = true;
+                    }
+                }
+                if covered.is_empty() {
+                    continue;
+                }
                 for r in place.top..=place.bottom {
                     for (_, &anchor) in covered.range((place.sheet, r, place.left)..=(place.sheet, r, place.right)) {
                         if let Err(at) = f.reads_formulas.binary_search(&anchor) {
@@ -405,7 +531,7 @@ impl Calculation {
             for f in &mut self.formulas {
                 f.state = State::Waiting;
             }
-            self.covered.clear();
+            self.covered = SpillCoverage::default();
             for i in 0..self.formulas.len() {
                 self.outcome(i);
             }
@@ -499,18 +625,13 @@ impl Calculation {
     /// An array that spills without its last rows and columns while they hold nothing but blanks and empty texts;
     /// at least its first value stays. Only what spills is cut: `=ROWS(VSTACK(1,""))` is still 2.
     fn trimmed(&mut self, array: Rc<Array>) -> Rc<Array> {
-        let empty = |v: &Value| matches!(v, Value::Blank) || matches!(v, Value::Text(t) if t.is_empty());
-        let rows = (0..array.rows()).rev().find(|&r| array.row(r).iter().any(|v| !empty(v))).map_or(1, |r| r + 1);
-        let columns =
-            (0..array.columns()).rev().find(|&c| (0..rows).any(|r| !empty(array.get(r, c)))).map_or(1, |c| c + 1);
+        let (rows, columns) = array.occupied_dimensions();
         if rows == array.rows() && columns == array.columns() {
             return array;
         }
-        let at = |r: usize, c: usize| r * array.columns() + c;
-        let places = || (0..rows).flat_map(|r| (0..columns).map(move |c| (r, c)));
-        let cut = Rc::new(Array::new(rows, columns, places().map(|(r, c)| array.values()[at(r, c)].clone()).collect()));
+        let cut = Rc::new(array.crop(rows, columns));
         if let Some((_, formats)) = self.array_formats.get(&Rc::as_ptr(&array)) {
-            let formats: Rc<[Option<Brought>]> = places().map(|(r, c)| formats[at(r, c)].clone()).collect();
+            let formats = formats.crop(array.columns(), rows, columns);
             self.array_formats.insert(Rc::as_ptr(&cut), (cut.clone(), formats));
         }
         cut
@@ -529,7 +650,7 @@ impl Calculation {
             cycle_entry: None,
         };
         if bottom >= grid.rows || right >= grid.columns {
-            return blocked(BlockedBy::EndOfSheet, (bottom.min(grid.rows - 1), right.min(grid.columns - 1)));
+            return blocked(BlockedBy::EndOfSheet((bottom, right)), (bottom.min(grid.rows - 1), right.min(grid.columns - 1)));
         }
         for r in row..=bottom {
             for (&(rr, cc), _) in grid.slots.range((r, column)..=(r, right)) {
@@ -538,23 +659,25 @@ impl Calculation {
                 }
             }
         }
-        for r in row..=bottom {
-            for c in column..=right {
-                if let Some(&other) = self.covered.get(&(s, r, c)) {
-                    if other != i {
-                        let at = (self.formulas[other].row, self.formulas[other].column);
-                        return blocked(BlockedBy::EarlierFormula(at), (bottom, right));
-                    }
-                }
-            }
+        let area = Place { sheet: s, top: row, bottom, left: column, right };
+        let dense = if array.is_sparse() {
+            self.covered.cells.iter().filter_map(|(&(sheet, r, c), &owner)| {
+                (sheet == s && owner != i && (row..=bottom).contains(&r) && (column..=right).contains(&c))
+                    .then_some(((r, c), owner))
+            }).min()
+        } else {
+            (row..=bottom).find_map(|r| {
+                (column..=right).find_map(|c| {
+                    self.covered.cells.get(&(s, r, c)).filter(|&&owner| owner != i).map(|&owner| ((r, c), owner))
+                })
+            })
+        };
+        let sparse = self.covered.meeting(&area).filter(|(_, owner)| *owner != i);
+        if let Some((_, other)) = dense.into_iter().chain(sparse).min() {
+            let at = (self.formulas[other].row, self.formulas[other].column);
+            return blocked(BlockedBy::EarlierFormula(at), (bottom, right));
         }
-        for r in row..=bottom {
-            for c in column..=right {
-                if (r, c) != (row, column) {
-                    self.covered.insert((s, r, c), i);
-                }
-            }
-        }
+        self.covered.add(i, area, &array);
         let value = held(array.get(0, 0).clone());
         let formats = self.array_formats.get(&Rc::as_ptr(&array)).map(|(_, formats)| formats.clone());
         let spill = SpillOutcome::Fills { array, to: (bottom, right), formats };
@@ -642,15 +765,15 @@ impl Calculation {
 
     fn spilled_value(&mut self, sheet: usize, row: usize, column: usize) -> Value {
         let key = (sheet, row, column);
-        let anchor = match self.covered.get(&key) {
-            Some(&j) => j,
-            None => match self.covered_before.get(&key).copied().or_else(|| self.may_fill(key)) {
+        let anchor = match self.covered.get(key) {
+            Some(j) => j,
+            None => match self.covered_before.get(key).or_else(|| self.may_fill(key)) {
                 Some(j) => {
                     if self.outcome(j).is_none() {
                         return Value::Error(CellError::Reference);
                     }
-                    match self.covered.get(&key) {
-                        Some(&k) => k,
+                    match self.covered.get(key) {
+                        Some(k) => k,
                         None => return Value::Blank,
                     }
                 }
@@ -732,6 +855,37 @@ pub(crate) fn read_references(expr: &Expr, out: &mut Vec<usize>) {
     }
 }
 
+/// The recognized source a pivot formula's references describe.
+fn pivot_records(
+    workbook: &Workbook,
+    pivot: &PivotFormula,
+    formula: &crate::formula::StoredFormula,
+    sources: &mut HashMap<PivotSource, Vec<serde_json::Value>>,
+) -> Option<Vec<RangeInclusive<usize>>> {
+    let spec = pivot.specification(&formula.references)?;
+    let tables = sources.entry(spec.source.clone()).or_insert_with(|| pivot_read::source_tables(workbook, &spec.source));
+    let table = pivot_read::matching_table(tables, &spec)?;
+    if !pivot_read::reads_just_records(pivot, formula, table) {
+        return None;
+    }
+    let sheet = workbook.sheet_index(&spec.source.sheet_id)?;
+    pivot_read::record_runs(workbook, &workbook.sheets[sheet], table)
+}
+
+fn pivot_reads(pivot: &PivotFormula, records: &[RangeInclusive<usize>], places: &[Option<Place>]) -> Vec<Place> {
+    let at = |i: usize| places.get(i).copied().flatten();
+    let mut reads = Vec::new();
+    for place in pivot.columns_used().filter_map(at) {
+        reads.push(Place { bottom: place.top, ..place });
+        reads.extend(records.iter().map(|rows| Place { top: *rows.start(), bottom: *rows.end(), ..place }));
+    }
+    reads.extend(pivot.filters.iter().filter_map(|filter| match filter.listed {
+        Criterion::Reference(i) => at(i),
+        Criterion::Values(_) => None,
+    }));
+    reads
+}
+
 /// Whether two places have a cell in common.
 pub(crate) fn meet(a: &Place, b: &Place) -> bool {
     a.sheet == b.sheet && a.top <= b.bottom && b.top <= a.bottom && a.left <= b.right && b.left <= a.right
@@ -747,7 +901,19 @@ pub(crate) fn spill_area(workbook: &Workbook, s: usize, (r, c): (LineId, LineId)
     let places: Vec<Option<Place>> = formula.references.iter().map(|reference| resolve(workbook, reference)).collect();
     let reach = reach::reach(expr, &places);
     if !reach.spills || !reach.is_several() {
-        return None;
+        // PIVOT's shape depends on distinct values in its source and cannot be inferred from its syntax.
+        // Its last footprint remains relevant when a blank intersection is filled or a blocker is cleared.
+        let (bottom, right) = match workbook.outcome(&sheet.id, r, c)?.spill.as_ref()? {
+            SpillOutcome::Fills { array, .. } if array.is_sparse() => (
+                (row + array.rows() - 1).min(sheet.rows.len() - 1),
+                (column + array.columns() - 1).min(sheet.columns.len() - 1),
+            ),
+            SpillOutcome::Blocked { would_fill_to, .. } if matches!(expr, Expr::Call { name, .. } if name.as_ref() == "PIVOT") => {
+                *would_fill_to
+            }
+            _ => return None,
+        };
+        return (bottom >= row && right >= column).then_some(Place { sheet: s, top: row, left: column, bottom, right });
     }
     let bottom = row.saturating_add(reach.rows - 1).min(sheet.rows.len() - 1);
     let right = column.saturating_add(reach.columns - 1).min(sheet.columns.len() - 1);

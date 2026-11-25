@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/design-system-core",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The Design System artifact model: tokens.json grammar and tokens.css compiler, the index, components, assets, manifest and checks.",

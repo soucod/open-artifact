@@ -335,7 +335,10 @@ function Marker({ row, items, open, onChoose }: { row: MarkerRow; items: Readonl
   });
   const ids = row.ids.filter(id => !reactions.some(thread => thread.id === id));
   const comments = ids.filter(id => items.get(id)?.thread).length;
-  const others = ids.length - comments;
+  const others = ids.reduce((sum, id) => {
+    const item = items.get(id);
+    return item?.thread ? sum : sum + (item?.card?.count ?? 1);
+  }, 0);
   const label = [comments ? `${comments} ${comments === 1 ? 'comment' : 'comments'}` : '', others ? `${others} ${others === 1 ? 'suggestion' : 'suggestions'}` : '']
     .filter(Boolean)
     .join(', ');
@@ -361,7 +364,7 @@ function Marker({ row, items, open, onChoose }: { row: MarkerRow; items: Readonl
           onClick={() => onChoose(ids)}
         >
           <Icon className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
-          {ids.length}
+          {comments + others}
         </button>
       ) : null}
     </div>

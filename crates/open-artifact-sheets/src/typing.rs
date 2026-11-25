@@ -15,7 +15,8 @@
 //!
 //! A paste whose formulas have many words of their own is first shown to the person (`typing/unseen.rs`): the
 //! answer is `toBeShownFirst` with those texts until the edit is queued with exactly them as `shownToThePerson`
-//! (`paste_texts_shown`), and refuses a paste with more than 50 of them (`tooMuchThatNoCellShows`). A formula some
+//! (`paste_texts_shown`), and refuses a paste with more than 50 of them (`tooMuchThatNoCellShows`). Queued with no
+//! `shownToThePerson` (null or left out), a paste shows nothing first and is not refused for them. A formula some
 //! cell holds already is not shown, by its text between references as kept: in any sheet, deleted rows, columns and
 //! sheets too, whoever put it there (`=sum(` is not `=SUM(`); nor is a formula with the text between references of
 //! one shown before it in the paste.
@@ -42,6 +43,7 @@ use crate::formula_text;
 use crate::ids::LineId;
 use crate::locale::{self, Locale};
 use crate::number_format::{Kind, NumberFormat};
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{blocks, Leaf};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op, Refusal};
 use crate::workbook::{Input, Sheet, Workbook};
@@ -113,7 +115,7 @@ enum EnterEdit {
 
 /// The most bytes of UTF-8 a text may have (a `'` first aside), a formula may have, and the most references a
 /// formula may have.
-const LONGEST_TEXT: usize = 32767;
+pub(crate) const LONGEST_TEXT: usize = 32767;
 const LONGEST_FORMULA: usize = 8192;
 const MOST_REFERENCES: usize = 256;
 
@@ -255,11 +257,13 @@ fn paste_cells(
     for reading in &readings {
         check_reading_length(workbook, s, reading, locale)?;
     }
-    let to_show = texts_to_show(workbook, s, texts.iter().map(|&(place, ..)| place).zip(&readings), locale);
-    if to_show.len() > unseen::MOST_TEXTS {
-        return Err(Refusal::TooMuchThatNoCellShows);
-    }
+    // Only a paste the page shows the person first (`shownToThePerson` given) counts the texts no cell shows: with
+    // none (an agent's write), however many there are, nothing is asked or refused.
     if let Some(shown) = shown {
+        let to_show = texts_to_show(workbook, s, texts.iter().map(|&(place, ..)| place).zip(&readings), locale);
+        if to_show.len() > unseen::MOST_TEXTS {
+            return Err(Refusal::TooMuchThatNoCellShows);
+        }
         if !to_show.is_empty() && !were_shown(before, &to_show, shown) {
             return Ok(Pasted::ToBeShownFirst(to_show));
         }
@@ -703,16 +707,15 @@ fn kept_as(kind: Kind, pattern: &str, n: f64, shape: &Shape) -> bool {
     match shape.kind {
         ShapeKind::Plain => kind != Kind::Time || in_a_day,
         ShapeKind::Grouped => kind != Kind::General && (kind != Kind::Time || in_a_day),
-        ShapeKind::Percent => matches!(kind, Kind::Percent | Kind::Fraction),
+        ShapeKind::Percent => kind == Kind::Percent,
         ShapeKind::Currency => {
-            kind == Kind::Fraction
-                || (kind == Kind::Currency
-                    && reading::currency_of(pattern) == shape.pattern.as_deref().and_then(reading::currency_of))
+            kind == Kind::Currency
+                && reading::currency_of(pattern) == shape.pattern.as_deref().and_then(reading::currency_of)
         }
-        ShapeKind::Date => matches!(kind, Kind::Date | Kind::DateAndTime | Kind::Fraction),
-        ShapeKind::Time => matches!(kind, Kind::Time | Kind::Duration | Kind::Fraction),
-        ShapeKind::TimeOfHalfDay => matches!(kind, Kind::Time | Kind::Fraction),
-        ShapeKind::DateAndTime => matches!(kind, Kind::DateAndTime | Kind::Fraction),
+        ShapeKind::Date => matches!(kind, Kind::Date | Kind::DateAndTime),
+        ShapeKind::Time => matches!(kind, Kind::Time | Kind::Duration),
+        ShapeKind::TimeOfHalfDay => kind == Kind::Time,
+        ShapeKind::DateAndTime => kind == Kind::DateAndTime,
     }
 }
 
@@ -737,7 +740,7 @@ fn ops_of(workbook: &Workbook, sheet: &Sheet, order: &[(LineId, LineId)], change
         .iter()
         .map(|place| CellToSet { r: bases.text(place.0), c: bases.text(place.1), input: changes[place].input.clone() })
         .collect();
-    let mut ops = vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false }];
+    let mut ops = vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto }];
     let patterns: Vec<(Leaf, (LineId, LineId), Value)> = order
         .iter()
         .filter_map(|place| changes[place].pattern.as_ref().map(|p| (Leaf::NumberFormat, *place, json!({"pattern": p}))))

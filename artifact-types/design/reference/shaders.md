@@ -6,7 +6,7 @@ You don't run your work, so keep to this page's sample, kit and building blocks.
 
 ## The artboard
 
-The whole file. Change the title, size, background, aria-label, `data-props`, `FRAG` and `uniforms()`, and add any markup. Keep the rest as is in every artboard. `function shaderStage` is the kit: it compiles `FRAG`, feeds it time, the pointer and `uniforms()`, handles reduced motion, boards off screen, slow machines and lost WebGL, and falls back to the root's background. When a shader fails, `renderVals()` throws the kit's message, so the artboard shows it and the editor passes it to you.
+The whole file. Change the title, size, background, aria-label, `data-props`, `FRAG` and `uniforms()`, and add any markup. Everything else stays unchanged. One exception: when the canvas is laid out on a PAGE (`expand: "fill"`), whether imported or written in place, give it `touch-action: pan-y` so a finger can still scroll the page. `function shaderStage` is the kit: it compiles `FRAG`, feeds it time, the pointer and `uniforms()`, handles reduced motion, boards off screen, slow machines and lost WebGL, and falls back to the root's background. When a shader fails, `renderVals()` throws the kit's message, so the artboard shows it and the editor passes it to you.
 
 ```html
 <!doctype html>
@@ -33,7 +33,7 @@ function shaderStage(logic, frag) {
 var calm = matchMedia('(prefers-reduced-motion: reduce)');
 var view, paint, buf, gl, uni, raf = 0, away = 0, shown = true, broken = false, fresh = true, before = '', tints = {};
 var time = 12, clock = 0, last = 0, down = false, inside = false, press = 0;
-var level = 0, ticks = 0, due = 0, next = 0, wait = 2, sharp = 1.5;
+var level = 0, ticks = 0, due = 0, next = 0, wait = 2, sharp = 1.5, steppedDown = 0;
 var aim = [0.5, 0.5], mouse = [0.5, 0.5], trail = [], oops = 'This shader has an error. Ask the agent to fix it. ';
 function fail(text) { broken = true; halt(); sleep(); logic.error = text; logic.setState({}); }
 function part(kind, code) {
@@ -131,8 +131,9 @@ function count(now) { ticks = 0; due = now + 2e3; }
 function tune(now) {
   var f = frameElement;
   sharp = f && f.getBoundingClientRect().width < f.offsetWidth / 2 ? 1 : 1.5;
-  if (ticks < 50 && !calm.matches) { level += level < 5; next = now + wait * 1e3; }
-  else if (level && now > next) { level--; wait = Math.min(wait * 2, 64); next = now + wait * 1e3; }
+  if (ticks < 50 && !calm.matches) { level += level < 5; if (steppedDown) wait = Math.min(wait * 2, 64); steppedDown = 0; next = now + wait * 1e3; }
+  else if (level) { if (now > next) { level--; steppedDown = now; next = now + wait * 1e3; } }
+  else if (steppedDown && now - steppedDown > 3e4) { steppedDown = 0; wait = 2; }
   count(now);
 }
 function tick(now) {

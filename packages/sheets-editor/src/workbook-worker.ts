@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
-import { hostWorkbook, inWords } from './engine/workbook-host.ts';
-import { WORKER_STARTED_MESSAGE, NO_TRANSFER, workerLine } from './engine/worker-line.ts';
+import { hostWorkbook, inWords, type MessageToPage } from './engine/workbook-host.ts';
+import { WORKER_STARTED_MESSAGE, NO_TRANSFER, hostLine, type WorkerLine } from './engine/worker-line.ts';
+import { writeCopy } from './engine/written-copy.ts';
+import type { MessageToHost } from './engine/worker-workbook.ts';
 import { createSheetsUtilities, createWorkbookSessionCore } from './engine/wasm-bindings.ts';
 import { newIdCode } from './engine/core-reads.ts';
 
@@ -9,7 +11,8 @@ interface WorkerStart {
   timeOriginMs: number;
 }
 
-const scope = self as unknown as DedicatedWorkerGlobalScope;
+// This file runs as a dedicated worker, though the page's types see `self` as a window.
+const scope = self as typeof self & DedicatedWorkerGlobalScope;
 
 // LAN guests load workers over HTTP. getRandomValues is available there in both Window and Worker.
 function newEditId(): string {
@@ -22,7 +25,7 @@ function newEditId(): string {
 }
 
 function start({ data }: MessageEvent<WorkerStart>): void {
-  const line = workerLine(scope);
+  const line: WorkerLine<MessageToPage, MessageToHost> = hostLine(scope);
   scope.addEventListener('unhandledrejection', ({ reason }) => line.send({ happened: [{ kind: 'threw', inWords: inWords(reason) }] }));
   hostWorkbook({
     line,
@@ -33,6 +36,7 @@ function start({ data }: MessageEvent<WorkerStart>): void {
     wait: (ms) => new Promise((resolve) => void setTimeout(resolve, ms)),
     nowMs: () => performance.timeOrigin + performance.now() - data.timeOriginMs,
     calculateLater: (calculate) => void setTimeout(calculate),
+    writeCopy,
   });
   scope.postMessage(WORKER_STARTED_MESSAGE, NO_TRANSFER);
 }

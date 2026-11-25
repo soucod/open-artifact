@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { EngineCellTable } from '@open-artifact/sheets-core';
 import { areasOfAllRanges, isAreaWithin } from '../selection/several-ranges.ts';
 import { placedTablesOfSheet, areaOfFilteredTable, isTableCertain, tableEdgesOf, hasCellsOnShowIn, tablesReadState } from './finding.ts';
 import { outlinableTablesOf } from './tables-in-view.ts';
@@ -9,13 +9,30 @@ import { withNoEffects } from '../state/transitions.ts';
 import { keepActiveCellClearOfStuckHeaders } from '../selection/keep-in-view.ts';
 import { IF_QUEUED_DEFAULTS, queueEdit } from '../model/edit-effects.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { PageState, TableNotFormatted } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function tableHoldingSelectionToFormat(state: PageState, workbook: WorkbookReads) {
-  let areas = areasOfAllRanges(state, workbook);
+import type { PageTransition } from '../state/transitions.ts';
+import type { FormatAsTableChosen, IfQueued } from '../state/event-reducer.ts';
+import type { OutlinableTable } from './tables-in-view.ts';
+/** What formatting the selected table as a table does: take its declared table away, only change how it looks, or declare one. */
+export type FormatAsTableChoice =
+  | { kind: 'remove'; table: OutlinableTable; cellTableId: string }
+  | { kind: 'look'; table: OutlinableTable; isOn: boolean }
+  | { kind: 'declare'; cellTable: EngineCellTable };
+/** What formatting as a table tells it did, both as the last thing done and once its edit is queued. */
+interface FormatAsTableDone {
+  what: 'formattedAsTable' | 'notFormattedAsTable';
+}
+/** How the menu offers formatting as a table: whether choosing it turns it on, and whether everyone sees the change. */
+export interface FormatAsTableOffer {
+  isOn: boolean;
+  isForEveryone: boolean;
+}
+export function tableHoldingSelectionToFormat(state: PageState, workbook: WorkbookReads): OutlinableTable | null {
+  const areas = areasOfAllRanges(state, workbook);
   if (areas.length === 0) return null;
-  let tables = placedTablesOfSheet(state, workbook, state.sheetId).certain.filter(
-    ({ area: area }: Dynamic) => areas.every((areaSelected?: Dynamic) => isAreaWithin(areaSelected, area)),
+  const tables = placedTablesOfSheet(state, workbook, state.sheetId).certain.filter(
+    ({ area }) => areas.every((areaSelected) => isAreaWithin(areaSelected, area)),
   );
   return (
     outlinableTablesOf(
@@ -28,32 +45,32 @@ export function tableHoldingSelectionToFormat(state: PageState, workbook: Workbo
     )[0] ?? null
   );
 }
-export function cellTableToDeclareAtSelection(state: PageState, workbook: WorkbookReads) {
-  let { sheetId: sheetId } = state;
-  let [area, ...otherAreas] = areasOfAllRanges(state, workbook);
+export function cellTableToDeclareAtSelection(state: PageState, workbook: WorkbookReads): EngineCellTable | null {
+  const { sheetId } = state;
+  const [area, ...otherAreas] = areasOfAllRanges(state, workbook);
   if (area === undefined || otherAreas.length > 0) return null;
-  let tablesHit = placedTablesOfSheet(state, workbook, sheetId).all.filter((placed?: Dynamic) => areasOverlap(area, placed.area));
+  const tablesHit = placedTablesOfSheet(state, workbook, sheetId).all.filter((placed) => areasOverlap(area, placed.area));
   if (
-    ownFiltersOfSheet(state, sheetId).some((ownFilter?: Dynamic) => {
-      let filteredArea = areaOfFilteredTable(workbook, ownFilter);
+    ownFiltersOfSheet(state, sheetId).some((ownFilter) => {
+      const filteredArea = areaOfFilteredTable(workbook, ownFilter);
       return filteredArea !== null && areasOverlap(area, filteredArea);
     }) ||
-    tablesHit.some((placed?: Dynamic) => isTableCertain(placed.table) && hasNoUnformattedMark(state, placed, workbook))
+    tablesHit.some((placed) => isTableCertain(placed.table) && hasNoUnformattedMark(state, placed, workbook))
   )
     return null;
-  let [firstHit, ...otherHits] = tablesHit;
+  const [firstHit, ...otherHits] = tablesHit;
   if (firstHit === undefined) return null;
-  let headerRow = Math.max(area.topRowIndex, Math.min(...tablesHit.map(({ header: header }: Dynamic) => header.first)));
-  let columns = {
-    first: Math.max(area.leftColumnIndex, Math.min(...tablesHit.map((placed?: Dynamic) => placed.columns.first))),
-    last: Math.min(area.leftColumnIndex + area.columnCount - 1, Math.max(...tablesHit.map((placed?: Dynamic) => placed.columns.last))),
+  const headerRow = Math.max(area.topRowIndex, Math.min(...tablesHit.map(({ header }) => header.first)));
+  const columns = {
+    first: Math.max(area.leftColumnIndex, Math.min(...tablesHit.map((placed) => placed.columns.first))),
+    last: Math.min(area.leftColumnIndex + area.columnCount - 1, Math.max(...tablesHit.map((placed) => placed.columns.last))),
   };
   if (
     otherHits.length === 0 &&
     (area.rowCount < 2 || columns.last - columns.first + 1 < firstHit.area.columnCount || headerRow <= firstHit.header.last + 1)
   )
     return isTableCertain(firstHit.table) || firstHit.body === null ? null : tableEdgesOf(firstHit.table);
-  let hasCellsOnShowInRow = (row?: Dynamic) =>
+  const hasCellsOnShowInRow = (row: number) =>
     hasCellsOnShowIn(
       sheetId,
       {
@@ -63,8 +80,8 @@ export function cellTableToDeclareAtSelection(state: PageState, workbook: Workbo
       columns,
       workbook,
     );
-  let firstCell = workbook.cellIdAt(sheetId, headerRow, columns.first);
-  let lastCell = workbook.cellIdAt(sheetId, headerRow, columns.last);
+  const firstCell = workbook.cellIdAt(sheetId, headerRow, columns.first);
+  const lastCell = workbook.cellIdAt(sheetId, headerRow, columns.last);
   if (firstCell === null || lastCell === null || !hasCellsOnShowInRow(headerRow) || !hasCellsOnShowInRow(headerRow + 1)) return null;
   return {
     headerRows: {
@@ -76,40 +93,40 @@ export function cellTableToDeclareAtSelection(state: PageState, workbook: Workbo
     footerRows: null,
   };
 }
-export function formatAsTableChoice(state: PageState, workbook: WorkbookReads, canEdit?: Dynamic) {
-  let table = tableHoldingSelectionToFormat(state, workbook);
-  let basis = table?.table.basis;
-  let canDeclare = canEdit && tablesReadState(state, state.sheetId) === 'asTheyAre';
+export function formatAsTableChoice(state: PageState, workbook: WorkbookReads, canEdit: boolean): FormatAsTableChoice | null {
+  const table = tableHoldingSelectionToFormat(state, workbook);
+  const basis = table?.table.basis;
+  const canDeclare = canEdit && tablesReadState(state, state.sheetId) === 'asTheyAre';
   if (table !== null && basis?.kind === 'declared')
     return canDeclare
       ? {
           kind: 'remove',
-          table: table,
+          table,
           cellTableId: basis.cellTableId,
         }
       : null;
   if (table !== null && hasNoUnformattedMark(state, table, workbook))
     return {
       kind: 'look',
-      table: table,
+      table,
       isOn: false,
     };
-  let cellTable = canDeclare ? cellTableToDeclareAtSelection(state, workbook) : null;
+  const cellTable = canDeclare ? cellTableToDeclareAtSelection(state, workbook) : null;
   if (cellTable !== null)
     return {
       kind: 'declare',
-      cellTable: cellTable,
+      cellTable,
     };
   return table === null
     ? null
     : {
         kind: 'look',
-        table: table,
+        table,
         isOn: true,
       };
 }
-export function formatAsTableState(state: PageState, workbook: WorkbookReads, canEdit?: Dynamic) {
-  let choice = formatAsTableChoice(state, workbook, canEdit);
+export function formatAsTableState(state: PageState, workbook: WorkbookReads, canEdit: boolean): FormatAsTableOffer | null {
+  const choice = formatAsTableChoice(state, workbook, canEdit);
   return choice === null
     ? null
     : {
@@ -117,10 +134,15 @@ export function formatAsTableState(state: PageState, workbook: WorkbookReads, ca
         isForEveryone: choice.kind !== 'look',
       };
 }
-export function tablesNotFormattedAfterChoice(marks: Dynamic, table: Dynamic, isOn: Dynamic, workbook: WorkbookReads) {
-  let { headerRows: headerRows, firstColumn: firstColumn } = table.table;
-  let marksInHeader = unformattedMarksInHeader(table, marks, workbook);
-  let keptMarks = marks.filter((mark?: Dynamic) => !marksInHeader.includes(mark));
+export function tablesNotFormattedAfterChoice(
+  marks: readonly TableNotFormatted[],
+  table: OutlinableTable,
+  isOn: boolean,
+  workbook: WorkbookReads,
+): TableNotFormatted[] {
+  const { headerRows, firstColumn } = table.table;
+  const marksInHeader = unformattedMarksInHeader(table, marks, workbook);
+  const keptMarks = marks.filter((mark) => !marksInHeader.includes(mark));
   return isOn
     ? keptMarks
     : [
@@ -132,38 +154,44 @@ export function tablesNotFormattedAfterChoice(marks: Dynamic, table: Dynamic, is
         },
       ];
 }
-export function setFormatAsTable(state: PageState, workbook: ReadsWithTextMeasurer, canEdit: Dynamic, { isOn: isOn, kept: kept }: Dynamic) {
-  let choice = formatAsTableChoice(state, workbook, canEdit);
-  let closed = {
+export function setFormatAsTable(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  canEdit: boolean,
+  { isOn, kept }: Pick<FormatAsTableChosen, 'isOn' | 'kept'>,
+): PageTransition {
+  const choice = formatAsTableChoice(state, workbook, canEdit);
+  const closed = {
     ...state,
     menu: null,
   };
-  let done = {
+  const done: FormatAsTableDone = {
     what: isOn ? 'formattedAsTable' : 'notFormattedAsTable',
   };
-  let marks = kept ?? state.tablesNotFormatted;
+  const marks = kept ?? state.tablesNotFormatted;
   if (choice?.kind === 'look') {
-    let looked = {
+    const looked = {
       ...closed,
       tablesNotFormatted: tablesNotFormattedAfterChoice(marks, choice.table, isOn, workbook),
       formatAsTableChosenLast: {
-        isOn: isOn,
+        isOn,
         before: marks,
       },
+      ownSortChosenLast: null,
       lastDone: done,
     };
     return withNoEffects(keepActiveCellClearOfStuckHeaders(state, looked, workbook));
   }
   if (choice === null || isFormatAsTableChoiceOn(choice) !== isOn) return withNoEffects(closed);
-  let { sheetId: sheetId } = state;
-  let ifQueued = {
+  const { sheetId } = state;
+  const ifQueued: IfQueued = {
     ...IF_QUEUED_DEFAULTS,
     select: null,
-    done: done,
+    done,
   };
   if (choice.kind === 'declare') {
-    let { cellTable: cellTable } = choice;
-    let scroll = {
+    const { cellTable } = choice;
+    const scroll = {
       scrollLeft: state.scrollLeft,
       scrollTop: state.scrollTop,
     };
@@ -174,8 +202,8 @@ export function setFormatAsTable(state: PageState, workbook: ReadsWithTextMeasur
       },
       {
         kind: 'declareCellTable',
-        sheetId: sheetId,
-        cellTable: cellTable,
+        sheetId,
+        cellTable,
         isAskedFor: true,
       },
       ifQueued,
@@ -188,16 +216,16 @@ export function setFormatAsTable(state: PageState, workbook: ReadsWithTextMeasur
     },
     {
       kind: 'removeCellTable',
-      sheetId: sheetId,
+      sheetId,
       cellTableId: choice.cellTableId,
     },
     ifQueued,
   );
 }
-export function undoFormatAsTableChosenLast(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function undoFormatAsTableChosenLast(state: PageState, workbook: ReadsWithTextMeasurer): PageState | null {
   if (state.formatAsTableChosenLast === null) return null;
-  let { isOn: isOn, before: before } = state.formatAsTableChosenLast;
-  let undone = {
+  const { isOn, before } = state.formatAsTableChosenLast;
+  const undone: PageState = {
     ...state,
     tablesNotFormatted: before,
     formatAsTableChosenLast: null,
@@ -207,4 +235,4 @@ export function undoFormatAsTableChosenLast(state: PageState, workbook: ReadsWit
   };
   return keepActiveCellClearOfStuckHeaders(state, undone, workbook);
 }
-export const isFormatAsTableChoiceOn = (choice?: Dynamic) => (choice.kind === 'look' ? choice.isOn : choice.kind === 'declare');
+export const isFormatAsTableChoiceOn = (choice: FormatAsTableChoice): boolean => (choice.kind === 'look' ? choice.isOn : choice.kind === 'declare');

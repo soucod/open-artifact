@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { mergedAreaOrCellOf, areaOfPosition } from '../selection/model.ts';
 import { layoutOfView } from './layout.ts';
 import { frozenRowsHeight, cellsHeightAboveFloats, isRangeInSight } from './geometry.ts';
@@ -9,9 +8,17 @@ import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import { isSelectionOneCell } from '../selection/keyboard.ts';
 import { hasOtherRanges } from '../selection/several-ranges.ts';
 import { withCalendarShut } from '../chips/calendar.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { MoreOfCellShownDone, PageState } from '../state/initial-state.ts';
+import type { PageStep } from '../selection/jumps.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function tallCellScrollRange(state: PageState, workbook: ReadsWithTextMeasurer) {
+/** How far the view scrolls through a cell taller than the room for it: from its top, to its foot, and the room it is seen in. */
+export interface TallCellScrollRange {
+  atStart: number;
+  atEnd: number;
+  room: number;
+  cell: string;
+}
+export function tallCellScrollRange(state: PageState, workbook: ReadsWithTextMeasurer): TallCellScrollRange | null {
   let area = mergedAreaOrCellOf(workbook, state.activeCell);
   let layout = layoutOfView(state, workbook);
   if (area === null || state.activeCell.sheetId !== state.sheetId) return null;
@@ -29,11 +36,11 @@ export function tallCellScrollRange(state: PageState, workbook: ReadsWithTextMea
   return {
     atStart: top - frozenHeight - stickyHeight,
     atEnd: bottom - frozenHeight - stickyHeight - room,
-    room: room,
-    cell: cell,
+    room,
+    cell,
   };
 }
-export function scrollThroughTallCell(state: PageState, workbook: ReadsWithTextMeasurer, direction?: Dynamic) {
+export function scrollThroughTallCell(state: PageState, workbook: ReadsWithTextMeasurer, direction: PageStep): PageState | null {
   let tall =
     isSelectionOneCell(state, workbook) && !hasOtherRanges(state) && state.placementSelected === null ? tallCellScrollRange(state, workbook) : null;
   if (tall === null) return null;
@@ -41,17 +48,17 @@ export function scrollThroughTallCell(state: PageState, workbook: ReadsWithTextM
   if (direction * (edge - state.scrollTop) < 1) return null;
   let next = state.scrollTop + direction * Math.max(tall.room - DEFAULT_ROW_HEIGHT, DEFAULT_ROW_HEIGHT);
   let scrollTop = direction === 1 ? Math.min(next, edge) : Math.max(next, edge);
-  let lastDone = {
+  let lastDone: MoreOfCellShownDone = {
     what: 'moreOfCellShown',
     cell: tall.cell,
   };
   return {
     ...withCalendarShut(state),
-    scrollTop: scrollTop,
-    lastDone: lastDone,
+    scrollTop,
+    lastDone,
   };
 }
-export function scrollToTallCellStart(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function scrollToTallCellStart(state: PageState, workbook: ReadsWithTextMeasurer): PageState {
   let tall = tallCellScrollRange(state, workbook);
   return tall === null || state.scrollTop <= tall.atStart
     ? state

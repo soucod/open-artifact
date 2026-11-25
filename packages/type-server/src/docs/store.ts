@@ -225,7 +225,7 @@ export const shortId = () => {
 };
 /**
  * A session id: a letter, then 10 base-36 characters. Block ids are `<session>.<n>` and the page only takes ids whose
- * session starts with a letter (the range of an Edit with Agent request is checked against it).
+ * session starts with a letter.
  */
 const sessionId = () => {
   const bytes = randomBytes(11);

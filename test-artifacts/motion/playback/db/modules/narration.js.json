@@ -1,0 +1,1 @@
+{"kind":"js","text":"kit.narration((T) => ({ lines: [\n  { at: T.intro + 0.3, text: 'Motion playback test.', audio: 'narration', dur: 1.7 },\n] }));"}

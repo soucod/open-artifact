@@ -6,29 +6,29 @@ import { create } from 'zustand';
 import { cellSelected, linkAt, removeLink, selectedMedia, setLink } from '../editor/commands.ts';
 import { currentView } from '../editor/format.ts';
 import { schema } from '../editor/schema.ts';
+import { boxText, planLinkCommit } from './link-commit.ts';
 import { docLinkUrl, followDocLink } from './navigate.ts';
 import { stripInvisible, webLinkParts } from './link-url.ts';
 import { type TextRange, linkRange, setLinkRange } from './watch.ts';
-
-/** The atom placeholder `setLink` compares a range's text with. */
-export const ATOM_CHAR = '￼';
 
 export interface LinkPop {
   /** `card`: the link's address and what can be done with it; `edit`: its text and address as fields. */
   mode: 'card' | 'edit';
   /** The link's address now ('' for a new link). */
   href: string;
-  /** The range's text when the box opened. */
+  /** The range's text when the box opened, or when a save last found it changed. */
   text: string;
   /** The text can't be changed here: the range crosses blocks or holds chips. */
   textFixed: boolean;
+  /** Opened on no text: a new link that brings its own. */
+  empty: boolean;
+  /** How many saves were held back because the text under the box changed meanwhile (the box then shows it). */
+  changed: number;
   /** Opened from the keyboard, so the card takes the focus. */
   byKey: boolean;
 }
 
 export const useLinkPop = create<{ pop: LinkPop | null }>(() => ({ pop: null }));
-
-const rangeText = (doc: PMNode, range: TextRange) => doc.textBetween(range.from, range.to, '', ATOM_CHAR);
 
 /** The link run around `pos` in its text block. */
 export function linkAround(doc: PMNode, pos: number): (TextRange & { href: string }) | null {
@@ -51,13 +51,9 @@ export function linkAround(doc: PMNode, pos: number): (TextRange & { href: strin
   return found;
 }
 
-function open(view: EditorView, range: TextRange, pop: Omit<LinkPop, 'text' | 'textFixed'>): void {
-  const $from = view.state.doc.resolve(range.from);
-  const $to = view.state.doc.resolve(range.to);
-  const text = rangeText(view.state.doc, range);
-  const textFixed = !$from.sameParent($to) || text.includes(ATOM_CHAR);
+function open(view: EditorView, range: TextRange, pop: Omit<LinkPop, 'text' | 'textFixed' | 'empty' | 'changed'>): void {
   setLinkRange(view, range);
-  useLinkPop.setState({ pop: { ...pop, text: textFixed ? stripInvisible(view.state.doc.textBetween(range.from, range.to, ' ', '')) : text, textFixed } });
+  useLinkPop.setState({ pop: { ...pop, ...boxText(view.state.doc, range), empty: range.from === range.to, changed: 0 } });
 }
 
 export function closeLink(options: { refocus?: boolean } = {}): void {
@@ -179,10 +175,12 @@ export function commitLink(href: string, text: string): void {
     closeLink();
     return;
   }
-  const wanted = text.trim();
-  const insert = range.from === range.to;
-  const newText = insert ? wanted || href : !pop.textFixed && wanted && wanted !== pop.text.trim() ? wanted : undefined;
-  setLink(href, newText, range)(view.state, view.dispatch);
+  const plan = planLinkCommit(view.state, pop, href, text);
+  if (plan.kind === 'changed') {
+    useLinkPop.setState({ pop: { ...pop, text: plan.text, textFixed: plan.textFixed, empty: plan.empty, changed: pop.changed + 1 } });
+    return;
+  }
+  if (plan.kind === 'set') setLink(href, plan.text, plan.range)(view.state, view.dispatch);
   closeLink({ refocus: true });
 }
 

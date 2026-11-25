@@ -12,7 +12,7 @@ The controls, every `dash.calc` and every `dash.loader` are only in the page's f
 
 A filter becomes the product's own parameter, with the same default. Its value goes in as a value and not as query text, because the `rules` that guard it here don't go with it. A number in the text that the page fills from a source updates each time the dashboard opens. In the other product it is fixed unless the product can fill it, so say which ones are.
 
-No connector serves an attached file's rows, which are in the file stored with this dashboard. Leave out a source that the product can't reach, and name it and what it needs.
+Attached files and saved rows live inside this dashboard rather than behind an external connector. Leave out any source the destination product cannot reach, and note what it needs.
 
 ## What goes there, and who sees it
 

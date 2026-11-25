@@ -14,6 +14,8 @@ export interface ConnectorSourceGroup {
 export interface SourceGroups {
   connectors: ConnectorSourceGroup[];
   files: Dataset[];
+  /** Saved rows, kept in the artifact's own store. */
+  stores: Dataset[];
   rest: Dataset[];
   calcs: Dataset[];
 }
@@ -38,10 +40,11 @@ export interface LocalRunEntry {
 export const LOCAL_RUN_STORAGE_PREFIX = 'dash-runs:';
 export const MAX_LOCAL_RUN_HISTORY = 20;
 
-/** Query sources by connector (in order of first use), then files, the rest, and calculations ("Transforms"). */
+/** Query sources by connector (in order of first use), then files, saved rows, the rest, and calculations ("Transforms"). */
 export function groupSourcesByConnector(datasets: readonly Dataset[]): SourceGroups {
   const connectors: ConnectorSourceGroup[] = [];
   const files: Dataset[] = [];
+  const stores: Dataset[] = [];
   const rest: Dataset[] = [];
   const calcs: Dataset[] = [];
   for (const dataset of datasets) {
@@ -51,10 +54,11 @@ export function groupSourcesByConnector(datasets: readonly Dataset[]): SourceGro
       if (group === undefined) connectors.push((group = { connector: source.connector, rows: [] }));
       group.rows.push(dataset);
     } else if (source.kind === 'file') files.push(dataset);
+    else if (source.kind === 'store') stores.push(dataset);
     else if (source.kind === 'calc') calcs.push(dataset);
     else rest.push(dataset);
   }
-  return { connectors, files, rest, calcs };
+  return { connectors, files, stores, rest, calcs };
 }
 
 /** The trail after opening a source: back to it when it is on the trail, else one more step. */
@@ -83,15 +87,17 @@ export function includeSelectedDataset(listed: readonly Dataset[], all: readonly
   return found === undefined || listed.some((dataset) => dataset.id === found.id) ? listed : [...listed, found];
 }
 
-/** A query or file that hasn't loaded yet counts as loading, unless nothing asked for it. */
+const LOADED_KINDS: ReadonlySet<Dataset['source']['kind']> = new Set(['query', 'file', 'store']);
+
+/** A query, file or saved rows that haven't loaded yet count as loading, unless nothing asked for them. */
 export function isDatasetLoading(dataset: Dataset, run: DatasetRun, unasked = false): boolean {
-  return run.status === 'running' || (!unasked && run.status === 'idle' && (dataset.source.kind === 'query' || dataset.source.kind === 'file'));
+  return run.status === 'running' || (!unasked && run.status === 'idle' && LOADED_KINDS.has(dataset.source.kind));
 }
 
-/** A live query that failed (or a file whose loader's code failed): Retry may help. */
+/** A live query or saved rows that failed (or a file whose loader's code failed): Retry may help. */
 export function isLiveQueryFailure(dataset: Dataset, run: DatasetRun): boolean {
   if (!isFailedDatasetRun(run) || run.status !== 'failed') return false;
-  return dataset.source.kind === 'query' || (dataset.source.kind === 'file' && isPageCodeFailure(run));
+  return dataset.source.kind === 'query' || dataset.source.kind === 'store' || (dataset.source.kind === 'file' && isPageCodeFailure(run));
 }
 
 function isLocalRunEntry(value: unknown): value is LocalRunEntry {
@@ -241,7 +247,7 @@ export function isSourceWaitingForConnection(dataset: Dataset, run: DatasetRun, 
  */
 export function hasRefreshAction(dataset: Dataset, run: DatasetRun, alone = false): boolean {
   const kind = dataset.source.kind;
-  if (kind !== 'query' && kind !== 'file') return false;
+  if (!LOADED_KINDS.has(kind)) return false;
   const shown = run.status === 'running' ? run.prev : run;
   if (shown !== null && isFailedDatasetRun(shown)) return shown.status !== 'refused';
   return kind === 'query' && alone;

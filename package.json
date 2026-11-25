@@ -2,7 +2,7 @@
   "name": "open-artifact-workspace",
   "private": true,
   "type": "module",
-  "description": "Open Artifact: generic, agent-agnostic artifact types (Design, Design System) with their editors, runtimes and local type server.",
+  "description": "Open, agent- and model-agnostic artifacts, all saved locally as plain files — edit, comment on, and export slides, UI designs, design systems, whiteboards, sheets, dashboards, docs, motion, and free HTML pages.",
   "license": "Apache-2.0",
   "workspaces": [
     "packages/*",
@@ -14,9 +14,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test \"packages/*/test/*.test.ts\" \"plugins/dsh/test/*.test.ts\"",
+    "test": "node --test \"packages/*/test/*.test.ts\" \"plugins/dsh/test/*.test.ts\" \"plugins/zcode/test/*.test.mjs\" \"examples/host-plugins/*.test.mjs\" \"examples/harness-node/*.test.mjs\" \"examples/harness-stdio/*.test.mjs\" \"scripts/*.test.mjs\"",
     "check": "npm run typecheck && npm test",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/run.mjs",
+    "test:sea": "node --test e2e/sea/sea.test.mjs",
+    "test-artifacts": "node test-artifacts/home.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",

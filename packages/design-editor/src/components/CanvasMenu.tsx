@@ -30,7 +30,7 @@ import {
 import { canPasteHere, copyToSystem, pasteFromSystem, pasteHere } from '../services/clipboard.ts';
 import { canCaptureSelection, canCopyAs, copyAs } from '../services/capture.ts';
 import { armScale } from '../services/scale.ts';
-import { ChromeMenuItem, ChromeMenuSeparator, POPUP } from '@open-artifact/editor-kit/react';
+import { ChromeMenuItem, ChromeMenuSeparator, menuFit, POPUP } from '@open-artifact/editor-kit/react';
 
 /** Wraps the canvas root, which becomes the menu's trigger. */
 export function CanvasMenu({ children }: { children: ReactElement<Record<string, unknown>> }) {
@@ -39,7 +39,7 @@ export function CanvasMenu({ children }: { children: ReactElement<Record<string,
       <ContextMenu.Trigger render={children} />
       <ContextMenu.Portal>
         <ContextMenu.Positioner className="z-[1000]">
-          <ContextMenu.Popup className={cn(POPUP, 'min-w-[220px]')}>
+          <ContextMenu.Popup className={cn(POPUP, 'min-w-[220px]')} style={menuFit()}>
             <MenuItems />
           </ContextMenu.Popup>
         </ContextMenu.Positioner>
@@ -92,7 +92,7 @@ function MenuItems() {
   const copyAsItems = canCopyAs() ? (
     <>
       {(['png', 'svg', 'html'] as const).map((format) => (
-        <ChromeMenuItem key={format} disabled={!canCaptureSelection()} onSelect={() => void copyAs(format)}>
+        <ChromeMenuItem key={format} shortcut={format === 'png' ? '⇧⌘C' : undefined} disabled={!canCaptureSelection()} onSelect={() => void copyAs(format)}>
           {`Copy as ${format.toUpperCase()}`}
         </ChromeMenuItem>
       ))}

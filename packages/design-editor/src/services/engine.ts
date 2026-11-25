@@ -14,7 +14,10 @@
  * (`registerLiveBoard`). A pan moves their frames with the camera; while
  * the camera zooms, live artboards that have a snapshot are drawn from it and
  * their frames hidden, and once it settles the frames show again
- * (services/live.ts decides which artboards are live).
+ * (services/live.ts decides which artboards are live). A snapshot that left
+ * web fonts out (`rough`) does not stand in for a frame while zooming: the
+ * text would change font twice. Resting artboards keep a frame but show
+ * their snapshot.
  *
  * The camera belongs to the engine. Layers that must follow it every frame
  * (note text, artboard labels) subscribe with `onCameraFrame`; the view
@@ -238,7 +241,7 @@ export async function startEngine(canvas: HTMLCanvasElement, surface: HTMLElemen
     if (stopped) return;
     const { canvas, readOnly } = useDocument.getState();
     const view = useView.getState();
-    const { live } = useLive.getState();
+    const { live, resting, snapshots } = useLive.getState();
     const upsert: CanvasItem[] = [];
     const seen = new Set<string>();
     boardsOnPage(canvas, view.page).forEach((path, z) => {
@@ -247,9 +250,11 @@ export async function startEngine(canvas: HTMLCanvasElement, surface: HTMLElemen
       seen.add(id);
       const texture = shown.get(path) ?? wantedTexture(path);
       const editing = view.textEdit?.board === path || view.playing === path;
-      // A booted frame shows through, except while the camera zooms and a snapshot can stand in for it
-      // (a pan only moves the frame, which stays sharp; a snapshot is a fraction of its resolution).
-      const hole = isLive(path, live) && Boolean(view.frames[path]?.booted) && (editing || !zooming || !shown.has(path));
+      // A booted frame shows through, except where a snapshot stands in for it: for a resting artboard, and
+      // while the camera zooms (a pan only moves the frame, which stays sharp; a snapshot is a fraction of its
+      // resolution) unless the snapshot is in other fonts than the frame.
+      const standIn = shown.has(path) && (resting.has(path) || (zooming && !snapshots[path]?.rough));
+      const hole = isLive(path, live) && Boolean(view.frames[path]?.booted) && (editing || !standIn);
       const look = `${hole ? 'h' : 'i'}|${texture ?? ''}|${z}|${readOnly ? 'r' : 'w'}`;
       const last = sent.get(id);
       if (last && last.source === entry && last.look === look) return;
@@ -440,7 +445,7 @@ export async function startEngine(canvas: HTMLCanvasElement, surface: HTMLElemen
     if (state.canvas !== prev.canvas || state.readOnly !== prev.readOnly) queueSync();
   });
   const unsubscribeLive = useLive.subscribe((state, prev) => {
-    if (state.live !== prev.live) queueSync();
+    if (state.live !== prev.live || state.resting !== prev.resting) queueSync();
     if (state.snapshots !== prev.snapshots) {
       queueSync();
       if (!moving) refreshTextures();

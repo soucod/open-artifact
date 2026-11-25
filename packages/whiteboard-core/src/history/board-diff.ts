@@ -6,7 +6,8 @@
  * Applying merges by field groups: only the fields the step changed (and the
  * fields that go with them) are written, so undoing a move does not revert
  * someone else's text edit of the same note. Tables, SVG drawings and
- * multi-element steps are applied as whole values.
+ * multi-element steps are applied as whole values, except a step that only
+ * moved or resized its elements.
  */
 
 import { canonicalValuesEqual } from '../json.ts';
@@ -72,6 +73,22 @@ export const LINKED_FIELD_GROUPS: readonly (readonly string[])[] = [
 /** Elements applied whole (their fields do not merge meaningfully). */
 export function isWholeValueElement(element: BoardElement): boolean {
   return element.type === 'table' || (element.type === 'image' && isSvgBase64DataUrl(element.src));
+}
+
+/** Fields a move or resize changes. */
+export const GEOMETRY_FIELDS: ReadonlySet<string> = new Set([...FIELD_GROUPS.place, ...FIELD_GROUPS.box, 'turn']);
+
+/** True when every element the step modified changed only {@link GEOMETRY_FIELDS}. */
+export function diffChangesOnlyGeometry(diff: BoardDiff): boolean {
+  for (const { before, after } of diff.touched.values()) {
+    if (before === undefined || after === undefined) continue;
+    const beforeFields = new Map(Object.entries(before));
+    const afterFields = new Map(Object.entries(after));
+    for (const key of new Set([...beforeFields.keys(), ...afterFields.keys()])) {
+      if (!GEOMETRY_FIELDS.has(key) && !canonicalValuesEqual(beforeFields.get(key), afterFields.get(key))) return false;
+    }
+  }
+  return true;
 }
 
 /** True when the step modified more than one existing element. */
@@ -141,11 +158,19 @@ export function restoreRecordedOrder(elements: readonly BoardElement[], order: r
   return kept;
 }
 
-/** Keeps a link someone else set on an image when the step did not change it. */
+/** Keeps a link or drawing style someone else set on an image when the step did not change it. */
 export function rebaseImageHref(next: BoardElement, current: BoardElement, base: BoardElement | undefined): BoardElement {
-  if (next.type !== 'image' || current.type !== 'image' || base?.type !== 'image' || next.href !== base.href || next.href === current.href) return next;
-  const { href: _href, ...rest } = next;
-  return current.href === undefined ? rest : { ...rest, href: current.href };
+  if (next.type !== 'image' || current.type !== 'image' || base?.type !== 'image') return next;
+  let result = next;
+  if (next.href === base.href && next.href !== current.href) {
+    const { href: _href, ...rest } = result;
+    result = current.href === undefined ? rest : { ...rest, href: current.href };
+  }
+  if (next.style === base.style && next.style !== current.style) {
+    const { style: _style, ...rest } = result;
+    result = current.style === undefined ? rest : { ...rest, style: current.style };
+  }
+  return result;
 }
 
 /** Keeps a rotation someone else set when the step did not rotate. */
@@ -222,7 +247,7 @@ export function applyBoardDiff(content: BoardContent, diff: BoardDiff, direction
   const onlyLockChanged = [...diff.touched.values()].every((change) =>
     canonicalValuesEqual({ ...change.before, locked: undefined }, { ...change.after, locked: undefined }),
   );
-  const wholeValues = force || (diffChangesSeveral(diff) && !onlyLockChanged);
+  const wholeValues = force || (diffChangesSeveral(diff) && !onlyLockChanged && !diffChangesOnlyGeometry(diff));
   const entries = [...diff.touched].sort(([, a], [, b]) => arrowRank(a) - arrowRank(b));
   for (const [id, change] of entries) {
     const [target, source] = direction === 'forward' ? [change.after, change.before] : [change.before, change.after];

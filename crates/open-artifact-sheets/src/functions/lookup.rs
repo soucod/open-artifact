@@ -493,7 +493,7 @@ fn filter(args: &[Arg], cx: &mut CallContext) -> Answer {
     let count = if by_column { columns } else { rows };
     let mut keep = vec![true; count];
     for include in &includes {
-        for (i, v) in include.values().iter().enumerate() {
+        for (i, v) in include.values().enumerate() {
             if !included(v)? {
                 keep[i] = false;
             }

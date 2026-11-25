@@ -18,6 +18,16 @@ export {
   type PollParams,
   type ToolRunner,
 } from './harness.ts';
+export {
+  addUserProfile,
+  homeProfileFile,
+  listProfiles,
+  removeProfile,
+  sanitizeAdapterProfile,
+  saveAdapterProfile,
+  type ProfileListing,
+} from './harness-profiles.ts';
+export { HARNESS_FEATURES, negotiateProtocol } from './harness-features.ts';
 export { TypeServers, fillTemplate, serverFiles, type TypeServersOptions } from './servers.ts';
 export {
   BUILTIN_TYPE_IDS,

@@ -1,5 +1,6 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
+/** Words besides a tool's label that find it, by the key the tool is told by. */
+type SearchWordsByKey = Partial<Record<string, () => string>>;
 export const INSERT_SEARCH_WORDS = {
   today: () =>
     translateMessage({
@@ -52,23 +53,24 @@ export const INSERT_SEARCH_WORDS = {
       id: 'Fg/vfI+xh1',
     }),
 };
-export const insertSearchWords = (key?: Dynamic) =>
+export type InsertSearchWordsKey = keyof typeof INSERT_SEARCH_WORDS;
+export const insertSearchWords = (key: InsertSearchWordsKey): string[] =>
   INSERT_SEARCH_WORDS[key]()
     .split(/[,،、，]/)
-    .map((input?: Dynamic) => input.trim())
-    .filter((input?: Dynamic) => input !== '');
-export const toolLabelWithValue = (tool?: Dynamic, value?: Dynamic) =>
+    .map((word) => word.trim())
+    .filter((word) => word !== '');
+export const toolLabelWithValue = (tool: string, value: string | undefined): string =>
   translateMessage(
     {
       defaultMessage: '{tool}: {value}',
-      id: 'Xpho4+j9wh',
+      id: 'slPKCQLVQ1',
     },
     {
-      tool: tool,
-      value: value,
+      tool,
+      value,
     },
   );
-export const TOOL_SEARCH_WORDS = {
+export const TOOL_SEARCH_WORDS: SearchWordsByKey = {
   strikethrough: () =>
     translateMessage({
       defaultMessage:
@@ -163,7 +165,7 @@ export const TOOL_SEARCH_WORDS = {
   time: () =>
     translateMessage({
       defaultMessage: 'hours, clock, times, time of day, hour, minutes, hh mm, am pm, 12 hour, time only',
-      id: 'XIzwaROiH8',
+      id: 'UypxR6RyIa',
     }),
   mergeCells: () =>
     translateMessage({
@@ -178,30 +180,35 @@ export const TOOL_SEARCH_WORDS = {
     }),
   general: () =>
     translateMessage({
-      defaultMessage: 'general, default, plain, auto, clear number format',
-      id: 'Owt+Bamjim',
+      defaultMessage: 'general, default, auto, clear number format',
+      id: '77DgQRcnvt',
     }),
   currency: () =>
     translateMessage({
       defaultMessage: 'money, dollar, price, currency symbol, dollars, prices, usd, cents, monetary, dollar sign, curency',
-      id: 'UHSxKwntyk',
+      id: 'pd1owLtnJ0',
     }),
   percent: () =>
     translateMessage({
       defaultMessage:
         'percentage, percentages, percents, per cent, pct, ratio, proportion, precent, persent, percent sign, growth rate, interest rate, percantage',
-      id: 'kKlH6iphFj',
+      id: 'yDdSdK/6ZO',
+    }),
+  roundedPercent: () =>
+    translateMessage({
+      defaultMessage: 'whole percent, round percent, nearest percent, percent no decimals',
+      id: 'e/x1GBhHGK',
     }),
   scientific: () =>
     translateMessage({
       defaultMessage: 'exponent, scientific notation, notation, exponential, exponents, e notation, powers of ten, power of 10, sci, mantissa',
-      id: 'rbJbY42Sme',
+      id: 'notT1jiJPU',
     }),
   duration: () =>
     translateMessage({
       defaultMessage:
         'elapsed, hours, minutes, seconds, time spent, time taken, length of time, hours worked, timesheet, hh mm ss, runtime, running time, interval, durations, hours and minutes',
-      id: '3cZAa57WyB',
+      id: 'htMrYlGZJf',
     }),
   zoom: () =>
     translateMessage({
@@ -283,13 +290,13 @@ export const TOOL_SEARCH_WORDS = {
     translateMessage({
       defaultMessage:
         'comma, thousands, delimiter, separator, digits, numbers, numeric, decimals, two decimals, 2 decimals, 2 dp, thousands separator, thousand separator, commas, comma style, figures, separators, delimiters, comma separators, plain number, two decimal places, 2 decimal places, places after the point',
-      id: 'iCITxrWy99',
+      id: 'o4kzPjyrOk',
     }),
   numberInParentheses: () =>
     translateMessage({
       defaultMessage:
         'negative, accounting, brackets, negatives, negative numbers, parenthesis, parens, bracketed, bracket, round brackets, negatives in brackets',
-      id: 'ASYR+1Tf9h',
+      id: 'R+W9hdqB3/',
     }),
   'align.center': () =>
     translateMessage({
@@ -300,25 +307,25 @@ export const TOOL_SEARCH_WORDS = {
     translateMessage({
       defaultMessage:
         'tick box, tickbox, check box, todo, checkboxes, check boxes, tick boxes, checkmark, check mark, tick, ticks, checklist, check list, to do, todos, task, tasks, done, complete, completed, yes no, true false, boolean, chekbox, task list, checked',
-      id: 'HW8GaKQaOz',
+      id: 'ud+Bb+ta2d',
     }),
   insertDropdown: () =>
     translateMessage({
       defaultMessage:
         'drop down, list, options, choices, pick list, dropdowns, drop downs, picker, picklist, selector, pull down, combo box, data validation, validation, multiple choice, status, category, categories, tags, labels, dropdwon, dropdown list, choice list, options list, dropdown menu, choose from list',
-      id: 'pM4G/j5ys2',
+      id: 'ektCNn9c/O',
     }),
   insertPerson: () =>
     translateMessage({
       defaultMessage:
         'people, mention, assign, assignee, persons, contact, member, teammate, colleague, collaborator, assigned to, assignees, tag someone, at mention, staff, add person, tag person, people chip',
-      id: 'mLPUm+giSr',
+      id: 'pjMEHZ6JXy',
     }),
   insertDate: () =>
     translateMessage({
       defaultMessage:
-        'calendar, day, date picker, dates, datepicker, pick a date, today, deadline, due date, due, schedule, calender, pick date, choose date, add date, calendar picker',
-      id: 'jKjnsCwR5l',
+        'calendar, day, date picker, dates, datepicker, today, deadline, due date, due, schedule, calender, choose date, add date, calendar picker',
+      id: 'QvML3NqEzh',
     }),
   bold: () =>
     translateMessage({
@@ -577,60 +584,65 @@ export const TOOL_SEARCH_WORDS = {
     }),
   numberFormat: () =>
     translateMessage({
-      defaultMessage: 'format as, show as, display as, formatting, number style, cell format, data type, cell type',
-      id: 'qPB5JvER8m',
+      defaultMessage: 'format as, show as, display as, formatting, number format, number style, cell format, data type',
+      id: 'gQLZNkemKz',
     }),
   roundedNumber: () =>
     translateMessage({
       defaultMessage:
         'whole, whole number, whole numbers, integer, integers, no decimals, no decimal places, zero decimals, 0 decimals, round, rounding, round off, nearest whole, without decimals, drop decimals, nothing after the point',
-      id: 'J0PAW8jlHL',
+      id: 'jikji3oZGm',
     }),
   roundedCurrency: () =>
     translateMessage({
       defaultMessage: 'whole dollars, no cents, round dollars, whole amounts, nearest dollar, money, dollars, without cents, round money, drop cents',
-      id: 'cqE1p0TcAX',
+      id: 'vviirkAR4z',
+    }),
+  text: () =>
+    translateMessage({
+      defaultMessage: 'text, keep zeros, string',
+      id: 'uCNuULe68I',
     }),
   date: () =>
     translateMessage({
       defaultMessage: 'dates, short date, numeric date, mm dd yyyy, dd mm yyyy, slashes, daet, slash date',
-      id: 'y82jNI0DQX',
+      id: '/Plsd5QPDW',
     }),
   mediumDate: () =>
     translateMessage({
       defaultMessage: 'medium date, abbreviated month, month abbreviation, abbreviated date, three letter month, short month name, mar 15 2026',
-      id: '0pMFqIZAbZ',
+      id: 'qOI35+Mbbh',
     }),
   longDate: () =>
     translateMessage({
       defaultMessage: 'long date, full date, month name, written out, full month name, month spelled out, formal date, march 15 2026',
-      id: 'EItImVehYC',
+      id: '84ga77gQLb',
     }),
   monthAndDay: () =>
     translateMessage({
       defaultMessage: 'date, day and month, month day, day month, mar 15',
-      id: 'Sxw28x9Nwc',
+      id: 'd4IYgSVjNa',
     }),
   monthAndYear: () =>
     translateMessage({
       defaultMessage: 'date, monthly, month year, year month, billing month, mar 2026',
-      id: '0k0vmLQtER',
+      id: '5MjribPi/C',
     }),
   dateAndTime: () =>
     translateMessage({
       defaultMessage: 'datetime, timestamp, time stamp, date with time, day and hour, timestamps, with time, time too',
-      id: 'paOmoww5NB',
+      id: 'tNu4+HD3jX',
     }),
   phoneNumber: () =>
     translateMessage({
       defaultMessage: 'phone number, telephone, tel, mobile, fax',
-      id: 'gEbzVLsjjh',
+      id: 'S92heMvjeU',
     }),
   customFormat: () =>
     translateMessage({
       defaultMessage:
         'custom number format, own format, pattern, format code, format string, mask, make my own, advanced format, units, suffix, prefix, leading zeros, phone number, zip code, fraction, number pattern, create format, define format, special format, custom number formatting, decimal places, 1 decimal, 3 decimals, 4 decimals, 5 decimals, one decimal, three decimals, four decimals, five decimals, 1 dp, 3 dp, weekday, day of the week, year only, just the year, quarter, seconds',
-      id: '7O2LvPtYs3',
+      id: '6CeJAQibMA',
     }),
   fewerDecimalPlaces: () =>
     translateMessage({
@@ -662,8 +674,8 @@ export const TOOL_SEARCH_WORDS = {
     }),
   insert: () =>
     translateMessage({
-      defaultMessage: 'add, new, create, make, put in',
-      id: 'l/ycPlCHSv',
+      defaultMessage: 'insert, add, new, create, make, put in',
+      id: '1FzsHtPHVV',
     }),
   zoomToChart: () =>
     translateMessage({
@@ -724,11 +736,12 @@ export const TOOL_SEARCH_WORDS = {
       id: 'gXoXcjHyvd',
     }),
 };
-export const toolSearchWords = (...keys: Dynamic[]) =>
+export const toolSearchWords = (...keys: string[]): string[] =>
   keys.flatMap(
-    (key?: Dynamic) =>
+    (key) =>
       (TOOL_SEARCH_WORDS[key]?.() ?? '')
         .split(/[,،、，]/)
-        .map((input?: Dynamic) => input.trim())
-        .filter((input?: Dynamic) => input !== ''),
+        .map((word) => word.trim())
+        .filter((word) => word !== ''),
+
   );

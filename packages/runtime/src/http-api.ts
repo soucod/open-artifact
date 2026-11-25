@@ -18,6 +18,8 @@ import type {
   ConflictPath,
   DbChangeEvent,
   DbDocument,
+  DbOrder,
+  DbReceipt,
   DbWrite,
   FileListing,
   FilesChangedEvent,
@@ -35,7 +37,7 @@ import type {
   RoomMessage,
   Viewer,
 } from './capabilities.ts';
-import type { SheetFrame } from './sheet-api.ts';
+import type { SheetFrame, SheetWalkthrough } from './sheet-api.ts';
 import type { DocFrame } from './doc-api.ts';
 
 /** Route paths, relative to the page base. */
@@ -72,7 +74,23 @@ export const API = {
   systemCopy: '_api/design/system-copy',
   mcpTools: '_api/mcp/tools',
   mcpCall: '_api/mcp/call',
+  /**
+   * `POST` {@link DataRefreshRequest} → {@link DataRefreshResponse}: a hosted Data dashboard asks its owner's computer to
+   * run its live queries again (the host queues it; no connector runs there).
+   */
+  dataRefresh: '_api/data/refresh',
 } as const;
+
+/** `POST _api/data/refresh`: the dataset ids to refresh, all live queries when left out. */
+export interface DataRefreshRequest {
+  queries?: string[];
+}
+
+/** `POST _api/data/refresh`'s answer: queued; `online` says whether the owner's computer is linked now to take it. */
+export interface DataRefreshResponse {
+  queued: true;
+  online: boolean;
+}
 
 /** Root-relative prefix every upload is served under. */
 export const BLOB_PREFIX = '/_blob/';
@@ -145,8 +163,8 @@ export interface DbGetResponse {
   data: JsonRecord | null;
 }
 
-/** `GET _api/db/list?collection=` 200 body. */
-export interface DbListResponse {
+/** `GET _api/db/list?collection=` 200 body: `epoch` and `seq` say where the host stood when it read them (older hosts omit them). */
+export interface DbListResponse extends Partial<DbOrder> {
   documents: DbDocument[];
 }
 
@@ -155,6 +173,11 @@ export interface DbWriteRequest {
   writes: DbWrite[];
   /** The writing page's client id, so the change is not echoed back to it. */
   client: string;
+}
+
+/** `POST _api/db/write` 200 body: the {@link DbReceipt} (older hosts omit its fields). */
+export interface DbWriteResponse extends Partial<DbReceipt> {
+  ok: true;
 }
 
 /** `GET _api/comments` 200 body, and the body of `POST _api/comments/remove`. */
@@ -292,6 +315,8 @@ export interface ServerEvents {
   history: HistoryChangeEvent;
   /** A frame of the workbook's edit log (types with `store: "workbook"`). */
   sheet: SheetFrame;
+  /** A walkthrough the agent sent, to one page of the owner's (`SHEET_WALKTHROUGH_EVENT`; types with `store: "workbook"`). */
+  sheetWalkthrough: SheetWalkthrough;
   /** A write to a doc, its tabs or its dropdown lists (types with `store: "doc"`). */
   doc: DocFrame;
 }

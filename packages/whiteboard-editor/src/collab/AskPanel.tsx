@@ -15,12 +15,14 @@ import { ArrowUp, FileText, Frame, LayoutGrid, MousePointer2, X } from 'lucide-r
 import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { cn, toast } from '@open-artifact/ui';
 import { isBoardMediaFile } from '../lib/media.ts';
+import { middleCut } from '../lib/middle-cut.ts';
 import { announce } from '../services/announce.ts';
 import { useAgent } from '../services/agent.ts';
 import { maybeSession } from '../services/session.ts';
 import { useAsk, type AskScope } from '../state/ask.ts';
 import { useSelection } from '../state/selection.ts';
 import { Card, ChromeButton, Tip } from '../ui/chrome.tsx';
+import { useFocusThroughDisable } from '../ui/hooks.ts';
 import { askAgent, type AskTarget } from './asks.ts';
 import { MAX_ASK_TEXT } from './ask-status.ts';
 import {
@@ -110,7 +112,10 @@ function dragHasFiles(event: ReactDragEvent): boolean {
   return [...event.dataTransfer.types].includes('Files');
 }
 
-/** The attached files, as chips with a remove button. */
+/** Characters of a file name a chip shows; longer names are cut in the middle. */
+const CHIP_NAME_CHARS = 24;
+
+/** The attached files, as chips with a remove button (a long name keeps its extension; the full name is the tooltip). */
 function AttachedFileChips() {
   const files = useAttachedFiles((state) => state.files);
   if (files.length === 0) return null;
@@ -120,7 +125,7 @@ function AttachedFileChips() {
         <li key={file.n} className="inline-flex h-6 max-w-[220px] items-center gap-1 rounded-[6px] bg-chrome-hover pl-2 pr-0.5 text-[12px] text-chrome-fg">
           <FileText aria-hidden="true" className="size-3.5 shrink-0 text-chrome-muted" />
           <span className="min-w-0 truncate" title={file.name}>
-            {file.name}
+            {middleCut(file.name, CHIP_NAME_CHARS)}
           </span>
           <button
             type="button"
@@ -165,6 +170,7 @@ export function AskPanel() {
   const lastFile = useAttachedFiles((state) => state.files.reduce((most, file) => Math.max(most, file.n), 0));
   const [dropOver, setDropOver] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
+  const keepFocus = useFocusThroughDisable(field, !available);
 
   // Opening, a new scope or a newly attached file puts the caret in the field.
   useEffect(() => {
@@ -221,7 +227,7 @@ export function AskPanel() {
   };
 
   return (
-    <Card className="wb-ask-panel" role="dialog" aria-label={`Ask ${name}`} data-drop-over={dropOver ? '' : undefined} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+    <Card className="wb-ask-panel" data-wb-region="ask" role="dialog" aria-label={`Ask ${name}`} data-drop-over={dropOver ? '' : undefined} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
       <div className="flex w-full flex-col gap-1.5 p-1.5">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-6 items-center gap-1 rounded-[6px] bg-chrome-hover px-2 text-[12px] text-chrome-muted">
@@ -254,6 +260,7 @@ export function AskPanel() {
             onChange={(event) => useAsk.getState().setDraft(event.target.value)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
+            {...keepFocus}
           />
           <Tip label="Send" shortcut="Enter" side="top">
             <ChromeButton

@@ -143,6 +143,101 @@ export function useTallSheet(enabled: boolean, body: React.RefObject<HTMLElement
   return tall;
 }
 
+interface PointerPress {
+  pointerId: number;
+  /** When the press went down, on the page's clock. */
+  downAt: number;
+  /** When it was let go or cancelled, if it has been. */
+  upAt: number | undefined;
+  byFinger: boolean;
+}
+
+/** The last press on each document, kept from the start so a press made before a sheet opened is known. */
+const lastPressByDocument = new WeakMap<Document, PointerPress | null>();
+
+/** How far an event's own time may lag the clock and still be trusted as when it happened. */
+const EVENT_TIME_TRUST_MS = 1000;
+
+const isFingerLike = (pointerType: string): boolean => pointerType === 'touch' || pointerType === 'pen';
+
+function watchPresses(doc: Document): void {
+  if (lastPressByDocument.has(doc)) return;
+  lastPressByDocument.set(doc, null);
+  const now = (): number => doc.defaultView?.performance.now() ?? 0;
+  doc.addEventListener(
+    'pointerdown',
+    (event) => {
+      const clock = now();
+      const lag = clock - event.timeStamp;
+      const downAt = event.timeStamp > 0 && lag >= 0 && lag <= EVENT_TIME_TRUST_MS ? event.timeStamp : clock;
+      lastPressByDocument.set(doc, { pointerId: event.pointerId, downAt, upAt: undefined, byFinger: isFingerLike(event.pointerType) });
+    },
+    true,
+  );
+  const onPressEnd = (event: PointerEvent): void => {
+    const press = lastPressByDocument.get(doc);
+    if (press && press.upAt === undefined && press.pointerId === event.pointerId) press.upAt = now();
+  };
+  doc.addEventListener('pointerup', onPressEnd, true);
+  doc.addEventListener('pointercancel', onPressEnd, true);
+}
+
+if (typeof document !== 'undefined') watchPresses(document);
+
+function cssDurationMs(value: string): number {
+  const amount = Number.parseFloat(value);
+  if (Number.isNaN(amount)) return 0;
+  return value.trim().endsWith('ms') ? amount : amount * 1000;
+}
+
+const ENTRY_TAP_EVENTS = ['mousedown', 'mouseup', 'click'] as const;
+
+/**
+ * A finger that lands while a sheet is still sliding in meant whatever was under it before the
+ * sheet arrived: the mouse events that touch sends on to the sheet are swallowed.
+ */
+export function useSwallowSheetEntryTaps(sheet: HTMLElement | null, open: boolean): void {
+  React.useLayoutEffect(() => {
+    const doc = sheet?.ownerDocument;
+    const view = doc?.defaultView ?? null;
+    if (!sheet || !doc || view === null || !open) return undefined;
+    watchPresses(doc);
+    const slideMs = cssDurationMs(view.getComputedStyle(sheet).getPropertyValue('--ui-dur-sheet'));
+    const openedAt = view.performance.now();
+    let slideStartedAt = openedAt;
+    let slideEndedAt = Number.POSITIVE_INFINITY;
+    const onSlideRun = (event: TransitionEvent): void => {
+      if (event.target !== sheet || event.propertyName !== 'translate') return;
+      slideStartedAt = view.performance.now();
+      sheet.removeEventListener('transitionrun', onSlideRun);
+    };
+    const onSlideEnd = (event: TransitionEvent): void => {
+      if (event.target === sheet && event.propertyName === 'translate') slideEndedAt = view.performance.now();
+    };
+    const stopWaitingForSlide = view.setTimeout(() => sheet.removeEventListener('transitionrun', onSlideRun), slideMs);
+    const landedWhileSliding = (event: MouseEvent): boolean => {
+      const press = lastPressByDocument.get(doc);
+      if (press === undefined || press === null) return event instanceof view.PointerEvent && isFingerLike(event.pointerType);
+      const letGoBeforeOpen = press.upAt !== undefined && press.upAt < openedAt;
+      return press.byFinger && !letGoBeforeOpen && press.downAt - slideStartedAt < slideMs && press.downAt < slideEndedAt;
+    };
+    const swallow = (event: MouseEvent): void => {
+      if (event.detail === 0 || !landedWhileSliding(event)) return;
+      event.stopPropagation();
+      if (event.type === 'click') event.preventDefault();
+    };
+    sheet.addEventListener('transitionrun', onSlideRun);
+    sheet.addEventListener('transitionend', onSlideEnd);
+    for (const type of ENTRY_TAP_EVENTS) sheet.addEventListener(type, swallow, true);
+    return () => {
+      view.clearTimeout(stopWaitingForSlide);
+      sheet.removeEventListener('transitionrun', onSlideRun);
+      sheet.removeEventListener('transitionend', onSlideEnd);
+      for (const type of ENTRY_TAP_EVENTS) sheet.removeEventListener(type, swallow, true);
+    };
+  }, [sheet, open]);
+}
+
 /** Sizes a list to show `count` rows before it scrolls. */
 export function visibleRowsMaxHeight(count: number, withHeader: boolean): string {
   const gutter = withHeader ? 'var(--ui-menu-gutter) + 0.25rem' : '2 * var(--ui-menu-gutter)';

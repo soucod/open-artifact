@@ -154,6 +154,7 @@ pub fn read(edit: &Json) -> Option<Edit> {
             settings.last_frozen_row.is_some()
                 || settings.last_frozen_column.is_some()
                 || settings.are_gridlines_hidden.is_some()
+                || settings.interactive.is_some()
         }
         Edit::InsertRows { count, values_from_filter, .. } => *count > 0 && values_from_filter.is_none(),
         Edit::InsertColumns { count, .. } => *count > 0,
@@ -485,9 +486,22 @@ fn set_sheet_settings(workbook: &Workbook, sheet: &Sheet, asked: SheetSettings) 
             settings.are_gridlines_hidden = Some(hidden);
         }
     }
+    if let Some(view) = asked.interactive.filter(|view| *view != sheet.interactive) {
+        if let Some(id) = &view {
+            let (_, view) = workbook.views.get(id).ok_or(Refused::Because("unknownView"))?;
+            if !view.is_interactive() {
+                return Err(Refused::Because("viewIsNoInteractive"));
+            }
+            if !sheet.cells.is_empty() || !sheet.placements.is_empty() {
+                return Err(Refused::Because("sheetForInteractiveIsNotEmpty"));
+            }
+        }
+        settings.interactive = Some(view);
+    }
     let is_any_set = settings.last_frozen_row.is_some()
         || settings.last_frozen_column.is_some()
-        || settings.are_gridlines_hidden.is_some();
+        || settings.are_gridlines_hidden.is_some()
+        || settings.interactive.is_some();
     if !is_any_set {
         return Ok(Made::nothing());
     }
@@ -566,7 +580,7 @@ fn delete(workbook: &Workbook, sheet: &Sheet, lines: Lines, deleted: Vec<LineId>
     let runs = sorted_runs(&workbook.bases, &mut ids);
     let sheet_id = sheet.id.clone();
     let op = match lines {
-        Lines::Rows => Op::DeleteRows { sheet_id, rows: runs },
+        Lines::Rows => Op::DeleteRows { sheet_id, rows: crate::ids::listed_runs::RowRuns::written(runs) },
         Lines::Columns => Op::DeleteColumns { sheet_id, columns: runs },
     };
     ops.push(op.clone());

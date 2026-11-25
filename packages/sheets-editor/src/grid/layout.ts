@@ -129,7 +129,7 @@ export function cellLayoutCacheFor(
   book: ReadsWithTextMeasurer,
   density: CellDensity,
 ): [WeakMap<CellLayoutKey, GridLayout>, CellLayoutKey] {
-  let { withNoWrappedText: withNoWrappedText, withWrappedText: withWrappedText } = cellLayoutCachesByDensity[density];
+  let { withNoWrappedText, withWrappedText } = cellLayoutCachesByDensity[density];
   let sheetAsItStands = book.sheetAsItStands(sheet.sheetId);
   if (sheetAsItStands === null || !mayRowsGrowInSheet(sheet.sheetId, book)) return [withNoWrappedText, sheet];
   let cached = withWrappedText.get(book.lineCountsOfWrappedTexts);
@@ -153,18 +153,18 @@ export function cachedRowEdges(rowLines: LineIndex | undefined, rowCount: number
     rowEdgesCache.set(rowLines, {
       sized: sizedRuns,
       plain: plainSize,
-      edges: edges,
+      edges,
     });
   return edges;
 }
 export function cellLayoutOfSheet(sheet: SheetSummary, book: ReadsWithTextMeasurer, density: CellDensity): GridLayout {
   let {
-    sheetId: sheetId,
-    rowCount: rowCount,
-    columnCount: columnCount,
-    columnEdges: columnEdges,
-    frozenRowCount: frozenRowCount,
-    frozenColumnCount: frozenColumnCount,
+    sheetId,
+    rowCount,
+    columnCount,
+    columnEdges,
+    frozenRowCount,
+    frozenColumnCount,
   } = sheet;
   let [cache, cacheKey] = cellLayoutCacheFor(sheet, book, density);
   let cached = cache.get(cacheKey);
@@ -176,12 +176,12 @@ export function cellLayoutOfSheet(sheet: SheetSummary, book: ReadsWithTextMeasur
     defaultRowHeightAtDensity(density),
   );
   let layout: GridLayout = {
-    rowCount: rowCount,
-    columnCount: columnCount,
-    rowEdges: rowEdges,
-    columnEdges: columnEdges,
-    frozenRowCount: frozenRowCount,
-    frozenColumnCount: frozenColumnCount,
+    rowCount,
+    columnCount,
+    rowEdges,
+    columnEdges,
+    frozenRowCount,
+    frozenColumnCount,
     rowsOutOfSight: [],
     columnsOutOfSight: [],
   };
@@ -189,9 +189,9 @@ export function cellLayoutOfSheet(sheet: SheetSummary, book: ReadsWithTextMeasur
   return layout;
 }
 export function rowsOutOfSightOf(
-  { ownCollapsing: ownCollapsing, rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters }: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters'>,
+  { ownCollapsing, rowsOutOfViewByOwnFilters }: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters'>,
   book: WorkbookReads,
-  { sheetId: sheetId, rowGroups: rowGroups, rowCount: rowCount, frozenRowCount: frozenRowCount }: Pick<SheetSummary, 'sheetId' | 'rowGroups' | 'rowCount' | 'frozenRowCount'>,
+  { sheetId, rowGroups, rowCount, frozenRowCount }: Pick<SheetSummary, 'sheetId' | 'rowGroups' | 'rowCount' | 'frozenRowCount'>,
 ): RowsOutOfSight {
   let filteredRowIds = rowsOutOfViewByOwnFilters.get(sheetId);
   let rowLines = book.linesOf(sheetId)?.rows;
@@ -209,12 +209,12 @@ export function rowsOutOfSightOf(
     reusable !== null && sameLineRuns(reusable.inGroups, collapsedRuns) ? reusable.found : mergeRowsOutOfSight(collapsedRuns, filteredRuns, rowCount);
   let cacheEntry: RowsOutOfSightCacheEntry = {
     rows: rowLines,
-    frozenRowCount: frozenRowCount,
-    rowGroups: rowGroups,
-    ownCollapsing: ownCollapsing,
+    frozenRowCount,
+    rowGroups,
+    ownCollapsing,
     named: filteredRuns,
     inGroups: collapsedRuns,
-    found: found,
+    found,
   };
   rowsOutOfSightCache.set(filteredRowIds, cacheEntry);
   return found;
@@ -240,8 +240,8 @@ export function rowEdgesWithHiddenRows(rowEdges: LineSizes, outOfSight: readonly
   if (cached?.outOfSight === outOfSight) return cached.edges;
   let edges = collapseLineSizes(rowEdges, outOfSight);
   rowEdgesWithHiddenRowsCache.set(rowEdges, {
-    outOfSight: outOfSight,
-    edges: edges,
+    outOfSight,
+    edges,
   });
   return edges;
 }
@@ -251,27 +251,27 @@ export function withHiddenLines(
   book: WorkbookReads,
   view: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters'>,
 ): GridLayout {
-  let { sheetId: sheetId, rowGroups: rowGroups, columnGroups: columnGroups } = sheet;
-  let { ownCollapsing: ownCollapsing } = view;
+  let { sheetId, rowGroups, columnGroups } = sheet;
+  let { ownCollapsing } = view;
   let filteredRowIds = view.rowsOutOfViewByOwnFilters.get(sheetId);
   if (rowGroups.length === 0 && columnGroups.length === 0 && filteredRowIds === undefined) return layout;
   let cached = layoutWithHiddenLinesCache.get(layout);
   if (cached?.ownCollapsing === ownCollapsing && cached.rowIds === filteredRowIds) return cached.layout;
   let rowsOutOfSight = rowsOutOfSightOf(view, book, sheet).all;
   let columnsOutOfSight = collapsedIndexRuns(withOwnCollapsing(ownCollapsing, columnGroups));
-  let result: GridLayout = {
+  let layoutWithHidden: GridLayout = {
     ...layout,
-    rowsOutOfSight: rowsOutOfSight,
-    columnsOutOfSight: columnsOutOfSight,
+    rowsOutOfSight,
+    columnsOutOfSight,
     rowEdges: rowEdgesWithHiddenRows(layout.rowEdges, rowsOutOfSight),
     columnEdges: collapseLineSizes(layout.columnEdges, columnsOutOfSight),
   };
   layoutWithHiddenLinesCache.set(layout, {
-    ownCollapsing: ownCollapsing,
+    ownCollapsing,
     rowIds: filteredRowIds,
-    layout: result,
+    layout: layoutWithHidden,
   });
-  return result;
+  return layoutWithHidden;
 }
 export function withFreezeBeingDragged(view: Pick<PageState, 'dragging' | 'heldUntilAnswered' | 'sheetId'>, layout: GridLayout): GridLayout {
   let dragging = draggingOrHeld(view);
@@ -288,11 +288,11 @@ export function withFreezeBeingDragged(view: Pick<PageState, 'dragging' | 'heldU
       };
 }
 export function lineBeingResized(
-  { dragging: dragging, sheetId: sheetId, density: density }: Pick<PageState, 'dragging' | 'sheetId' | 'density'>,
-  book: WorkbookReads,
+  { dragging, sheetId, density }: Pick<PageState, 'dragging' | 'sheetId' | 'density'>,
+  book: ReadsWithTextMeasurer,
 ): LineResize | null {
   if (dragging?.kind !== 'resizing') return null;
-  let { line: line, sizeInPixels: sizeInPixels } = dragging;
+  let { line, sizeInPixels } = dragging;
   let isByFinger = dragging.isByFinger === true;
   if (line.isA === 'column') {
     let columnIndex = book.columnIndexOf(sheetId, line.columnId);
@@ -301,8 +301,8 @@ export function lineBeingResized(
       : {
           isA: 'column',
           index: columnIndex,
-          sizeInPixels: sizeInPixels,
-          isByFinger: isByFinger,
+          sizeInPixels,
+          isByFinger,
         };
   }
   let rowIndex = book.rowIndexOf(sheetId, line.rowId);
@@ -312,7 +312,7 @@ export function lineBeingResized(
     isA: 'row',
     index: rowIndex,
     sizeInPixels: Math.max(sizeInPixels, wrappedHeight),
-    isByFinger: isByFinger,
+    isByFinger,
   };
 }
 export function keepResizedLineInSight<V extends LayoutView & Pick<PageState, 'scrollTop' | 'scrollLeft'>>(
@@ -323,7 +323,7 @@ export function keepResizedLineInSight<V extends LayoutView & Pick<PageState, 's
   let resize = lineBeingResized(
     {
       ...view,
-      dragging: dragging,
+      dragging,
     },
     book,
   );
@@ -361,7 +361,7 @@ export function layoutOfView(view: LayoutView, book: ReadsWithTextMeasurer): Gri
 }
 export function withReachOfFloats(layout: GridLayout, placements: readonly PlacementOnGrid[]): GridLayout {
   if (placements.length === 0) return layout;
-  let { rowEdges: rowEdges, columnEdges: columnEdges, frozenRowCount: frozenRowCount, frozenColumnCount: frozenColumnCount } = layout;
+  let { rowEdges, columnEdges, frozenRowCount, frozenColumnCount } = layout;
   let cached = reachOfFloatsCache.get(placements);
   if (cached?.ofCells === layout) return cached.withReach;
   if (
@@ -375,7 +375,7 @@ export function withReachOfFloats(layout: GridLayout, placements: readonly Place
       reachOfWhatFloats: cached.withReach.reachOfWhatFloats,
     };
   let [across, down]: [number, number] = [0, 0];
-  for (let { rowIndex: rowIndex, columnIndex: columnIndex, offsetFromAnchorCell: offsetFromAnchorCell, ...size } of placements) {
+  for (let { rowIndex, columnIndex, offsetFromAnchorCell, ...size } of placements) {
     let [columnPoint, rowPoint] = [
       {
         index: columnIndex,
@@ -390,22 +390,22 @@ export function withReachOfFloats(layout: GridLayout, placements: readonly Place
       across = Math.max(across, columnEdges.startOf(columnIndex) + clampPixelsPast(columnEdges, columnPoint) + size.widthInPixels);
     if (rowIndex >= frozenRowCount) down = Math.max(down, rowEdges.startOf(rowIndex) + clampPixelsPast(rowEdges, rowPoint) + size.heightInPixels);
   }
-  let result: GridLayout = {
+  let layoutWithReach: GridLayout = {
     ...layout,
     reachOfWhatFloats: {
-      across: across,
-      down: down,
+      across,
+      down,
     },
   };
   reachOfFloatsCache.set(placements, {
     ofCells: layout,
-    withReach: result,
+    withReach: layoutWithReach,
   });
-  return result;
+  return layoutWithReach;
 }
-export function hiddenByBorderAtFoot(view: Pick<PageState, 'sheetId' | 'scrollTop' | 'density'>, book: WorkbookReads, layout: GridLayout, area: CellArea): number {
+export function hiddenByBorderAtFoot(view: Pick<PageState, 'sheetId' | 'scrollTop' | 'density'>, book: ReadsWithTextMeasurer, layout: GridLayout, area: CellArea): number {
   if (!book.hasBorderLine(view.sheetId)) return 0;
-  let { topRowIndex: topRowIndex, rowCount: rowCount, leftColumnIndex: leftColumnIndex, columnCount: columnCount } = area;
+  let { topRowIndex, rowCount, leftColumnIndex, columnCount } = area;
   let isManyCells = rowCount > 1 || columnCount > 1;
   let isWithinFrozen = view.scrollTop > 0 && topRowIndex + rowCount <= layout.frozenRowCount;
   let borderHidden = borderOverhangBelow(
@@ -417,7 +417,7 @@ export function hiddenByBorderAtFoot(view: Pick<PageState, 'sheetId' | 'scrollTo
     bordersAtCellOf(book, view.sheetId),
   );
   let cellId = borderHidden === 0 || isManyCells ? null : book.cellIdAt(view.sheetId, topRowIndex, leftColumnIndex);
-  if (cellId === null || !book.formatOf(cellId).alignment.wrap) return borderHidden;
+  if (cellId === null || book.formatOf(cellId).alignment.wrap !== true) return borderHidden;
   let wrappedHeight = wrappedHeightOfRow(cellId.rowId, sheetOfView(view, book), book, view.density);
   let rowHeight = layout.rowEdges.startOf(topRowIndex + 1) - layout.rowEdges.startOf(topRowIndex);
   return wrappedHeight === 0 ? borderHidden : clampBetween(rowHeight - wrappedHeight, 0, borderHidden);
@@ -439,13 +439,13 @@ export function anchoredScrollOffset<LineId extends RowId | ColumnId>(
     let indexNow = lineId === null ? null : after.indexOf(lineId);
     if (indexNow !== null)
       candidates.push({
-        index: index,
-        indexNow: indexNow,
+        index,
+        indexNow,
       });
     index = Math.max(index + 1, shownLineAtOrAfter(before.edges, index + 1));
   }
   let anchor = candidates.find(
-    ({ indexNow: indexNow }: AnchorCandidate, position: number) =>
+    ({ indexNow }: AnchorCandidate, position: number) =>
       candidates.every((other: AnchorCandidate, otherPosition: number) => otherPosition < position === other.indexNow < indexNow),
   );
   if (anchor === undefined) return scroll;
@@ -453,9 +453,9 @@ export function anchoredScrollOffset<LineId extends RowId | ColumnId>(
   return Math.max(0, after.edges.startOf(anchor.indexNow) + pixelsIntoAnchor - after.sizeOfFrozen);
 }
 export function scrollAnchorLinesOf(view: LayoutView, book: ReadsWithTextMeasurer): ScrollAnchorsOfView {
-  let { sheetId: sheetId } = view;
+  let { sheetId } = view;
   let layout = layoutOfView(view, book);
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layout;
+  let { rowEdges, columnEdges } = layout;
   return {
     rows: {
       edges: rowEdges,
@@ -478,22 +478,22 @@ export function keepScrollAnchoredAcrossChange<V extends AnchoredView>(
   viewBefore: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters' | 'density'> = view,
 ): V {
   let reanchor = <P extends Pick<Place, 'sheetId' | 'scrollTop' | 'scrollLeft'>>(place: P): P => {
-    let { sheetId: sheetId, scrollTop: scrollTop, scrollLeft: scrollLeft } = place;
+    let { sheetId, scrollTop, scrollLeft } = place;
     if (scrollTop === 0 && scrollLeft === 0) return place;
     let dragging = view.dragging?.kind === 'freezing' ? null : view.dragging;
     let placeView = {
       ...view,
-      sheetId: sheetId,
-      dragging: dragging,
+      sheetId,
+      dragging,
     };
-    let { ownCollapsing: ownCollapsing, rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters, density: density } = viewBefore;
+    let { ownCollapsing, rowsOutOfViewByOwnFilters, density } = viewBefore;
     let [linesBefore, linesAfter] = [
       scrollAnchorLinesOf(
         {
           ...placeView,
-          ownCollapsing: ownCollapsing,
-          rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters,
-          density: density,
+          ownCollapsing,
+          rowsOutOfViewByOwnFilters,
+          density,
         },
         bookBefore,
       ),
@@ -536,7 +536,7 @@ export const isNumberedSheetName = (sheetName: string, stem: string): boolean =>
 export const DEFAULT_SHEET_NAME_STEM = 'Sheet';
 export const isDefaultSheetName = (sheetName: string, localStem: string): boolean =>
   [localStem, DEFAULT_SHEET_NAME_STEM].some((stem: string) => isNumberedSheetName(sheetName, stem));
-export const sheetOfView = ({ sheetId: sheetId }: Pick<PageState, 'sheetId'>, book: WorkbookReads): SheetSummary | undefined => findSheetById(book, sheetId);
+export const sheetOfView = ({ sheetId }: Pick<PageState, 'sheetId'>, book: WorkbookReads): SheetSummary | undefined => findSheetById(book, sheetId);
 export const createCellLayoutCaches = (): CellLayoutCaches => ({
   withNoWrappedText: new WeakMap<CellLayoutKey, GridLayout>(),
   withWrappedText: new WeakMap<TextMeasurer['lineCountsOfWrappedTexts'], WeakMap<CellLayoutKey, GridLayout>>(),
@@ -550,15 +550,15 @@ export const rowsOutOfSightCache = new WeakMap<Set<RowId>, RowsOutOfSightCacheEn
 export const sameLineRuns = (runs: readonly LineSpan[], others: readonly LineSpan[]): boolean =>
   runs.length === others.length &&
   runs.every(
-    ({ firstIndex: firstIndex, count: count }: LineSpan, index: number) =>
+    ({ firstIndex, count }: LineSpan, index: number) =>
       others[index]?.firstIndex === firstIndex && others[index].count === count,
   );
 export const layoutWithHiddenLinesCache = new WeakMap<GridLayout, LayoutWithHiddenLinesCacheEntry>();
 export const rowEdgesWithHiddenRowsCache = new WeakMap<LineSizes, RowEdgesWithHiddenRowsCacheEntry>();
 export const sheetOfViewOrEmpty = (view: Pick<PageState, 'sheetId'>, book: WorkbookReads): SheetSummary | GridLayout => sheetOfView(view, book) ?? EMPTY_GRID_LAYOUT;
-export const draggingOrHeld = ({ dragging: dragging, heldUntilAnswered: heldUntilAnswered }: Pick<PageState, 'dragging' | 'heldUntilAnswered'>): Dragging | null =>
+export const draggingOrHeld = ({ dragging, heldUntilAnswered }: Pick<PageState, 'dragging' | 'heldUntilAnswered'>): Dragging | null =>
   dragging ?? heldUntilAnswered?.held ?? null;
-export const lineResizeOfView = (view: Pick<PageState, 'dragging' | 'heldUntilAnswered' | 'sheetId' | 'density'>, book: WorkbookReads): LineResize | null =>
+export const lineResizeOfView = (view: Pick<PageState, 'dragging' | 'heldUntilAnswered' | 'sheetId' | 'density'>, book: ReadsWithTextMeasurer): LineResize | null =>
   lineBeingResized(
     {
       ...view,
@@ -572,7 +572,7 @@ export const viewWithDensity = <V extends AnchoredView & Pick<PageState, 'height
     keepScrollAnchoredAcrossChange(
       {
         ...view,
-        density: density,
+        density,
       },
       book,
       book,

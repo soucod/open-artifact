@@ -13,6 +13,35 @@
 
 import { useEffect, useRef, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 
+/**
+ * Marks a field whose value was last set by dragging its label. Until it is
+ * typed into, undo and redo there are the editor's, so they take the drag
+ * back instead of doing nothing in the field.
+ */
+export const SCRUBBED = 'data-open-artifact-scrubbed';
+
+/** The fields of a keydown {@link undoesScrub} reads. */
+export interface ScrubUndoKey {
+  target: unknown;
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}
+
+/**
+ * True for ⌘Z, ⇧⌘Z or ⌘Y (Ctrl elsewhere) in a field marked {@link SCRUBBED}.
+ * The caller has already let an input method's keys go by.
+ */
+export function undoesScrub(event: ScrubUndoKey): boolean {
+  const target = event.target as { tagName?: string; hasAttribute?: (name: string) => boolean } | null;
+  if (target?.tagName !== 'INPUT' || !target.hasAttribute?.(SCRUBBED)) return false;
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return false;
+  const key = event.key.toLowerCase();
+  return key === 'z' || (key === 'y' && !event.shiftKey);
+}
+
 /** What a scrub reads, at every move (the latest render's values). */
 export interface NumberScrubOptions {
   /** The value the scrub starts from. */

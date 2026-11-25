@@ -6,7 +6,7 @@
 
 import { compileSlide, type Diagnostic } from './compile.ts';
 import { checkDeckIndex, parseDeckIndex, resolveOrder, type DeckIndex } from './deck.ts';
-import { ID_PATTERN, LIMITS, setSlideSize } from './limits.ts';
+import { ID_PATTERN, LIMITS } from './limits.ts';
 import { createSourceDeck, deckFormatKind, isFlatSlideHtml, NEEDS_FORMAT_KEY, readSourceSlide, slideMarkupMadeFor, type SourceDeck } from './source.ts';
 
 /** Severity of a project finding (the type server's scale). */
@@ -87,8 +87,9 @@ export function checkSlidesProject(files: ReadonlyMap<string, string>, options: 
     }
   }
 
-  // A source deck reads its slides against project/deck.css, at the deck's size.
-  setSlideSize(index?.size);
+  // A source deck reads its slides against project/deck.css, at the deck's size (passed with the deck: the check
+  // runs in a type server that serves many decks at once, so it never sets the module's SLIDE_WIDTH, which is the
+  // one deck an editor page shows).
   let deck: SourceDeck | undefined;
   if (index && deckFormatKind(index) === 'source') {
     const css = files.get(DECK_CSS_FILE);

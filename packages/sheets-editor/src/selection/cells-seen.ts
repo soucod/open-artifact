@@ -41,7 +41,7 @@ export function seenKindOfCell(reads: WorkbookReads, cellId: CellId): SeenKindOf
       isPerson: false,
       linkDrawnAs: readCellLink(cell, format)?.drawnAs ?? null,
       isFormulaShown: false,
-      isWrappedByFormat: true,
+      wrappingByFormat: 'wrap',
       holdsList: false,
       hasRoomToWrap: true,
     }) === 'wrap'
@@ -55,7 +55,7 @@ export function cellsSeenIn(reads: WorkbookReads, sheetId: SheetId, areas: reado
   let [isCut, hasUnseenKind, hasSpillOrUnshownCell]: [boolean, boolean, boolean] = [false, false, false];
   let dropdownIds = new Set<string | undefined>();
   let cellsLeft = MAX_CELLS_SEEN;
-  for (let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } of areas) {
+  for (let { topRowIndex, leftColumnIndex, rowCount, columnCount } of areas) {
     let rowsSeen = Math.min(rowCount, Math.max(topRowIndex === 0 ? 2 : 1, Math.floor(cellsLeft / columnCount)));
     cellsLeft -= rowsSeen * columnCount;
     isCut ||= rowsSeen < rowCount;
@@ -98,7 +98,7 @@ export function removeDropdownOfSelection(state: PageState, reads: WorkbookReads
       stateOfRange,
       {
         kind: 'formatCells',
-        cells: cells,
+        cells,
         format: {
           cellControl: {
             kind: 'none',
@@ -117,7 +117,7 @@ export function removeDropdownOfSelection(state: PageState, reads: WorkbookReads
   });
 }
 export function clearCellsOrDropdown(state: PageState, env: PageContext, how: ClearHow): PageTransition {
-  let { reads: reads } = env;
+  let { reads } = env;
   return how !== 'menuWithNoKeyboard' &&
     canRemoveDropdown(state, reads) &&
     !isEntryWorkPending(state, env) &&
@@ -130,6 +130,6 @@ export const MAX_CELLS_SEEN = 2000;
 export const canRemoveDropdown = (state: PageState, reads: WorkbookReads): boolean =>
   state.selectionSeen.cellsAre === 'dropdown' &&
   areasOfAllRanges(state, reads).reduce(
-    (total: number, { rowCount: rowCount, columnCount: columnCount }: CellArea) => total + rowCount * columnCount,
+    (total: number, { rowCount, columnCount }: CellArea) => total + rowCount * columnCount,
     0,
   ) <= MAX_CELLS_SEEN;

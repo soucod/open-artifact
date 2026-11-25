@@ -5,6 +5,7 @@ import {
   guardHeldActivation,
   HELD_KEY_GUARD_MAX_MS,
   HELD_KEY_SETTLE_MS,
+  isComposingKey,
   isRepeatedActivation,
   preventRepeatedActivation,
   withRepeatGuard,
@@ -154,5 +155,14 @@ describe('scrollsOverflow', () => {
     assert.equal(scrollsOverflow({ ...box, overflowY: 'clip' }), false);
     assert.equal(scrollsOverflow({ ...box, overflowY: 'visible' }), false);
     assert.equal(scrollsOverflow({ ...box, scrollHeight: 201 }), false);
+  });
+});
+
+describe('isComposingKey', () => {
+  it('is true while an input method composes, including the 229 key code Safari sends at its end', () => {
+    assert.equal(isComposingKey({ isComposing: true, keyCode: 13 }), true);
+    assert.equal(isComposingKey({ isComposing: false, keyCode: 229 }), true);
+    assert.equal(isComposingKey({ isComposing: false, keyCode: 13 }), false);
+    assert.equal(isComposingKey({}), false);
   });
 });

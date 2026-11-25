@@ -45,6 +45,14 @@ export const DRAFT_UNSTARTED_TEXT = 'Your draft hasn’t started. Cancel to star
 export const SAVED_SHOWN_TEXT = 'Showing the saved artifact. Press Redo to see the draft again.';
 
 export const EMPTY_DASHBOARD_TEXT = 'Nothing here yet';
+export const CHOOSE_FORMAT_TEXT = 'Choose a format.';
+export const IMPORT_FILE_LABEL = 'Import a file';
+export const IMPORT_FILE_HINT = 'CSV, Excel, or JSON';
+export const IMPORTING_FILE_LABEL = 'Importing…';
+export const unreadableImportMessage = (names: readonly string[]): string =>
+  `${names.join(', ')} ${names.length === 1 ? 'isn’t' : 'aren’t'} CSV, Excel, or JSON.`;
+export const largeImportMessage = (name: string, limit: number): string => `${name} is larger than ${Math.floor(limit / (1024 * 1024))} MB.`;
+export const importFailedMessage = (name: string): string => `Couldn’t import ${name}.`;
 export const MAKING_PAGE_TEXT = 'Making your page…';
 export const USUALLY_A_FEW_MINUTES_TEXT = 'Usually a few minutes';
 export const TAKING_LONGER_TEXT = 'Taking longer than usual';

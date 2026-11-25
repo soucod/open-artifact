@@ -13,6 +13,27 @@ export function dataUrlBytes(url: string): number {
   return /;base64,/.test(url.slice(0, comma + 1)) ? Math.floor((body.length * 3) / 4) : body.length;
 }
 
+/** Statuses that say the server or the way to it had a moment: worth one more try. */
+const TRY_AGAIN = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * `fetch` with one more try, past the browser's cache, after a dropped
+ * connection or a status in {@link TRY_AGAIN}. A missing file, a second
+ * failure or an aborted request is the answer.
+ */
+export async function fetchRetrying(url: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<Response> {
+  const again = (): Promise<Response> => fetcher(url, { ...init, cache: 'reload' });
+  let response: Response;
+  try {
+    response = await fetcher(url, init);
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
+    return again();
+  }
+  if (!TRY_AGAIN.has(response.status) || init.signal?.aborted) return response;
+  return again().catch(() => response);
+}
+
 /** A picture ready for a PPTX package. */
 export interface OfficePicture {
   data: Uint8Array;
@@ -48,7 +69,7 @@ export class AssetCache {
     const url = this.url(src);
     let pending = this.blobs.get(url);
     if (!pending) {
-      pending = fetch(url, { credentials: 'same-origin' })
+      pending = fetchRetrying(url, { credentials: 'same-origin' })
         .then((response) => (response.ok ? response.blob() : null))
         .catch(() => null);
       this.blobs.set(url, pending);

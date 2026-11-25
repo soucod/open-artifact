@@ -22,10 +22,13 @@ import {
   useMergedRefs,
   useOpenerFocusReturn,
   useSheetPresentation,
+  useSwallowSheetEntryTaps,
   useTallSheet,
   type PopupFinalFocus,
   type PopupPadding,
 } from './popup-frame.tsx';
+import { useScrollableOverflow } from './scrollable-overflow.ts';
+import { tabStopsWithin } from './tab-stops.ts';
 
 type PositionerProps = BasePopover.Positioner.Props;
 type OpenChangeDetails = BasePopover.Root.ChangeEventDetails;
@@ -35,10 +38,18 @@ const POPOVER_POPUP_CLASSES = `${POPUP_SURFACE_CLASSES} max-w-[320px] max-h-[var
 const POPOVER_BODY_CLASSES =
   '[display:inherit] [flex-direction:inherit] [flex-wrap:inherit] [align-items:inherit] [justify-content:inherit] [justify-items:inherit] [gap:inherit] [grid-template-columns:inherit] [grid-template-rows:inherit] [grid-auto-flow:inherit] [grid-auto-columns:inherit] [grid-auto-rows:inherit] col-span-full row-span-full self-stretch justify-self-stretch max-h-[inherit] min-h-0 min-w-0 flex-auto overflow-y-auto rounded-[inherit] outline-none focus-visible:outline-hidden';
 
+/** A popover not exposed as a dialog: its body is not given a name and a tab stop of its own. */
+const PRESENTATIONAL_OVERLAY_SELECTOR = '[role="presentation"], [role="none"], [aria-hidden="true"]';
+/** A row of a roving-focus group that holds the group's tab stop. */
+const ROVING_TAB_STOP_SELECTOR = '[data-tabindex]:not([data-tabindex="-1"])';
+
+const POINTER_OPEN_TYPES = new Set(['mouse', 'touch', 'pen']);
+
 const EDITABLE_SELECTOR =
   'input:not([type=button],[type=checkbox],[type=radio],[type=range],[type=submit],[type=reset],[type=color],[type=file],[type=image],[type=hidden],[readonly]), textarea:not([readonly]), [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
 
 interface PopoverRootState {
+  open: boolean;
   close: () => void;
 }
 
@@ -49,29 +60,32 @@ export type PopoverRootProps = BasePopover.Root.Props;
 /**
  * The root of a popover. Escape first closes a menu opened inside it, and only then the popover.
  */
-function PopoverRoot({ onOpenChange, actionsRef, children, ...rest }: PopoverRootProps): React.ReactElement {
+function PopoverRoot({ open, defaultOpen, onOpenChange, actionsRef, children, ...rest }: PopoverRootProps): React.ReactElement {
   const [registry] = React.useState(createInnerOverlayRegistry);
+  const [ownOpen, setOwnOpen] = React.useState(defaultOpen ?? false);
+  const isOpen = open ?? ownOpen;
   const sheet = useSheetPresentation();
   const actions = React.useRef<BasePopover.Root.Actions | null>(null);
   React.useEffect(() => {
     if (actionsRef) actionsRef.current = actions.current;
   });
   const handleOpenChange = React.useCallback(
-    (open: boolean, details: OpenChangeDetails) => {
-      if (!open && details.reason === 'escape-key' && registry.closeTop(details.event)) {
+    (next: boolean, details: OpenChangeDetails) => {
+      if (!next && details.reason === 'escape-key' && registry.closeTop(details.event)) {
         details.cancel();
         return;
       }
-      onOpenChange?.(open, details);
+      onOpenChange?.(next, details);
+      if (!details.isCanceled) setOwnOpen(next);
     },
     [registry, onOpenChange],
   );
-  const state = React.useMemo<PopoverRootState>(() => ({ close: () => actions.current?.close() }), []);
+  const state = React.useMemo<PopoverRootState>(() => ({ open: isOpen, close: () => actions.current?.close() }), [isOpen]);
   return (
     <PopoverRootContext.Provider value={state}>
       <InnerOverlayContext.Provider value={registry}>
         <SheetPresentationProvider sheet={sheet}>
-          <BasePopover.Root {...rest} actionsRef={actions} onOpenChange={handleOpenChange}>
+          <BasePopover.Root {...rest} open={open} defaultOpen={defaultOpen} actionsRef={actions} onOpenChange={handleOpenChange}>
             {children}
           </BasePopover.Root>
         </SheetPresentationProvider>
@@ -149,7 +163,17 @@ const PopoverPopup = React.forwardRef<HTMLDivElement, PopoverPopupProps>(functio
   const tall = useTallSheet(sheet && sheetHeight === 'tall', bodyRef);
   const returnsToOpener = anchor !== undefined && anchor !== null && finalFocus === undefined;
   const opener = useOpenerFocusReturn(returnsToOpener);
-  const mergedRef = useMergedRefs<HTMLDivElement>(ref, opener.popupRef);
+  const [popupElement, setPopupElement] = React.useState<HTMLDivElement | null>(null);
+  const mergedRef = useMergedRefs<HTMLDivElement>(ref, opener.popupRef, setPopupElement);
+  useSwallowSheetEntryTaps(sheet ? popupElement : null, root?.open ?? false);
+
+  // Opened by touch, or with nothing inside to tab to, focus goes to the popover itself.
+  const openedByPointer = React.useRef(false);
+  const focusOnOpen = (openType: string): HTMLDivElement | null | true => {
+    openedByPointer.current = POINTER_OPEN_TYPES.has(openType);
+    const body = bodyRef.current;
+    return openType === 'touch' || (body !== null && tabStopsWithin(body).length === 0) ? popupElement : true;
+  };
 
   return (
     <BasePopover.Portal>
@@ -173,12 +197,13 @@ const PopoverPopup = React.forwardRef<HTMLDivElement, PopoverPopupProps>(functio
               data-presentation={sheet ? 'sheet' : undefined}
               {...rest}
               ref={mergedRef}
-              initialFocus={sheet ? undefined : initialFocus}
+              initialFocus={sheet || initialFocus === undefined ? focusOnOpen : initialFocus}
               finalFocus={returnsToOpener ? opener.finalFocus : finalFocus}
               onFocus={(event) => {
                 onFocus?.(event);
                 const popup = event.currentTarget;
-                if (event.target === popup && popup.ownerDocument.activeElement === popup) bodyRef.current?.focus({ preventScroll: true });
+                if (event.target !== popup || popup.ownerDocument.activeElement !== popup) return;
+                bodyRef.current?.focus(openedByPointer.current ? { preventScroll: true, focusVisible: false } : { preventScroll: true });
               }}
               onMouseDown={(event) => {
                 onMouseDown?.(event);
@@ -193,20 +218,84 @@ const PopoverPopup = React.forwardRef<HTMLDivElement, PopoverPopupProps>(functio
               )}
             >
               {sheet && <SheetTitleBar closeLabel={closeLabel} onClose={() => root?.close()} />}
-              <div
+              <PopoverBody
                 ref={bodyRef}
-                tabIndex={-1}
-                data-ui-popover-body=""
-                {...{ [POPUP_SCROLL_ATTRIBUTE]: '' }}
                 className={cn(POPOVER_BODY_CLASSES, scrollFade && 'scroll-fade-y', POPUP_PADDING_CLASSES[padding], sheet && className)}
               >
                 {children}
-              </div>
+              </PopoverBody>
             </BasePopover.Popup>
           </BasePopover.Positioner>
         </PopupLayerScope>
       </SheetPresentationProvider>
     </BasePopover.Portal>
+  );
+});
+
+interface PopoverBodyProps {
+  className: string;
+  children?: React.ReactNode;
+}
+
+interface BodyStop {
+  /** The body scrolls with nothing inside to tab to, so it takes a tab stop itself to be scrolled from the keyboard. */
+  needed: boolean;
+  labelledBy: string | null;
+  label: string | null;
+}
+
+const NO_BODY_STOP: BodyStop = { needed: false, labelledBy: null, label: null };
+
+const sameBodyStop = (a: BodyStop, b: BodyStop): boolean => a.needed === b.needed && a.labelledBy === b.labelledBy && a.label === b.label;
+
+/** The scrolling part of a popover. While it scrolls and holds no tab stop, it is a named group Tab reaches. */
+const PopoverBody = React.forwardRef<HTMLDivElement, PopoverBodyProps>(function PopoverBody({ className, children }, ref) {
+  const [body, setBody] = React.useState<HTMLDivElement | null>(null);
+  const mergedRef = useMergedRefs<HTMLDivElement>(ref, setBody);
+  const scrolls = useScrollableOverflow(body);
+  const [stop, setStop] = React.useState<BodyStop>(NO_BODY_STOP);
+  const fallbackLabel = useKitLabel('unnamedPanelContent');
+
+  React.useLayoutEffect(() => {
+    const win = body?.ownerDocument.defaultView;
+    if (!scrolls || !body || !win) return undefined;
+    const overlay = body.closest(`[${OVERLAY_ATTRIBUTE}]`);
+    const update = (): void => {
+      const next: BodyStop = {
+        needed:
+          overlay?.matches(PRESENTATIONAL_OVERLAY_SELECTOR) !== true &&
+          tabStopsWithin(body).length === 0 &&
+          body.querySelector(ROVING_TAB_STOP_SELECTOR) === null,
+        labelledBy: overlay?.getAttribute('aria-labelledby') ?? null,
+        label: overlay?.getAttribute('aria-label') ?? null,
+      };
+      setStop((current) => (sameBodyStop(current, next) ? current : next));
+    };
+    update();
+    const observer = new win.MutationObserver(update);
+    observer.observe(body, { childList: true, subtree: true, attributes: true });
+    if (overlay) observer.observe(overlay, { attributeFilter: ['aria-labelledby', 'aria-label'] });
+    return () => observer.disconnect();
+  }, [scrolls, body]);
+
+  const isStop = scrolls && stop.needed;
+  return (
+    <div
+      ref={mergedRef}
+      {...(isStop
+        ? {
+            role: 'group',
+            tabIndex: 0,
+            'aria-labelledby': stop.labelledBy ?? undefined,
+            'aria-label': stop.labelledBy === null ? (stop.label ?? fallbackLabel) : undefined,
+          }
+        : { tabIndex: -1 })}
+      data-ui-popover-body=""
+      {...{ [POPUP_SCROLL_ATTRIBUTE]: '' }}
+      className={cn(className, isStop && 'focus-visible:shadow-focus')}
+    >
+      {children}
+    </div>
   );
 });
 
@@ -222,8 +311,8 @@ export interface PopoverHeaderProps {
   /** Shows a close button at the end; never on a sheet, which has its own. */
   showClose?: boolean;
   closeLabel?: string;
-  /** Shows a back button before the title. */
-  onBack?: () => void;
+  /** Shows a back button before the title; it is handed the button's click. */
+  onBack?: React.MouseEventHandler<HTMLButtonElement>;
   backLabel?: string;
   /** Buttons between the title and the close button. */
   actions?: React.ReactNode;

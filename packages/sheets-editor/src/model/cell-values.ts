@@ -1,5 +1,6 @@
 import type { CellContents, DecimalSignName, ListLine, Mark, Person, ValueContents } from '@open-artifact/sheets-core';
 import type { CellOnShow } from './workbook.ts';
+import type { ShownCell } from '../grid/formulas-shown.ts';
 import { shownCellText } from '../format/shown-text.ts';
 import { TEXT_PREFIX_QUOTE, booleanText, textAsTypedInput, sanitizeCellText } from './cell-text.ts';
 import { withDecimalSign } from '../format/number-signs.ts';
@@ -17,7 +18,7 @@ export function dropdownOptionLabel(cell: CellOnShow): string {
   if (cell.value?.kind !== 'text') throw Error('a dropdown option was read without its label');
   return cell.value.value;
 }
-export function usersOfCell(cell: CellOnShow | null): readonly Person[] {
+export function usersOfCell(cell: ShownCell | null): readonly Person[] {
   if (cell === null || !('input' in cell)) return NO_CELL_USERS;
   if (cell.input.kind === 'user') return [cell.input];
   return cell.input.kind === 'users' ? cell.input.users : NO_CELL_USERS;
@@ -38,13 +39,13 @@ export function listLinesOfCell(cell: CellContents | null): LineOfAList[] {
   if (cell?.input.kind !== 'richText') return NO_LIST_LINES;
   let cached = listLinesOfCellCache.get(cell);
   if (cached !== void 0) return cached;
-  let { paragraphs: paragraphs } = cell.input;
+  let { paragraphs } = cell.input;
   let lines =
     shownCellText(cell, 1 / 0, 'point').text === richTextPlainText(cell) &&
-    paragraphs.some(({ list: list }) => list.kind !== 'none')
+    paragraphs.some(({ list }) => list.kind !== 'none')
       ? paragraphs.map(
-          ({ list: list }, index) => ({
-            list: list,
+          ({ list }, index) => ({
+            list,
             number: cell.numbersOfListLines?.[index] ?? null,
           }),
         )
@@ -80,7 +81,7 @@ export function cellInputText(cell: CellContents | null, decimalSign: DecimalSig
       return formulaTextOf(cell);
   }
 }
-export function formulaTextOf({ formulaText: formulaText }: Pick<CellContents, 'formulaText'>): string {
+export function formulaTextOf({ formulaText }: Pick<CellContents, 'formulaText'>): string {
   if (formulaText === undefined) throw Error('a formula was read without its text');
   return formulaText;
 }
@@ -110,7 +111,7 @@ export function formulaResultAsTypedText(cell: CellOnShow | null, decimalSign: D
   if (cell === null || ('input' in cell && cell.input.kind !== 'formula')) return null;
   return cell.value === undefined ? '' : valueAsTypedText(cell.value, decimalSign);
 }
-export function cellValueOf(cell: CellOnShow | null): ValueContents | null {
+export function cellValueOf(cell: ShownCell | null): ValueContents | null {
   if (cell === null) return null;
   if (!('input' in cell)) return cell.value;
   if (cell.input.kind === 'number' || cell.input.kind === 'text' || cell.input.kind === 'boolean') return cell.input;
@@ -123,5 +124,5 @@ export const NO_LIST_LINES: LineOfAList[] = [];
 export const listLinesOfCellCache = new WeakMap<CellContents, LineOfAList[]>();
 export const richTextMarksOfCell = (cell: CellOnShow | null): Mark[] =>
   cell !== null && 'input' in cell && cell.input.kind === 'richText'
-    ? cell.input.paragraphs.flatMap(({ runs: runs }) => runs.flatMap(({ marks: marks }) => marks))
+    ? cell.input.paragraphs.flatMap(({ runs }) => runs.flatMap(({ marks }) => marks))
     : [];

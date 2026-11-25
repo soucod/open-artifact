@@ -14,8 +14,12 @@ use crate::workbook::load::Op;
 mod cells;
 mod clipboard;
 mod formats;
+mod interactive;
+mod named_views;
+mod pivot;
 pub(super) mod lines;
 pub(super) mod objects;
+mod seen;
 mod sheets;
 pub(crate) mod tables;
 
@@ -30,6 +34,10 @@ pub struct Context<'a> {
     /// What the page says the person was shown (`shownToThePerson`): the texts no cell shows of an earlier
     /// `toBeShownFirst`. None (null or left out): the edit shows nothing first.
     pub shown_to_the_person: Option<&'a [crate::typing::TextThatNoCellShows]>,
+    /// The order the person sees a sheet's rows in (`ownRowOrder`), when they put them in one of their own.
+    pub own_row_order: Option<&'a super::OwnRowOrder>,
+    /// The order the edit is made in, of the sheet it is on (`seen`): set for the families while they make it.
+    pub seen: Option<&'a seen::Seen>,
 }
 
 /// An edit worked out: its operations, and the place it changed when that is not where the operations change.
@@ -77,8 +85,11 @@ pub enum Edit {
     Cells(cells::Edit),
     Clipboard(clipboard::Edit),
     Formats(formats::Edit),
+    Interactive(interactive::Edit),
+    NamedViews(named_views::Edit),
     Lines(lines::Edit),
     Tables(tables::Edit),
+    Pivot(pivot::Edit),
     Objects(objects::Edit),
 }
 
@@ -110,18 +121,25 @@ impl Edit {
     /// table's look.
     pub fn follow_up(&self, code: &str) -> Option<FollowUp> {
         match self {
-            Edit::Tables(edit) => tables::follow_up(edit, code).map(FollowUp),
+            Edit::Tables(edit) => tables::follow_up(edit, code).map(FollowUp::Tables),
+            Edit::Pivot(edit) => Some(FollowUp::Pivot(pivot::follow_up(edit, code))),
             _ => None,
         }
     }
 }
 
 /// What an edit adds once made (`Edit::follow_up`).
-pub struct FollowUp(tables::FollowUp);
+pub enum FollowUp {
+    Tables(tables::FollowUp),
+    Pivot(pivot::FollowUp),
+}
 
 /// The operations of what an edit adds once made, on the workbook it leaves (none: nothing to add).
 pub fn follow_up_ops(workbook: &crate::workbook::Workbook, follow_up: FollowUp) -> Vec<Op> {
-    tables::follow_up_ops(workbook, follow_up.0)
+    match follow_up {
+        FollowUp::Tables(follow_up) => tables::follow_up_ops(workbook, follow_up),
+        FollowUp::Pivot(follow_up) => pivot::follow_up_ops(workbook, follow_up),
+    }
 }
 
 /// The edit as the session reads it, before anything else about it, by its kind.
@@ -143,12 +161,15 @@ pub fn read(edit: Json) -> Option<Edit> {
         }
         "pasteCopiedCells" | "pasteValuesOfCopiedCells" | "pasteCellsOfAnotherProgram" | "pasteValuesOfCells"
         | "moveCells" | "fillCells" => Edit::Clipboard(clipboard::read(edit)?),
+        "insertPivotTable" | "changePivotTable" => Edit::Pivot(pivot::read(edit)?),
         "formatCells" | "setBorders" | "mergeCells" | "unmergeCells" => Edit::Formats(formats::read(edit)?),
+        "writeFromInteractive" | "resetInteractive" | "saveDefaultsOfInteractive" => Edit::Interactive(interactive::read(edit)?),
+        "saveNamedView" | "removeNamedView" => Edit::NamedViews(named_views::read(edit)?),
         "setColumnWidths" | "setRowHeights" | "fitColumns" | "setSheetSettings" | "insertRows" | "insertColumns"
         | "deleteRows" | "deleteColumns" | "moveRows" | "moveColumns" | "hideRows" | "hideColumns" | "groupRows"
         | "groupColumns" | "ungroupRows" | "ungroupColumns" | "setRowGroupsCollapsed" | "setColumnGroupsCollapsed"
         | "showRowGroupsToDepth" | "showColumnGroupsToDepth" => Edit::Lines(lines::read(edit)?),
-        "sortRows" | "sortCells" | "declareCellTable" | "changeCellTable" | "removeCellTable"
+        "sortRows" | "sortCells" | "moveColumnsOfCells" | "declareCellTable" | "changeCellTable" | "removeCellTable"
         | "importTableAsNewSheet" | "importTableIntoSheet" | "duplicateSheet" => Edit::Tables(tables::read(edit)?),
         "addConditionalFormats" | "changeConditionalFormat" | "moveConditionalFormat" | "removeConditionalFormat"
         | "makeDropdown" | "addDropdownOption" | "setDropdownOptions" | "movePlacedView" | "resizePlacedView"
@@ -160,7 +181,7 @@ pub fn read(edit: Json) -> Option<Edit> {
 
 /// Whether the edit works the formulas out before anything else (sorts do, to sort by what they come to).
 pub fn calculates_first(edit: &Edit) -> bool {
-    matches!(edit, Edit::Tables(edit) if tables::calculates_first(edit))
+    matches!(edit, Edit::Pivot(_)) || matches!(edit, Edit::Tables(edit) if tables::calculates_first(edit))
 }
 
 /// The refusals of the edit after which the page is told everything changed.
@@ -182,16 +203,51 @@ fn options_kept(workbook: &crate::workbook::Workbook, made: Made) -> Result<Made
     }
 }
 
-pub fn make(workbook: &crate::workbook::Workbook, edit: Edit, context: &Context) -> Result<Made, Refused> {
-    let mut made = match edit {
+/// The sheet whose rows an edit lays out in the order the person sees them, when they put them in one of their own
+/// (`seen`): fills down or up, pastes, and borders.
+fn in_seen_order(workbook: &crate::workbook::Workbook, edit: &Edit) -> Option<String> {
+    match edit {
+        Edit::Clipboard(edit) => edit.in_seen_order(workbook),
+        Edit::Formats(edit) => edit.in_seen_order(),
+        Edit::Cells(cells::Edit::PasteRowsOfTexts(edit)) => edit["selected"]["sheetId"].as_str(),
+        _ => None,
+    }
+    .map(str::to_owned)
+}
+
+fn made_by_family(workbook: &crate::workbook::Workbook, edit: Edit, context: &Context) -> Result<Made, Refused> {
+    match edit {
         Edit::Sheets(edit) => sheets::make(workbook, edit, context),
         Edit::Cells(edit) => cells::make(workbook, edit, context),
         Edit::Clipboard(edit) => clipboard::make(workbook, edit, context),
         Edit::Formats(edit) => formats::make(workbook, edit, context),
+        Edit::Interactive(edit) => interactive::make(workbook, edit),
+        Edit::NamedViews(edit) => named_views::make(workbook, edit, context.code),
         Edit::Lines(edit) => lines::make(workbook, edit, context),
         Edit::Tables(edit) => tables::make(workbook, edit, context),
+        Edit::Pivot(edit) => pivot::make(workbook, edit, context),
         Edit::Objects(edit) => objects::make(workbook, edit, context),
-    }?;
+    }
+}
+
+pub fn make(workbook: &crate::workbook::Workbook, edit: Edit, context: &Context) -> Result<Made, Refused> {
+    let interactive_edit = matches!(&edit, Edit::Interactive(_));
+    let order = match (context.own_row_order, in_seen_order(workbook, &edit)) {
+        (Some(order), Some(sheet_id)) => seen::read(workbook, order, &sheet_id)?,
+        _ => None,
+    };
+    let mut made = match order {
+        // Made on the workbook as the person sees it, its place by the rows as stored.
+        Some((order, lines)) => {
+            let shown = seen::shown(workbook, &order, &lines);
+            let made = made_by_family(&shown, edit, &Context { seen: Some(&order), ..*context })?;
+            seen::back(made, &shown, workbook, &order)
+        }
+        None => made_by_family(workbook, edit, context)?,
+    };
+    if !interactive_edit {
+        interactive::check_grid_edits(workbook, &made.ops)?;
+    }
     objects::adopt_time_zone(workbook, &mut made, context);
     Ok(made)
 }

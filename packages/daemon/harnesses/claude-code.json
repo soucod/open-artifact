@@ -19,5 +19,18 @@
   "wake": [
     "inbox"
   ],
-  "open": "browser"
+  "open": "browser",
+  "markers": [
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID"
+  ],
+  "hookDialect": "claude-code",
+  "caps": {
+    "tools": "mcp",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    }
+  }
 }

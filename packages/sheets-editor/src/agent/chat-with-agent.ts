@@ -1,75 +1,159 @@
-import type { Dynamic } from '../dynamic.ts';
 import { isNonNullObject } from '../utils/objects.ts';
 import { isViewId } from './view-context.ts';
-export async function askCanSendToAgentSession(room?: Dynamic): Promise<Dynamic> {
+import { isAskTaken, type AskSentToChat } from '../messages/charts.ts';
+import type { ChartKindOrAny } from '../charts/chart-words.ts';
+import type { RuleNumber } from '../format/conditional/ask-agent-about-rule.tsx';
+import type { SelectionForAgent } from '../state/initial-state.ts';
+import type { ErrorsToldToAgent } from './ask-agent-menu.tsx';
+/** The room the agent's session is reached through, as the agent gives it. */
+type RoomOfAgent = Record<PropertyKey, unknown>;
+/** A blank sheet put in the chat. */
+interface AboutBlankSheet {
+  label: string;
+  isSheetBlank: true;
+  sheetNumber: number;
+}
+/** A chart put in the chat. */
+export interface AboutChart {
+  label: string;
+  chartId: string;
+  sheetNumber: number;
+}
+/** A chart sent to the agent with words about it. */
+export interface AskAboutChart extends AboutChart {
+  request: string;
+}
+/** A conditional format rule put in the chat. */
+export interface AboutRule extends RuleNumber {
+  label: string;
+  sheetNumber: number;
+}
+/** Cells put in the chat, labelled by their range. */
+export type AboutCells = SelectionForAgent & { label: string };
+/** What goes with a press that takes cells to the chat: the person's words, the chart asked for, the errors to fix. */
+export interface AskBesidePress extends ErrorsToldToAgent {
+  request?: string;
+  chartKind?: ChartKindOrAny;
+}
+/** Cells put in the chat by a press, with what the press was. */
+export type WithWhatWasPressed = AskBesidePress & AboutCells & { pressed: string };
+/** What the page puts in the chat with the agent. */
+export type ChatPayload = AboutBlankSheet | AboutChart | AskAboutChart | AboutRule | AboutCells | WithWhatWasPressed;
+/** How a payload goes to the session: sent, or left for the person to send; and whether the page's presence goes with it. */
+interface SendOptions {
+  deliver?: 'send' | 'stage';
+  attachPresence?: false;
+}
+/** A payload as one who hears of it reads it: any of the fields a payload may have, each of which may be missing. */
+export type ChatPayloadHeard = Partial<AboutBlankSheet & AskAboutChart & AboutRule & WithWhatWasPressed>;
+/** What of a payload tells which cells a press took to the chat. */
+type PressedCellsHeard = Pick<ChatPayloadHeard, 'sheetNumber' | 'range' | 'pressed'>;
+/** Hears a press the agent refused: what was sent, and whether keys were kept off the cells meanwhile. */
+export type PressRefusedListener = (payload: ChatPayloadHeard, wereKeysKeptOff: boolean) => void;
+/** Keeps keys off the cells while the chat takes them; the release says whether keys were kept off. */
+export type KeepKeysOffCells = () => (isDone?: boolean) => boolean;
+/** Why the chat looks again whether the agent can be reached. */
+type LookKind = 'first' | 'later' | 'forWork';
+/** A look planned for later; a newer plan takes its place. */
+interface ScheduledLook {
+  is: LookKind;
+}
+/** A hold on summoning the agent, known only by its identity. */
+type SummonHold = Record<never, never>;
+/** The words of a send about a chart: its label, the chart, its sheet and the person's words. */
+export type ChartSendArgs = [label: string, chartId: string, sheetNumber: number, askWords: string];
+/** A send about a chart still on its way, and what came of it. */
+interface ChartSendInFlight {
+  chartId: string;
+  became: Promise<AskSentToChat>;
+}
+/** The chat with the agent beside the page, as the page takes things to it. */
+export interface ChatWithAgent {
+  /** Whether the agent can be reached in the chat; null while that is not known. */
+  isToBeHad(): boolean | null;
+  isBesidePage(): boolean;
+  isKeptFromLeaving(): boolean;
+  subscribe(listener: () => void): () => void;
+  look(): Promise<void>;
+  openAboutBlankSheet(label: string, sheetNumber: number): Promise<boolean>;
+  openAboutChart(label: string, chartId: string, sheetNumber: number): Promise<boolean>;
+  openAboutRule(label: string, rule: RuleNumber & { sheetNumber: number }): Promise<boolean>;
+  openAboutCells(cells: SelectionForAgent): Promise<boolean>;
+  openWithWhatWasPressed(label: string, cells: SelectionForAgent, pressed: string, ask: AskBesidePress): Promise<boolean>;
+  onPressRefused(listener: PressRefusedListener): () => void;
+  takesWordsAtOnce(): boolean;
+  sendAboutChart(...send: ChartSendArgs): Promise<AskSentToChat>;
+  sendPressAboutChart(...send: ChartSendArgs): Promise<AskSentToChat>;
+}
+export async function askCanSendToAgentSession(room: RoomOfAgent | null): Promise<unknown> {
   let canSend = room?.canSendToAgentSession;
   if (typeof canSend !== 'function') return null;
   try {
     return await canSend.call(room);
-  } catch (fault: Dynamic) {
+  } catch (fault) {
     let code = isNonNullObject(fault) ? fault.code : null;
     return code === 'capability_removed' || code === 'invalid_argument' ? null : 'rejected';
   }
 }
 export function createChatWithAgent(
-  getAgent?: Dynamic,
-  reportFault?: Dynamic,
-  leavingLosesWork?: Dynamic,
-  sleep: Dynamic = (ms?: Dynamic) => new (Promise as Dynamic)((resolve?: Dynamic) => void setTimeout(resolve, ms)),
-  keepKeysOffCells: Dynamic = () => () => false,
-  hasUserActivation2: Dynamic = 'userActivation' in MessageEvent.prototype,
-) {
-  let room: Dynamic = null;
-  let toBeHad: Dynamic = null;
-  let isNotBeside: Dynamic = false;
-  let availableIfSummoned: Dynamic = false;
-  let summonHold: Dynamic = null;
-  let lookNumber: Dynamic = 0;
-  let lookApplied: Dynamic = 0;
-  let changeCount: Dynamic = 0;
-  let scheduledLook: Dynamic = null;
-  let lookAgainIndex: Dynamic = 0;
-  let subscribers = new (Set as Dynamic)();
-  let pressRefusedListeners = new (Set as Dynamic)();
-  let notifyPressRefused = (payload?: Dynamic, wasWithWords?: Dynamic) => {
-    for (let listener of pressRefusedListeners as Dynamic)
+  getAgent: () => unknown,
+  reportFault: (fault: unknown) => void,
+  leavingLosesWork: () => boolean,
+  sleep: (ms: number) => Promise<void> = (ms: number) => new Promise<void>((resolve) => void setTimeout(resolve, ms)),
+  keepKeysOffCells: KeepKeysOffCells = () => () => false,
+  hasUserActivation: boolean = 'userActivation' in MessageEvent.prototype,
+): ChatWithAgent {
+  let room: RoomOfAgent | null = null;
+  let toBeHad: boolean | null = null;
+  let isNotBeside = false;
+  let availableIfSummoned = false;
+  let summonHold: SummonHold | null = null;
+  let lookNumber = 0;
+  let lookApplied = 0;
+  let changeCount = 0;
+  let scheduledLook: ScheduledLook | null = null;
+  let lookAgainIndex = 0;
+  let subscribers = new Set<() => void>();
+  let pressRefusedListeners = new Set<PressRefusedListener>();
+  let notifyPressRefused = (payload: ChatPayload, wereKeysKeptOff: boolean) => {
+    for (let listener of pressRefusedListeners)
       try {
-        listener(payload, wasWithWords);
+        listener(payload, wereKeysKeptOff);
       } catch {
         reportFault(Error('onPressRefused fault'));
       }
   };
-  let takesWords: Dynamic = false;
-  let setToBeHad = (isToBeHad?: Dynamic) => {
+  let takesWords = false;
+  let setToBeHad = (isToBeHad: boolean | null) => {
     if (isToBeHad === true) {
       if (scheduledLook?.is !== 'forWork') scheduledLook = null;
       lookAgainIndex = 0;
     }
-    let takesWordsNow = isToBeHad === true && !isNotBeside && hasUserActivation2;
+    let takesWordsNow = isToBeHad === true && !isNotBeside && hasUserActivation;
     if (isToBeHad === toBeHad && takesWordsNow === takesWords) return;
     if (isToBeHad !== null && isToBeHad !== toBeHad) changeCount += 1;
     toBeHad = isToBeHad;
     takesWords = takesWordsNow;
-    for (let subscriber of subscribers as Dynamic) subscriber();
+    for (let subscriber of subscribers) subscriber();
   };
-  let dropAfterSilence = async (): Promise<Dynamic> => {
+  let dropAfterSilence = async (): Promise<void> => {
     let changeAtStart = changeCount;
     await sleep(CHAT_SEND_TIMEOUT_MS);
     if (changeAtStart !== changeCount) return;
     setToBeHad(false);
     planNextLook(false);
   };
-  let openRoom = async (agent?: Dynamic): Promise<Dynamic> => {
+  let openRoom = async (agent: unknown): Promise<RoomOfAgent | null> => {
     try {
       let use = isNonNullObject(agent) ? agent.use : null;
-      let roomCapability = typeof use === 'function' ? await use.call(agent, 'room') : null;
+      let roomCapability: unknown = typeof use === 'function' ? await use.call(agent, 'room') : null;
       return isNonNullObject(roomCapability) && roomCapability.available !== false ? roomCapability : null;
     } catch {
       reportFault(Error('agent.use fault: room'));
       return null;
     }
   };
-  let look = async (dropsWhenUnavailable?: Dynamic, isForWork: Dynamic = false): Promise<Dynamic> => {
+  let look = async (dropsWhenUnavailable: boolean, isForWork: boolean = false): Promise<void> => {
     lookNumber += 1;
     let thisLook = lookNumber;
     let openedRoom = await openRoom(getAgent());
@@ -93,15 +177,15 @@ export function createChatWithAgent(
     return void planNextLook(planAgain);
   };
   let onceLeavingIsSafe = () =>
-    new (Promise as Dynamic)((resolve?: Dynamic) => {
+    new Promise<void>((resolve) => {
       let check = () => {
         if (leavingLosesWork()) sleep(LEAVE_CHECK_INTERVAL_MS).then(check);
         else resolve();
       };
       check();
     });
-  let scheduleLook = async (lookKind?: Dynamic, waitFor?: Dynamic): Promise<Dynamic> => {
-    let scheduled = {
+  let scheduleLook = async (lookKind: LookKind, waitFor: Promise<void>): Promise<void> => {
+    let scheduled: ScheduledLook = {
       is: lookKind,
     };
     scheduledLook = scheduled;
@@ -110,7 +194,7 @@ export function createChatWithAgent(
     scheduledLook = null;
     await look(lookKind !== 'forWork', lookKind === 'forWork');
   };
-  let planNextLook = async (isFresh?: Dynamic): Promise<Dynamic> => {
+  let planNextLook = async (isFresh: boolean): Promise<void> => {
     if (isFresh && scheduledLook?.is !== 'first') {
       if (scheduledLook?.is === 'later') scheduledLook = null;
       lookAgainIndex = 0;
@@ -125,25 +209,25 @@ export function createChatWithAgent(
     if (delayMs !== undefined) await scheduleLook(lookAgainIndex === 1 ? 'first' : 'later', sleep(delayMs));
   };
   let sendToSession = async (
-    payload?: Dynamic,
-    sendOptions?: Dynamic,
-    skipsKeyGuard: Dynamic = false,
-    whenNotListening: Dynamic = null,
-  ): Promise<Dynamic> => {
+    payload: ChatPayload,
+    sendOptions?: SendOptions,
+    skipsKeyGuard: boolean = false,
+    whenNotListening: (() => void) | null = null,
+  ): Promise<boolean> => {
     let sendToAgentSession = room?.sendToAgentSession;
     let maySummon = availableIfSummoned && !leavingLosesWork();
     let isQuietWhenUnavailable = isNotBeside && leavingLosesWork();
-    let releaseKeys: Dynamic = null;
+    let releaseKeys: ReturnType<KeepKeysOffCells> | null = null;
     try {
       if (typeof sendToAgentSession !== 'function') return false;
       releaseKeys = skipsKeyGuard ? null : keepKeysOffCells();
       await (sendOptions === undefined ? sendToAgentSession.call(room, payload) : sendToAgentSession.call(room, payload, sendOptions));
       return true;
-    } catch (fault: Dynamic) {
+    } catch (fault) {
       let code = isNonNullObject(fault) ? fault.code : null;
       let keysWereHeld = (code === 'agent_unavailable' || code === 'invalid_argument') && (releaseKeys?.() ?? false);
       if (code === 'agent_unavailable' && maySummon) {
-        let hold: Dynamic = {};
+        let hold: SummonHold = {};
         summonHold = hold;
         sleep(SUMMON_UNAVAILABLE_HOLD_MS).then(() => {
           if (summonHold === hold) summonHold = null;
@@ -160,26 +244,37 @@ export function createChatWithAgent(
       return false;
     }
   };
-  let withAnswerTimeout = (sending?: Dynamic) => Promise.race([sending, sleep(CHAT_SEND_TIMEOUT_MS).then(() => false)]);
-  let deliverToSession = async (payload?: Dynamic, deliver?: Dynamic, withPresence?: Dynamic): Promise<Dynamic> => {
+  let withAnswerTimeout = (sending: Promise<boolean>) => Promise.race([sending, sleep(CHAT_SEND_TIMEOUT_MS).then(() => false)]);
+  let deliverToSession = async (
+    payload: AskAboutChart,
+    deliver: NonNullable<SendOptions['deliver']>,
+    withPresence: boolean,
+  ): Promise<AskSentToChat> => {
     let sendToAgentSession = room?.sendToAgentSession;
     if (typeof sendToAgentSession !== 'function') return 'failed';
     try {
       let sendOptions = withPresence
         ? {
-            deliver: deliver,
+            deliver,
           }
         : {
-            deliver: deliver,
+            deliver,
             attachPresence: false,
           };
-      let sent = sendToAgentSession.call(room, payload, sendOptions);
-      return (await withAnswerTimeout(Promise.resolve(sent).then(() => true))) ? 'taken' : 'failed';
-    } catch (sendOptions: Dynamic) {
-      let sent = isNonNullObject(sendOptions) ? sendOptions.code : null;
-      if (sent === 'rate_limited') return 'tooSoon';
-      if (sent === 'agent_unavailable') return look(false).then(() => 'notListening');
-      if (sent !== 'invalid_argument') look(false);
+      let sent: unknown = sendToAgentSession.call(room, payload, sendOptions);
+      let drafted = false;
+      let taken = await withAnswerTimeout(
+        Promise.resolve(sent).then((answer) => {
+          drafted = isNonNullObject(answer) && answer.drafted === true;
+          return true;
+        }),
+      );
+      return taken ? (drafted ? 'drafted' : 'taken') : 'failed';
+    } catch (fault) {
+      let code = isNonNullObject(fault) ? fault.code : null;
+      if (code === 'rate_limited') return 'tooSoon';
+      if (code === 'agent_unavailable') return look(false).then((): AskSentToChat => 'notListening');
+      if (code !== 'invalid_argument') look(false);
       else if (withPresence) reportFault(Error('sendToAgentSession fault: invalid_argument of words'));
       else {
         reportFault(Error('sendToAgentSession fault: invalid_argument'));
@@ -188,13 +283,19 @@ export function createChatWithAgent(
       return 'failed';
     }
   };
-  let sendAboutChartTo = (sendsNow?: Dynamic, label?: Dynamic, chartId?: Dynamic, sheetNumber?: Dynamic, askWords?: Dynamic) => {
+  let sendAboutChartTo = (
+    sendsNow: boolean,
+    label: string,
+    chartId: string,
+    sheetNumber: number,
+    askWords: string,
+  ): Promise<AskSentToChat> => {
     let request = cleanAskWords(askWords);
-    let payload = {
-      label: label,
-      chartId: chartId,
-      sheetNumber: sheetNumber,
-      request: request,
+    let payload: AskAboutChart = {
+      label,
+      chartId,
+      sheetNumber,
+      request,
     };
     if (!isViewId(chartId) || request === '') reportFault(Error('sendAboutChart fault: no id or no words'));
     else if (takesWords && !isNotBeside) return deliverToSession(payload, 'send', sendsNow);
@@ -212,20 +313,20 @@ export function createChatWithAgent(
               true,
               () => (isNotListening = true),
             ),
-          ).then((sent?: Dynamic) => (sent ? 'taken' : isNotListening ? 'notListening' : 'failed'));
+          ).then((sent): AskSentToChat => (sent ? 'taken' : isNotListening ? 'notListening' : 'failed'));
     }
     return Promise.resolve('failed');
   };
-  let chartSendInFlight: Dynamic = null;
-  let startChartSend = (...args: Dynamic[]) => {
-    let became = (sendAboutChartTo as Dynamic)(false, ...args).catch(() => 'failed');
-    let inFlight = {
-      chartId: args[1],
-      became: became,
+  let chartSendInFlight: ChartSendInFlight | null = null;
+  let startChartSend = (...send: ChartSendArgs) => {
+    let became = sendAboutChartTo(false, ...send).catch((): AskSentToChat => 'failed');
+    let inFlight: ChartSendInFlight = {
+      chartId: send[1],
+      became,
     };
     chartSendInFlight = inFlight;
     became
-      .then((outcome?: Dynamic) => (outcome === 'taken' ? sleep(CHART_SEND_SETTLE_MS) : undefined))
+      .then((outcome) => (isAskTaken(outcome) ? sleep(CHART_SEND_SETTLE_MS) : undefined))
       .then(() => {
         if (chartSendInFlight === inFlight) chartSendInFlight = null;
         return;
@@ -236,7 +337,7 @@ export function createChatWithAgent(
     isToBeHad: () => toBeHad,
     isBesidePage: () => toBeHad === true && !isNotBeside,
     isKeptFromLeaving: () => isNotBeside && leavingLosesWork(),
-    subscribe(listener?: Dynamic) {
+    subscribe(listener: () => void) {
       subscribers.add(listener);
       return () => void subscribers.delete(listener);
     },
@@ -244,35 +345,35 @@ export function createChatWithAgent(
       if (toBeHad === null) dropAfterSilence();
       return look(false);
     },
-    openAboutBlankSheet: (label?: Dynamic, sheetNumber?: Dynamic) =>
+    openAboutBlankSheet: (label: string, sheetNumber: number) =>
       sendToSession({
-        label: label,
+        label,
         isSheetBlank: true,
-        sheetNumber: sheetNumber,
+        sheetNumber,
       }),
-    openAboutChart(label?: Dynamic, chartId?: Dynamic, sheetNumber?: Dynamic) {
+    openAboutChart(label: string, chartId: string, sheetNumber: number) {
       if (isViewId(chartId))
         return sendToSession({
-          label: label,
-          chartId: chartId,
-          sheetNumber: sheetNumber,
+          label,
+          chartId,
+          sheetNumber,
         });
       reportFault(Error('openAboutChart fault: not in the form of an id'));
       return Promise.resolve(false);
     },
-    openAboutRule: (label: Dynamic, { ruleNumber: ruleNumber, ruleCount: ruleCount, sheetNumber: sheetNumber }: Dynamic) =>
+    openAboutRule: (label: string, { ruleNumber, ruleCount, sheetNumber }: RuleNumber & { sheetNumber: number }) =>
       sendToSession(
         {
-          label: label,
-          ruleNumber: ruleNumber,
-          ruleCount: ruleCount,
-          sheetNumber: sheetNumber,
+          label,
+          ruleNumber,
+          ruleCount,
+          sheetNumber,
         },
         {
           attachPresence: false,
         },
       ),
-    openAboutCells: (cells?: Dynamic) =>
+    openAboutCells: (cells: SelectionForAgent) =>
       isNotBeside && leavingLosesWork()
         ? Promise.resolve(false)
         : sendToSession(
@@ -284,30 +385,30 @@ export function createChatWithAgent(
               attachPresence: false,
             },
           ),
-    openWithWhatWasPressed: (label?: Dynamic, extras?: Dynamic, pressed?: Dynamic, basePayload?: Dynamic) =>
+    openWithWhatWasPressed: (label: string, cells: SelectionForAgent, pressed: string, ask: AskBesidePress) =>
       isNotBeside && leavingLosesWork()
         ? Promise.resolve(false)
         : sendToSession(
             {
-              ...basePayload,
-              label: label,
-              ...extras,
-              pressed: pressed,
+              ...ask,
+              label,
+              ...cells,
+              pressed,
             },
             {
               attachPresence: false,
             },
           ),
-    onPressRefused(listener?: Dynamic) {
+    onPressRefused(listener: PressRefusedListener) {
       pressRefusedListeners.add(listener);
       return () => void pressRefusedListeners.delete(listener);
     },
     takesWordsAtOnce: () => takesWords,
-    sendAboutChart: (...args: Dynamic[]) => (sendAboutChartTo as Dynamic)(true, ...args),
-    async sendPressAboutChart(...args: Dynamic[]): Promise<Dynamic> {
+    sendAboutChart: (...send: ChartSendArgs) => sendAboutChartTo(true, ...send),
+    async sendPressAboutChart(...send: ChartSendArgs): Promise<AskSentToChat> {
       let releaseKeys = keepKeysOffCells();
-      let outcome = await ((chartSendInFlight?.chartId === args[1] ? chartSendInFlight.became : null) ??
-        (startChartSend as Dynamic)(...args));
+      let outcome = await ((chartSendInFlight?.chartId === send[1] ? chartSendInFlight.became : null) ??
+        startChartSend(...send));
       if (outcome !== 'taken') releaseKeys(true);
       return outcome;
     },
@@ -316,18 +417,18 @@ export function createChatWithAgent(
 export const MAX_ASK_WORDS_LENGTH = 1000;
 export const UNSHOWN_CHARACTERS_PATTERN =
   /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Noncharacter_Code_Point}\u2800\uFFFD\u{16FE4}]/gu;
-export const collapseWhitespace = (text?: Dynamic) => text.replaceAll(/\s+/gu, ' ').trim();
-export const hasUnshownCharacters = (text?: Dynamic) => text.replaceAll(UNSHOWN_CHARACTERS_PATTERN, '') !== text;
-export const cleanAskWords = (text?: Dynamic) =>
+export const collapseWhitespace = (text: string): string => text.replaceAll(/\s+/gu, ' ').trim();
+export const hasUnshownCharacters = (text: string): boolean => text.replaceAll(UNSHOWN_CHARACTERS_PATTERN, '') !== text;
+export const cleanAskWords = (text: string): string =>
   collapseWhitespace(collapseWhitespace(text).slice(0, MAX_ASK_WORDS_LENGTH).replaceAll(UNSHOWN_CHARACTERS_PATTERN, ''));
-export const pressedCellsOf = ({ sheetNumber: sheetNumber, range: range, pressed: pressed }: Dynamic) =>
+export const pressedCellsOf = ({ sheetNumber, range, pressed }: PressedCellsHeard): Pick<SelectionForAgent, 'sheetNumber' | 'range'> | null =>
   typeof sheetNumber === 'number' && typeof range === 'string' && pressed === undefined
     ? {
-        sheetNumber: sheetNumber,
-        range: range,
+        sheetNumber,
+        range,
       }
     : null;
-export const NO_CHAT_WITH_AGENT = {
+export const NO_CHAT_WITH_AGENT: ChatWithAgent = {
   isToBeHad: () => false,
   isBesidePage: () => false,
   isKeptFromLeaving: () => false,

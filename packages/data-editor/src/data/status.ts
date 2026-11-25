@@ -81,6 +81,12 @@ export function describeLoadFailure(failure: { message: string; wording?: LoadWo
       return 'Couldn’t load the file.';
     case 'fileNoRows':
       return 'The file has no rows this dashboard can read.';
+    case 'savedRowsUnavailable':
+      return 'This view has no store, so saved rows can’t be read here.';
+    case 'savedRowsSilent':
+      return 'The store didn’t answer in time.';
+    case 'savedRowsFailed':
+      return 'Couldn’t read the saved rows.';
     case 'noConnector':
       return 'This dataset names no connector.';
     case 'notData':
@@ -169,7 +175,7 @@ export function fitDatasetNotice(notice: DatasetNotice, max: number): string {
 }
 
 function isLiveQueryFailure(dataset: Dataset, run: DatasetRun): boolean {
-  return run.status === 'failed' && (dataset.source.kind === 'query' || (dataset.source.kind === 'file' && isPageCodeFailure(run)));
+  return run.status === 'failed' && (dataset.source.kind === 'query' || dataset.source.kind === 'store' || (dataset.source.kind === 'file' && isPageCodeFailure(run)));
 }
 
 function getMissingToolHint(source: QuerySource, run: DatasetRun): { tool?: string } {
@@ -191,6 +197,7 @@ export function getDatasetNotice(dataset: Dataset, run: DatasetRun): DatasetNoti
   if (run.status === 'declined') return { text: describeLoadFailure(run) };
   if (source.kind === 'file' && isPageCodeFailure(run)) return { text: SOURCE_FAILED_MESSAGE, said: describeLoadFailure(run), retry: 'refresh' };
   if (run.status !== 'failed' || source.kind === 'file') return { text: describeLoadFailure(run) };
+  if (source.kind === 'store') return { text: describeLoadFailure(run), retry: 'refresh' };
   if (source.kind === 'calc' && run.quoted !== true) return { text: describeLoadFailure(run), ask: true };
   const retry: Pick<DatasetNotice, 'retry'> = isLiveQueryFailure(dataset, run) ? { retry: 'refresh' } : {};
   const ask: Pick<DatasetNotice, 'ask'> = source.kind === 'calc' ? { ask: true } : {};

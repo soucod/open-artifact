@@ -1,9 +1,29 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { KeyPress } from '../state/event-reducer.ts';
 import { shortcutKeysFor } from './shortcut-list.ts';
+
+/** The fields of a keyboard event, DOM or React, that key handling reads. */
+export type KeyEventFields = Pick<
+  KeyboardEvent,
+  'key' | 'code' | 'keyCode' | 'altKey' | 'shiftKey' | 'ctrlKey' | 'metaKey' | 'repeat' | 'getModifierState'
+>;
+/** The modifier keys of a keyboard event. */
+export type ModifierFields = Pick<KeyEventFields, 'altKey' | 'shiftKey' | 'ctrlKey' | 'metaKey'>;
+/** A key with its physical code and modifiers. */
+export type KeyWithModifiers = Pick<KeyEventFields, 'key' | 'code'> & ModifierFields;
+/** One of the commands whose shortcut holds the command key and Alt together. */
+export type AltCommandAct = (typeof ALT_COMMAND_ACTS)[number];
+/** The shortcut of a command that holds Alt, split into its parts. */
+export interface AltCommandShortcut {
+  act: AltCommandAct;
+  key: string;
+  isWithCommand: boolean;
+  isWithAlt: boolean;
+  isWithShift: boolean;
+}
 export function latinKeyOf(
-  { key: key, code: code, altKey: isAltHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld }: Dynamic,
-  isShortcut?: Dynamic,
-) {
+  { key, code, altKey: isAltHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld }: Pick<KeyWithModifiers, 'key' | 'code' | 'altKey' | 'shiftKey' | 'ctrlKey'>,
+  isShortcut: boolean,
+): string {
   if (!isShortcut || isAltHeld) return key;
   let letter = KEY_LETTER_CODE_PATTERN.exec(code)?.[1];
   if (letter !== undefined && !isAsciiKey(key)) return letter.toLowerCase();
@@ -13,72 +33,72 @@ export function latinKeyOf(
   if (digit === undefined) return key;
   return isCtrlHeld ? digit : code;
 }
-export function signOfMacAltKey(key?: Dynamic, code?: Dynamic, keyCode?: Dynamic) {
+export function signOfMacAltKey(key: string, code: string, keyCode: number): string {
   return (code === 'Equal' ? key === '=' || key === '≠' : code === 'Minus' && (key === '-' || key === '–')) ? (KEY_CODE_SIGNS[keyCode] ?? '') : '';
 }
-export function altCommandKeyOf(event?: Dynamic, isMac?: Dynamic) {
-  let { key: key, code: code, keyCode: keyCode, altKey: isAltHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld, metaKey: isMetaHeld } = event;
+export function altCommandKeyOf(event: KeyEventFields, isMac: boolean): string | null {
+  let { key, code, keyCode, altKey: isAltHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld, metaKey: isMetaHeld } = event;
   if (!isAltHeld || isMetaHeld !== isMac || isCtrlHeld === isMac) return null;
   if (isMac ? isShiftHeld : event.getModifierState('AltGraph') || NUMPAD_CODE_PATTERN.test(code)) return null;
   if (key === 'Enter') return key;
   let commandKey = isMac ? signOfMacAltKey(key, code, keyCode) : key;
   return isAltCommandKey(commandKey) ? commandKey : null;
 }
-export function readKeyPress(event?: Dynamic, isMac?: Dynamic) {
-  let { key: key, code: code, altKey: isAltKeyHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld, repeat: isRepeat } = event;
+export function readKeyPress(event: KeyEventFields, isMac: boolean): KeyPress {
+  let { key, code, altKey: isAltKeyHeld, shiftKey: isShiftHeld, ctrlKey: isCtrlHeld, repeat: isRepeat } = event;
   let altCommandKey = altCommandKeyOf(event, isMac);
   if (altCommandKey !== null)
     return {
       key: altCommandKey,
-      isShiftHeld: isShiftHeld,
+      isShiftHeld,
       isModifierHeld: true,
       isAltHeld: true,
-      isRepeat: isRepeat,
+      isRepeat,
     };
   let isCommand = isCommandHeld(event);
   let isAltHeld = isAltKeyHeld && !isCtrlHeld && !(isMac && key === '=');
   let latinKey = latinKeyOf(event, isCommand);
   return {
     key: isCommand && isAltHeld && isAltCommandKey(latinKey) ? code : latinKey,
-    isShiftHeld: isShiftHeld,
+    isShiftHeld,
     isModifierHeld: isCommand,
-    isAltHeld: isAltHeld,
-    isRepeat: isRepeat,
+    isAltHeld,
+    isRepeat,
   };
 }
-export function isFillDownOrRightKey(event?: Dynamic, isMac?: Dynamic) {
+export function isFillDownOrRightKey(event: KeyWithModifiers, isMac: boolean): boolean {
   let isCommand = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey;
   let hasNoOtherModifier = !event.shiftKey && !event.altKey;
   return isCommand && hasNoOtherModifier && ['d', 'r'].includes(latinKeyOf(event, true).toLowerCase());
 }
-export function isBrowserReservedKey(event?: Dynamic) {
+export function isBrowserReservedKey(event: KeyWithModifiers): boolean {
   if (/^F(?:5|11|12)$/.test(event.key)) return event.key !== 'F11' || !event.shiftKey;
   let latinKey = latinKeyOf(event, true);
   return (event.ctrlKey || event.metaKey) && (/^[tnwq]$/i.test(latinKey) || (event.shiftKey && /^r$/i.test(latinKey)) || isZoomKey(event));
 }
-export const ALT_COMMAND_ACTS = ['insertRowsOrColumns', 'deleteRowsOrColumns', 'clearFormatting', 'addSheet'];
-export const shortcutFor = (act?: Dynamic) => shortcutKeysFor(act);
-export const ALT_COMMAND_SHORTCUTS = ALT_COMMAND_ACTS.map((act?: Dynamic) => {
+export const ALT_COMMAND_ACTS = ['insertRowsOrColumns', 'deleteRowsOrColumns', 'clearFormatting', 'addSheet'] as const;
+export const shortcutFor = (act: string): string => shortcutKeysFor(act);
+export const ALT_COMMAND_SHORTCUTS = ALT_COMMAND_ACTS.map((act): AltCommandShortcut => {
   let parts = shortcutFor(act).split('+');
   let key = parts.at(-1) ?? '';
   return {
-    act: act,
+    act,
     key: /^f\d+$/.test(key) ? key.toUpperCase() : key,
     isWithCommand: parts.includes('cmd'),
     isWithAlt: parts.includes('alt'),
     isWithShift: parts.includes('shift'),
   };
 });
-export const isAltCommandKey = (key?: Dynamic) =>
-  ALT_COMMAND_SHORTCUTS.some((shortcut?: Dynamic) => shortcut.isWithCommand && shortcut.isWithAlt && shortcut.key === key);
+export const isAltCommandKey = (key: string): boolean =>
+  ALT_COMMAND_SHORTCUTS.some((shortcut) => shortcut.isWithCommand && shortcut.isWithAlt && shortcut.key === key);
 export const altCommandActOf = ({
-  key: key,
-  isShiftHeld: isShiftHeld,
-  isModifierHeld: isModifierHeld,
-  isAltHeld: isAltHeld,
-}: Dynamic) =>
+  key,
+  isShiftHeld,
+  isModifierHeld,
+  isAltHeld,
+}: KeyPress): AltCommandAct | null =>
   ALT_COMMAND_SHORTCUTS.find(
-    (shortcut?: Dynamic) =>
+    (shortcut) =>
       shortcut.key === key &&
       shortcut.isWithCommand === isModifierHeld &&
       shortcut.isWithAlt === isAltHeld &&
@@ -88,18 +108,21 @@ export const KEY_LETTER_CODE_PATTERN = /^Key([A-Z])$/;
 export const DIGIT_CODE_PATTERN = /^Digit([0-9])$/;
 export const NUMPAD_CODE_PATTERN = /^Numpad/;
 export const SIGN_KEY_PATTERN = /^[-+=]$/;
-export const isAsciiKey = (key?: Dynamic) => (key.codePointAt(0) ?? 0) < 128;
-export const KEY_CODE_SIGNS = {
+export const isAsciiKey = (key: string): boolean => (key.codePointAt(0) ?? 0) < 128;
+export const KEY_CODE_SIGNS: Partial<Record<number, string>> = {
   187: '=',
   61: '=',
   171: '=',
   189: '-',
   173: '-',
 };
-export const isCommandHeld = ({ ctrlKey: ctrlKey, altKey: altKey, metaKey: metaKey }: Dynamic) => metaKey || (ctrlKey && !altKey);
-export const isTypingKey = (event?: Dynamic, allowsAlt?: Dynamic) =>
+export const isCommandHeld = ({ ctrlKey, altKey, metaKey }: Pick<ModifierFields, 'ctrlKey' | 'altKey' | 'metaKey'>): boolean => metaKey || (ctrlKey && !altKey);
+export const isTypingKey = (
+  event: Pick<KeyEventFields, 'key' | 'altKey' | 'ctrlKey' | 'metaKey' | 'getModifierState'>,
+  allowsAlt: boolean,
+): boolean =>
   event.key.length === 1 && !isCommandHeld(event) && (allowsAlt || !event.altKey || event.getModifierState('AltGraph'));
-export const isAltCommandPress = ({ key: key, isModifierHeld: isModifierHeld, isAltHeld: isAltHeld }: Dynamic, isMac?: Dynamic) =>
+export const isAltCommandPress = ({ key, isModifierHeld, isAltHeld }: KeyPress, isMac: boolean): boolean =>
   isMac && isModifierHeld && isAltHeld && isAltCommandKey(key);
-export const isZoomKey = ({ key: key, code: code, altKey: altKey }: Dynamic) =>
+export const isZoomKey = ({ key, code, altKey }: Pick<KeyWithModifiers, 'key' | 'code' | 'altKey'>): boolean =>
   !altKey && (/^[-+=_0]$/.test(key) || (/^(?:Minus|Equal|Digit0)$/.test(code) && !isAsciiKey(key)));

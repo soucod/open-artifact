@@ -1,15 +1,21 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
-export function truncateShownValue(text?: Dynamic) {
-  let [shown, count]: Dynamic = ['', 0];
-  for (let { segment: segment } of new (Intl.Segmenter as Dynamic)().segment(text) as Dynamic) {
+
+/** A formula and the value it comes to, as shown. */
+export type FormulaAndValue = readonly [formula: string, shownValue: string];
+
+/** Why the agent wrote no formula. */
+export type FormulaNotWrittenWhy = 'noFormula' | 'makesAnAddress' | 'ranOutOfTime' | 'notAvailable' | 'sheetTooLarge';
+
+export function truncateShownValue(text: string): string {
+  let [shown, count] = ['', 0];
+  for (let { segment } of new Intl.Segmenter().segment(text)) {
     if (count === MAX_SHOWN_VALUE_GRAPHEMES) return `${shown}…`;
     shown += segment;
     count += 1;
   }
   return text;
 }
-export function twoFormulaReadingsHint([formula, value]: Dynamic, [otherFormula, otherValue]: Dynamic, canAskAgent?: Dynamic) {
+export function twoFormulaReadingsHint([formula, value]: FormulaAndValue, [otherFormula, otherValue]: FormulaAndValue, canAskAgent: boolean): string {
   let [shownValue, otherShownValue] = [truncateShownValue(value), truncateShownValue(otherValue)];
   return canAskAgent
     ? translateMessage(
@@ -19,9 +25,9 @@ export function twoFormulaReadingsHint([formula, value]: Dynamic, [otherFormula,
           id: 'y9FjgpINoc',
         },
         {
-          formula: formula,
+          formula,
           value: shownValue,
-          otherFormula: otherFormula,
+          otherFormula,
           otherValue: otherShownValue,
         },
       )
@@ -32,9 +38,9 @@ export function twoFormulaReadingsHint([formula, value]: Dynamic, [otherFormula,
           id: 'BQnMZqWtza',
         },
         {
-          formula: formula,
+          formula,
           value: shownValue,
-          otherFormula: otherFormula,
+          otherFormula,
           otherValue: otherShownValue,
         },
       );
@@ -69,14 +75,14 @@ export const stopWritingFormulaLabel = () =>
     defaultMessage: 'Stop',
     id: 'EQV1kDGXjE',
   });
-export const writingFormulaForWords = (words?: Dynamic) =>
+export const writingFormulaForWords = (words: string): string =>
   translateMessage(
     {
       defaultMessage: 'Writing a formula for “{words}”…',
       id: '0T3Og9F4nR',
     },
     {
-      words: words,
+      words,
     },
   );
 export const keepFormulaLabel = () =>
@@ -90,7 +96,7 @@ export const discardFormulaLabel = () =>
     id: '3qNOm7mVWg',
   });
 export const MAX_SHOWN_VALUE_GRAPHEMES = 100;
-export const formulaResultPreview = (value?: Dynamic) =>
+export const formulaResultPreview = (value: string): string | null =>
   value === ''
     ? null
     : translateMessage(
@@ -132,22 +138,20 @@ export const formulaNotReadWords = () =>
     defaultMessage: 'Couldn’t turn that into a formula. Try saying it another way.',
     id: 'slp+LQYT2d',
   });
-export const formulaNotWrittenReason = (failure?: Dynamic) =>
-  (
-    ({
-      noFormula: formulaNotReadWords,
-      makesAnAddress: formulaMakesAddressWords,
-      ranOutOfTime: formulaRanOutOfTimeWords,
-      notAvailable: formulaAgentUnavailableWords,
-      sheetTooLarge: formulaSheetTooLargeWords,
-    }) as Dynamic
-  )[failure]();
+export const formulaNotWrittenReason = (failure: FormulaNotWrittenWhy): string =>
+  ({
+    noFormula: formulaNotReadWords,
+    makesAnAddress: formulaMakesAddressWords,
+    ranOutOfTime: formulaRanOutOfTimeWords,
+    notAvailable: formulaAgentUnavailableWords,
+    sheetTooLarge: formulaSheetTooLargeWords,
+  })[failure]();
 export const notAFormulaHint = () =>
   translateMessage({
     defaultMessage: 'This isn’t a formula. Press Enter to have Agent write one, or Tab to keep typing.',
     id: '/GqwOJuhfW',
   });
-export const formulaReadingHint = (formula?: Dynamic, value?: Dynamic) =>
+export const formulaReadingHint = (formula: string, value: string): string =>
   value === ''
     ? translateMessage(
         {
@@ -155,7 +159,7 @@ export const formulaReadingHint = (formula?: Dynamic, value?: Dynamic) =>
           id: 'cKNR/p1emB',
         },
         {
-          formula: formula,
+          formula,
         },
       )
     : translateMessage(
@@ -164,7 +168,7 @@ export const formulaReadingHint = (formula?: Dynamic, value?: Dynamic) =>
           id: 'WNsDeIughX',
         },
         {
-          formula: formula,
+          formula,
           value: truncateShownValue(value),
         },
       );
@@ -178,7 +182,7 @@ export const agentWritingFormulaWords = () =>
     defaultMessage: 'Agent is writing a formula. Press Escape to stop.',
     id: 'J4yZ1kZIYm',
   });
-export const agentWroteFormulaWords = (count?: Dynamic, formula?: Dynamic, value?: Dynamic) =>
+export const agentWroteFormulaWords = (count: number, formula: string, value: string): string =>
   value === ''
     ? translateMessage(
         {
@@ -187,8 +191,8 @@ export const agentWroteFormulaWords = (count?: Dynamic, formula?: Dynamic, value
           id: 'nnTWnPd3Qs',
         },
         {
-          count: count,
-          formula: formula,
+          count,
+          formula,
         },
       )
     : translateMessage(
@@ -198,12 +202,12 @@ export const agentWroteFormulaWords = (count?: Dynamic, formula?: Dynamic, value
           id: 'dkB3y5nP3q',
         },
         {
-          count: count,
-          formula: formula,
+          count,
+          formula,
           value: truncateShownValue(value),
         },
       );
-export const agentWroteOneFormulaWords = (formula?: Dynamic, value?: Dynamic) =>
+export const agentWroteOneFormulaWords = (formula: string, value: string): string =>
   value === ''
     ? translateMessage(
         {
@@ -211,7 +215,7 @@ export const agentWroteOneFormulaWords = (formula?: Dynamic, value?: Dynamic) =>
           id: 'jXbHJC875P',
         },
         {
-          formula: formula,
+          formula,
         },
       )
     : translateMessage(
@@ -220,7 +224,7 @@ export const agentWroteOneFormulaWords = (formula?: Dynamic, value?: Dynamic) =>
           id: 'YIuX8lEiPB',
         },
         {
-          formula: formula,
+          formula,
           value: truncateShownValue(value),
         },
       );

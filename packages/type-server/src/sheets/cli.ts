@@ -3,7 +3,7 @@
  * Sheet's, through the `call` action of a running server, or one made on the folder when none holds it:
  *
  * ```
- * read <dir> [payload] [--at <revision>]   one of the reads (readSheets when none is given)
+ * read <dir> [payload] [--at <revision>]   one of the reads (readSheets when none is given), or a showGuide
  * update <dir> <payload>                   {"kind": "applyEdits", "base": n, "edits": [...]} ("kind" may be left out)
  * batch <dir> <calls>                      widget creates and one applyEdits, last; a create may give "codeFile"
  * widget <dir> create <code>               a chart's widget (code: a file, or - for stdin)
@@ -21,7 +21,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isObject, type Json, type JsonObject } from '@open-artifact/sheets-core';
+import { AgentError, GUIDE_KIND, isObject, type Json, type JsonObject, SheetRefusalError, type SheetWalkthrough } from '@open-artifact/sheets-core';
 import { readMeta, SHEET_DIR, SheetStore } from './store.ts';
 
 export const SHEETS_COMMANDS = ['read', 'update', 'batch', 'widget', 'export', 'info'] as const;
@@ -31,7 +31,7 @@ export type SheetsCommand = (typeof SHEETS_COMMANDS)[number];
 export const SHEET_ACTIONS = [
   {
     name: 'read',
-    title: 'A read of the workbook: readSheets (the default), readCells, readCellFormats, readConditionalFormats, readCharts',
+    title: 'A read of the workbook: readSheets (the default), readCells, readCellFormats, readConditionalFormats, readCharts, readInteractive; or showGuide, a walkthrough for the owner\'s open page',
     effect: 'read',
     schema: { type: 'object', properties: { payload: { type: 'object' }, at: { type: 'integer', description: 'A revision to read at.' } } },
   },
@@ -306,10 +306,32 @@ function exportTo(store: SheetStore, root: string, args: JsonObject): Json {
 }
 
 /**
+ * What the place a call runs in gives it beyond the store. A running server knows the Sheet's page and who has it open;
+ * a store made on the folder knows neither, so its reads carry no `frame` and a walkthrough is not shown.
+ */
+export interface SheetCallHost {
+  /** The address of the Sheet's page: a read that lists the sheets gives it as `frame.artifactUrl`. */
+  artifactUrl?: string;
+  /** Shows a walkthrough on a page the owner has open; false when they have none open. */
+  showWalkthrough?(walkthrough: SheetWalkthrough): boolean;
+}
+
+/** showGuide: the walkthrough checked against the workbook, then given to the owner's open page. Answers {shown}. */
+function showGuide(store: SheetStore, payload: JsonObject, host: SheetCallHost): Json {
+  const extra = Object.keys(payload).find((key) => key !== 'kind' && key !== 'guide');
+  if (extra !== undefined || !('guide' in payload)) {
+    const message = extra !== undefined ? `showGuide takes no "${extra}": its one key is guide.` : 'showGuide takes guide: {"stops": [{"at", "say"}]}.';
+    throw SheetRefusalError.of(new AgentError('unreadableRead', message, extra !== undefined ? { key: extra } : {}));
+  }
+  const walkthrough = store.checkWalkthrough(payload.guide);
+  return { shown: host.showWalkthrough?.(walkthrough) ?? false };
+}
+
+/**
  * Runs a call on a Sheet's store and answers its JSON. Throws SheetRefusalError when the Sheet refuses it,
  * SheetsCommandError when it is given wrong.
  */
-export function runSheetCall(store: SheetStore, call: SheetCall): unknown {
+export function runSheetCall(store: SheetStore, call: SheetCall, host: SheetCallHost = {}): unknown {
   const { args } = call;
   switch (call.name) {
     case 'info':
@@ -318,7 +340,10 @@ export function runSheetCall(store: SheetStore, call: SheetCall): unknown {
       if (args.at !== undefined && (typeof args.at !== 'number' || !Number.isInteger(args.at) || args.at < 0)) {
         throw new SheetsCommandError('NOT_A_REVISION', 'at is a revision: 0, 1, 2, …');
       }
-      return store.agentRead(args.payload ?? { kind: 'readSheets' }, args.at as number | undefined);
+      const payload = args.payload ?? { kind: 'readSheets' };
+      if (isObject(payload) && payload.kind === GUIDE_KIND) return showGuide(store, payload, host);
+      const answer = store.agentRead(payload, args.at as number | undefined);
+      return host.artifactUrl !== undefined && Array.isArray(answer.sheets) ? { ...answer, frame: { artifactUrl: host.artifactUrl } } : answer;
     }
     case 'update': {
       let { payload } = args;

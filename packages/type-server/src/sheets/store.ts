@@ -25,6 +25,7 @@ import {
   AgentError,
   applyEdits,
   ChartReader,
+  checkWalkthrough,
   clockReading,
   csvOf,
   deletedSheets,
@@ -60,6 +61,7 @@ import {
   type SheetEditsRequest,
   type SheetSendRequest,
   type SheetSendResponse,
+  type SheetView,
   sheetsOf,
   type SnapshotFrame,
   undeleted,
@@ -67,6 +69,7 @@ import {
   type WidgetRequest,
   type WidgetResponse,
   type WidgetState,
+  type SheetWalkthrough,
   type WorkbookContents,
   workbookOf,
   xlsxChartsOf,
@@ -139,6 +142,12 @@ export interface SheetStoreOptions {
   /** Hands a request to the agent ("Import from Excel"); true when it was taken. */
   sendToAgent?: (request: AgentRequest) => boolean | Promise<boolean>;
   log?: (line: string) => void;
+  /**
+   * How an edit written by another process is noticed while a page listens: `poll` (default) rereads the edit log
+   * each second; `events` (this process the only writer, its `fs.watch` reporting every write) watches the folder
+   * instead, and polls only when that watch cannot start.
+   */
+  watch?: 'poll' | 'events';
 }
 
 /** The answer to a page's read. */
@@ -270,6 +279,10 @@ export class SheetStore {
   private damaged: number | null = null;
   private readonly streams = new Set<Stream>();
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
+  /** `watch: 'events'`: the folder's watch while a page listens, and the short wait that gathers its events. */
+  private watcher: fs.FSWatcher | null = null;
+  private watchWait: ReturnType<typeof setTimeout> | null = null;
+  private readonly watchMode: 'poll' | 'events';
   /** The workbook's time zone (its last setTimeZone operation), null for none: the clock is told in it. */
   private timeZone: string | null = null;
   /** The session the agent's reads are answered from: the workbook at `revision`, its formulas worked out. */
@@ -294,6 +307,7 @@ export class SheetStore {
     this.morePeople = options.people ?? (() => []);
     this.sendToAgent = options.sendToAgent ?? null;
     this.log = options.log ?? ((line) => process.stderr.write(`${line}\n`));
+    this.watchMode = options.watch ?? 'poll';
     this.meta = ensureMeta(this.dir, options.title);
     this.widgets = new WidgetStore(this.dir);
     const described = describeEngine(this.engine);
@@ -504,24 +518,53 @@ export class SheetStore {
     clock.unref();
     const stream: Stream = { viewer, emit, clock };
     this.streams.add(stream);
-    if (!this.rescanTimer) {
-      this.rescanTimer = setInterval(() => {
-        try {
-          this.rescan();
-        } catch (error) {
-          this.log(`${EDITS_FILE}: ${(error as Error).message}`);
-        }
-      }, RESCAN_MS);
-      this.rescanTimer.unref();
-    }
+    if (!this.rescanTimer && !this.watcher) this.startNoticing();
     return () => {
       clearInterval(clock);
       this.streams.delete(stream);
-      if (this.streams.size === 0 && this.rescanTimer) {
-        clearInterval(this.rescanTimer);
-        this.rescanTimer = null;
-      }
+      if (this.streams.size === 0) this.stopNoticing();
     };
+  }
+
+  /** Rereads the edit log, logging what goes wrong. */
+  private rescanLogged(): void {
+    try {
+      this.rescan();
+    } catch (error) {
+      this.log(`${EDITS_FILE}: ${(error as Error).message}`);
+    }
+  }
+
+  /** Starts noticing edits written by others: the folder's watch in `events` mode, else (or failing that) a poll. */
+  private startNoticing(): void {
+    if (this.watchMode === 'events') {
+      try {
+        fs.mkdirSync(this.dir, { recursive: true });
+        const watcher = fs.watch(this.dir, () => {
+          if (this.watchWait) return;
+          this.watchWait = setTimeout(() => {
+            this.watchWait = null;
+            this.rescanLogged();
+          }, 50);
+        });
+        watcher.on('error', () => undefined);
+        this.watcher = watcher;
+        return;
+      } catch (error) {
+        this.log(`cannot watch ${this.dir} (${(error as Error).message}); polling it`);
+      }
+    }
+    this.rescanTimer = setInterval(() => this.rescanLogged(), RESCAN_MS);
+    this.rescanTimer.unref();
+  }
+
+  private stopNoticing(): void {
+    if (this.rescanTimer) clearInterval(this.rescanTimer);
+    this.rescanTimer = null;
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.watchWait) clearTimeout(this.watchWait);
+    this.watchWait = null;
   }
 
   private broadcast(edit: StoredEdit): void {
@@ -889,8 +932,8 @@ export class SheetStore {
   }
 
   /**
-   * One of the agent's reads (readSheets, readCells, readCellFormats, readConditionalFormats, readCharts), from the
-   * workbook as it stands, or as it stood at `atRevision`.
+   * One of the agent's reads (readSheets, readCells, readCellFormats, readConditionalFormats, readCharts,
+   * readInteractive), from the workbook as it stands, or as it stood at `atRevision`.
    */
   agentRead(payload: unknown = { kind: 'readSheets' }, atRevision?: number): EngineMessage {
     this.rescan();
@@ -902,14 +945,32 @@ export class SheetStore {
       try {
         let charts: ChartReader | undefined;
         const before = this.edits.slice(0, at).flatMap((e) => e.ops);
+        const reader = (sheets: SheetView[]) => (charts ??= new ChartReader(workbook, sheets, (more) => undeleted(this.engine, [...before, ...more])));
         return readWorkbook(payload, {
           workbook,
           answer: (request) => session.answer(request),
           utility: (request) => this.engine.utility(request),
           calculationTookTooLong: unfinished,
           timeZone: this.timeZone,
-          charts: (view, sheets) => (charts ??= new ChartReader(workbook, sheets, (more) => undeleted(this.engine, [...before, ...more]))).chartsOf(view),
+          charts: (view, sheets) => reader(sheets).chartsOf(view),
+          interactive: (view, sheets) => reader(sheets).interactiveOf(view),
         });
+      } finally {
+        release();
+      }
+    });
+  }
+
+  /**
+   * A walkthrough the agent sends (showGuide's `guide`), checked against the workbook as it stands: its stops, or a
+   * refusal (unreadableRead, unknownSheetName, outsideTheSheet). Showing it is the host's (cli.ts, runSheetCall).
+   */
+  checkWalkthrough(guide: unknown): SheetWalkthrough {
+    this.rescan();
+    return this.refusing(() => {
+      const { workbook, release } = this.contents();
+      try {
+        return checkWalkthrough(guide, sheetsOf(workbook));
       } finally {
         release();
       }
@@ -1098,8 +1159,7 @@ export class SheetStore {
   close(): void {
     for (const stream of this.streams) clearInterval(stream.clock);
     this.streams.clear();
-    if (this.rescanTimer) clearInterval(this.rescanTimer);
-    this.rescanTimer = null;
+    this.stopNoticing();
     this.dropSessions();
     this.workbook.free();
   }

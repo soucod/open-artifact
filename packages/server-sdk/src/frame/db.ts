@@ -13,7 +13,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { FrameError, writeAtomic } from './files.ts';
+import { FrameError, LINK_GUARD, writeAtomic, type PathGuard } from './files.ts';
+import type { Json, JsonObject } from './page-values.ts';
+
+export type { Json, JsonObject } from './page-values.ts';
 
 export const DB_DIR = 'db';
 export const DOC_MAX_BYTES = 256 * 1024;
@@ -23,9 +26,6 @@ const OPS = new Set(['==', '!=', '<', '<=', '>', '>=', 'in', 'not-in', 'array-co
 const SHA = /^[0-9a-f]{64}$/;
 /** Largest page of an agent's read. */
 export const READ_MAX = 1000;
-
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export type JsonObject = { [key: string]: Json };
 
 export const dbError = (code: string, message: string, extra: Record<string, unknown> = {}): FrameError =>
   new FrameError(code, message, code === 'invalid_argument' ? 400 : 409, extra);
@@ -40,6 +40,11 @@ export function docSha256(data: unknown): string {
 
 /** The fix for a `set` / `delete` over an existing document without `if_match`. */
 export const IF_MATCH_FIX = 'Read the document with ArtifactData {action: "get"} and pass its sha256 as if_match, or pass "*" to replace it anyway.';
+
+/** A new random document id (what `add()` names a document). */
+export function newDocId(): string {
+  return randomBytes(10).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x');
+}
 
 /** Splits and checks a db path. `kind`: 'doc', 'collection' or 'any' ('' is the root, allowed for 'any' only). */
 export function splitPath(p: unknown, kind: 'doc' | 'collection' | 'any' = 'any'): string[] {
@@ -276,15 +281,21 @@ export class DbStore extends EventEmitter {
   readonly root: string;
   readonly dir: string;
   readonly leases = new Map<string, Lease>();
+  private readonly guard: PathGuard;
 
-  constructor(root: string) {
+  /** `guard`: how it keeps inside the artifact folder (default {@link LINK_GUARD}: links followed). */
+  constructor(root: string, options: { guard?: PathGuard } = {}) {
     super();
     this.root = root;
     this.dir = join(root, DB_DIR);
+    this.guard = options.guard ?? LINK_GUARD;
   }
 
+  /** A document's file; refused when a link (db/ itself, or a folder in it) leads it out of the artifact folder. */
   private fileOf(segs: string[]): string {
-    return join(this.dir, ...segs.slice(0, -1), `${segs.at(-1)}.json`);
+    const file = join(this.dir, ...segs.slice(0, -1), `${segs.at(-1)}.json`);
+    if (!this.guard.inside(this.root, file)) throw dbError('invalid_argument', `${segs.join('/')} leads out of the artifact folder (a link).`);
+    return file;
   }
 
   readDoc(p: string): JsonObject | null {
@@ -301,6 +312,7 @@ export class DbStore extends EventEmitter {
   listCollection(p: string): Doc[] {
     const segs = splitPath(p, 'collection');
     const dir = join(this.dir, ...segs);
+    if (!this.guard.inside(this.root, dir)) return [];
     let names;
     try {
       names = readdirSync(dir, { withFileTypes: true });
@@ -380,9 +392,9 @@ export class DbStore extends EventEmitter {
     return { existed };
   }
 
-  add(collection: string, data: unknown): { id: string; path: string } {
+  /** A new document in `collection`, under `id` (default: a new random one, {@link newDocId}). */
+  add(collection: string, data: unknown, id: string = newDocId()): { id: string; path: string } {
     const segs = splitPath(collection, 'collection');
-    const id = randomBytes(10).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x');
     const docPath = [...segs, id].join('/');
     this.set(docPath, data);
     return { id, path: docPath };
@@ -392,7 +404,8 @@ export class DbStore extends EventEmitter {
   acquire(p: string, opts: { holder?: unknown; ttlMs?: unknown; data?: unknown } = {}): { acquired: boolean; version?: number; expiresAt?: number; holder?: string } {
     const key = splitPath(p, 'doc').join('/');
     const { holder, ttlMs = 30_000, data } = opts;
-    if (typeof holder !== 'string' || !holder || holder.length > 128) throw dbError('invalid_argument', 'acquire() needs a holder.');
+    // 128 characters from a page; the frame core puts the viewer's id before them (up to 512 in all).
+    if (typeof holder !== 'string' || !holder || holder.length > 512) throw dbError('invalid_argument', 'acquire() needs a holder.');
     if (typeof ttlMs !== 'number' || !Number.isInteger(ttlMs) || ttlMs < 1000 || ttlMs > 600_000) throw dbError('invalid_argument', 'acquire(): ttlMs is 1000 to 600000.');
     const now = Date.now();
     const have = this.leases.get(key);
@@ -441,7 +454,7 @@ export class DbStore extends EventEmitter {
         }
       }
     };
-    walk(this.dir, []);
+    if (this.guard.inside(this.root, this.dir)) walk(this.dir, []);
     return out.sort((a, b) => (a.path < b.path ? -1 : 1));
   }
 

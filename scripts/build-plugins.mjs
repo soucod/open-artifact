@@ -12,11 +12,16 @@
  *   node scripts/build-plugins.mjs [--only <name>] [--no-skill]
  *
  * plugins/dsh (DeepSeek Harness) is an npm package built by its own script, through `node scripts/build.mjs`.
+ *
+ * A plugin's `test/` folder stays behind. A plugin with code that imports workspace packages lists it in `BUNDLED`:
+ * that file is bundled with esbuild into one dependency-free ES module in its place (plugins/zcode's extension, which
+ * imports @open-artifact/harness-kit and which ZCode loads as it is).
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildSync } from 'esbuild';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = join(repo, 'plugins');
@@ -28,6 +33,9 @@ const arg = (name) => {
   return i > 0 ? process.argv[i + 1] : undefined;
 };
 const only = arg('only');
+
+/** Per plugin, the files bundled in place (paths inside the plugin folder). */
+const BUNDLED = { zcode: ['extension/index.mjs'] };
 const log = (message) => console.log(`plugins build: ${message}`);
 
 if (!process.argv.includes('--no-skill') || !existsSync(join(skill, 'vendor', 'open-artifact.mjs'))) {
@@ -44,7 +52,21 @@ for (const name of plugins) {
   if (only && only !== name) continue;
   const target = join(out, name);
   rmSync(target, { recursive: true, force: true });
-  cpSync(join(source, name), target, { recursive: true, filter: (path) => basename(path) !== 'node_modules' });
+  const from = join(source, name);
+  cpSync(from, target, { recursive: true, filter: (path) => basename(path) !== 'node_modules' && relative(from, path) !== 'test' });
+  for (const file of BUNDLED[name] ?? []) {
+    buildSync({
+      entryPoints: [join(from, file)],
+      outfile: join(target, file),
+      allowOverwrite: true,
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node22',
+      legalComments: 'none',
+      logLevel: 'warning',
+    });
+  }
   cpSync(skill, join(target, 'skills', 'open-artifact'), { recursive: true });
   for (const file of ['LICENSE', 'NOTICE']) cpSync(join(repo, file), join(target, file));
   log(`dist/plugins/${name}`);

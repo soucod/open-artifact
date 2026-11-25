@@ -1,4 +1,18 @@
-import type { Dynamic } from '../dynamic.ts';
+import type {
+  CellAt,
+  CellBlock,
+  CellControl,
+  Color,
+  ColumnId,
+  DropdownContents,
+  DropdownToPointAt,
+  Edit,
+  EditOf,
+  OptionToMake,
+  SharedCellFormat,
+  SheetId,
+  StretchOfADropdown,
+} from '@open-artifact/sheets-core';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import {
@@ -54,17 +68,105 @@ import { filteredRowRunsIn } from '../tables/filtered-rows.ts';
 import { isInSpan } from '../grid/geometry.ts';
 import { dropdownEditorOfPane } from '../state/queries.ts';
 import { NO_COLOR, colorsEqual } from '../model/colors.ts';
-import { parseA1AreaAsSeen } from '../model/a1-references.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import { parseA1AreasAsSeen } from '../model/a1-references.ts';
+import type {
+  DropdownCellsRefused,
+  DropdownClearedCellsOffer,
+  DropdownOptionDeletedOffer,
+  DropdownOptionMovedDone,
+  DropdownOptionRemovedDone,
+  DropdownOptionsAddedDone,
+  DropdownReach,
+  HeaderRowSetDone,
+  OptionOfDropdownInPane,
+  PageState,
+  UndoOfferMadeDone,
+  WhyDropdownCellsRefused,
+} from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
+import type { CellArea, CellSelection } from '../selection/model.ts';
+import type { DropdownPresetKey, LocalizedDropdownPreset, NamedDropdownPreset } from '../i18n/chip-labels.ts';
+import type { DropdownEditTarget, DropdownEditor, EveryOptionColorOffer } from './dropdown-pane-edits.ts';
+import type { IfQueued } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { DropdownCommand } from '../format/format-commands.ts';
+/** What to tell once a dropdown is given cells, and the offer to undo it when that cleared some of them. */
+export interface DropdownClearingOffer {
+  done: 'dropdownSet' | HeaderRowSetDone | UndoOfferMadeDone;
+  undoOffer: DropdownClearedCellsOffer | null;
+}
+/** A heading above the cells of a column: its text, how many rows it takes, and the cells under it. */
+export interface HeaderAboveDropdownCells {
+  heading: string;
+  top: number;
+  under: CellArea;
+  corners: CellSelection;
+}
+/** The cells a new dropdown goes to, the format they share, the cell to open, and the heading left out above them. */
+export interface DropdownTarget {
+  selected: CellArea;
+  corners: CellSelection;
+  shared: SharedCellFormat;
+  entryCell: CellId;
+  heading: string | null;
+  thenSelected: CellSelection | null;
+}
+/** What the selected cells say, for a dropdown made of them: how often each label, and how many formulas and other values. */
+export interface DropdownSelectionSummary {
+  isTaken: boolean;
+  formulaCount: number;
+  /** How many cells say each label, by its folded case. */
+  said: Map<string, number>;
+  otherCount: number;
+}
+/** A dropdown just above some cells, and the cells to give it. */
+export interface DropdownToJoin {
+  dropdown: DropdownContents;
+  joining: CellArea;
+}
+/** The heading in the first row of a column, and how many rows it takes. */
+export interface HeadingInFirstRow {
+  text: string;
+  rowCount: number;
+}
+interface HeadingOfColumn extends HeadingInFirstRow {
+  columnIndex: number;
+  sought: string;
+}
+/** Whether the heading above a dropdown's cells is one of them (`'on'`) or left out of them (`'off'`). */
+export type HeaderRowState = 'on' | 'off';
+/** Edits to make before and after the cells are set, and the options the cells are checked against. */
+export interface DropdownCellsSetWith {
+  optionsFirst?: Edit[];
+  optionsLast?: Edit[];
+  optionsByThen?: OptionOfDropdownInPane[];
+}
+/** An act in the dropdown editor of the side pane. */
+export type DropdownEditorAct =
+  | { kind: 'startOption' }
+  | { kind: 'type'; optionId: string | null; label: string }
+  | { kind: 'dropTyped' }
+  | { kind: 'pasteNames'; optionId: string | null; labels: string[] }
+  | { kind: 'enter'; thenStartsOption: boolean; optionId?: string | null }
+  | { kind: 'setColor'; optionId: string | null; color: Color }
+  | { kind: 'setColorOfEveryOption'; to: EveryOptionColorOffer }
+  | { kind: 'remove'; optionId: string | null }
+  | { kind: 'move'; optionId: string | null; toIndex: number }
+  | { kind: 'chooseReach'; reach: DropdownReach }
+  | { kind: 'typeCells'; text: string }
+  | { kind: 'dropTypedCells' }
+  | { kind: 'useSelection' }
+  | { kind: 'enterCells'; isBeforeOtherEvent?: boolean }
+  | { kind: 'setHeaderRow'; isOn: boolean }
+  | { kind: 'startFrom'; set: LocalizedDropdownPreset | 'custom' };
 export function dropdownClearingOffer(
   reads: WorkbookReads,
-  area: Dynamic,
-  { activeCell: activeCell, selectionCorner: selectionCorner }: Dynamic,
-  dropdownChoice?: Dynamic,
-  headerRow?: Dynamic,
-) {
+  area: CellArea,
+  { activeCell, selectionCorner }: Pick<CellSelection, 'activeCell' | 'selectionCorner'>,
+  dropdownChoice: DropdownToPointAt,
+  headerRow: HeaderRowSetDone | null,
+): DropdownClearingOffer | null {
   let cellsCleared =
     reads.filledCellsIn(activeCell.sheetId, area).length === 0
       ? {
@@ -78,7 +180,7 @@ export function dropdownClearingOffer(
       done: headerRow ?? 'dropdownSet',
       undoOffer: null,
     };
-  let undoOffer = {
+  let undoOffer: DropdownClearedCellsOffer = {
     kind: 'dropdownClearedCells',
     cells: areaToA1AsStored(area, ownRowOrderOfSheet(reads, activeCell.sheetId)),
     isOneCell: area.rowCount * area.columnCount === 1,
@@ -91,13 +193,13 @@ export function dropdownClearingOffer(
       what: 'undoOfferMade',
       offer: undoOffer,
       ...(headerRow !== null && {
-        headerRow: headerRow,
+        headerRow,
       }),
     },
-    undoOffer: undoOffer,
+    undoOffer,
   };
 }
-export function headerAboveDropdownCells(state: PageState, reads: ReadsWithTextMeasurer, area?: Dynamic) {
+export function headerAboveDropdownCells(state: PageState, reads: ReadsWithTextMeasurer, area: CellArea): HeaderAboveDropdownCells | null {
   let heading =
     area.columnCount === 1 && selectionKindOf(area, layoutOfView(state, reads)) === 'columns'
       ? headingsInFirstRow(reads, state.sheetId, area).get(area.leftColumnIndex)
@@ -119,14 +221,14 @@ export function headerAboveDropdownCells(state: PageState, reads: ReadsWithTextM
         corners: cornersUnder,
       };
 }
-export function dropdownTargetOfSelection(state: PageState, reads: ReadsWithTextMeasurer) {
+export function dropdownTargetOfSelection(state: PageState, reads: ReadsWithTextMeasurer): DropdownTarget | null {
   let sharedFormat = sharedFormatOfSelection(state, reads);
   let selected = selectedArea(state, reads);
   let corners = selected === null ? null : selectionOfArea(state, reads, selected);
   if (sharedFormat === null || selected === null || corners === null) return null;
-  let target = {
-    selected: selected,
-    corners: corners,
+  let target: DropdownTarget = {
+    selected,
+    corners,
     shared: sharedFormat,
     entryCell: activeAnchorCell(state, reads),
     heading: null,
@@ -134,7 +236,7 @@ export function dropdownTargetOfSelection(state: PageState, reads: ReadsWithText
   };
   let headerAbove = headerAboveDropdownCells(state, reads, selected);
   if (headerAbove === null) return target;
-  let { heading: heading, top: headingRows, under: areaUnder, corners: cornersUnder } = headerAbove;
+  let { heading, top: headingRows, under: areaUnder, corners: cornersUnder } = headerAbove;
   let { activeCell: firstCellUnder, selectionCorner: lastCellUnder } = cornersUnder;
   let sharedUnder = reads.sharedFormatBetween(firstCellUnder, lastCellUnder);
   if (sharedUnder === null || isCellUnderMerge(reads, firstCellUnder)) return target;
@@ -142,7 +244,7 @@ export function dropdownTargetOfSelection(state: PageState, reads: ReadsWithText
     selected: areaUnder,
     corners: cornersUnder,
     shared: sharedUnder,
-    heading: heading,
+    heading,
   };
   if ((reads.positionOfCell(state.activeCell)?.rowIndex ?? 0) >= headingRows)
     return {
@@ -160,27 +262,27 @@ export function dropdownTargetOfSelection(state: PageState, reads: ReadsWithText
     entryCell: firstCellUnder,
     thenSelected: {
       ...selectionAtCell(firstCellUnder),
-      rangeWalked: rangeWalked,
+      rangeWalked,
     },
   };
 }
-export function readySetNamed(readySets?: Dynamic, label?: Dynamic) {
+export function readySetNamed(readySets: readonly NamedDropdownPreset[], label: string): LocalizedDropdownPreset | null {
   let squashedLabel = squashSetLabel(label);
-  return readySets.find(({ label: label2 }: Dynamic) => squashSetLabel(label2) === squashedLabel)?.set ?? null;
+  return readySets.find(({ label: presetLabel }) => squashSetLabel(presetLabel) === squashedLabel)?.set ?? null;
 }
 export function readySetNamedAbove(
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic,
-  readySets?: Dynamic,
-) {
+  sheetId: SheetId,
+  { topRowIndex, leftColumnIndex, columnCount }: CellArea,
+  readySets: readonly NamedDropdownPreset[],
+): LocalizedDropdownPreset | null {
   if (columnCount !== 1) return null;
   let topmostRowIndex = Math.max(topRowIndex - MAX_ROWS_UP_TO_HEADING, 0);
-  for (let rowIndex: Dynamic = topRowIndex - 1; rowIndex >= topmostRowIndex; rowIndex -= 1) {
+  for (let rowIndex = topRowIndex - 1; rowIndex >= topmostRowIndex; rowIndex -= 1) {
     let cellId = reads.cellIdAt(sheetId, rowIndex, leftColumnIndex);
     if (cellId === null) continue;
     let mergedArea = reads.mergedAreaAt(sheetId, {
-      rowIndex: rowIndex,
+      rowIndex,
       columnIndex: leftColumnIndex,
     });
     if (mergedArea !== null && mergedArea.leftColumnIndex !== leftColumnIndex) return null;
@@ -194,17 +296,17 @@ export function readySetNamedAbove(
   }
   return null;
 }
-export function dropdownSelectionSummary(state: PageState, reads: ReadsWithTextMeasurer) {
+export function dropdownSelectionSummary(state: PageState, reads: ReadsWithTextMeasurer): DropdownSelectionSummary | null {
   let target = dropdownTargetOfSelection(state, reads);
   if (target === null) return null;
-  let { selected: selected, shared: sharedFormat, entryCell: entryCell } = target;
+  let { selected, shared: sharedFormat, entryCell } = target;
   let cellsOfDropdown = sharedFormat.cellControl?.kind === 'dropdown' ? reads.cellsOfTheDropdownAt(entryCell) : null;
   let filledCells = (
-    cellsOfDropdown?.stretches.flatMap((input?: Dynamic) => stretchArea(state, reads, input) ?? []) ?? [selected]
-  ).flatMap((input?: Dynamic) => reads.filledCellsIn(state.sheetId, input));
-  let labelCounts = new (Map as Dynamic)();
-  let [formulaCount, otherCount]: Dynamic = [0, 0];
-  for (let cellId of filledCells as Dynamic) {
+    cellsOfDropdown?.stretches.flatMap((stretch) => stretchArea(state, reads, stretch) ?? []) ?? [selected]
+  ).flatMap((area) => reads.filledCellsIn(state.sheetId, area));
+  let labelCounts = new Map<string, number>();
+  let [formulaCount, otherCount] = [0, 0];
+  for (let cellId of filledCells) {
     let cell = reads.cellOf(cellId);
     let label = cellsOfDropdown === null ? cellLabelText(reads, cellId) : cell?.dropdownOption?.label;
     if (label !== null && label !== undefined) labelCounts.set(foldLabelCase(label), (labelCounts.get(foldLabelCase(label)) ?? 0) + 1);
@@ -214,22 +316,22 @@ export function dropdownSelectionSummary(state: PageState, reads: ReadsWithTextM
   }
   return {
     isTaken: sharedFormat.cellControl?.kind !== 'dropdown' || dropdownAtCell(reads, entryCell) !== null,
-    formulaCount: formulaCount,
+    formulaCount,
     said: labelCounts,
-    otherCount: otherCount,
+    otherCount,
   };
 }
-export function makeDropdownFromSelection(state: PageState, reads: ReadsWithTextMeasurer, request?: Dynamic) {
-  let firstSet = request.firstSet ?? null;
+export function makeDropdownFromSelection(state: PageState, reads: ReadsWithTextMeasurer, command: DropdownCommand): PageTransition {
+  let firstSet = command.firstSet ?? null;
   let target = dropdownTargetOfSelection(state, reads);
   if (target === null) return withNoEffects(state);
   let {
-    selected: selected,
-    corners: corners,
+    selected,
+    corners,
     shared: sharedFormat,
-    entryCell: entryCell,
-    heading: heading,
-    thenSelected: thenSelected,
+    entryCell,
+    heading,
+    thenSelected,
   } = target;
   let stateSelected =
     thenSelected === null
@@ -238,7 +340,7 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
           ...state,
           ...thenSelected,
         };
-  let headerRowDone =
+  let headerRowDone: HeaderRowSetDone | null =
     heading === null
       ? null
       : {
@@ -247,39 +349,39 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
           heading: clipHeading(heading),
           cells: areaToA1AsStored(selected, ownRowOrderOfSheet(reads, state.sheetId)),
         };
-  let opensList = request.thenOpens === 'list';
-  let { thenGoesOnTo: thenGoesOnTo } = request;
-  let clearingOfferFor = (dropdownChoice?: Dynamic) =>
+  let opensList = command.thenOpens === 'list';
+  let { thenGoesOnTo } = command;
+  let clearingOfferFor = (dropdownChoice: DropdownToPointAt) =>
     dropdownClearingOffer(reads, selected, corners, dropdownChoice, headerRowDone);
   if (sharedFormat.cellControl?.kind === 'dropdown') {
-    let value = request.isReadySetPicked === true && dropdownAtCell(reads, entryCell) !== null ? firstSet : null;
+    let setToStartFrom = command.isReadySetPicked === true && dropdownAtCell(reads, entryCell) !== null ? firstSet : null;
     if (thenGoesOnTo !== undefined)
-      return value === null
+      return setToStartFrom === null
         ? withNoEffects(moveActiveCellTo(state, reads, thenGoesOnTo))
-        : startDropdownFromSet(stateSelected, reads, value, thenGoesOnTo);
-    let value2 = opensList ? openDropdownListOrEditor(stateSelected, reads) : openDropdownEditorAt(stateSelected, reads, entryCell);
-    return value === null ? withNoEffects(value2) : startDropdownFromSet(value2, reads, value, entryCell);
+        : startDropdownFromSet(stateSelected, reads, setToStartFrom, thenGoesOnTo);
+    let stateOpened = opensList ? openDropdownListOrEditor(stateSelected, reads) : openDropdownEditorAt(stateSelected, reads, entryCell);
+    return setToStartFrom === null ? withNoEffects(stateOpened) : startDropdownFromSet(stateOpened, reads, setToStartFrom, entryCell);
   }
   let editCells = cellBlockOfSelection(state, reads, corners);
   if (editCells === null) return withNoEffects(state);
-  let thenWhat =
+  let thenWhat: Pick<IfQueued, 'thenGoesOnTo' | 'thenDropdownList'> =
     thenGoesOnTo !== undefined
       ? {
-          thenGoesOnTo: thenGoesOnTo,
+          thenGoesOnTo,
         }
       : opensList
         ? {
             thenDropdownList: 'opens',
           }
         : {};
-  let pickedSet = request.isReadySetPicked === true ? firstSet : null;
+  let pickedSet = command.isReadySetPicked === true ? firstSet : null;
   let heldDropdown = reads.dropdownOf(entryCell);
   if (heldDropdown !== null && (pickedSet === null || isOptionSetSameAs(heldDropdown.options, pickedSet))) {
-    let value = clearingOfferFor({
+    let clearingOffer = clearingOfferFor({
       kind: 'held',
       dropdownId: heldDropdown.dropdownId,
     });
-    if (value === null) return withNoEffects(state);
+    if (clearingOffer === null) return withNoEffects(state);
     return queueEdit(
       state,
       cellControlEdit(editCells, {
@@ -289,7 +391,7 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
       {
         ...IF_QUEUED_DEFAULTS,
         select: thenSelected,
-        ...value,
+        ...clearingOffer,
         ...thenWhat,
       },
     );
@@ -301,26 +403,26 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
   let [firstJoinedOption, ...otherJoinedOptions] =
     dropdownAbove === null ? [] : (mergeOfferedOptions(dropdownAbove.dropdown.options, offeredLabels) ?? []);
   if (dropdownAbove !== null && firstJoinedOption !== undefined) {
-    let { dropdown: value, joining: value2 } = dropdownAbove;
-    let value3 = selectionOfArea(state, reads, value2);
-    let value4 = value3 === null ? null : cellBlockOfSelection(state, reads, value3);
-    let labels = [firstJoinedOption, ...otherJoinedOptions].map(({ label: label }: Dynamic) => label);
+    let { dropdown: joinedDropdown, joining } = dropdownAbove;
+    let cornersJoining = selectionOfArea(state, reads, joining);
+    let cellsJoining = cornersJoining === null ? null : cellBlockOfSelection(state, reads, cornersJoining);
+    let labels = [firstJoinedOption, ...otherJoinedOptions].map(({ label }) => label);
     let clearingOffer =
-      value3 === null
+      cornersJoining === null
         ? null
         : dropdownClearingOffer(
             reads,
-            value2,
-            value3,
+            joining,
+            cornersJoining,
             {
               kind: 'new',
-              labels: labels,
+              labels,
             },
             headerRowDone,
           );
-    if (value4 === null || clearingOffer === null) return withNoEffects(state);
-    let { dropdownId: dropdownId } = value;
-    let ifQueued = {
+    if (cellsJoining === null || clearingOffer === null) return withNoEffects(state);
+    let { dropdownId } = joinedDropdown;
+    let ifQueued: IfQueued = {
       ...IF_QUEUED_DEFAULTS,
       select: thenSelected,
       ...clearingOffer,
@@ -330,21 +432,21 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
             thenInDropdownEditor: 'opens',
           }),
     };
-    let cellControlEdit2 = cellControlEdit(value4, {
+    let cellControlSet = cellControlEdit(cellsJoining, {
       kind: 'dropdown',
-      dropdownId: dropdownId,
+      dropdownId,
     });
-    if (labels.length === value.options.length) return queueEdit(state, cellControlEdit2, ifQueued);
-    let optionsEdit = {
+    if (labels.length === joinedDropdown.options.length) return queueEdit(state, cellControlSet, ifQueued);
+    let optionsEdit: EditOf<'setDropdownOptions'> = {
       kind: 'setDropdownOptions',
       sheetId: state.sheetId,
-      dropdownId: dropdownId,
+      dropdownId,
       options: [firstJoinedOption, ...otherJoinedOptions],
       appliesTo: {
         kind: 'everyCell',
       },
     };
-    return queueEdits(state, [optionsEdit, cellControlEdit2], ifQueued, {
+    return queueEdits(state, [optionsEdit, cellControlSet], ifQueued, {
       isEachPointedAt: true,
     });
   }
@@ -353,14 +455,14 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
     pickedSet !== null
       ? pickedSet.options
       : isFromFirstSet
-        ? (readySetNamedAbove(reads, state.sheetId, selected, request.setsByName ?? []) ?? firstSet).options
+        ? (readySetNamedAbove(reads, state.sheetId, selected, command.setsByName ?? []) ?? firstSet).options
         : colorOptionsAutomatically(offeredLabels).map(newDropdownOption);
   if (firstOption !== undefined) {
-    let value = clearingOfferFor({
+    let clearingOffer = clearingOfferFor({
       kind: 'new',
-      labels: [firstOption, ...otherOptions].map(({ label: label }: Dynamic) => label),
+      labels: [firstOption, ...otherOptions].map(({ label }) => label),
     });
-    if (value === null) return withNoEffects(state);
+    if (clearingOffer === null) return withNoEffects(state);
     return queueEdit(
       state,
       {
@@ -371,7 +473,7 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
       {
         ...IF_QUEUED_DEFAULTS,
         select: thenSelected,
-        ...value,
+        ...clearingOffer,
         ...(opensList
           ? thenWhat
           : {
@@ -392,14 +494,14 @@ export function makeDropdownFromSelection(state: PageState, reads: ReadsWithText
     }),
   );
 }
-export function dropdownToJoinAbove(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic, mayJoinRows?: Dynamic) {
-  let { topRowIndex: topRowIndex, rowCount: rowCount, leftColumnIndex: leftColumnIndex, columnCount: columnCount } = area;
+export function dropdownToJoinAbove(reads: WorkbookReads, sheetId: SheetId, area: CellArea, mayJoinRows: boolean): DropdownToJoin | null {
+  let { topRowIndex, rowCount, leftColumnIndex, columnCount } = area;
   if (columnCount !== 1) return null;
-  let dropdownAtRow = (rowIndex?: Dynamic) => {
+  let dropdownAtRow = (rowIndex: number) => {
     let cellId = reads.cellIdAt(sheetId, rowIndex, leftColumnIndex);
     return cellId === null ? null : reads.dropdownOf(cellId);
   };
-  let dropdownAbove: Dynamic = dropdownAtRow(topRowIndex - 1);
+  let dropdownAbove = dropdownAtRow(topRowIndex - 1);
   if (!mayJoinRows)
     return dropdownAbove === null
       ? null
@@ -407,12 +509,12 @@ export function dropdownToJoinAbove(reads: WorkbookReads, sheetId?: Dynamic, are
           dropdown: dropdownAbove,
           joining: area,
         };
-  let rowsWithout: Dynamic = [];
-  for (let value: Dynamic = topRowIndex; value < topRowIndex + rowCount; value += 1) {
-    let value2 = dropdownAtRow(value);
-    if (value2 === null) rowsWithout.push(value);
-    else if (dropdownAbove !== null && dropdownAbove.dropdownId !== value2.dropdownId) return null;
-    else dropdownAbove = value2;
+  let rowsWithout: number[] = [];
+  for (let rowIndex = topRowIndex; rowIndex < topRowIndex + rowCount; rowIndex += 1) {
+    let dropdownAtThisRow = dropdownAtRow(rowIndex);
+    if (dropdownAtThisRow === null) rowsWithout.push(rowIndex);
+    else if (dropdownAbove !== null && dropdownAbove.dropdownId !== dropdownAtThisRow.dropdownId) return null;
+    else dropdownAbove = dropdownAtThisRow;
   }
   let [firstRowWithout, lastRowWithout] = [rowsWithout[0], rowsWithout.at(-1)];
   if (dropdownAbove === null || firstRowWithout === undefined || lastRowWithout === undefined) return null;
@@ -426,77 +528,78 @@ export function dropdownToJoinAbove(reads: WorkbookReads, sheetId?: Dynamic, are
     },
   };
 }
-export function mergeOfferedOptions(options?: Dynamic, offered?: Dynamic) {
+export function mergeOfferedOptions(options: readonly OptionOfDropdownInPane[], offered: readonly { label: string }[]): OptionOfDropdownInPane[] | null {
   let merged = [...options];
-  for (let { label: value } of offered as Dynamic)
-    if (merged.every((input?: Dynamic) => !isSameOptionLabel(input.label, value)))
+  for (let { label } of offered)
+    if (merged.every((option) => !isSameOptionLabel(option.label, label)))
       merged.push({
         optionId: null,
-        label: value,
-        color: colorForAddedOption(value, merged),
+        label,
+        color: colorForAddedOption(label, merged),
       });
   return merged.length > MAX_DROPDOWN_OPTIONS ? null : merged;
 }
 export function countCellsLosingOptions(
   state: PageState,
   reads: WorkbookReads,
-  stretches?: Dynamic,
-  newOptions?: Dynamic,
-  oldOptions?: Dynamic,
-  skipsHeaderRows?: Dynamic,
-) {
-  let newIds = new (Set as Dynamic)(newOptions.map(({ optionId: optionId }: Dynamic) => optionId));
-  let droppedIds = new (Set as Dynamic)(
-    oldOptions.flatMap(({ optionId: optionId }: Dynamic) => (optionId === null || newIds.has(optionId) ? [] : optionId)),
+  stretches: readonly StretchOfADropdown[],
+  newOptions: readonly Pick<OptionOfDropdownInPane, 'optionId'>[],
+  oldOptions: readonly Pick<OptionOfDropdownInPane, 'optionId'>[],
+  skipsHeaderRows: boolean,
+): number {
+  let newIds = new Set(newOptions.map(({ optionId }) => optionId));
+  let droppedIds = new Set(
+    oldOptions.flatMap(({ optionId }) => (optionId === null || newIds.has(optionId) ? [] : optionId)),
   );
   if (droppedIds.size === 0) return 0;
   return stretches
-    .flatMap((input?: Dynamic) => stretchArea(state, reads, input) ?? [])
-    .flatMap((input?: Dynamic) => {
-      let value = skipsHeaderRows ? filteredRowRunsIn(state, reads, input) : [];
-      return value.length === 0
-        ? reads.filledCellsIn(state.sheetId, input)
-        : reads.filledCellsIn(state.sheetId, input).filter((input2?: Dynamic) => {
-            let value2 = reads.positionOfCell(input2)?.rowIndex ?? -1;
-            return !value.some((input3?: Dynamic) => isInSpan(value2, input3.firstIndex, input3.count));
+    .flatMap((stretch) => stretchArea(state, reads, stretch) ?? [])
+    .flatMap((area) => {
+      let hiddenRuns = skipsHeaderRows ? filteredRowRunsIn(state, reads, area) : [];
+      return hiddenRuns.length === 0
+        ? reads.filledCellsIn(state.sheetId, area)
+        : reads.filledCellsIn(state.sheetId, area).filter((cellId) => {
+            let rowIndex = reads.positionOfCell(cellId)?.rowIndex ?? -1;
+            return !hiddenRuns.some((run) => isInSpan(rowIndex, run.firstIndex, run.count));
           });
     })
-    .filter((input?: Dynamic) => {
-      let value = reads.cellOf(input)?.dropdownOption?.optionId;
-      return value !== undefined && droppedIds.has(value);
+    .filter((cellId) => {
+      let optionId = reads.cellOf(cellId)?.dropdownOption?.optionId;
+      return optionId !== undefined && droppedIds.has(optionId);
     }).length;
 }
 export function commitDropdownOptions(
   state: PageState,
   reads: WorkbookReads,
-  editor?: Dynamic,
-  options?: Dynamic,
-  thenInEditor?: Dynamic,
-  startedFromSet?: Dynamic,
-  done?: Dynamic,
-) {
+  editor: DropdownEditTarget,
+  options: readonly OptionOfDropdownInPane[],
+  thenInEditor: NonNullable<IfQueued['thenInDropdownEditor']>,
+  startedFromSet?: DropdownPresetKey,
+  /** What was done, before the cells it was done in are known. */
+  done?: Omit<DropdownOptionsAddedDone, 'onlyIn'> | Omit<DropdownOptionRemovedDone, 'onlyIn'> | Omit<DropdownOptionMovedDone, 'onlyIn'>,
+): PageTransition {
   let [firstOption, ...otherOptions] = options;
   if (firstOption === undefined) return withNoEffects(state);
-  let ifQueued = {
+  let ifQueued: Omit<IfQueued, 'done'> = {
     ...IF_QUEUED_DEFAULTS,
     select: null,
     leavesEntryOpen: true,
     thenInDropdownEditor: thenInEditor,
   };
   if (editor.dropdownId === null) {
-    let value = selectedArea(state, reads);
-    let value2 = value === null ? null : selectionOfArea(state, reads, value);
-    if (value === null || value2 === null) return withNoEffects(state);
-    let value3 = cellBlockOfSelection(state, reads, value2);
-    if (value3 === null) return withNoEffects(state);
-    let labels = options.map(({ label: label }: Dynamic) => label);
+    let selected = selectedArea(state, reads);
+    let corners = selected === null ? null : selectionOfArea(state, reads, selected);
+    if (selected === null || corners === null) return withNoEffects(state);
+    let cells = cellBlockOfSelection(state, reads, corners);
+    if (cells === null) return withNoEffects(state);
+    let labels = options.map(({ label }) => label);
     let clearingOffer = dropdownClearingOffer(
       reads,
-      value,
-      value2,
+      selected,
+      corners,
       {
         kind: 'new',
-        labels: labels,
+        labels,
       },
       null,
     );
@@ -505,7 +608,7 @@ export function commitDropdownOptions(
       state,
       {
         kind: 'makeDropdown',
-        cells: value3,
+        cells,
         options: [newDropdownOption(firstOption), ...otherOptions.map(newDropdownOption)],
       },
       {
@@ -519,14 +622,14 @@ export function commitDropdownOptions(
   let stretchesTouched = isEveryStretch ? editor.stretches : [ownStretch];
   let rowsOfOwnStretch = isEveryStretch
     ? null
-    : (({ top: top, bottom: bottom }: Dynamic) =>
+    : (({ top, bottom }: StretchOfADropdown) =>
         shownCellBlockOfCorners(state, reads, {
           sheetId: state.sheetId,
           oneCorner: top,
           otherCorner: bottom,
         }))(ownStretch);
   if (!isEveryStretch && rowsOfOwnStretch === null) return withNoEffects(state);
-  let setOptionsEdit = {
+  let setOptionsEdit: EditOf<'setDropdownOptions'> = {
     kind: 'setDropdownOptions',
     sheetId: state.sheetId,
     dropdownId: editor.dropdownId,
@@ -543,7 +646,7 @@ export function commitDropdownOptions(
             otherColumn: rowsOfOwnStretch.otherColumn,
           },
   };
-  let rangesText = stretchesTouched.map(({ range: range }: Dynamic) => range).join(', ');
+  let rangesText = stretchesTouched.map(({ range }) => range).join(', ');
   let onlyIn = isEveryStretch ? null : rangesText;
   let [
     { top: firstTop } = {
@@ -567,21 +670,21 @@ export function commitDropdownOptions(
     !isEveryStretch,
   );
   if (done?.what === 'dropdownOptionRemoved' && clearedCount > 0) {
-    let { label: value, isSaved: value2 } = done;
-    let state2 = {
+    let { label, isSaved } = done;
+    let deletedOffer: DropdownOptionDeletedOffer = {
       kind: 'dropdownOptionDeleted',
-      label: value,
+      label,
       cellCount: clearedCount,
-      onlyIn: onlyIn,
-      isSaved: value2,
+      onlyIn,
+      isSaved,
     };
     return queueEdit(state, setOptionsEdit, {
       ...ifQueued,
       done: {
         what: 'undoOfferMade',
-        offer: state2,
+        offer: deletedOffer,
       },
-      undoOffer: state2,
+      undoOffer: deletedOffer,
     });
   }
   return queueEdit(state, setOptionsEdit, {
@@ -600,7 +703,7 @@ export function commitDropdownOptions(
             }
           : {
               ...done,
-              onlyIn: onlyIn,
+              onlyIn,
             },
     undoOffer:
       clearedCount === 0
@@ -612,16 +715,20 @@ export function commitDropdownOptions(
           },
   });
 }
-export function ownStretchArea(state: PageState, reads: WorkbookReads, { stretches: stretches, indexOfOwnStretch: indexOfOwnStretch }: Dynamic) {
+export function ownStretchArea(
+  state: PageState,
+  reads: WorkbookReads,
+  { stretches, indexOfOwnStretch }: Pick<DropdownEditTarget, 'stretches' | 'indexOfOwnStretch'>,
+): CellArea | null {
   let ownStretch = stretches[indexOfOwnStretch];
   return ownStretch === undefined ? null : stretchArea(state, reads, ownStretch);
 }
-export function stretchArea(state: PageState, reads: WorkbookReads, stretch?: Dynamic) {
-  let positionOf = ({ r: rowId, c: columnId }: Dynamic) =>
+export function stretchArea(state: PageState, reads: WorkbookReads, stretch: Pick<StretchOfADropdown, 'top' | 'bottom'>): CellArea | null {
+  let positionOf = ({ r: rowId, c: columnId }: CellAt) =>
     reads.positionOfCell({
       sheetId: state.sheetId,
-      rowId: rowId,
-      columnId: columnId,
+      rowId,
+      columnId,
     });
   let [topPosition, bottomPosition] = [positionOf(stretch.top), positionOf(stretch.bottom)];
   return topPosition === null || bottomPosition === null
@@ -633,23 +740,23 @@ export function stretchArea(state: PageState, reads: WorkbookReads, stretch?: Dy
         columnCount: 1,
       };
 }
-export function clipHeading(heading?: Dynamic) {
-  let chars = Array.from<Dynamic>(heading);
+export function clipHeading(heading: string): string {
+  let chars = Array.from(heading);
   let isClipped = chars.length > OPTION_LABEL_SHOWN_LENGTH;
   return `${chars.slice(0, OPTION_LABEL_SHOWN_LENGTH).join('')}${isClipped ? '…' : ''}`;
 }
-export function cellLabelText(reads: WorkbookReads, cellId?: Dynamic) {
+export function cellLabelText(reads: WorkbookReads, cellId: CellId | null): string | null {
   let cell = cellId === null ? null : reads.cellOf(cellId);
   let shownText = cellPlainText(cell);
   if (shownText !== null) return shownText;
   return cell?.input.kind === 'dropdownOption' ? (cell.dropdownOption?.label ?? cell.input.label) : null;
 }
-export function areaHasLabel(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic, label?: Dynamic) {
-  return reads.filledCellsIn(sheetId, area).some((input?: Dynamic) => isSameOptionLabel(cellLabelText(reads, input) ?? '', label));
+export function areaHasLabel(reads: WorkbookReads, sheetId: SheetId, area: CellArea, label: string): boolean {
+  return reads.filledCellsIn(sheetId, area).some((cellId) => isSameOptionLabel(cellLabelText(reads, cellId) ?? '', label));
 }
-export function headingsInFirstRow(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
-  let headings = new (Map as Dynamic)();
-  for (let columnIndex of reads.columnIndexesOnShowIn(sheetId, 0) as Dynamic) {
+export function headingsInFirstRow(reads: WorkbookReads, sheetId: SheetId, area: CellArea): Map<number, HeadingInFirstRow> {
+  let headings = new Map<ColumnId, HeadingOfColumn>();
+  for (let columnIndex of reads.columnIndexesOnShowIn(sheetId, 0)) {
     let cellId = reads.cellIdAt(sheetId, 0, columnIndex);
     let isInArea = columnIndex >= area.leftColumnIndex && columnIndex < area.leftColumnIndex + area.columnCount;
     if (cellId === null || !isInArea) continue;
@@ -658,32 +765,36 @@ export function headingsInFirstRow(reads: WorkbookReads, sheetId?: Dynamic, area
     let rowCount = mergedAreaOrCellOf(reads, cellId)?.rowCount ?? 1;
     if (text.trim() !== '')
       headings.set(cellId.columnId, {
-        text: text,
-        rowCount: rowCount,
-        columnIndex: columnIndex,
+        text,
+        rowCount,
+        columnIndex,
         sought: foldLabelCase(text),
       });
   }
-  for (let columnIndex of (headings.size === 0 ? [] : reads.filledCellsIn(sheetId, area)) as Dynamic) {
-    let cellId = headings.get(columnIndex.columnId);
-    let isInArea = cellId === undefined ? null : cellLabelText(reads, columnIndex);
-    if (cellId === undefined || isInArea === null || foldLabelCase(isInArea) !== cellId.sought) continue;
-    if ((reads.rowIndexOf(sheetId, columnIndex.rowId) ?? 0) >= cellId.rowCount) headings.delete(columnIndex.columnId);
+  for (let filledCell of headings.size === 0 ? [] : reads.filledCellsIn(sheetId, area)) {
+    let heading = headings.get(filledCell.columnId);
+    let text = heading === undefined ? null : cellLabelText(reads, filledCell);
+    if (heading === undefined || text === null || foldLabelCase(text) !== heading.sought) continue;
+    if ((reads.rowIndexOf(sheetId, filledCell.rowId) ?? 0) >= heading.rowCount) headings.delete(filledCell.columnId);
   }
-  return new (Map as Dynamic)(
-    Array.from<Dynamic, Dynamic>(
+  return new Map(
+    Array.from(
       headings.values(),
-      ({ columnIndex: columnIndex, text: text, rowCount: rowCount }: Dynamic) => [
+      ({ columnIndex, text, rowCount }): [number, HeadingInFirstRow] => [
         columnIndex,
         {
-          text: text,
-          rowCount: rowCount,
+          text,
+          rowCount,
         },
       ],
     ),
   );
 }
-export function dropdownHeaderRowState(state: PageState, reads: WorkbookReads, editor?: Dynamic) {
+export function dropdownHeaderRowState(
+  state: PageState,
+  reads: WorkbookReads,
+  editor: Pick<DropdownEditTarget, 'stretches' | 'indexOfOwnStretch'>,
+): HeaderRowState | null {
   let ownArea = editor.stretches.length === 1 ? ownStretchArea(state, reads, editor) : null;
   if (ownArea === null || ownArea.topRowIndex > 1 || ownArea.topRowIndex + ownArea.rowCount < 2) return null;
   if ((cellLabelTextAt(reads, state.sheetId, 0, ownArea.leftColumnIndex) ?? '').trim() === '') return null;
@@ -696,13 +807,13 @@ export function dropdownHeaderRowState(state: PageState, reads: WorkbookReads, e
     ? 'on'
     : null;
 }
-export function isAreaWithoutDropdown(state: PageState, reads: WorkbookReads, area?: Dynamic) {
+export function isAreaWithoutDropdown(state: PageState, reads: WorkbookReads, area: CellArea): boolean {
   let corners = selectionOfArea(state, reads, area);
   if (corners === null) return false;
   let cellControl = reads.sharedFormatBetween(corners.activeCell, corners.selectionCorner)?.cellControl ?? null;
   return cellControl !== null && cellControl.kind !== 'dropdown';
 }
-export function subtractArea(area?: Dynamic, cut?: Dynamic) {
+export function subtractArea(area: CellArea, cut: CellArea): CellArea[] {
   let [areaBottom, areaRight] = [area.topRowIndex + area.rowCount, area.leftColumnIndex + area.columnCount];
   let cutTop = Math.min(Math.max(cut.topRowIndex, area.topRowIndex), areaBottom);
   let cutBottom = Math.max(Math.min(cut.topRowIndex + cut.rowCount, areaBottom), cutTop);
@@ -734,49 +845,49 @@ export function subtractArea(area?: Dynamic, cut?: Dynamic) {
       leftColumnIndex: cutRight,
       columnCount: areaRight - cutRight,
     },
-  ].filter(({ rowCount: rowCount, columnCount: columnCount }: Dynamic) => rowCount > 0 && columnCount > 0);
+  ].filter(({ rowCount, columnCount }) => rowCount > 0 && columnCount > 0);
 }
 export function setDropdownCells(
   state: PageState,
   reads: WorkbookReads,
-  area?: Dynamic,
-  selectsArea?: Dynamic,
-  { optionsFirst = [], optionsLast = [], optionsByThen: optionsByThen }: Dynamic = {},
-) {
+  area: CellArea,
+  selectsArea: boolean,
+  { optionsFirst = [], optionsLast = [], optionsByThen }: DropdownCellsSetWith = {},
+): PageTransition {
   let editor = dropdownEditorOfPane(state);
   let ownArea = editor === null ? null : ownStretchArea(state, reads, editor);
   if (editor === null || ownArea === null || editor.dropdownId === null) return withNoEffects(state);
-  let cornersOf = (input?: Dynamic) => selectionOfArea(state, reads, input);
-  let refuse = (input?: Dynamic) =>
+  let cornersOf = (cornersArea: CellArea) => selectionOfArea(state, reads, cornersArea);
+  let refuse = (why: Exclude<WhyDropdownCellsRefused, 'headingIsNoOption' | 'notFound'>) =>
     withNoEffects(
       withDropdownPane(state, {
         ...editor,
         cellsRefused: {
-          why: input,
+          why,
         },
       }),
     );
   let addedAreas = subtractArea(area, ownArea);
-  if (!addedAreas.every((input?: Dynamic) => isAreaWithoutDropdown(state, reads, input))) return refuse('ofAnotherDropdown');
-  let labels = (optionsByThen ?? editor.options).map(({ label: label }: Dynamic) => label);
+  if (!addedAreas.every((addedArea) => isAreaWithoutDropdown(state, reads, addedArea))) return refuse('ofAnotherDropdown');
+  let labels = (optionsByThen ?? editor.options).map(({ label }) => label);
   let cellsCleared = addedAreas
-    .filter((input?: Dynamic) => reads.filledCellsIn(state.sheetId, input).length > 0)
-    .map((input?: Dynamic) => {
-      let value = cornersOf(input);
-      return value === null
+    .filter((addedArea) => reads.filledCellsIn(state.sheetId, addedArea).length > 0)
+    .map((addedArea) => {
+      let corners = cornersOf(addedArea);
+      return corners === null
         ? null
-        : reads.cellsThatADropdownWouldClear(value.activeCell, value.selectionCorner, {
+        : reads.cellsThatADropdownWouldClear(corners.activeCell, corners.selectionCorner, {
             kind: 'new',
-            labels: labels,
+            labels,
           });
     });
   if (cellsCleared.includes(null)) return withNoEffects(state);
-  if (cellsCleared.some((input?: Dynamic) => (input?.formulas ?? 0) > 0)) return refuse('holdFormula');
-  if (cellsCleared.some((input?: Dynamic) => (input?.others ?? 0) > 0)) return refuse('holdNoOption');
-  let controlEdits = (area2?: Dynamic, control?: Dynamic) => {
-    let corners = cornersOf(area2);
+  if (cellsCleared.some((cleared) => (cleared?.formulas ?? 0) > 0)) return refuse('holdFormula');
+  if (cellsCleared.some((cleared) => (cleared?.others ?? 0) > 0)) return refuse('holdNoOption');
+  let controlEdits = (controlledArea: CellArea, cellControl: CellControl) => {
+    let corners = cornersOf(controlledArea);
     let cells = corners === null ? null : cellBlockOfSelection(state, reads, corners);
-    return cells === null ? [] : [cellControlEdit(cells, control)];
+    return cells === null ? [] : [cellControlEdit(cells, cellControl)];
   };
   let edits = [
     ...optionsFirst,
@@ -785,8 +896,8 @@ export function setDropdownCells(
       dropdownId: editor.dropdownId,
     }),
     ...subtractArea(ownArea, area).flatMap(
-      (input?: Dynamic) =>
-        controlEdits(input, {
+      (areaLeft) =>
+        controlEdits(areaLeft, {
           kind: 'none',
         }),
     ),
@@ -809,12 +920,12 @@ export function setDropdownCells(
     },
   );
 }
-export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, action?: Dynamic) {
-  let editor = dropdownEditorOfPane(state);
+export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, act: DropdownEditorAct): PageTransition {
+  let editor: DropdownEditor | null = dropdownEditorOfPane(state);
   if (editor === null) return withNoEffects(state);
-  let [options, { typed: typed }] = [editorOptionsOf(editor), editor];
-  let { cellsRefused: cellsRefused, cellsTyped: cellsTyped, ...editorRest } = editor;
-  let withEditor = (input?: Dynamic) =>
+  let [options, { typed }] = [editorOptionsOf(editor), editor];
+  let { cellsRefused, cellsTyped, ...editorRest } = editor;
+  let withEditor = (changes: Partial<DropdownEditor>) =>
     withNoEffects(
       withDropdownPane(
         {
@@ -823,37 +934,37 @@ export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, act
         },
         {
           ...editorRest,
-          ...input,
+          ...changes,
         },
       ),
     );
   let hasRoomForOption = options.length < MAX_DROPDOWN_OPTIONS;
-  let typedAfterEnter = (input?: Dynamic) => (input || options.length === 0 ? EMPTY_TYPED_OPTION : null);
-  switch (action.kind) {
+  let typedAfterEnter = (startsOption: boolean) => (startsOption || options.length === 0 ? EMPTY_TYPED_OPTION : null);
+  switch (act.kind) {
     case 'startOption':
       return reduceDropdownEditor(state, reads, {
         kind: 'enter',
         thenStartsOption: true,
       });
     case 'type': {
-      let value = typed?.optionId === action.optionId ? typed.pickedColor : null;
-      let state2 = {
-        optionId: action.optionId,
-        label: cleanOptionLabel(action.label),
-        pickedColor: value,
+      let pickedColor = typed?.optionId === act.optionId ? typed.pickedColor : null;
+      let typedOption = {
+        optionId: act.optionId,
+        label: cleanOptionLabel(act.label),
+        pickedColor,
       };
-      let value2 = typed?.optionId === action.optionId ? null : optionsAfterTypedLabel(editor);
-      return value2 === null
+      let optionsCommitted = typed?.optionId === act.optionId ? null : optionsAfterTypedLabel(editor);
+      return optionsCommitted === null
         ? withEditor({
-            typed: state2,
+            typed: typedOption,
           })
         : commitDropdownOptions(
             withEditor({
-              typed: state2,
+              typed: typedOption,
             }).state,
             reads,
             editor,
-            value2,
+            optionsCommitted,
             'goesOn',
           );
     }
@@ -864,126 +975,126 @@ export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, act
             typed: typed.optionId === null ? EMPTY_TYPED_OPTION : null,
           });
     case 'pasteNames': {
-      let value = typed?.optionId === action.optionId ? null : optionsAfterTypedLabel(editor);
-      let value2 = value ?? options;
-      let value3 =
-        action.optionId === null ? value2.length : value2.findIndex((input?: Dynamic) => input.optionId === action.optionId);
-      if (value3 === -1) return withNoEffects(state);
-      let value4 = typed?.optionId === action.optionId ? typed.pickedColor : null;
-      let { pasted: value5, ...value6 } = pasteOptionLabels(value2, value3, action.labels, value4);
-      let state2 = {
+      let optionsTyped = typed?.optionId === act.optionId ? null : optionsAfterTypedLabel(editor);
+      let optionsNow = optionsTyped ?? options;
+      let pasteIndex =
+        act.optionId === null ? optionsNow.length : optionsNow.findIndex((option) => option.optionId === act.optionId);
+      if (pasteIndex === -1) return withNoEffects(state);
+      let pickedColor = typed?.optionId === act.optionId ? typed.pickedColor : null;
+      let { pasted, ...added } = pasteOptionLabels(optionsNow, pasteIndex, act.labels, pickedColor);
+      let addedDone: Omit<DropdownOptionsAddedDone, 'onlyIn'> = {
         what: 'dropdownOptionsAdded',
-        ...value6,
+        ...added,
       };
-      let value7 = cleanOptionLabel(action.labels[0] ?? '');
-      let state3 = withEditor({
+      let firstLabel = cleanOptionLabel(act.labels[0] ?? '');
+      let stateTyped = withEditor({
         typed: {
-          optionId: action.optionId,
-          label: value7,
-          pickedColor: value4,
+          optionId: act.optionId,
+          label: firstLabel,
+          pickedColor,
         },
       }).state;
-      if (value !== null || value6.count > 0 || value5[value3]?.label !== value2[value3]?.label)
-        return commitDropdownOptions(state3, reads, editor, value5, 'entered', undefined, state2);
+      if (optionsTyped !== null || added.count > 0 || pasted[pasteIndex]?.label !== optionsNow[pasteIndex]?.label)
+        return commitDropdownOptions(stateTyped, reads, editor, pasted, 'entered', undefined, addedDone);
       return withNoEffects({
-        ...state3,
+        ...stateTyped,
         lastDone: {
-          ...state2,
+          ...addedDone,
           onlyIn: null,
         },
       });
     }
     case 'enter': {
       if (typed === null)
-        return action.thenStartsOption && hasRoomForOption
+        return act.thenStartsOption && hasRoomForOption
           ? withEditor({
               typed: EMPTY_TYPED_OPTION,
             })
           : withNoEffects(state);
-      if (action.optionId !== undefined && action.optionId !== typed.optionId) return withNoEffects(state);
-      let value = typed.label.trim();
-      let value2 = action.thenStartsOption && hasRoomForOption;
-      let match = options.find((input?: Dynamic) => input.optionId === typed.optionId);
-      if (value === '' || value === match?.label)
+      if (act.optionId !== undefined && act.optionId !== typed.optionId) return withNoEffects(state);
+      let label = typed.label.trim();
+      let startsOption = act.thenStartsOption && hasRoomForOption;
+      let optionTyped = options.find((option) => option.optionId === typed.optionId);
+      if (label === '' || label === optionTyped?.label)
         return withEditor({
-          typed: typedAfterEnter(value2),
+          typed: typedAfterEnter(startsOption),
         });
-      let value3 = optionsAfterTypedLabel(editor);
-      if (value3 === null) return withNoEffects(state);
-      return commitDropdownOptions(state, reads, editor, value3, value2 ? 'startsOption' : 'entered');
+      let optionsEntered = optionsAfterTypedLabel(editor);
+      if (optionsEntered === null) return withNoEffects(state);
+      return commitDropdownOptions(state, reads, editor, optionsEntered, startsOption ? 'startsOption' : 'entered');
     }
     case 'setColor': {
-      if (action.optionId === null)
+      if (act.optionId === null)
         return typed?.optionId === null
           ? withEditor({
               typed: {
                 ...typed,
-                pickedColor: action.color,
+                pickedColor: act.color,
               },
             })
           : withNoEffects(state);
-      let mapped = options.map(
-        (input?: Dynamic) =>
-          input.optionId === action.optionId
+      let recolored = options.map(
+        (option) =>
+          option.optionId === act.optionId
             ? {
-                ...input,
-                color: action.color,
+                ...option,
+                color: act.color,
               }
-            : input,
+            : option,
       );
-      return commitDropdownOptions(state, reads, editor, mapped, 'goesOn');
+      return commitDropdownOptions(state, reads, editor, recolored, 'goesOn');
     }
     case 'setColorOfEveryOption': {
-      if (action.to !== everyOptionColorOffer(editor)) return withNoEffects(state);
-      let value = action.to === 'none' ? NO_COLOR : null;
-      let value2 = assignOptionColors(options, (input?: Dynamic) => colorOfOptionIn(editor.lastInColor, input));
-      let value3 = isDropdownDeliberatelyUncolored(value2) ? assignOptionColors(options) : value2;
-      let value4 = action.to === 'none' ? withoutOptionColors(options) : value3;
-      let value5 = value4.every(({ color: color }: Dynamic, index?: Dynamic) => {
+      if (act.to !== everyOptionColorOffer(editor)) return withNoEffects(state);
+      let pickedColor = act.to === 'none' ? NO_COLOR : null;
+      let colorsAsLastIn = assignOptionColors(options, (option) => colorOfOptionIn(editor.lastInColor, option));
+      let colorsRestored = isDropdownDeliberatelyUncolored(colorsAsLastIn) ? assignOptionColors(options) : colorsAsLastIn;
+      let recolored = act.to === 'none' ? withoutOptionColors(options) : colorsRestored;
+      let isUnchanged = recolored.every(({ color }, index) => {
         let option = options[index];
         return option !== undefined && colorsEqual(color, option.color);
       });
-      let value6 = withEditor({
+      let withPickedColor = withEditor({
         typed:
           typed === null
             ? null
             : {
                 ...typed,
-                pickedColor: value,
+                pickedColor,
               },
-        ...(!value5 && {
-          lastInColor: action.to === 'none' ? options : value4,
+        ...(!isUnchanged && {
+          lastInColor: act.to === 'none' ? options : recolored,
         }),
       });
-      return value5 ? value6 : commitDropdownOptions(value6.state, reads, editor, value4, 'goesOn');
+      return isUnchanged ? withPickedColor : commitDropdownOptions(withPickedColor.state, reads, editor, recolored, 'goesOn');
     }
     case 'remove': {
-      if (action.optionId === null)
+      if (act.optionId === null)
         return withEditor({
           typed: null,
         });
-      let match = options.find((input?: Dynamic) => input.optionId === action.optionId);
-      let matches = options.filter((input?: Dynamic) => input !== match);
-      let value =
-        match === undefined
+      let removed = options.find((option) => option.optionId === act.optionId);
+      let others = options.filter((option) => option !== removed);
+      let removedDone: Omit<DropdownOptionRemovedDone, 'onlyIn'> | undefined =
+        removed === undefined
           ? undefined
           : {
               what: 'dropdownOptionRemoved',
-              label: match.label,
+              label: removed.label,
               isSaved: false,
             };
-      return commitDropdownOptions(state, reads, editor, matches, 'goesOn', undefined, value);
+      return commitDropdownOptions(state, reads, editor, others, 'goesOn', undefined, removedDone);
     }
     case 'move': {
-      let match = options.find((input?: Dynamic) => input.optionId === action.optionId);
-      if (match === undefined) return withNoEffects(state);
-      let matches = options.filter((input?: Dynamic) => input !== match);
-      let value = Math.max(0, Math.min(action.toIndex, matches.length));
-      if (options[value] === match) return withNoEffects(state);
-      return commitDropdownOptions(state, reads, editor, [...matches.slice(0, value), match, ...matches.slice(value)], 'goesOn', undefined, {
+      let moved = options.find((option) => option.optionId === act.optionId);
+      if (moved === undefined) return withNoEffects(state);
+      let others = options.filter((option) => option !== moved);
+      let index = Math.max(0, Math.min(act.toIndex, others.length));
+      if (options[index] === moved) return withNoEffects(state);
+      return commitDropdownOptions(state, reads, editor, [...others.slice(0, index), moved, ...others.slice(index)], 'goesOn', undefined, {
         what: 'dropdownOptionMoved',
-        label: match.label,
-        place: value + 1,
+        label: moved.label,
+        place: index + 1,
         optionCount: options.length,
       });
     }
@@ -991,197 +1102,209 @@ export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, act
       return withNoEffects(
         withDropdownPane(state, {
           ...editor,
-          reach: action.reach,
+          reach: act.reach,
         }),
       );
     case 'typeCells':
       return withEditor({
-        cellsTyped: action.text,
+        cellsTyped: act.text,
       });
     case 'dropTypedCells':
       return withEditor({});
     case 'useSelection': {
-      let value = selectedArea(state, reads);
-      return value === null ? withEditor({}) : setDropdownCells(withEditor({}).state, reads, value, true);
+      let selected = selectedArea(state, reads);
+      return selected === null ? withEditor({}) : setDropdownCells(withEditor({}).state, reads, selected, true);
     }
     case 'enterCells': {
       if (editor.cellsTyped === undefined) return withNoEffects(state);
-      let value = changedCellsTyped(editor);
-      if (value === null) return withEditor({});
-      let match = reads.listSheets().find(({ sheetId: sheetId }: Dynamic) => sheetId === state.sheetId);
-      let value2 = match === undefined ? null : parseA1AreaAsSeen(value, match);
-      if (value2 !== null) return setDropdownCells(withEditor({}).state, reads, value2, action.isBeforeOtherEvent !== true);
+      let cellsText = changedCellsTyped(editor);
+      if (cellsText === null) return withEditor({});
+      let sheet = reads.listSheets().find(({ sheetId }) => sheetId === state.sheetId);
+      let areas = sheet === undefined ? null : parseA1AreasAsSeen(cellsText, sheet);
+      let [area = null, ...otherAreas] = areas ?? [];
+      if (otherAreas.length > 0) {
+        let { state: stateWithEditor } = withEditor({});
+        return withNoEffects({
+          ...stateWithEditor,
+          lastDone: null,
+          notice: {
+            kind: 'ownSortInTheWay',
+            act: 'dropdown',
+          },
+        });
+      }
+      if (area !== null) return setDropdownCells(withEditor({}).state, reads, area, act.isBeforeOtherEvent !== true);
       return withEditor({
         cellsRefused: {
           why: 'notFound',
-          typed: clipHeading(value),
+          typed: clipHeading(cellsText),
         },
       });
     }
     case 'setHeaderRow': {
-      let value = ownStretchArea(state, reads, editor);
-      if (value === null || dropdownHeaderRowState(state, reads, editor) !== (action.isOn ? 'off' : 'on')) return withNoEffects(state);
-      let value2 = commitTypedOption(state, reads, editor);
-      let value3 = value2?.named ?? editor.options;
-      let value4 = reads.cellIdAt(state.sheetId, 0, value.leftColumnIndex);
-      let value5 = value4 === null ? undefined : reads.cellOf(value4)?.dropdownOption;
-      let value6 =
-        value3.find(({ optionId: optionId }: Dynamic) => optionId !== null && optionId === value5?.optionId)?.label ??
-        cellLabelText(reads, value4) ??
+      let ownArea = ownStretchArea(state, reads, editor);
+      if (ownArea === null || dropdownHeaderRowState(state, reads, editor) !== (act.isOn ? 'off' : 'on')) return withNoEffects(state);
+      let typedCommitted = commitTypedOption(state, reads, editor);
+      let namedOptions = typedCommitted?.named ?? editor.options;
+      let headingCell = reads.cellIdAt(state.sheetId, 0, ownArea.leftColumnIndex);
+      let headingOption = headingCell === null ? undefined : reads.cellOf(headingCell)?.dropdownOption;
+      let headingLabel =
+        namedOptions.find(({ optionId }) => optionId !== null && optionId === headingOption?.optionId)?.label ??
+        cellLabelText(reads, headingCell) ??
         '';
-      let value7 = (area?: Dynamic, control?: Dynamic) => {
-        let result = setDropdownCells(withEditor({}).state, reads, area, true, control);
-        let editorAfter = dropdownEditorOfPane(result.state);
+      let setCellsWithHeading = (areaToSet: CellArea, optionsWith: DropdownCellsSetWith): PageTransition => {
+        let cellsSet = setDropdownCells(withEditor({}).state, reads, areaToSet, true, optionsWith);
+        let editorAfter = dropdownEditorOfPane(cellsSet.state);
         if (editorAfter?.cellsRefused?.why === 'holdNoOption') {
-          let cellsRefused2 = editor.cellsRefused;
-          let refusal = {
+          let refusedBefore = editor.cellsRefused;
+          let refusal: DropdownCellsRefused = {
             why: 'headingIsNoOption',
-            timesBefore: cellsRefused2?.why === 'headingIsNoOption' ? cellsRefused2.timesBefore + 1 : 0,
+            timesBefore: refusedBefore?.why === 'headingIsNoOption' ? refusedBefore.timesBefore + 1 : 0,
           };
           return withNoEffects(
-            withDropdownPane(result.state, {
+            withDropdownPane(cellsSet.state, {
               ...editorAfter,
               cellsRefused: refusal,
             }),
           );
         }
-        let [firstEffect] = result.effects;
-        let { isOn: isOn } = action;
-        let [heading, cells] = [clipHeading(value6), areaToA1AsStored(area, ownRowOrderOfSheet(reads, state.sheetId))];
+        let [firstEffect] = cellsSet.effects;
+        let { isOn } = act;
+        let [heading, cells] = [clipHeading(headingLabel), areaToA1AsStored(areaToSet, ownRowOrderOfSheet(reads, state.sheetId))];
         return firstEffect?.kind !== 'queueEdit'
-          ? result
+          ? cellsSet
           : {
-              state: result.state,
+              state: cellsSet.state,
               effects: [
                 withIfQueued(firstEffect, {
                   done: {
                     what: 'headerRowSet',
-                    isOn: isOn,
-                    heading: heading,
-                    cells: cells,
+                    isOn,
+                    heading,
+                    cells,
                   },
                 }),
               ],
             };
       };
-      let value8 = (input?: Dynamic) =>
-        value2 === null
-          ? input
+      let withTypedEffects = (transition: PageTransition): PageTransition =>
+        typedCommitted === null
+          ? transition
           : {
-              ...input,
-              effects: [...value2.effects, ...input.effects],
+              ...transition,
+              effects: [...typedCommitted.effects, ...transition.effects],
             };
-      if (!action.isOn) {
-        let [value17] = value4 === null ? [] : (reads.dropdownOptionsToOffer(value4, value4) ?? []);
-        let value18 =
-          value17 !== undefined &&
-          value3.length < MAX_DROPDOWN_OPTIONS &&
-          value3.every(({ label: label }: Dynamic) => !isSameOptionLabel(label, value17.label));
-        let [value19, ...value20] = value18
+      if (!act.isOn) {
+        let [offeredHeading] = headingCell === null ? [] : (reads.dropdownOptionsToOffer(headingCell, headingCell) ?? []);
+        let addsHeadingAsOption =
+          offeredHeading !== undefined &&
+          namedOptions.length < MAX_DROPDOWN_OPTIONS &&
+          namedOptions.every(({ label }) => !isSameOptionLabel(label, offeredHeading.label));
+        let [firstOptionNow, ...otherOptionsNow] = addsHeadingAsOption
           ? [
               {
                 optionId: null,
-                label: value17.label,
-                color: colorForAddedOption(value17.label, value3),
+                label: offeredHeading.label,
+                color: colorForAddedOption(offeredHeading.label, namedOptions),
               },
-              ...value3,
+              ...namedOptions,
             ]
-          : value3;
-        let value21 =
-          editor.dropdownId === null || !value18 || value19 === undefined
+          : namedOptions;
+        let optionsFirst: EditOf<'setDropdownOptions'>[] =
+          editor.dropdownId === null || !addsHeadingAsOption || firstOptionNow === undefined
             ? []
             : [
                 {
                   kind: 'setDropdownOptions',
                   sheetId: state.sheetId,
                   dropdownId: editor.dropdownId,
-                  options: [value19, ...value20],
+                  options: [firstOptionNow, ...otherOptionsNow],
                   appliesTo: {
                     kind: 'everyCell',
                   },
                 },
               ];
-        let state3 = {
-          ...value,
+        let areaWithHeading = {
+          ...ownArea,
           topRowIndex: 0,
-          rowCount: value.rowCount + 1,
+          rowCount: ownArea.rowCount + 1,
         };
-        let value22 = value19 === undefined ? [] : [value19, ...value20];
-        return value8(
-          value7(state3, {
-            optionsFirst: value21,
-            optionsByThen: value22,
+        let optionsByThen = firstOptionNow === undefined ? [] : [firstOptionNow, ...otherOptionsNow];
+        return withTypedEffects(
+          setCellsWithHeading(areaWithHeading, {
+            optionsFirst,
+            optionsByThen,
           }),
         );
       }
-      let state2 = {
-        ...value,
+      let areaUnderHeading = {
+        ...ownArea,
         topRowIndex: 1,
-        rowCount: value.rowCount - 1,
+        rowCount: ownArea.rowCount - 1,
       };
-      let value9 = value6.toLowerCase();
-      let value10 = areaHasLabel(reads, state.sheetId, state2, value6)
-        ? value3
-        : value3.filter(({ label: label }: Dynamic) => label.toLowerCase() !== value9);
-      let value11 = state.readySets ?? [];
-      let value12 = readySetNamed(value11, value6) ?? value11[0]?.set;
-      let value13 =
-        value10.length > 0
-          ? value10
-          : (value12?.options ?? []).map(
-              ({ label: label, color: color }: Dynamic) => ({
+      let foldedHeading = headingLabel.toLowerCase();
+      let optionsLeft = areaHasLabel(reads, state.sheetId, areaUnderHeading, headingLabel)
+        ? namedOptions
+        : namedOptions.filter(({ label }) => label.toLowerCase() !== foldedHeading);
+      let readySets: readonly NamedDropdownPreset[] = state.readySets ?? [];
+      let readySet = readySetNamed(readySets, headingLabel) ?? readySets[0]?.set;
+      let optionsUnder =
+        optionsLeft.length > 0
+          ? optionsLeft
+          : (readySet?.options ?? []).map(
+              ({ label, color }) => ({
                 optionId: null,
-                label: label,
-                color: color,
+                label,
+                color,
               }),
             );
-      let [value14, ...value15] = value13;
-      let value16 =
-        editor.dropdownId === null || value14 === undefined || value10.length === value3.length
+      let [firstOptionLeft, ...otherOptionsLeft] = optionsUnder;
+      let optionsLast: EditOf<'setDropdownOptions'>[] =
+        editor.dropdownId === null || firstOptionLeft === undefined || optionsLeft.length === namedOptions.length
           ? []
           : [
               {
                 kind: 'setDropdownOptions',
                 sheetId: state.sheetId,
                 dropdownId: editor.dropdownId,
-                options: [value14, ...value15],
+                options: [firstOptionLeft, ...otherOptionsLeft],
                 appliesTo: {
                   kind: 'everyCell',
                 },
               },
             ];
-      return value8(
-        value7(state2, {
-          optionsLast: value16,
+      return withTypedEffects(
+        setCellsWithHeading(areaUnderHeading, {
+          optionsLast,
         }),
       );
     }
     case 'startFrom': {
-      if ((action.set === 'custom' ? 'custom' : action.set.key) === chosenOptionSetKey(state, editor)) return withNoEffects(state);
-      if (action.set !== 'custom') {
-        let value2 = commitTypedOption(state, reads, editor);
-        let value3 = optionsFromReadySet(value2?.named ?? editor.options, action.set);
-        let value4 =
-          value2 === null
+      if ((act.set === 'custom' ? 'custom' : act.set.key) === chosenOptionSetKey(state, editor)) return withNoEffects(state);
+      if (act.set !== 'custom') {
+        let typedCommitted = commitTypedOption(state, reads, editor);
+        let optionsOfSet = optionsFromReadySet(typedCommitted?.named ?? editor.options, act.set);
+        let editorThen =
+          typedCommitted === null
             ? editor
             : {
                 ...editor,
-                optionsByThen: value2.named,
+                optionsByThen: typedCommitted.named,
               };
-        let value5 = commitDropdownOptions(state, reads, value4, value3, 'entered', action.set.key);
-        return value2 === null
-          ? value5
+        let committed = commitDropdownOptions(state, reads, editorThen, optionsOfSet, 'entered', act.set.key);
+        return typedCommitted === null
+          ? committed
           : {
-              ...value5,
-              effects: [...value2.effects, ...value5.effects],
+              ...committed,
+              effects: [...typedCommitted.effects, ...committed.effects],
             };
       }
-      let { state: value } = withEditor({
+      let { state: stateCustom } = withEditor({
         typed: EMPTY_TYPED_OPTION,
         isCustom: true,
       });
       return withNoEffects({
-        ...value,
+        ...stateCustom,
         lastDone: {
           what: 'dropdownStartedFrom',
           set: 'custom',
@@ -1191,7 +1314,7 @@ export function reduceDropdownEditor(state: PageState, reads: WorkbookReads, act
     }
   }
 }
-export function startDropdownFromSet(state: PageState, reads: ReadsWithTextMeasurer, set?: Dynamic, cell?: Dynamic) {
+export function startDropdownFromSet(state: PageState, reads: ReadsWithTextMeasurer, set: LocalizedDropdownPreset, cell: CellId): PageTransition {
   let dropdown = dropdownAtActiveCell(state, reads);
   let cellsOfDropdown = reads.cellsOfTheDropdownAt(activeAnchorCell(state, reads));
   if (dropdown === null || cellsOfDropdown === null) return withNoEffects(state);
@@ -1211,20 +1334,22 @@ export function startDropdownFromSet(state: PageState, reads: ReadsWithTextMeasu
     set.key,
   );
 }
-export const cellControlEdit = (cells?: Dynamic, cellControl?: Dynamic) => ({
+export const cellControlEdit = (cells: CellBlock, cellControl: CellControl): EditOf<'formatCells'> => ({
   kind: 'formatCells',
-  cells: cells,
+  cells,
   format: {
-    cellControl: cellControl,
+    cellControl,
   },
 });
-export const squashSetLabel = (label?: Dynamic) => foldLabelCase(label).replaceAll(/\s/gu, '');
-export const newDropdownOption = ({ label: label, color: color }: Dynamic) => ({
-  label: label,
-  color: color,
+export const squashSetLabel = (label: string): string => foldLabelCase(label).replaceAll(/\s/gu, '');
+export const newDropdownOption = ({ label, color }: OptionToMake): OptionToMake => ({
+  label,
+  color,
 });
-export const colorOfOptionIn = (lastInColor: Dynamic, { optionId: optionId }: Dynamic) =>
-  lastInColor?.find((input?: Dynamic) => input.optionId === optionId)?.color;
-export const isCellUnderMerge = (reads: WorkbookReads, cellId?: Dynamic) => !isSameCell(anchorCellOf(reads, cellId), cellId);
-export const cellLabelTextAt = (reads: WorkbookReads, sheetId?: Dynamic, rowIndex?: Dynamic, columnIndex?: Dynamic) =>
+export const colorOfOptionIn = (
+  lastInColor: readonly OptionOfDropdownInPane[] | undefined,
+  { optionId }: Pick<OptionOfDropdownInPane, 'optionId'>,
+): Color | undefined => lastInColor?.find((option) => option.optionId === optionId)?.color;
+export const isCellUnderMerge = (reads: WorkbookReads, cellId: CellId): boolean => !isSameCell(anchorCellOf(reads, cellId), cellId);
+export const cellLabelTextAt = (reads: WorkbookReads, sheetId: SheetId, rowIndex: number, columnIndex: number): string | null =>
   cellLabelText(reads, reads.cellIdAt(sheetId, rowIndex, columnIndex));

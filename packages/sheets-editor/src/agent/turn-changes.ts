@@ -1,8 +1,32 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { EditOfAnother, SheetId } from '@open-artifact/sheets-core';
 import { listCellsChangedBetween } from './changes-by-agent.ts';
-export function runsOfConsecutive(indices?: Dynamic) {
-  let runs: Dynamic = [];
-  for (let index of indices as Dynamic) {
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { ChangedInTurnOfAgent } from '../state/event-reducer.ts';
+import type { BrowserSide } from '../state/controller.ts';
+import type { CaughtUpByLoad } from '../store/workbook-sync.ts';
+import type { ConnectionListeners } from '../store/sheet-connection.ts';
+import type { AgentActivity } from './activity.ts';
+/** A run of revisions one after another, from the first to the last. */
+export interface RevisionRun {
+  first: number;
+  last: number;
+}
+/** An edit of the agent streamed in after its turn ended, and when. */
+interface EditAfterTurn {
+  revision: number;
+  atMs: number;
+}
+/** Follows the edits of the agent's turn, to tell which cells it changed and which runs of edits would take the turn back. */
+export interface TurnChangesTracker extends Pick<ConnectionListeners, 'streamChanged' | 'caughtUpByLoad'> {
+  changesMayBeMissed(): void;
+  revisionStated(revision: number, isNext: boolean): void;
+  editByAgentStreamed(revision: number, isOfThisTurn: boolean): void;
+  editsOfOthersMade(edits: EditOfAnother[], workbookBefore: WorkbookReads | null, workbookAfter: WorkbookReads): void;
+  changedInTurn(): ChangedInTurnOfAgent | null;
+}
+export function runsOfConsecutive(indices: number[]): RevisionRun[] {
+  let runs: RevisionRun[] = [];
+  for (let index of indices) {
     let lastRun = runs.at(-1);
     if (lastRun?.last === index - 1) lastRun.last = index;
     else
@@ -13,19 +37,22 @@ export function runsOfConsecutive(indices?: Dynamic) {
   }
   return runs;
 }
-export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now) {
-  let pendingRevisions = new (Set as Dynamic)();
-  let changedCellsBySheet = new (Map as Dynamic)();
-  let turnRevisions: Dynamic = [];
-  let editsAfterTurn: Dynamic = [];
-  let lastMissAtMs: Dynamic = Number.NEGATIVE_INFINITY;
-  let statedRevision: Dynamic = null;
-  let loadedRevision: Dynamic = 0;
-  let turnEndedAtMs: Dynamic = null;
-  let turnSeenFromStart: Dynamic = false;
-  let mayHaveMissed: Dynamic = false;
-  let hasEdits: Dynamic = false;
-  let cellsAreComplete: Dynamic = false;
+export function createTurnChangesTracker(
+  turn: Pick<AgentActivity, 'isWorking' | 'isTurnSeenFromItsStart' | 'onChanged'>,
+  now: () => number = Date.now,
+): TurnChangesTracker {
+  let pendingRevisions = new Set<number>();
+  let changedCellsBySheet = new Map<SheetId, Map<string, CellId>>();
+  let turnRevisions: number[] = [];
+  let editsAfterTurn: EditAfterTurn[] = [];
+  let lastMissAtMs = Number.NEGATIVE_INFINITY;
+  let statedRevision: number | null = null;
+  let loadedRevision = 0;
+  let turnEndedAtMs: number | null = null;
+  let turnSeenFromStart = false;
+  let mayHaveMissed = false;
+  let hasEdits = false;
+  let cellsAreComplete = false;
   let dropCells = () => void (cellsAreComplete = false);
   let isWithinTurn = () => turn.isWorking() || (turnEndedAtMs !== null && isWithinTurnSettle(turnEndedAtMs, now()));
   let noteMissedChanges = () => {
@@ -35,7 +62,7 @@ export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now
   };
   let isTurnSeenWhole = () => (turnEndedAtMs === null ? turn.isTurnSeenFromItsStart() : turnSeenFromStart);
   let areCellsKnown = () => cellsAreComplete && isTurnSeenWhole();
-  let wasWorking: Dynamic = turn.isWorking();
+  let wasWorking = turn.isWorking();
   turn.onChanged(() => {
     let isWorking = turn.isWorking();
     let [hasStarted, hasEnded] = [isWorking && !wasWorking, !isWorking && wasWorking];
@@ -48,9 +75,9 @@ export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now
     pendingRevisions.clear();
     changedCellsBySheet.clear();
     turnEndedAtMs = null;
-    let editsInSettle = editsAfterTurn.filter(({ atMs: atMs }: Dynamic) => isWithinTurnSettle(atMs, now()));
+    let editsInSettle = editsAfterTurn.filter(({ atMs }) => isWithinTurnSettle(atMs, now()));
     mayHaveMissed = isWithinTurnSettle(lastMissAtMs, now()) || editsInSettle.length < editsAfterTurn.length;
-    turnRevisions = editsInSettle.map(({ revision: revision }: Dynamic) => revision);
+    turnRevisions = editsInSettle.map(({ revision }) => revision);
     editsAfterTurn = [];
     hasEdits = turnRevisions.length > 0;
     cellsAreComplete = !hasEdits;
@@ -58,18 +85,18 @@ export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now
   return {
     streamChanged: noteMissedChanges,
     changesMayBeMissed: noteMissedChanges,
-    revisionStated(revision?: Dynamic, isNext?: Dynamic) {
+    revisionStated(revision, isNext) {
       if (!(isNext ? revision - 1 === statedRevision : revision <= (statedRevision ?? -1))) noteMissedChanges();
       statedRevision = Math.max(statedRevision ?? 0, revision);
     },
-    editByAgentStreamed(revision?: Dynamic, isOfThisTurn?: Dynamic) {
+    editByAgentStreamed(revision, isOfThisTurn) {
       if (!turn.isWorking()) {
         if (!isOfThisTurn) return;
         if (isWithinTurn()) mayHaveMissed = true;
-        editsAfterTurn = editsAfterTurn.filter(({ atMs: atMs }: Dynamic, index?: Dynamic) => index === 0 || isWithinTurnSettle(atMs, now()));
+        editsAfterTurn = editsAfterTurn.filter(({ atMs }, index) => index === 0 || isWithinTurnSettle(atMs, now()));
         if (revision > (editsAfterTurn.at(-1)?.revision ?? 0))
           editsAfterTurn.push({
-            revision: revision,
+            revision,
             atMs: now(),
           });
         else noteMissedChanges();
@@ -82,20 +109,20 @@ export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now
       if (revision > loadedRevision) pendingRevisions.add(revision);
       else noteMissedChanges();
     },
-    editsOfOthersMade(edits?: Dynamic, workbookBefore?: Dynamic, workbookAfter?: Dynamic) {
-      let matchedCount = edits.filter(({ revision: revision }: Dynamic) => pendingRevisions.delete(revision)).length;
+    editsOfOthersMade(edits, workbookBefore, workbookAfter) {
+      let matchedCount = edits.filter(({ revision }) => pendingRevisions.delete(revision)).length;
       if (matchedCount === 0 || !areCellsKnown()) return;
       let changedCells =
         workbookBefore === null || matchedCount < edits.length ? null : listCellsChangedBetween(workbookBefore, workbookAfter);
       if (changedCells === null) dropCells();
-      for (let cell of (changedCells ?? []) as Dynamic) {
-        let sheetCells = changedCellsBySheet.get(cell.sheetId) ?? new (Map as Dynamic)();
+      for (let cell of changedCells ?? []) {
+        let sheetCells = changedCellsBySheet.get(cell.sheetId) ?? new Map<string, CellId>();
         changedCellsBySheet.set(cell.sheetId, sheetCells.set(`${cell.rowId} ${cell.columnId}`, cell));
       }
     },
-    caughtUpByLoad({ revisionBefore: revisionBefore, revision: revision }: Dynamic) {
+    caughtUpByLoad({ revisionBefore, revision }: CaughtUpByLoad) {
       loadedRevision = Math.max(loadedRevision, revision);
-      for (let pendingRevision of pendingRevisions as Dynamic) {
+      for (let pendingRevision of pendingRevisions) {
         if (pendingRevision <= revisionBefore || pendingRevision > revision) continue;
         pendingRevisions.delete(pendingRevision);
         dropCells();
@@ -110,25 +137,28 @@ export function createTurnChangesTracker(turn?: Dynamic, now: Dynamic = Date.now
       if (!areCellsKnown() || othersInterleaved)
         return {
           cellsBySheet: null,
-          edits: edits,
+          edits,
         };
-      let cellEntries = Array.from<Dynamic, Dynamic>(
+      let cellEntries = Array.from(
         changedCellsBySheet,
-        ([sheetId, cells]: Dynamic) => [sheetId, Array.from<Dynamic>(cells.values())],
+        ([sheetId, cells]): [SheetId, CellId[]] => [sheetId, Array.from(cells.values())],
       );
       return {
-        cellsBySheet: new (Map as Dynamic)(cellEntries),
-        edits: edits,
+        cellsBySheet: new Map(cellEntries),
+        edits,
       };
     },
   };
 }
 export const MAX_TURN_EDIT_RUNS = 64;
 export const TURN_SETTLE_MS = 5000;
-export const isWithinTurnSettle = (atMs?: Dynamic, nowMs2?: Dynamic) => nowMs2 - atMs <= TURN_SETTLE_MS;
-export const withTurnTakeBackGuard = (versionHistory?: Dynamic, changedInTurn?: Dynamic) => ({
+export const isWithinTurnSettle = (atMs: number, nowMs: number): boolean => nowMs - atMs <= TURN_SETTLE_MS;
+export const withTurnTakeBackGuard = (
+  versionHistory: BrowserSide['versionHistory'],
+  changedInTurn: () => ChangedInTurnOfAgent | null,
+): BrowserSide['versionHistory'] => ({
   ...versionHistory,
-  editsThatTakeBack: (request?: Dynamic) =>
+  editsThatTakeBack: (request) =>
     request.kind === 'only' && (changedInTurn()?.edits ?? null) === null
       ? Promise.resolve({
           kind: 'notRead',

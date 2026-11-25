@@ -1,0 +1,43 @@
+# Caddy in front of the Open Artifact host, certificates by HTTP-01, for people who cannot (or would rather not) give
+# Caddy access to their DNS. The app host gets its certificate at start; each content host ({id}.CONTENT_DOMAIN) gets
+# one the first time it is visited ("on-demand TLS"), and only after the host says the name is a live artifact's
+# (GET /tls-ask on the host's internal port, which is not reachable from outside).
+#
+# Needs: DNS A/AAAA records for APP_HOST and *.CONTENT_DOMAIN pointing at this server, and ports 80 and 443 open.
+# Set APP_HOST, CONTENT_DOMAIN and ACME_EMAIL in .env (compose passes them in).
+#
+# Trade-off: the first visit to an artifact waits a few seconds for its certificate, and Let's Encrypt allows 50 new
+# certificates per registered domain per week; past that, use the wildcard set-up (Caddyfile.dns).
+
+{
+	email {$ACME_EMAIL}
+	on_demand_tls {
+		ask http://host:4901/tls-ask
+	}
+}
+
+(to_host) {
+	# The host reads the larger of its own limits (an uploaded archive or a Link push: 100 MiB); refuse more here.
+	request_body {
+		max_size 101MiB
+	}
+	reverse_proxy host:4900 {
+		# Server-sent events (the library's and the Link API's streams) go out as they are written.
+		flush_interval -1
+		# Shorter than the host's idle timeout (130 s behind a proxy), so Caddy never reuses a connection it closed.
+		transport http {
+			keepalive 90s
+		}
+	}
+}
+
+{$APP_HOST} {
+	import to_host
+}
+
+*.{$CONTENT_DOMAIN} {
+	tls {
+		on_demand
+	}
+	import to_host
+}

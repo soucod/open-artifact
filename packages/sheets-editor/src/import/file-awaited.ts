@@ -1,9 +1,10 @@
-import type { Dynamic } from '../dynamic.ts';
 import { LIGHT_GRAY_HEX } from '../model/cell-format.ts';
 import { isModalOpen } from '../ui/find.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function carryFileAwaited(state: PageState, transition?: Dynamic) {
-  let { fileAwaited: fileAwaited } = state;
+import type { LookOfAnImportedTable } from '@open-artifact/sheets-core';
+import type { FileAwaited, Notice, PageState, UndoOffer } from '../state/initial-state.ts';
+import type { PageTransition } from '../state/transitions.ts';
+export function carryFileAwaited(state: PageState, transition: PageTransition): PageTransition {
+  let { fileAwaited } = state;
   let { state: nextState } = transition;
   if (fileAwaited === null) return transition;
   if (nextState.importOfAFile !== null)
@@ -29,7 +30,7 @@ export function carryFileAwaited(state: PageState, transition?: Dynamic) {
     },
   };
 }
-export function importedSheetLook(headerNames?: Dynamic) {
+export function importedSheetLook(headerNames: string[]): LookOfAnImportedTable {
   let firstBlank = headerNames.indexOf('');
   return {
     kind: 'headerFrozenAndFilled',
@@ -38,7 +39,7 @@ export function importedSheetLook(headerNames?: Dynamic) {
       hex: LIGHT_GRAY_HEX,
     },
     leastWidthsInPixels: (firstBlank === -1 ? headerNames : headerNames.slice(0, firstBlank)).map(
-      ({ length: length }: Dynamic) =>
+      ({ length }) =>
         Math.min(WIDEST_HEADER_PIXELS, Math.ceil(length * HEADER_WIDTH_PIXELS.ofACharacter) + HEADER_WIDTH_PIXELS.besideText),
     ),
     widestForATextInPixels: WIDEST_HEADER_PIXELS,
@@ -49,9 +50,9 @@ export const HEADER_WIDTH_PIXELS = {
   besideText: 44,
 };
 export const WIDEST_HEADER_PIXELS = 360;
-export const withoutImportUndoOffer = (undoOffer?: Dynamic) =>
+export const withoutImportUndoOffer = (undoOffer: UndoOffer | null) =>
   undoOffer?.kind === 'tableImportedAsNewSheet' || undoOffer?.kind === 'tableImportedIntoSheet' ? null : undoOffer;
-export const awaitFileToImport = (state: PageState, isAskedByKey?: Dynamic) =>
+export const awaitFileToImport = (state: PageState, isAskedByKey: boolean): PageState =>
   isModalOpen(state)
     ? state
     : {
@@ -61,12 +62,12 @@ export const awaitFileToImport = (state: PageState, isAskedByKey?: Dynamic) =>
         notice: null,
         undoOffer: withoutImportUndoOffer(state.undoOffer),
         fileAwaited: {
-          isAskedByKey: isAskedByKey,
+          isAskedByKey,
           whyNot: null,
           refusedCount: 0,
         },
       };
-export const awaitFileAgain = (state: PageState, fileAwaited?: Dynamic, whyNot?: Dynamic) => ({
+export const awaitFileAgain = (state: PageState, fileAwaited: FileAwaited | null, whyNot: Notice): PageState => ({
   ...state,
   menu: null,
   pickForWorkbook: null,
@@ -77,7 +78,7 @@ export const awaitFileAgain = (state: PageState, fileAwaited?: Dynamic, whyNot?:
   undoOffer: withoutImportUndoOffer(state.undoOffer),
   fileAwaited: {
     isAskedByKey: fileAwaited?.isAskedByKey ?? false,
-    whyNot: whyNot,
+    whyNot,
     refusedCount: (fileAwaited?.refusedCount ?? 0) + 1,
   },
 });

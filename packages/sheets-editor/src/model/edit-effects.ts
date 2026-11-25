@@ -17,23 +17,23 @@ export function holdUntilAnswered(transition: PageTransition, held: Dragging): P
         state: {
           ...transition.state,
           heldUntilAnswered: {
-            held: held,
+            held,
             edit: effect.edit,
           },
         },
       }
     : transition;
 }
-export function queueEdits(state: PageState, edits: readonly Edit[], ifQueued: IfQueued, { isEachPointedAt: isEachPointedAt }: { isEachPointedAt: boolean }): PageTransition {
+export function queueEdits(state: PageState, edits: readonly Edit[], ifQueued: IfQueued, { isEachPointedAt }: { isEachPointedAt: boolean }): PageTransition {
   let lastEdit = edits.at(-1);
   if (lastEdit === undefined)
     return {
-      state: state,
+      state,
       effects: [],
     };
   let editsBefore = edits.slice(0, -1).map(
     (edit) => ({
-      edit: edit,
+      edit,
       isPointedAt: isEachPointedAt,
     }),
   );
@@ -44,7 +44,7 @@ export function queueEdits(state: PageState, edits: readonly Edit[], ifQueued: I
     editsBefore.length === 0
       ? {}
       : {
-          editsBefore: editsBefore,
+          editsBefore,
         },
   );
 }
@@ -53,24 +53,24 @@ export const IF_QUEUED_DEFAULTS = {
   leavesEntryOpen: false,
   undoOffer: null,
   pasteOfTextInstead: null,
-} satisfies IfQueued;
+} satisfies Partial<IfQueued>;
 export const IF_QUEUED_PLACE_CHANGED = {
   ...IF_QUEUED_DEFAULTS,
   select: 'placeChanged',
   done: null,
 } satisfies IfQueued;
 export const queueEdit = (state: PageState, edit: Edit, ifQueued: IfQueued, more: MoreOfAQueuedEdit = {}): PageTransition => ({
-  state: state,
+  state,
   effects: [
     {
       kind: 'queueEdit',
-      edit: edit,
-      ifQueued: ifQueued,
+      edit,
+      ifQueued,
       ...more,
     },
   ],
 });
-export const withIfQueued = (effect: PageEffect, ifQueued: IfQueued): PageEffect =>
+export const withIfQueued = (effect: PageEffect, ifQueued: Partial<IfQueued>): PageEffect =>
   effect.kind === 'queueEdit'
     ? {
         ...effect,
@@ -80,16 +80,16 @@ export const withIfQueued = (effect: PageEffect, ifQueued: IfQueued): PageEffect
         },
       }
     : effect;
-export const selectedRangeOf = ({ activeCell: activeCell, selectionCorner: selectionCorner }: Pick<CellSelection, 'activeCell' | 'selectionCorner'>) =>
+export const selectedRangeOf = ({ activeCell, selectionCorner }: Pick<CellSelection, 'activeCell' | 'selectionCorner'>) =>
   areaRefBetween(activeCell, selectionCorner);
 export const enterEntryEdit = (cell: CellId, entry: Entry): EnterEdit => ({
   kind: 'enter',
   sheetId: cell.sheetId,
   cell: cellRefOf(cell),
-  entry: entry,
+  entry,
 });
 export const enterTextEdit = (cell: CellId, text: string): EnterEdit =>
   enterEntryEdit(cell, {
     kind: 'text',
-    text: text,
+    text,
   });

@@ -353,7 +353,9 @@ export function Typography() {
                         editTokens((raw) => setFamilyStack(raw, key, pick.css));
                       }}
                     />
-                    <CommitInput value={stack} aria-label={`Stack of --font-${key}`} onCommit={(value) => value.trim() && editTokens((raw) => setFamilyStack(raw, key, value.trim()))} className="h-6 font-mono text-[11px]" />
+                    <CommitInput value={stack} aria-label={`Stack of --font-${key}`} onCommit={(value) => {
+                      if (value.trim()) editTokens((raw) => setFamilyStack(raw, key, value.trim()));
+                    }} className="h-6 font-mono text-[11px]" />
                   </div>
                 ) : (
                   <div className="truncate font-mono text-[11px] text-fg-subtle" title={stack}>

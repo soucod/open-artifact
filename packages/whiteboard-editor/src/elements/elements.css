@@ -37,7 +37,7 @@
   border: 0;
 }
 
-/* The "Agent" (or placer's name) chip above an element; keeps its screen size at any zoom. */
+/* A face sticker's placer name above it; keeps its screen size at any zoom. */
 .wb-by-chip {
   position: absolute;
   left: 0;
@@ -269,6 +269,33 @@
 
 .wb-text .wb-edit {
   white-space: inherit;
+}
+
+/* An empty text's placeholder: laid out like its text, faint, with a faint underline. */
+.wb-text-hint {
+  opacity: 0.6;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+  cursor: text;
+}
+
+.wb-text[data-wb-backdrop] .wb-text-hint {
+  opacity: 0.7;
+}
+
+/* While an empty text is typed into, the caret sits over its hint (which keeps the box's size). */
+.wb-text .wb-edit-over-hint {
+  position: absolute;
+  inset: 0;
+}
+
+@media (forced-colors: active) {
+  .wb-text-hint {
+    opacity: 1;
+    color: GrayText;
+  }
 }
 
 /* ---- Section ---------------------------------------------------------------- */

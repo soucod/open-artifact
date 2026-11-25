@@ -1,6 +1,30 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { RuleByAddress, RulesRead } from '@open-artifact/sheets-core';
 import { isOverByteLimit } from '../../agent/prompt-text.ts';
-export function splitConditionalFormatBrief(brief?: Dynamic) {
+/** What the agent is given: instructions in `words`, and the data they refer to in `data`. */
+export interface AgentPrompt {
+  words: string;
+  data: string;
+}
+/** How rules are written, apart from what is known of the sheet (its `<sheet>` data). */
+export interface ConditionalFormatBrief {
+  howAllIsWritten: string;
+  knownOfTheSheet: string;
+}
+/** What one picked cell holds, as the agent is told: `null` for nothing or an error. */
+export type PickedHold = string | number | boolean | null;
+export interface PickedRow {
+  row: number;
+  label: string | null;
+  holds: PickedHold[];
+}
+/** The selected cells, as the agent is told how they lie in their table. */
+export interface PickedCells {
+  form: 'partOfAColumn' | 'oneRowAcross' | 'block';
+  rowCount: number;
+  columnCount: number;
+  rows: PickedRow[] | null;
+}
+export function splitConditionalFormatBrief(brief: string): ConditionalFormatBrief | null {
   let dataStart = brief.lastIndexOf(SHEET_DATA_OPENING);
   return dataStart < 0 || !brief.endsWith(SHEET_DATA_CLOSING)
     ? null
@@ -9,7 +33,7 @@ export function splitConditionalFormatBrief(brief?: Dynamic) {
         knownOfTheSheet: brief.slice(dataStart).trimEnd(),
       };
 }
-export function pickedCellsData(picked?: Dynamic) {
+export function pickedCellsData(picked: PickedCells): string {
   let data = taggedJson('picked', picked);
   return isOverByteLimit(data, MAX_PICKED_DATA_BYTES)
     ? taggedJson('picked', {
@@ -26,22 +50,22 @@ export const SHEET_DATA_CLOSING = `
 </sheet>
 `;
 export const ESCAPED_IN_DATA_PATTERN = /(?! )[<>\u2800\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/gu;
-export const escapeAsUnicode = (text?: Dynamic) =>
-  Array.from<Dynamic, Dynamic>(
+export const escapeAsUnicode = (text: string): string =>
+  Array.from(
     {
       length: text.length,
     },
-    (input?: Dynamic, index?: Dynamic) => `\\u${text.charCodeAt(index).toString(16).padStart(4, '0')}`,
+    (_, index) => `\\u${text.charCodeAt(index).toString(16).padStart(4, '0')}`,
   ).join('');
-export const taggedJson = (tag?: Dynamic, value?: Dynamic) => `<${tag}>
+export const taggedJson = (tag: string, value: unknown): string => `<${tag}>
 ${JSON.stringify(value).replace(ESCAPED_IN_DATA_PATTERN, escapeAsUnicode)}
 </${tag}>`;
 export const MAX_CONDITIONAL_FORMAT_SUGGESTIONS = 3;
 export const conditionalFormatPrompt = (
-  { howAllIsWritten: howAllIsWritten, knownOfTheSheet: knownOfTheSheet }: Dynamic,
-  asked?: Dynamic,
-  ...moreData: Dynamic[]
-) => ({
+  { howAllIsWritten, knownOfTheSheet }: ConditionalFormatBrief,
+  asked: string,
+  ...moreData: string[]
+): AgentPrompt => ({
   words: `${CONDITIONAL_FORMAT_PROMPT_INTRO}
 
 ${howAllIsWritten}
@@ -61,8 +85,12 @@ Cells picked across a row whose columns hold the same kind of thing, such as one
 Leave out a rule that would hold for none of the selected cells, or for all of them.
 
 `;
-export const suggestConditionalFormatsPrompt = (brief?: Dynamic, offered?: Dynamic, picked?: Dynamic) =>
-  (conditionalFormatPrompt as Dynamic)(
+export const suggestConditionalFormatsPrompt = (
+  brief: ConditionalFormatBrief,
+  offered: RuleByAddress[],
+  picked: PickedCells | null,
+): AgentPrompt =>
+  conditionalFormatPrompt(
     brief,
     `For the selected cells the app already offers the person some rules, which only take counting. They are in the data, as a JSON list on the one line between <offered> and </offered>.
 
@@ -85,11 +113,11 @@ export const NAMED_DAYS_INSTRUCTIONS = `A day that they name, such as Nov 20 or 
 export const LASTING_RULES_INSTRUCTIONS =
   "Rules do it only if they go on being right as days pass and as rows are added or changed. So answer [] where they could be right only today: for a calendar period that moves with today, such as this month, last month or next year, which no count of days from today follows; for a share of the cells, such as the upper third or the lowest 2%, which no fixed count follows; for the day of the week that a date falls on; for every other row; and for what is unusual for its column. What stays right is written as rules: a month, a year or a span of days that they name, such as in March or from June 1 to June 15, is fixed days; late, or due within two weeks, is counted from today; the best three, or the one cheapest, newest or longest, is a count; and a day's name in a column of texts is a text.";
 export const conditionalFormatFromWordsPrompt = (
-  brief?: Dynamic,
-  words?: Dynamic,
-  keepsToSelection?: Dynamic,
-  canChatTakeIt?: Dynamic,
-) =>
+  brief: ConditionalFormatBrief,
+  words: string,
+  keepsToSelection: boolean,
+  canChatTakeIt: boolean,
+): AgentPrompt =>
   conditionalFormatPrompt(
     brief,
     `The person asks, in their own words: ${JSON.stringify(words)}
@@ -98,7 +126,7 @@ Write the rule or rules that do this. They are added to the sheet's rules and ap
 
 ${keepsToSelection ? CONDITIONAL_FORMAT_SCOPE_INSTRUCTIONS : ''}${NAMED_DAYS_INSTRUCTIONS}Answer with the JSON list of rules alone. If such rules cannot do it, answer [].${canChatTakeIt ? ` ${LASTING_RULES_INSTRUCTIONS}` : ''}`,
   );
-export const editConditionalFormatRulePrompt = (brief?: Dynamic, rule?: Dynamic, words?: Dynamic) =>
+export const editConditionalFormatRulePrompt = (brief: ConditionalFormatBrief, rule: RuleByAddress, words: string): AgentPrompt =>
   conditionalFormatPrompt(
     brief,
     `The person is editing one rule of the sheet's. It is in the data, as a JSON list of that one rule on the one line between <edited> and </edited>.
@@ -110,13 +138,13 @@ Write the rule as it should be now, changing only what they ask for. It takes th
 Answer with a JSON list of that one rule alone. If it cannot be done, answer [].`,
     taggedJson('edited', [rule]),
   );
-export const refusedAnswerPrompt = (answer?: Dynamic, why?: Dynamic) => ({
+export const refusedAnswerPrompt = (answer: unknown, why: Exclude<RulesRead, { kind: 'rules' }>): AgentPrompt => ({
   words:
     'You answered that with the list that is in the data, on the one line between <refused> and </refused>. That list cannot be taken. Why not is in the data too, on the one line between <why> and </why>. Write the whole list again, and nothing else.',
   data: `${taggedJson('refused', answer)}
 ${taggedJson('why', why)}`,
 });
-export const suggestionsFromAnswer = (answer?: Dynamic) =>
+export const suggestionsFromAnswer = (answer: unknown): unknown[] =>
   Array.isArray(answer) ? answer.slice(0, MAX_CONDITIONAL_FORMAT_SUGGESTIONS) : [];
-export const rulesFromAnswer = (answer?: Dynamic) => (Array.isArray(answer) && answer.length > 0 ? answer : null);
-export const isNoRulesAnswer = (answer?: Dynamic) => Array.isArray(answer) && answer.length === 0;
+export const rulesFromAnswer = (answer: unknown): unknown[] | null => (Array.isArray(answer) && answer.length > 0 ? answer : null);
+export const isNoRulesAnswer = (answer: unknown): boolean => Array.isArray(answer) && answer.length === 0;

@@ -2,7 +2,6 @@ import type {
   CellAt,
   CellContents,
   CellReadByAnInput,
-  CellsContentsAnswer,
   CellsOfDropdownAnswer,
   CellsThatADropdownWouldClearAnswer,
   CellsToCopyAnswer,
@@ -27,10 +26,15 @@ import type {
   IdRun,
   InputOfAWidget,
   InputsOfViewAnswer,
+  NamedViewContents,
   ListLine,
   ListLineAsKept,
   NumberFormatKind,
   OffsetOfAPlacement,
+  PivotKeeps,
+  PivotTableAtAnswer,
+  PivotTableSource,
+  PivotWrittenValue,
   PlacementContents,
   ReadRowsInSortedOrderRequest,
   Refused,
@@ -45,7 +49,6 @@ import type {
   CellFormatContents,
   SharedCellFormat,
   SharedCodeDescription,
-  EngineSheetContents,
   SheetId,
   SheetLayoutContents,
   ShownValue,
@@ -53,6 +56,7 @@ import type {
   SpilledCell,
   TableIntoSheet,
   TableInIds,
+  TablesOfSheetAnswer,
   TableWithColumns,
   TextsUnderAColumnReadingAnswer,
   ValueIn,
@@ -62,7 +66,7 @@ import type {
   WhatATableChangesAnswer,
 } from '@open-artifact/sheets-core';
 import type { CellArea, CellPosition } from '../selection/model.ts';
-import type { CellFormatLookup, FormatAtIndexes, IndexRunsOfEntry, KindOfPattern, NumberFormatAtIndexes, WholeCellFormat } from './cell-format.ts';
+import type { CellFormatLookup, FormatAtIndexes, IndexRunsOfEntry, KindedNumberFormat, KindOfPattern, NumberFormatAtIndexes, WholeCellFormat } from './cell-format.ts';
 import type { LineIndex, LineSpan, OwnRowOrder } from './line-ids.ts';
 import type { LineSizes } from './line-sizes.ts';
 import {
@@ -78,12 +82,15 @@ import {
   rowLookKey,
   borderEdgesNear,
   numberFormatPatternsWithin,
+  clipsWithin,
 } from './cell-format.ts';
 import { usersOfCell, listLinesOfCell, cellValueOf } from './cell-values.ts';
 import { reuseLineIndex, createCachedLineIndex, createLineIndex, coveringRowSpanIn } from './line-ids.ts';
 import { createLineSizes } from './line-sizes.ts';
 import { spanOfIndexes } from './a1-references.ts';
 import { tableReadIn, cellTableIn, rowEndsAsSeen } from '../tables/own-row-order.ts';
+import type { RowEnds } from '../tables/own-row-order.ts';
+import type { PackedRowCells } from '../engine/packed-cells.ts';
 
 /** A cell by its sheet, row and column ids. */
 export interface CellId {
@@ -93,23 +100,21 @@ export interface CellId {
 }
 /** What a cell holds, or what spills into it. */
 export type CellOnShow = CellContents | SpilledCell;
-export type CellsByRow = Map<RowId, Map<ColumnId, CellContents>>;
-export type SpilledCellsByRow = Map<RowId, Map<ColumnId, SpilledCell>>;
+export type CellsByRow = Map<RowId, ReadonlyMap<ColumnId, CellContents>>;
+/** A sheet's rows of cells as the engine packs them, by row. */
+export type RowsOfCells = Map<RowId, PackedRowCells>;
+export type SpilledCellsByRow = Map<RowId, ReadonlyMap<ColumnId, SpilledCell>>;
 /** A row as it stands: the cells it holds, those spilled into it, or a mark that it has both. */
-export type RowAsItStands = Map<ColumnId, CellContents> | Map<ColumnId, SpilledCell> | Record<never, never>;
+export type RowAsItStands = ReadonlyMap<ColumnId, CellContents> | ReadonlyMap<ColumnId, SpilledCell> | Record<never, never>;
 /** A sheet's cells, kept by row. */
 export interface SheetCells {
-  cellsByRow: CellsByRow;
+  cellsByRow: RowsOfCells;
   spilledCellsByRow: SpilledCellsByRow;
   cellsWithSpillByRow: CellsByRow;
   cellsWithListsByRow: CellsByRow;
   rowsAsTheyStand: Map<RowId, RowAsItStands>;
   cellCountByUserId: Map<string, number>;
   columnIndexesOnShowByRow: Map<RowId, number[]>;
-}
-export interface RowMapWriter<T> {
-  rowToWrite(rowId: RowId): Map<ColumnId, T>;
-  written(): { byRow: Map<RowId, Map<ColumnId, T>>; rowIds: MapIterator<RowId> };
 }
 /** A row of an input as a view reads it. */
 export type InputRow = CellReadByAnInput[];
@@ -118,6 +123,8 @@ export type ViewInputs = Refused | { byElement: Map<string, Record<string, Input
 export interface ViewWithInputs {
   view: View;
   inputs: ViewInputs;
+  canBeReset?: true;
+  hasDefaultsToSave?: true;
 }
 export interface InputsOfViewRead {
   viewId: string;
@@ -162,8 +169,10 @@ export interface OwnRowOrderToRead extends LineSpan {
 export interface SheetLayoutToRead extends SheetLayoutContents {
   ownRowOrder?: OwnRowOrderToRead | 'givenUp';
 }
-export interface SheetToRead extends SheetLayoutToRead, Pick<EngineSheetContents, 'cells'> {}
-export interface WorkbookToRead extends Omit<EngineWorkbookContents, 'sheets'> {
+export interface SheetToRead extends SheetLayoutToRead {
+  cells: RowsOfCells;
+}
+export interface WorkbookToRead extends Omit<EngineWorkbookContents, 'kind' | 'sheets'> {
   sheets: SheetToRead[];
 }
 export interface WorkbookDescription extends Pick<SharedCodeDescription, 'defaultColumnWidthInPixels' | 'limits'> {
@@ -184,6 +193,8 @@ export interface SheetSummary {
   frozenRowCount: number;
   frozenColumnCount: number;
   areGridlinesHidden: boolean;
+  /** The interactive view the sheet shows in place of its grid. */
+  interactive: string | null;
   rowGroups: GroupOnGrid[];
   columnGroups: GroupOnGrid[];
   ownRowOrder: OwnRowOrder | null;
@@ -207,6 +218,7 @@ export interface SheetLayoutRead {
   conditionalFormats: ConditionalFormatContents[];
   placements: PlacementOnGrid[];
   cellTables: CellTableContents[];
+  namedViews: NamedViewContents[];
   /** The layout with its rows in the order they are stored in; `null` where they are seen in that order. */
   asStored(): SheetLayoutRead | null;
   mergedAreas: CellArea[];
@@ -229,6 +241,10 @@ export interface LimitsOfPlacements {
   smallestSideOfAPlacementInPixels: number;
   largestSideOfAPlacementInPixels: number;
 }
+export interface LimitsOfNamedViews {
+  mostNamedViewsInASheet: number;
+  longestNameOfANamedViewInCharacters: number;
+}
 /** The workbook as the page has read it. */
 export interface WorkbookRead {
   sheets: SheetRead[];
@@ -244,6 +260,7 @@ export interface WorkbookRead {
   mostOptionsInADropdown: number;
   longestSheetNameInCharacters: number;
   mostCells: number;
+  limitsOfNamedViews: LimitsOfNamedViews;
   deepestGroup: number;
   mostCheckboxesOfOneInsert: number;
   mostEditsInAStep: number;
@@ -254,8 +271,9 @@ export interface WorkbookRead {
 /** A sheet's changes as read from the engine. */
 export interface SheetChangesRead {
   sheetId: SheetId;
-  cellsListed: CellAt[];
-  cellsNow: CellContents[];
+  /** The rows read again: every row the sheet had, or those named. */
+  rowsListed: RowId[] | 'all';
+  cellsNow: RowsOfCells;
   spilledCellsNow: SpilledCell[];
   layoutNow: SheetLayoutToRead | null;
   formatsGivenNow: FormatsGiven | null;
@@ -314,7 +332,8 @@ export interface WorkbookServices {
   whatATableChanges(table: TableIntoSheet): WhatATableChangesAnswer | Refused | null;
   formatsGivenAsIf(sheetId: SheetId, asIf: Iterable<ConditionalFormatAsIf>): FormatsGivenAnswer | null;
   conditionalFormatSuggestions(oneCorner: CellId, otherCorner: CellId): ConditionalFormatSuggestionsAnswer | null;
-  tableAtCell(cell: CellId): TableWithColumns | null;
+  /** `'nowhere'`: no table at the cell. */
+  tableAtCell(cell: CellId): TableWithColumns | 'nowhere' | null;
   cellTableAt(cell: CellId): CellTableRead | null;
   cellTables(sheetId: SheetId): CellTablesRead;
   cellTableDeclaredAs(sheetId: SheetId, cellTable: CellTable): CellTableRead | 'tookTooLong' | 'nowhere' | null;
@@ -325,6 +344,14 @@ export interface WorkbookServices {
   filteredRows(table: TableInIds, filter: Filter): FilteredRowsAnswer | Refused | null;
   valuesOfFilteredColumn(table: TableInIds, filter: Filter | null, columnId: ColumnId): ValuesOfFilteredColumnAnswer | Refused | null;
   rowsInSortedOrder(toSort: RowsToSort): RowsInSortedOrderAnswer | Refused | null;
+  tablesOfSheet(sheetId: SheetId): TablesOfSheetAnswer | Refused | null;
+  pivotTableAt(cell: CellId): PivotTableAtAnswer | Refused | null;
+  valuesToFilterPivotTableBy(
+    source: PivotTableSource,
+    columnId: ColumnId,
+    keeps: PivotKeeps,
+    listed: Iterable<PivotWrittenValue | null>,
+  ): ValuesOfFilteredColumnAnswer | Refused | null;
   causeOfError(cell: CellId, cellNow: string): CauseOfErrorRead | null;
 }
 /** The locale readers of the services, bound to the workbook's locale. */
@@ -349,13 +376,14 @@ export interface WorkbookReads extends WorkbookServices, LocaleHelpers {
   asStored(): WorkbookReads | null;
   sheetAsItStands(sheetId: SheetId): SheetRead | null;
   rowsAsTheyStand(sheetId: SheetId): Map<RowId, RowAsItStands>;
-  cellsHeldByRow(sheetId: SheetId): CellsByRow;
+  cellsHeldByRow(sheetId: SheetId): RowsOfCells;
   cellsWithSpillIn(sheetId: SheetId): CellContents[];
   isSheetAsNew(sheetId: SheetId): boolean;
   mostBytesOfATableToImport(): number;
   mostOptionsInADropdown(): number;
   longestSheetNameInCharacters(): number;
   mostFilledCells(): number;
+  limitsOfNamedViews(): LimitsOfNamedViews;
   deepestGroup(): number;
   mostCheckboxesOfOneInsert(): number;
   mostEditsInAStep(): number;
@@ -376,12 +404,15 @@ export interface WorkbookReads extends WorkbookServices, LocaleHelpers {
   formatsGivenIn(sheetId: SheetId): FormatsGiven;
   placementsIn(sheetId: SheetId): PlacementOnGrid[];
   cellTablesDeclaredIn(sheetId: SheetId): CellTableContents[];
+  namedViewsIn(sheetId: SheetId): NamedViewContents[];
   viewAsItStands(viewId: string): ViewWithInputs | null;
   rowSizingOf(sheetId: SheetId): RowSizing[];
   whereTextWraps(sheetId: SheetId): IndexRunsOfEntry[];
   cellsWithListsIn(sheetId: SheetId): CellsByRow;
   hasBorderLine(sheetId: SheetId): boolean;
   bordersMayChangeBefore(sheetId: SheetId, area: CellArea): { rows: number[]; columns: number[] };
+  /** Whether a cell of the area clips its text. */
+  isTextClippedIn(sheetId: SheetId, area: CellArea): boolean;
   numberFormatPatternsIn(sheetId: SheetId, area: CellArea): string[];
   hexColorsOf(sheetId: SheetId): string[];
   dropdownOf(cell: CellId): DropdownContents | null;
@@ -419,16 +450,16 @@ export function rowCountBeforeNextBlock(rowsOfInputs: readonly (readonly InputRo
       firstBlankIndex ??= index;
       continue;
     }
-    let hasNumber = rowOfInputs.some((row: InputRow = []) => row.some(({ value: value }) => typeof value === 'number'));
+    let hasNumber = rowOfInputs.some((row: InputRow = []) => row.some(({ value }) => typeof value === 'number'));
     let hasTextOverNumbers = rowOfInputs.some(
       (row: InputRow = [], inputIndex) =>
         row.some(
-          ({ value: value, text: text }, columnIndex) =>
+          ({ value, text }, columnIndex) =>
             typeof value === 'string' && text !== '' && inputIndex + columnIndex > 0 && numberColumnsOfInputs[inputIndex]?.has(columnIndex) === true,
         ),
     );
     if (!hasNumber) {
-      let header = JSON.stringify(rowOfInputs.map((row: InputRow = []) => row.map(({ text: text }) => text)));
+      let header = JSON.stringify(rowOfInputs.map((row: InputRow = []) => row.map(({ text }) => text)));
       let isNewHeader = !headersSeen.has(header);
       if (firstBlankIndex !== null && filledRowCount >= 2 && hasTextOverNumbers && isNewHeader) return firstBlankIndex;
       headersSeen.add(header);
@@ -436,7 +467,7 @@ export function rowCountBeforeNextBlock(rowsOfInputs: readonly (readonly InputRo
     firstBlankIndex = null;
     filledRowCount += 1;
     for (let [inputIndex, row] of rowOfInputs.entries())
-      for (let [columnIndex, { value: value }] of (row ?? []).entries())
+      for (let [columnIndex, { value }] of (row ?? []).entries())
         if (typeof value === 'number') numberColumnsOfInputs[inputIndex]?.add(columnIndex);
   }
   return rowCount;
@@ -448,15 +479,12 @@ export function viewsWithInputs(
 ): Map<string, ViewWithInputs> {
   let inputsByView = new Map(inputs.map((input) => [input.viewId, input]));
   return new Map(
-    views.map(({ viewId: viewId, view: view }) => {
+    views.map(({ viewId, view }) => {
       let entry = inputsByView.get(viewId);
       let viewNow =
         entry === undefined
           ? previousViews.get(viewId)
-          : {
-              view: view,
-              inputs: viewInputsFromAnswer(entry, view),
-            };
+          : viewInputsFromAnswer(view, entry);
       if (viewNow === undefined) throw Error('sheets-core named a view whose inputs the page has not read');
       return [viewId, viewNow];
     }),
@@ -465,7 +493,7 @@ export function viewsWithInputs(
 export function rowSizingRuns(rows: LineIndex, rowHeights: readonly RowHeightContents[], cellFormats: readonly CellFormatContents[]): RowSizing[] {
   let edges: EdgeOfRowSizing[] = [];
   let addEdges = (spans: readonly LineSpan[], sizedBy: Pick<EdgeOfARowHeight, 'heightInPixels'> | Pick<EdgeOfAFontSize, 'fontSizeInPoints'>) => {
-    for (let { firstIndex: firstIndex, count: count } of spans)
+    for (let { firstIndex, count } of spans)
       edges.push(
         {
           at: firstIndex,
@@ -483,7 +511,7 @@ export function rowSizingRuns(rows: LineIndex, rowHeights: readonly RowHeightCon
     addEdges(rows.stretchesOf(rowRun), {
       heightInPixels: heightOfRun,
     });
-  for (let { rows: rowRuns, format: format } of cellFormats) {
+  for (let { rows: rowRuns, format } of cellFormats) {
     let fontSize = format.font?.size;
     if (fontSize === undefined || fontSize <= DEFAULT_CELL_FORMAT.font.size) continue;
     for (let rowRun of rowRuns)
@@ -517,86 +545,84 @@ export function rowSizingRuns(rows: LineIndex, rowHeights: readonly RowHeightCon
     sizing.push({
       firstIndex: isSameAsLast ? lastSizing!.firstIndex : edge.at,
       count: nextEdge.at - (isSameAsLast ? lastSizing!.firstIndex : edge.at),
-      heightInPixels: heightInPixels,
+      heightInPixels,
       largestFontSizeInPoints: largestFontSize,
     });
   });
   return sizing;
 }
-export function createRowMapWriter<T>(byRow: Map<RowId, Map<ColumnId, T>>): RowMapWriter<T> {
-  let rows = new Map(byRow);
-  let rowsWritten = new Map<RowId, Map<ColumnId, T>>();
-  return {
-    rowToWrite(rowId) {
-      let entry = rowsWritten.get(rowId);
-      if (entry !== undefined) return entry;
-      let entries = new Map(rows.get(rowId));
-      rowsWritten.set(rowId, entries);
-      rows.set(rowId, entries);
-      return entries;
-    },
-    written() {
-      for (let [rowId, cellsOfRow] of rowsWritten) if (cellsOfRow.size === 0) rows.delete(rowId);
-      return {
-        byRow: rows,
-        rowIds: rowsWritten.keys(),
-      };
-    },
-  };
+export function tableAtCellIfAny(services: Pick<WorkbookServices, 'tableAtCell'>, cell: CellId): TableWithColumns | null {
+  let read = services.tableAtCell(cell);
+  return read === 'nowhere' ? null : read;
 }
-export function applyCellChanges(
+/** A sheet's row map once the rows listed are read again: an entry for each row of the cells read. */
+export function rowsWithCells<Cell extends CellAt>(
+  byRow: ReadonlyMap<RowId, ReadonlyMap<ColumnId, Cell>>,
+  rowIdsListed: Iterable<RowId>,
+  cells: Iterable<Cell>,
+): Map<RowId, ReadonlyMap<ColumnId, Cell>> {
+  let rows = new Map(byRow);
+  if (rows.size > 0) for (let rowId of rowIdsListed) rows.delete(rowId);
+  let cellsByRow = new Map<RowId, Map<ColumnId, Cell>>();
+  for (let cell of cells) {
+    let row = cellsByRow.get(cell.r) ?? new Map<ColumnId, Cell>();
+    cellsByRow.set(cell.r, row.set(cell.c, cell));
+  }
+  for (let [rowId, row] of cellsByRow) rows.set(rowId, row);
+  return rows;
+}
+/** A sheet's cells once whole rows are read again: every row it had, or those listed, as the engine packs them. */
+export function applyRowChanges(
   sheetCells: SheetCells,
-  cellsListed: readonly CellAt[],
-  cellsNow: readonly CellContents[],
+  rowsListed: readonly RowId[] | 'all',
+  rowsNow: RowsOfCells,
   spilledCellsNow: readonly SpilledCell[],
   keepColumnIndexes: boolean,
 ): SheetCells {
-  let cells = createRowMapWriter(sheetCells.cellsByRow);
-  let spilledCells = createRowMapWriter(sheetCells.spilledCellsByRow);
-  let cellsWithSpill = createRowMapWriter(sheetCells.cellsWithSpillByRow);
-  let cellsWithLists = createRowMapWriter(sheetCells.cellsWithListsByRow);
+  let rowIdsListed = rowsListed === 'all' ? [...sheetCells.rowsAsTheyStand.keys()] : rowsListed;
   let cellCountByUserId = new Map(sheetCells.cellCountByUserId);
   let countUsers = (cell: CellContents, change: number) => {
-    for (let { userId: userId } of usersOfCell(cell)) {
-      let countNow = (cellCountByUserId.get(userId) ?? 0) + change;
-      if (countNow === 0) cellCountByUserId.delete(userId);
-      else cellCountByUserId.set(userId, countNow);
+    for (let { userId } of usersOfCell(cell)) {
+      let count = (cellCountByUserId.get(userId) ?? 0) + change;
+      if (count === 0) cellCountByUserId.delete(userId);
+      else cellCountByUserId.set(userId, count);
     }
   };
-  for (let { r: rowId, c: columnId } of cellsListed) {
-    if (sheetCells.spilledCellsByRow.get(rowId)?.has(columnId) === true) spilledCells.rowToWrite(rowId).delete(columnId);
-    let cellsOfRow = cells.rowToWrite(rowId);
-    let entry = cellsOfRow.get(columnId);
-    if (entry === undefined) continue;
-    countUsers(entry, -1);
-    cellsOfRow.delete(columnId);
-    if (entry.spill !== undefined) cellsWithSpill.rowToWrite(rowId).delete(columnId);
-    if (listLinesOfCell(entry).length > 0) cellsWithLists.rowToWrite(rowId).delete(columnId);
-  }
-  for (let cell of cellsNow) {
-    if ((cells.rowToWrite(cell.r).set(cell.c, cell), countUsers(cell, 1), cell.spill !== undefined))
-      cellsWithSpill.rowToWrite(cell.r).set(cell.c, cell);
-    if (listLinesOfCell(cell).length > 0) cellsWithLists.rowToWrite(cell.r).set(cell.c, cell);
-  }
-  for (let spilledCell of spilledCellsNow) spilledCells.rowToWrite(spilledCell.r).set(spilledCell.c, spilledCell);
   let columnIndexesOnShowByRow = new Map(keepColumnIndexes ? sheetCells.columnIndexesOnShowByRow : []);
-  let [writtenCells, writtenSpilledCells] = [cells.written(), spilledCells.written()];
-  let rowsAsTheyStand = writtenSpilledCells.byRow.size === 0 ? null : new Map(sheetCells.rowsAsTheyStand);
-  for (let rowId of [...writtenCells.rowIds, ...writtenSpilledCells.rowIds]) {
+  let cellsByRow = new Map(sheetCells.cellsByRow);
+  for (let rowId of rowIdsListed) {
+    for (let cell of cellsByRow.get(rowId)?.cellsWithUsersARichTextOrASpill() ?? []) countUsers(cell, -1);
+    if (!rowsNow.has(rowId)) cellsByRow.delete(rowId);
     columnIndexesOnShowByRow.delete(rowId);
-    let [cellsOfRow, spilledCellsOfRow] = [writtenCells.byRow.get(rowId), writtenSpilledCells.byRow.get(rowId)];
-    let rowNow: RowAsItStands | undefined = cellsOfRow !== undefined && spilledCellsOfRow !== undefined ? {} : (cellsOfRow ?? spilledCellsOfRow);
-    if (rowNow === undefined) rowsAsTheyStand?.delete(rowId);
-    else rowsAsTheyStand?.set(rowId, rowNow);
   }
+  let cellsWithSpill: CellContents[] = [];
+  let cellsWithLists: CellContents[] = [];
+  for (let [rowId, row] of rowsNow) {
+    if (sheetCells.cellsByRow.size > 0 && cellsByRow.get(rowId)?.goesOnAs(row) !== true) cellsByRow.set(rowId, row);
+    for (let cell of row.cellsWithUsersARichTextOrASpill()) {
+      if ((countUsers(cell, 1), cell.spill !== undefined)) cellsWithSpill.push(cell);
+      if (listLinesOfCell(cell).length > 0) cellsWithLists.push(cell);
+    }
+  }
+  let rowsOfCells = sheetCells.cellsByRow.size > 0 ? cellsByRow : rowsNow;
+  let spilledCellsByRow = rowsWithCells(sheetCells.spilledCellsByRow, rowIdsListed, spilledCellsNow);
+  let rowsAsTheyStand = spilledCellsByRow.size === 0 ? null : new Map(sheetCells.rowsAsTheyStand);
+  if (rowsAsTheyStand !== null)
+    for (let rowId of new Set([...rowIdsListed, ...rowsNow.keys(), ...spilledCellsNow.map(({ r }) => r)])) {
+      let [cells, spilledCells] = [rowsOfCells.get(rowId), spilledCellsByRow.get(rowId)];
+      if (cells === sheetCells.cellsByRow.get(rowId) && spilledCells === sheetCells.spilledCellsByRow.get(rowId)) continue;
+      let rowAsItStands: RowAsItStands | undefined = cells !== undefined && spilledCells !== undefined ? {} : (cells ?? spilledCells);
+      if (rowAsItStands === undefined) rowsAsTheyStand.delete(rowId);
+      else rowsAsTheyStand.set(rowId, rowAsItStands);
+    }
   return {
-    cellsByRow: writtenCells.byRow,
-    spilledCellsByRow: writtenSpilledCells.byRow,
-    cellsWithSpillByRow: cellsWithSpill.written().byRow,
-    cellsWithListsByRow: cellsWithLists.written().byRow,
-    rowsAsTheyStand: rowsAsTheyStand ?? writtenCells.byRow,
-    cellCountByUserId: cellCountByUserId,
-    columnIndexesOnShowByRow: columnIndexesOnShowByRow,
+    cellsByRow: rowsOfCells,
+    spilledCellsByRow,
+    cellsWithSpillByRow: rowsWithCells(sheetCells.cellsWithSpillByRow, rowIdsListed, cellsWithSpill),
+    cellsWithListsByRow: rowsWithCells(sheetCells.cellsWithListsByRow, rowIdsListed, cellsWithLists),
+    rowsAsTheyStand: rowsAsTheyStand ?? rowsOfCells,
+    cellCountByUserId,
+    columnIndexesOnShowByRow,
   };
 }
 export function readSheetLayout(
@@ -605,7 +631,7 @@ export function readSheetLayout(
   kindOfPattern: KindOfPattern,
   previous?: SheetLayoutRead,
 ): SheetLayoutRead {
-  let { sheetId: sheetId, name: name, rows: rowRuns, columns: columnRuns, ownRowOrder: ownRowOrder } = layout;
+  let { sheetId, name, rows: rowRuns, columns: columnRuns, ownRowOrder } = layout;
   let { mergedRanges = [], columnWidths = [], rowHeights = [] } = layout;
   let { cellFormats = [], dropdowns = [], rowGroups = [], columnGroups = [] } = layout;
   let { conditionalFormats = [], placements = [], cellTables = NO_CELL_TABLES } = layout;
@@ -614,13 +640,13 @@ export function readSheetLayout(
   let lastFrozenRowIndex = layout.lastFrozenRow === undefined ? -1 : rows.indexOf(layout.lastFrozenRow);
   let lastFrozenColumnIndex = layout.lastFrozenColumn === undefined ? -1 : columns.indexOf(layout.lastFrozenColumn);
   if (lastFrozenRowIndex === null || lastFrozenColumnIndex === null) throw Error('sheets-core named a frozen row or column that is not in the sheet');
-  let sizedColumns = columnWidths.map(({ columns: columnRun, widthInPixels: widthInPixels }) => {
+  let sizedColumns = columnWidths.map(({ columns: columnRun, widthInPixels }) => {
     let firstIndex = columns.indexOf(`${columnRun.base}.${columnRun.first}`);
     let lastIndex = columns.indexOf(`${columnRun.base}.${columnRun.first + columnRun.count - 1}`);
     if (firstIndex === null || lastIndex === null || lastIndex - firstIndex !== columnRun.count - 1)
       throw Error('sheets-core named sized columns that are not side by side in the sheet');
     return {
-      firstIndex: firstIndex,
+      firstIndex,
       count: columnRun.count,
       sizeInPixels: widthInPixels,
     };
@@ -635,14 +661,15 @@ export function readSheetLayout(
   let layoutAsStored: SheetLayoutRead | null = null;
   return {
     summary: {
-      sheetId: sheetId,
-      name: name,
+      sheetId,
+      name,
       rowCount: rows.count,
       columnCount: columns.count,
       columnEdges: createLineSizes(columns.count, sizedColumns, defaultColumnWidth),
       frozenRowCount: lastFrozenRowIndex + 1,
       frozenColumnCount: lastFrozenColumnIndex + 1,
       areGridlinesHidden: layout.areGridlinesHidden === true,
+      interactive: layout.interactive ?? null,
       rowGroups: groupsOnGrid(rowGroups, rows),
       columnGroups: groupsOnGrid(columnGroups, columns),
       ownRowOrder:
@@ -656,14 +683,15 @@ export function readSheetLayout(
             },
       isOwnRowOrderGivenUp: ownRowOrder === 'givenUp',
     },
-    rows: rows,
-    columns: columns,
+    rows,
+    columns,
     isLaidOutAsNew:
       layout.lastFrozenRow === undefined &&
       layout.lastFrozenColumn === undefined &&
       layout.areGridlinesHidden !== true &&
+      layout.interactive === undefined &&
       [mergedRanges, columnWidths, rowHeights, cellFormats, rowGroups, columnGroups, conditionalFormats, placements].every(
-        ({ length: length }) => length === 0,
+        ({ length }) => length === 0,
       ),
     cellFormats: createCellFormatLookup(cellFormats, kindOfPattern),
     rowSizing: () => (rowSizing ??= rowSizingRuns(rows, rowHeights, cellFormats)),
@@ -674,9 +702,10 @@ export function readSheetLayout(
     formats: () => (formats ??= formatEntryRuns(cellFormats, rows, columns, kindOfPattern)),
     hexColors: () => (hexColors ??= customHexColorsOfSheet(cellFormats, dropdowns)),
     dropdownsById: new Map(dropdowns.map((dropdown) => [dropdown.dropdownId, dropdown])),
-    conditionalFormats: conditionalFormats,
+    conditionalFormats,
     placements: placementsOnGrid(placements, rows, columns),
-    cellTables: cellTables,
+    cellTables,
+    namedViews: layout.namedViews ?? NO_NAMED_VIEWS,
     asStored() {
       if (ownRowOrder === undefined || ownRowOrder === 'givenUp') return null;
       let { ownRowOrder: _ownRowOrder, ...layoutAsSeen } = layout;
@@ -689,11 +718,11 @@ export function readSheetLayout(
         kindOfPattern,
       ));
     },
-    mergedAreas: mergedRanges.map(({ liveTopLeft: liveTopLeft, liveBottomRight: liveBottomRight }) => {
+    mergedAreas: mergedRanges.map(({ liveTopLeft, liveBottomRight }) => {
       let area = areaBetweenCells(
         {
-          rows: rows,
-          columns: columns,
+          rows,
+          columns,
         },
         liveTopLeft,
         liveBottomRight,
@@ -719,16 +748,16 @@ export function columnIndexesOnShow(sheet: SheetRead, rowIndex: number): number[
   return columnIndexes;
 }
 export function cellsInArea(sheet: SheetRead, cellsByRow: ReadonlyMap<RowId, ReadonlyMap<ColumnId, unknown>>, area: CellArea): CellId[] {
-  let { sheetId: sheetId } = sheet.summary;
+  let { sheetId } = sheet.summary;
   let cellIds: CellId[] = [];
   let addRow = (rowId: RowId, cellsOfRow: ReadonlyMap<ColumnId, unknown>) => {
     for (let columnId of cellsOfRow.keys()) {
       let columnIndex = sheet.columns.indexOf(columnId);
       if (columnIndex !== null && isIndexWithin(columnIndex, area.leftColumnIndex, area.columnCount))
         cellIds.push({
-          sheetId: sheetId,
-          rowId: rowId,
-          columnId: columnId,
+          sheetId,
+          rowId,
+          columnId,
         });
     }
   };
@@ -772,7 +801,7 @@ export function filledAreaWithin(sheet: SheetRead, area: CellArea): CellArea | n
       };
 }
 export function areaBetweenCells(
-  { rows: rows, columns: columns }: { rows: LineIndex; columns: LineIndex },
+  { rows, columns }: { rows: LineIndex; columns: LineIndex },
   topLeft: CellAt,
   bottomRight: CellAt,
 ): CellArea | null {
@@ -793,7 +822,7 @@ export function spanBetweenIds(lineIndex: LineIndex, firstId: string, lastId: st
   let [firstIndex, lastIndex] = [lineIndex.indexOf(firstId), lineIndex.indexOf(lastId)];
   return firstIndex === null || lastIndex === null ? null : spanOfIndexes([firstIndex, lastIndex]);
 }
-export function spillAreaOver(sheet: SheetRead, { rowId: rowId, columnId: columnId }: CellId): SpillOver | null {
+export function spillAreaOver(sheet: SheetRead, { rowId, columnId }: CellId): SpillOver | null {
   let rowIndex = sheet.rows.indexOf(rowId);
   let columnIndex = sheet.columns.indexOf(columnId);
   if (rowIndex === null || columnIndex === null) return null;
@@ -810,17 +839,17 @@ export function spillAreaOver(sheet: SheetRead, { rowId: rowId, columnId: column
     if (area !== null && isIndexWithin(rowIndex, area.topRowIndex, area.rowCount) && isIndexWithin(columnIndex, area.leftColumnIndex, area.columnCount))
       return {
         formulaText: candidate.formulaText,
-        area: area,
+        area,
       };
   }
   return null;
 }
 export function readWorkbook(
   {
-    sheets: sheets,
-    calculationTookTooLong: calculationTookTooLong,
-    timeZone: timeZone,
-    locale: locale,
+    sheets,
+    calculationTookTooLong,
+    timeZone,
+    locale,
     decimalSign = 'point',
     groupSign = 'comma',
     sizesOfGroups = 'threes',
@@ -828,22 +857,24 @@ export function readWorkbook(
     views = [],
   }: WorkbookToRead & { calculationTookTooLong?: boolean },
   {
-    defaultColumnWidthInPixels: defaultColumnWidthInPixels,
-    localeOfANewWorkbook: localeOfANewWorkbook,
+    defaultColumnWidthInPixels,
+    localeOfANewWorkbook,
     limits: {
-      mostBytesOfATableToImport: mostBytesOfATableToImport,
-      mostOptionsInADropdown: mostOptionsInADropdown,
-      longestSheetNameInCharacters: longestSheetNameInCharacters,
-      mostCells: mostCells,
-      deepestGroup: deepestGroup,
-      mostCheckboxesOfOneInsert: mostCheckboxesOfOneInsert,
-      mostEditsInAStep: mostEditsInAStep,
-      mostRangesInAConditionalFormat: mostRangesInAConditionalFormat,
-      mostTestsInAConditionalFormat: mostTestsInAConditionalFormat,
-      longestTextOfAConditionInCharacters: longestTextOfAConditionInCharacters,
-      largestCountInACondition: largestCountInACondition,
-      smallestSideOfAPlacementInPixels: smallestSideOfAPlacementInPixels,
-      largestSideOfAPlacementInPixels: largestSideOfAPlacementInPixels,
+      mostBytesOfATableToImport,
+      mostOptionsInADropdown,
+      longestSheetNameInCharacters,
+      mostCells,
+      mostNamedViewsInASheet,
+      longestNameOfANamedViewInCharacters,
+      deepestGroup,
+      mostCheckboxesOfOneInsert,
+      mostEditsInAStep,
+      mostRangesInAConditionalFormat,
+      mostTestsInAConditionalFormat,
+      longestTextOfAConditionInCharacters,
+      largestCountInACondition,
+      smallestSideOfAPlacementInPixels,
+      largestSideOfAPlacementInPixels,
     },
   }: WorkbookDescription,
   kindOfPattern: KindOfPattern,
@@ -853,39 +884,43 @@ export function readWorkbook(
   return {
     sheets: sheets.map((sheet) => ({
       ...readSheetLayout(sheet, defaultColumnWidthInPixels, kindOfPattern),
-      ...applyCellChanges(EMPTY_SHEET_CELLS, [], sheet.cells, sheet.spilledCells ?? [], false),
-      formatsGiven: formatsGivenBySheet.find(({ sheetId: sheetId }) => sheetId === sheet.sheetId)?.formatsGiven ?? NO_FORMATS_GIVEN,
+      ...applyRowChanges(EMPTY_SHEET_CELLS, [], sheet.cells, sheet.spilledCells ?? [], false),
+      formatsGiven: formatsGivenBySheet.find(({ sheetId }) => sheetId === sheet.sheetId)?.formatsGiven ?? NO_FORMATS_GIVEN,
     })),
     views: viewsWithInputs(new Map(), views, viewInputs),
     calculationTookTooLong: calculationTookTooLong === true,
     timeZone: timeZone ?? null,
     locale: locale ?? localeOfANewWorkbook,
-    decimalSign: decimalSign,
+    decimalSign,
     signsOfNumbers: {
-      decimalSign: decimalSign,
-      groupSign: groupSign,
-      sizesOfGroups: sizesOfGroups,
+      decimalSign,
+      groupSign,
+      sizesOfGroups,
     },
-    patternOfATimeOfDay: patternOfATimeOfDay,
-    defaultColumnWidthInPixels: defaultColumnWidthInPixels,
-    mostBytesOfATableToImport: mostBytesOfATableToImport,
-    mostOptionsInADropdown: mostOptionsInADropdown,
-    longestSheetNameInCharacters: longestSheetNameInCharacters,
-    mostCells: mostCells,
-    deepestGroup: deepestGroup,
-    mostCheckboxesOfOneInsert: mostCheckboxesOfOneInsert,
-    mostEditsInAStep: mostEditsInAStep,
+    patternOfATimeOfDay,
+    defaultColumnWidthInPixels,
+    mostBytesOfATableToImport,
+    mostOptionsInADropdown,
+    longestSheetNameInCharacters,
+    mostCells,
+    limitsOfNamedViews: {
+      mostNamedViewsInASheet,
+      longestNameOfANamedViewInCharacters,
+    },
+    deepestGroup,
+    mostCheckboxesOfOneInsert,
+    mostEditsInAStep,
     limitsOfConditionalFormats: {
-      mostRangesInAConditionalFormat: mostRangesInAConditionalFormat,
-      mostTestsInAConditionalFormat: mostTestsInAConditionalFormat,
-      longestTextOfAConditionInCharacters: longestTextOfAConditionInCharacters,
-      largestCountInACondition: largestCountInACondition,
+      mostRangesInAConditionalFormat,
+      mostTestsInAConditionalFormat,
+      longestTextOfAConditionInCharacters,
+      largestCountInACondition,
     },
     limitsOfPlacements: {
-      smallestSideOfAPlacementInPixels: smallestSideOfAPlacementInPixels,
-      largestSideOfAPlacementInPixels: largestSideOfAPlacementInPixels,
+      smallestSideOfAPlacementInPixels,
+      largestSideOfAPlacementInPixels,
     },
-    kindOfPattern: kindOfPattern,
+    kindOfPattern,
   };
 }
 export function applyWorkbookChanges(
@@ -893,44 +928,44 @@ export function applyWorkbookChanges(
   sheetChanges: readonly SheetChangesRead[],
   viewChanges: ViewChangesRead | null = null,
 ): WorkbookRead {
-  let { defaultColumnWidthInPixels: defaultColumnWidth, kindOfPattern: kindOfPattern } = workbook;
+  let { defaultColumnWidthInPixels: defaultColumnWidth, kindOfPattern } = workbook;
   let changesBySheet = new Map(sheetChanges.map((changes) => [changes.sheetId, changes]));
   if (changesBySheet.size < sheetChanges.length) throw Error('sheets-core listed a sheet twice');
   let sheets = workbook.sheets.map((sheet) => {
     let entry = changesBySheet.get(sheet.summary.sheetId);
     if (entry === undefined) return sheet;
     changesBySheet.delete(sheet.summary.sheetId);
-    let { cellsListed: cellsListed, cellsNow: cellsNow, spilledCellsNow: spilledCellsNow, layoutNow: layoutNow, formatsGivenNow: formatsGivenNow } = entry;
+    let { rowsListed, cellsNow, spilledCellsNow, layoutNow, formatsGivenNow } = entry;
     return {
       ...(layoutNow === null ? sheet : readSheetLayout(layoutNow, defaultColumnWidth, kindOfPattern, sheet)),
-      ...applyCellChanges(sheet, cellsListed, cellsNow, spilledCellsNow, layoutNow === null),
+      ...applyRowChanges(sheet, rowsListed, cellsNow, spilledCellsNow, layoutNow === null),
       formatsGiven: formatsGivenNow ?? sheet.formatsGiven,
     };
   });
   if (changesBySheet.size > 0) throw Error('sheets-core listed a sheet that the page has not read');
   return {
     ...workbook,
-    sheets: sheets,
+    sheets,
     views: viewChanges === null ? workbook.views : viewsWithInputs(workbook.views, viewChanges.viewsNow, viewChanges.inputsNow),
   };
 }
 export function createWorkbookAccessor(workbook: WorkbookRead, services: WorkbookServices): WorkbookReads {
   let {
-    sheets: sheets,
-    calculationTookTooLong: calculationTookTooLong,
-    timeZone: timeZone,
-    locale: locale,
-    decimalSign: decimalSign,
+    sheets,
+    calculationTookTooLong,
+    timeZone,
+    locale,
+    decimalSign,
   } = workbook;
-  let { signsOfNumbers: signsOfNumbers, patternOfATimeOfDay: patternOfATimeOfDay } = workbook;
+  let { signsOfNumbers, patternOfATimeOfDay } = workbook;
   let sheetsById = new Map(sheets.map((sheet) => [sheet.summary.sheetId, sheet]));
-  let summaries = sheets.map(({ summary: summary }) => summary);
+  let summaries = sheets.map(({ summary }) => summary);
   let userIdSet = new Set<string>();
   for (let sheet of sheets) for (let userId of sheet.cellCountByUserId.keys()) userIdSet.add(userId);
   let userIds = [...userIdSet];
   let lastSpill: LastSpill | null = null;
   let accessorAsStored: WorkbookReads | null = null;
-  let hasOwnRowOrder = summaries.some(({ ownRowOrder: ownRowOrder }) => ownRowOrder !== null);
+  let hasOwnRowOrder = summaries.some(({ ownRowOrder }) => ownRowOrder !== null);
   let accessor: WorkbookReads = {
     listSheets: () => summaries,
     asStored: () =>
@@ -961,20 +996,21 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
     mostOptionsInADropdown: () => workbook.mostOptionsInADropdown,
     longestSheetNameInCharacters: () => workbook.longestSheetNameInCharacters,
     mostFilledCells: () => workbook.mostCells,
+    limitsOfNamedViews: () => workbook.limitsOfNamedViews,
     deepestGroup: () => workbook.deepestGroup,
     mostCheckboxesOfOneInsert: () => workbook.mostCheckboxesOfOneInsert,
     mostEditsInAStep: () => workbook.mostEditsInAStep,
     limitsOfConditionalFormats: () => workbook.limitsOfConditionalFormats,
     limitsOfPlacements: () => workbook.limitsOfPlacements,
-    positionOfCell({ sheetId: sheetId, rowId: rowId, columnId: columnId }) {
+    positionOfCell({ sheetId, rowId, columnId }) {
       let entry = sheetsById.get(sheetId);
       let rowIndex = entry?.rows.indexOf(rowId) ?? null;
       let columnIndex = entry?.columns.indexOf(columnId) ?? null;
       return rowIndex === null || columnIndex === null
         ? null
         : {
-            rowIndex: rowIndex,
-            columnIndex: columnIndex,
+            rowIndex,
+            columnIndex,
           };
     },
     rowIndexOf: (sheetId, rowId) => sheetsById.get(sheetId)?.rows.indexOf(rowId) ?? null,
@@ -986,20 +1022,20 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
       return rowId === null || columnId === null
         ? null
         : {
-            sheetId: sheetId,
-            rowId: rowId,
-            columnId: columnId,
+            sheetId,
+            rowId,
+            columnId,
           };
     },
     linesOf: (sheetId) => sheetsById.get(sheetId) ?? null,
-    cellOf: ({ sheetId: sheetId, rowId: rowId, columnId: columnId }) => sheetsById.get(sheetId)?.cellsByRow.get(rowId)?.get(columnId) ?? null,
-    spilledCellOf: ({ sheetId: sheetId, rowId: rowId, columnId: columnId }) =>
+    cellOf: ({ sheetId, rowId, columnId }) => sheetsById.get(sheetId)?.cellsByRow.get(rowId)?.get(columnId) ?? null,
+    spilledCellOf: ({ sheetId, rowId, columnId }) =>
       sheetsById.get(sheetId)?.spilledCellsByRow.get(rowId)?.get(columnId) ?? null,
-    cellOnShowIn({ sheetId: sheetId, rowId: rowId, columnId: columnId }) {
+    cellOnShowIn({ sheetId, rowId, columnId }) {
       let entry = sheetsById.get(sheetId);
       return entry?.cellsByRow.get(rowId)?.get(columnId) ?? entry?.spilledCellsByRow.get(rowId)?.get(columnId) ?? null;
     },
-    formatOf: ({ sheetId: sheetId, rowId: rowId, columnId: columnId }) =>
+    formatOf: ({ sheetId, rowId, columnId }) =>
       sheetsById.get(sheetId)?.cellFormats.formatOf(rowId, columnId) ?? DEFAULT_CELL_FORMAT,
     sharedFormatBetween(oneCorner, otherCorner) {
       let entry = sheetsById.get(oneCorner.sheetId);
@@ -1019,15 +1055,17 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
     formatsGivenIn: (sheetId) => sheetsById.get(sheetId)?.formatsGiven ?? NO_FORMATS_GIVEN,
     placementsIn: (sheetId) => sheetsById.get(sheetId)?.placements ?? NO_PLACEMENTS,
     cellTablesDeclaredIn: (sheetId) => sheetsById.get(sheetId)?.cellTables ?? NO_CELL_TABLES,
+    namedViewsIn: (sheetId) => sheetsById.get(sheetId)?.namedViews ?? NO_NAMED_VIEWS,
     viewAsItStands: (viewId) => workbook.views.get(viewId) ?? null,
     rowSizingOf: (sheetId) => sheetsById.get(sheetId)?.rowSizing() ?? [],
     whereTextWraps: (sheetId) => sheetsById.get(sheetId)?.entriesThatWrapText() ?? [],
     cellsWithListsIn: (sheetId) => sheetsById.get(sheetId)?.cellsWithListsByRow ?? EMPTY_SHEET_CELLS.cellsWithListsByRow,
     hasBorderLine: (sheetId) => sheetsById.get(sheetId)?.hasBorderLine() ?? false,
     bordersMayChangeBefore: (sheetId, area) => borderEdgesNear(sheetsById.get(sheetId)?.entriesWithBorders() ?? [], area),
+    isTextClippedIn: (sheetId, area) => clipsWithin(sheetsById.get(sheetId)?.formats() ?? [], area),
     numberFormatPatternsIn: (sheetId, area) => numberFormatPatternsWithin(sheetsById.get(sheetId)?.numberFormats() ?? [], area),
     hexColorsOf: (sheetId) => sheetsById.get(sheetId)?.hexColors() ?? [],
-    dropdownOf({ sheetId: sheetId, rowId: rowId, columnId: columnId }) {
+    dropdownOf({ sheetId, rowId, columnId }) {
       let entry = sheetsById.get(sheetId);
       let cellControl = entry?.cellFormats.formatOf(rowId, columnId).cellControl;
       if (entry === undefined || cellControl?.kind !== 'dropdown') return null;
@@ -1061,8 +1099,8 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
             };
       let over = entry === undefined || ownRowOrder !== null ? spillAsSeen : spillAreaOver(entry, cell);
       lastSpill = {
-        key: key,
-        over: over,
+        key,
+        over,
       };
       return over;
     },
@@ -1084,7 +1122,7 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
       let entry = sheetsById.get(sheetId);
       return entry === undefined ? [] : columnIndexesOnShow(entry, rowIndex);
     },
-    mergedAreaAt: (sheetId, { rowIndex: rowIndex, columnIndex: columnIndex }) =>
+    mergedAreaAt: (sheetId, { rowIndex, columnIndex }) =>
       sheetsById
         .get(sheetId)
         ?.mergedAreas.find(
@@ -1092,18 +1130,18 @@ export function createWorkbookAccessor(workbook: WorkbookRead, services: Workboo
         ) ?? null,
     mergedAreasIn: (sheetId, area) => sheetsById.get(sheetId)?.mergedAreas.filter((merged) => areasOverlap(merged, area)) ?? [],
     userIds: () => userIds,
-    isEveryCellBlank: sheets.every(({ cellsByRow: cellsByRow }) => cellsByRow.size === 0),
+    isEveryCellBlank: sheets.every(({ cellsByRow }) => cellsByRow.size === 0),
     filledCellCount() {
       let count = 0;
-      for (let { cellsByRow: cellsByRow } of sheets) for (let cellsOfRow of cellsByRow.values()) count += cellsOfRow.size;
+      for (let { cellsByRow } of sheets) for (let cellsOfRow of cellsByRow.values()) count += cellsOfRow.size;
       return count;
     },
-    calculationTookTooLong: calculationTookTooLong,
-    timeZone: timeZone,
-    locale: locale,
-    decimalSign: decimalSign,
-    signsOfNumbers: signsOfNumbers,
-    patternOfATimeOfDay: patternOfATimeOfDay,
+    calculationTookTooLong,
+    timeZone,
+    locale,
+    decimalSign,
+    signsOfNumbers,
+    patternOfATimeOfDay,
     ...services,
     ...bindLocaleHelpers(locale, services),
   };
@@ -1114,7 +1152,7 @@ export function servicesAsStored(services: WorkbookServices, ownRowOrderOf: (she
     ...services,
     tableAtCell(cell) {
       let [table, ownRowOrder] = [services.tableAtCell(cell), ownRowOrderOf(cell.sheetId)];
-      return ownRowOrder === null ? table : tableReadIn('stored', ownRowOrder, table);
+      return ownRowOrder === null || table === 'nowhere' ? table : tableReadIn('stored', ownRowOrder, table);
     },
     cellTableAt(cell) {
       let [cellTable, ownRowOrder] = [services.cellTableAt(cell), ownRowOrderOf(cell.sheetId)];
@@ -1127,7 +1165,7 @@ export function servicesAsStored(services: WorkbookServices, ownRowOrderOf: (she
         : cellTables.map((cellTable) => cellTableIn('stored', ownRowOrder, cellTable));
     },
     conditionalFormatsAsAgentIsTold(oneCell, otherCell) {
-      let [rowIds, ownRowOrder] = [[oneCell.rowId, otherCell.rowId], ownRowOrderOf(oneCell.sheetId)];
+      let [rowIds, ownRowOrder]: [RowEnds, OwnRowOrder | null] = [[oneCell.rowId, otherCell.rowId], ownRowOrderOf(oneCell.sheetId)];
       let [oneRowId, otherRowId] = ownRowOrder === null ? rowIds : rowEndsAsSeen(ownRowOrder, rowIds);
       return services.conditionalFormatsAsAgentIsTold({ ...oneCell, rowId: oneRowId }, { ...otherCell, rowId: otherRowId });
     },
@@ -1150,32 +1188,37 @@ export function fullShownTextOfCell(workbook: WorkbookReads, cellId: CellId): st
   let cell = workbook.cellOnShowIn(cellId);
   if (cell?.shown?.kind !== 'text') return null;
   let value = cellValueOf(cell);
-  let { pattern: pattern } = numberFormatOfCell(workbook, cellId);
+  let { pattern } = numberFormatOfCell(workbook, cellId);
   return value?.kind === 'number' && GENERAL_OR_TEXT_PATTERN.test(pattern)
     ? (workbook.shownWithRoomForAll(value, pattern) ?? cell.shown.text)
     : cell.shown.text;
 }
 export const embedRefsOfView = (viewWithInputs: ViewWithInputs | null | undefined): string[] =>
-  (viewWithInputs?.view.elements ?? []).map(({ embed: embed }) => embed.ref);
+  (viewWithInputs?.view.elements ?? []).map(({ embed }) => embed.ref);
 export const isInputRowBlank = (row: InputRow | undefined): boolean =>
-  row === undefined || row.every(({ value: value, text: text }) => text === '' && (value === null || value === ''));
-export const inputRangeKey = ({ range: { sheetId: sheetId, topLeft: topLeft, bottomRight: bottomRight } }: InputOfAWidget): string =>
+  row === undefined || row.every(({ value, text }) => text === '' && (value === null || value === ''));
+export const inputRangeKey = ({ range: { sheetId, topLeft, bottomRight } }: InputOfAWidget): string =>
   JSON.stringify([sheetId, ...(topLeft.r < bottomRight.r ? [topLeft.r, bottomRight.r] : [bottomRight.r, topLeft.r])]);
-export const viewInputsFromAnswer = ({ answer: answer }: InputsOfViewRead, view: View): ViewInputs =>
+export const rowsByInputName = (inputs: readonly { name: string; rows: InputRow[] }[]): Record<string, InputRow[]> =>
+  Object.fromEntries(inputs.map(({ name, rows }) => [name, rows]));
+export const inputsOfAnswer = ({ answer }: InputsOfViewRead, view: View): ViewInputs =>
   'refusal' in answer
     ? answer
     : {
         byElement: new Map(
-          answer.elements.map(({ elementId: elementId, inputs: inputs }) => {
-            let inputsAsked = view.elements.find((element) => element.elementId === elementId)?.inputs;
-            let rangeKeys = inputs.map(({ name: name }) => {
+          answer.elements.map(({ elementId, inputs }) => {
+            let elementAsked = view.elements.find((element) => element.elementId === elementId);
+            // An interactive element's inputs are kept whole, by name.
+            if (elementAsked?.kind === 'interactive') return [elementId, rowsByInputName(inputs)];
+            let inputsAsked = elementAsked?.inputs;
+            let rangeKeys = inputs.map(({ name }) => {
               let inputAsked = inputsAsked?.find((input) => input.name === name);
               return inputAsked === undefined ? JSON.stringify(name) : inputRangeKey(inputAsked);
             });
             return [
               elementId,
               Object.fromEntries(
-                inputs.map(({ name: name, rows: rows }, index) => {
+                inputs.map(({ name, rows }, index) => {
                   let inputsOfSameRows = inputs.filter((_input, otherIndex) => rangeKeys[otherIndex] === rangeKeys[index]);
                   let rowCount = rowCountBeforeNextBlock(inputsOfSameRows.map((input) => input.rows));
                   return [name, rowCount < rows.length ? rows.slice(0, rowCount) : rows];
@@ -1185,26 +1228,36 @@ export const viewInputsFromAnswer = ({ answer: answer }: InputsOfViewRead, view:
           }),
         ),
       };
+export const viewInputsFromAnswer = (view: View, entry: InputsOfViewRead): ViewWithInputs => ({
+  view,
+  inputs: inputsOfAnswer(entry, view),
+  ...('canBeReset' in entry.answer && {
+    canBeReset: true,
+  }),
+  ...('hasDefaultsToSave' in entry.answer && {
+    hasDefaultsToSave: true,
+  }),
+});
 export const ZERO_ANCHOR_OFFSET: OffsetOfAPlacement = {
   xInPixels: 0,
   yInPixels: 0,
 };
 export const placementsOnGrid = (placements: readonly PlacementContents[], rows: LineIndex, columns: LineIndex): PlacementOnGrid[] =>
-  placements.map(({ placementId: placementId, placement: placement, liveTopLeft: liveTopLeft }) => {
+  placements.map(({ placementId, placement, liveTopLeft }) => {
     let [rowIndex, columnIndex] = [rows.indexOf(liveTopLeft.r), columns.indexOf(liveTopLeft.c)];
     if (rowIndex === null || columnIndex === null) throw Error('sheets-core placed a view at a cell that is not in the sheet');
-    let { shows: shows, widthInPixels: widthInPixels, heightInPixels: heightInPixels } = placement;
+    let { shows, widthInPixels, heightInPixels } = placement;
     return {
-      placementId: placementId,
+      placementId,
       viewId: shows.viewId,
-      rowIndex: rowIndex,
-      columnIndex: columnIndex,
+      rowIndex,
+      columnIndex,
       offsetFromAnchorCell: placement.offsetFromAnchorCell ?? ZERO_ANCHOR_OFFSET,
-      widthInPixels: widthInPixels,
-      heightInPixels: heightInPixels,
+      widthInPixels,
+      heightInPixels,
     };
   });
-export const cellRefOf = ({ rowId: rowId, columnId: columnId }: Pick<CellId, 'rowId' | 'columnId'>): CellAt => ({
+export const cellRefOf = ({ rowId, columnId }: Pick<CellId, 'rowId' | 'columnId'>): CellAt => ({
   r: rowId,
   c: columnId,
 });
@@ -1223,6 +1276,7 @@ export const DEFAULT_LOCALE_PATTERNS: LocalePatterns = {
 };
 export const NO_PLACEMENTS: PlacementOnGrid[] = [];
 export const NO_CELL_TABLES: CellTableContents[] = [];
+export const NO_NAMED_VIEWS: NamedViewContents[] = [];
 export const NO_FORMATS_GIVEN: FormatsGiven = {
   notWorkedOut: null,
   formats: [],
@@ -1239,15 +1293,15 @@ export const EMPTY_SHEET_CELLS: SheetCells = {
   columnIndexesOnShowByRow: new Map(),
 };
 export const groupsOnGrid = (groups: readonly GroupContents[], lineIndex: LineIndex): GroupOnGrid[] =>
-  groups.map(({ groupId: groupId, ends: ends, depth: depth, isCollapsed: isCollapsed }) => {
+  groups.map(({ groupId, ends, depth, isCollapsed }) => {
     let [firstIndex, lastIndex] = [lineIndex.indexOf(ends.first), lineIndex.indexOf(ends.last)];
     if (firstIndex === null || lastIndex === null || lastIndex < firstIndex) throw Error('sheets-core named a group whose ends are not in the sheet in that order');
     return {
-      groupId: groupId,
-      firstIndex: firstIndex,
+      groupId,
+      firstIndex,
       count: lastIndex - firstIndex + 1,
-      depth: depth,
-      isCollapsed: isCollapsed,
+      depth,
+      isCollapsed,
     };
   });
 export const isIndexWithin = (index: number, first: number, count: number): boolean => index >= first && index < first + count;
@@ -1260,13 +1314,13 @@ export const DEFAULT_TIME_OF_DAY_PATTERN = 'h:mm AM/PM';
 export const bindLocaleHelpers = (
   locale: string,
   {
-    dayTypedInLocaleAs: dayTypedInLocaleAs,
-    shownInLocaleWithRoomForAll: shownInLocaleWithRoomForAll,
-    patternReadInLocale: patternReadInLocale,
-    formulaInLocale: formulaInLocale,
-    patternsOfLocale: patternsOfLocale,
-    fitOfColumnReadingsInLocale: fitOfColumnReadingsInLocale,
-    textsUnderAColumnReadingInLocale: textsUnderAColumnReadingInLocale,
+    dayTypedInLocaleAs,
+    shownInLocaleWithRoomForAll,
+    patternReadInLocale,
+    formulaInLocale,
+    patternsOfLocale,
+    fitOfColumnReadingsInLocale,
+    textsUnderAColumnReadingInLocale,
   }: WorkbookServices,
 ): LocaleHelpers => ({
   dayTypedAs: (...args: [text: string]) => dayTypedInLocaleAs(locale, ...args),
@@ -1279,5 +1333,5 @@ export const bindLocaleHelpers = (
 });
 export const readsAsStoredCache = new WeakMap<WorkbookReads, WorkbookReads>();
 export const GENERAL_OR_TEXT_PATTERN = /general|@/i;
-export const numberFormatOfCell = (workbook: WorkbookReads, cellId: CellId): { pattern: string } =>
+export const numberFormatOfCell = (workbook: WorkbookReads, cellId: CellId): KindedNumberFormat =>
   workbook.cellOnShowIn(cellId)?.numberFormatBrought ?? workbook.formatOf(cellId).numberFormat;

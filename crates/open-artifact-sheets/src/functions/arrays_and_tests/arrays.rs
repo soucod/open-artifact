@@ -277,7 +277,7 @@ pub fn sort_by(args: &[Arg], cx: &mut CallContext) -> Answer {
     let mut order: Vec<usize> = (0..count).collect();
     order.sort_by(|&p, &q| {
         for (key, descending) in &keys {
-            let o = sort_order(&key.values()[p], &key.values()[q], *descending);
+            let o = sort_order(key.array.get_flat(p), key.array.get_flat(q), *descending);
             if o != Ordering::Equal {
                 return o;
             }

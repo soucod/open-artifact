@@ -33,6 +33,8 @@ import { frameKeyPressed } from './services/follow.ts';
 import { openFind, useFind } from './services/find.ts';
 import { runCollabShortcut } from './services/collab.ts';
 import { isTextField } from '@open-artifact/editor-kit';
+import { copyAs } from './services/capture.ts';
+import { isCopyPngKey, zoomKeyOf } from './lib/physical-keys.ts';
 
 /** A key press, from the window or from a frame. */
 export interface KeyPress {
@@ -112,6 +114,11 @@ export function runShortcut({ key, code, meta, shift, alt }: KeyPress, fromFrame
     return true;
   }
 
+  if (isCopyPngKey({ key, code, meta, shift, alt })) {
+    void copyAs('png');
+    return true;
+  }
+
   if (meta) {
     switch (lower) {
       case 'c':
@@ -177,6 +184,16 @@ export function runShortcut({ key, code, meta, shift, alt }: KeyPress, fromFrame
 
   if (view.mode === 'focused') return false;
 
+  const zoomKey = zoomKeyOf({ key, code, meta, shift, alt });
+  if (zoomKey) {
+    const s = view.selection;
+    if (zoomKey === 'fit') zoomToFit();
+    else if (zoomKey === 'actual') zoomTo(1);
+    else if (s.kind === 'objects' && s.boards.length) zoomToBoards(s.boards);
+    else if (s.kind === 'elements') zoomToBoards([s.board]);
+    return true;
+  }
+
   switch (key) {
     case 'Delete':
     case 'Backspace':
@@ -211,18 +228,6 @@ export function runShortcut({ key, code, meta, shift, alt }: KeyPress, fromFrame
       if (view.selection.kind !== 'elements' || doc.readOnly) return false;
       reorderSelection(key === ']' ? 1 : -1, true);
       return true;
-    case '!':
-      zoomToFit();
-      return true;
-    case ')':
-      zoomTo(1);
-      return true;
-    case '@': {
-      const s = view.selection;
-      if (s.kind === 'objects' && s.boards.length) zoomToBoards(s.boards);
-      else if (s.kind === 'elements') zoomToBoards([s.board]);
-      return true;
-    }
     default:
       break;
   }

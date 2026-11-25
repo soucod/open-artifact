@@ -116,6 +116,33 @@ test('wake: an inbox wake nudges its session; a live one does not', async () => 
   assert.equal(nudged.length, 1, 'delivered live, no nudge');
 });
 
+test('wake: a session already nudged is not nudged again until it takes its inbox', async () => {
+  const owner: SessionRef = { harness: 'codex', session: 'thread-nudge-once', workspace: null };
+  let nudges = 0;
+  const store = new ArtifactStore();
+  const inbox = new Inbox();
+  const wake = new WakeRouter({
+    store,
+    inbox,
+    live: () => ({ deliver: async () => null }),
+    viewUrl: (id) => `http://127.0.0.1:1/a/${id}`,
+    log: () => undefined,
+    mergeMs: 10,
+    nudge: () => void nudges++,
+  });
+  const key = sessionKeyOf(owner)!;
+  inbox.take(key);
+  const record = store.create({ root: join(tempDir('open-artifact-root-'), 'q'), type: 'design', owner, title: 'Queued' });
+  await wake.ask(record.id, 'One');
+  await wake.ask(record.id, 'Two');
+  assert.equal(nudges, 1, 'the first nudge’s turn takes both');
+  assert.equal(inbox.count(key), 2);
+  inbox.take(key);
+  await wake.ask(record.id, 'Three');
+  assert.equal(nudges, 2, 'taken: the next wake nudges again');
+  inbox.take(key);
+});
+
 test('wake: with nobody live it waits in the owner inbox, or the unowned one', async () => {
   const { store, inbox, wake } = router({ deliver: async () => null });
   const owned = store.create({ root: join(tempDir('open-artifact-root-'), 'a'), type: 'design', owner, title: 'Owned' });

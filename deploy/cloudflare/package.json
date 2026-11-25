@@ -1,0 +1,16 @@
+{
+  "name": "open-artifact-cloudflare-dev",
+  "version": "0.14.6",
+  "private": true,
+  "type": "module",
+  "description": "The wrangler project that bundles packages/host-cloudflare into the Open Artifact cloud host (and a rooms test Worker) for wrangler dev. Not a workspace of the repository: it has its own node_modules.",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "./dev.sh"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "wrangler": "4.166.0"
+  },
+  "license": "Apache-2.0"
+}

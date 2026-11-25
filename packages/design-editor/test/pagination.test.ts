@@ -191,5 +191,7 @@ describe('the HTML exports', () => {
     assert.ok(readme.includes('`sub/support.js`'));
     assert.ok(readme.includes('2 uploaded files'));
     assert.ok(readme.includes('`/_blob/gone` (used in `Home.dc.html`)'));
+    const stalled = exportReadme({ title: 'T', boards, resources: [], assets: 0, missing: [{ ref: '/_blob/slow', usedIn: ['Home.dc.html'], why: 'the download stopped responding' }], runtimes: [''] });
+    assert.ok(stalled.includes('`/_blob/slow` (used in `Home.dc.html`): the download stopped responding'));
   });
 });

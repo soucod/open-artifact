@@ -12,8 +12,8 @@ import { MAX_ZOOM, MIN_ZOOM, useView, type Camera } from '../state/view.ts';
 /** The viewport element's size, updated by the canvas component. */
 export const viewportSize = { width: 1, height: 1 };
 
-/** Fit the page once the canvas has measured itself (on load, after the focused view). */
-export const pendingFit = { current: true };
+/** Fit the page, or `boards` when set, once the canvas has measured itself (on load, after the focused view). */
+export const pendingFit: { current: boolean; boards: string[] | null } = { current: true, boards: null };
 
 /** Zoom presets offered by the zoom menu. */
 export { ZOOM_PRESETS };

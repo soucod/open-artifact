@@ -12,7 +12,8 @@
  *   way), a text below.
  * - Tab in a single-line field (a title, an arrow label) ends the edit and
  *   moves to the next item in reading order (Shift+Tab: the previous one).
- * - A free text left blank is removed when its edit ends.
+ * - A free text left blank is removed when its edit ends (one with a
+ *   placeholder is kept, empty).
  */
 
 import {
@@ -24,6 +25,7 @@ import {
   orderElementsForReading,
   placeNextItemBeside,
   removeElements,
+  showsTextPlaceholder,
   tableColumnIds,
   tableRowIds,
   type BoardElement,
@@ -39,9 +41,10 @@ import { currentMeasures } from '../state/measures.ts';
 import { useSelection, type TextEditTarget } from '../state/selection.ts';
 import { placeElement, randomNoteTilt } from '../tools/place.ts';
 import { openContextMenuAt } from '../ui/ContextMenu.tsx';
-import { boardElements, canEditBoard, editContent, runTableCellCommand, viewerAuthor } from './actions.ts';
+import { boardElements, canEditBoard, editContent, patchElements, runTableCellCommand, viewerAuthor } from './actions.ts';
 import { announce, emptyBlockRemovedMessage } from './announce.ts';
 import { focusItem } from './keyboard.ts';
+import { finishTextPush } from './text-push.ts';
 
 /** A table cell being edited. */
 type CellTarget = Extract<TextEditTarget, { kind: 'cell' }>;
@@ -171,14 +174,24 @@ function stepField(target: TextEditTarget, backwards: boolean): boolean {
 /* ------------------------------------------------------------------------ */
 
 /**
- * A free text left blank goes away when its edit ends. The removal merges
- * into the edit's own undo step when it follows the typing at once, so a
- * single undo brings the text back as it was.
+ * A free text left blank goes away when its edit ends, unless it has a
+ * placeholder (it is then saved empty). The removal merges into the edit's
+ * own undo step when it follows the typing at once, so a single undo brings
+ * the text back as it was; items the typing pushed down go back first.
  */
 function removeIfBlank(target: TextEditTarget): void {
-  if (target.kind !== 'element' || !canEditBoard()) return;
+  if (target.kind !== 'element') return;
   const element = useBoard.getState().byId.get(target.id);
-  if (element?.type !== 'text' || element.text.trim() !== '' || isElementLocked(element)) return;
+  if (!canEditBoard() || element?.type !== 'text' || element.text.trim() !== '' || isElementLocked(element)) {
+    finishTextPush(target.id, true);
+    return;
+  }
+  if (showsTextPlaceholder(element)) {
+    finishTextPush(element.id, true);
+    if (element.text !== '') patchElements([element.id], (next) => (next.type === 'text' ? { ...next, text: '' } : next), { label: 'Edit text', coalesce: editCoalesceKey(element.id) });
+    return;
+  }
+  finishTextPush(element.id, false);
   const ids = new Set<ElementId>([element.id]);
   const removed = editContent((content) => removeElements(content, ids), { label: 'Remove empty', coalesce: editCoalesceKey(element.id) });
   if (!removed) return;

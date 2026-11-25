@@ -17,10 +17,11 @@ export interface CaptureRecipe {
 
 /**
  * The design editor draws each artboard as a `[data-board]` element holding the board's iframe; the first artboard on
- * the canvas is the picture.
+ * the canvas is the picture. The motion editor draws its stage inside `[data-video-stage]`.
  */
 const RECIPES: Record<string, CaptureRecipe> = {
   design: { width: 1280, height: 800, find: `document.querySelector('[data-board] > iframe')?.parentElement ?? null` },
+  motion: { width: 1280, height: 800, find: `document.querySelector('[data-video-stage] > iframe')?.parentElement ?? null` },
 };
 
 /** The thumbnail recipe of a type; the whole page at 1280×800 for one without its own. */

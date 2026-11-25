@@ -1,6 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
-export let offerTopLayerClose: Dynamic;
-export function pushTopLayerClose(offerClose?: Dynamic) {
+import type { LayerCloser } from './frame-chrome.ts';
+/** Tells the frame how to close the topmost layer of the page, or that there is none to close. */
+export type TopLayerCloseOfferer = (close: LayerCloser | null) => void;
+export let offerTopLayerClose: TopLayerCloseOfferer;
+export function pushTopLayerClose(offerClose: LayerCloser): () => void {
   topLayerClosers.push(offerClose);
   offerCloseOfTopmostLayer();
   return () => {
@@ -9,10 +11,10 @@ export function pushTopLayerClose(offerClose?: Dynamic) {
     offerCloseOfTopmostLayer();
   };
 }
-export function setTopLayerCloseOfferer(offerer?: Dynamic) {
+export function setTopLayerCloseOfferer(offerer: TopLayerCloseOfferer): void {
   offerTopLayerClose = offerer;
   offerCloseOfTopmostLayer();
 }
-export const topLayerClosers: Dynamic = [];
+export const topLayerClosers: LayerCloser[] = [];
 offerTopLayerClose = () => {};
-export const offerCloseOfTopmostLayer = () => offerTopLayerClose(topLayerClosers.at(-1) ?? null);
+export const offerCloseOfTopmostLayer = (): void => offerTopLayerClose(topLayerClosers.at(-1) ?? null);

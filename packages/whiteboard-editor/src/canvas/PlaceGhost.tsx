@@ -7,8 +7,7 @@
  * their crosshair (or text caret) in the ghost's middle.
  *
  * The ghost follows the pointer without re-rendering; it hides off the
- * board, over chrome, while a press runs, and, for the Note tool, over an
- * existing item (a press there selects it).
+ * board, over chrome and while a press runs.
  */
 
 import { ShapeFace } from '../elements/ShapeFace.tsx';
@@ -22,7 +21,6 @@ import {
   defaultShapeSize,
   inkColorOnFill,
   noteColorForAuthor,
-  screenToBoard,
   type ShapeElement,
   type ShapeKind,
 } from '@open-artifact/whiteboard-core';
@@ -31,7 +29,6 @@ import { canEditBoard, viewerAuthor } from '../services/actions.ts';
 import { useCamera } from '../state/camera.ts';
 import { useColorScheme } from '../state/theme.ts';
 import { effectiveTool, useTool, type StickerChoice } from '../state/tool.ts';
-import { hitContext, hitElementAt } from '../tools/hit.ts';
 import { NOTE_TEMPLATE_SIZE, TEXT_TEMPLATE_Y } from '../tools/place.ts';
 import { StickerGlyph } from '../ui/StickerGlyph.tsx';
 
@@ -86,10 +83,6 @@ export function PlaceGhost({ surface }: { surface: React.RefObject<HTMLDivElemen
       const bounds = element.getBoundingClientRect();
       const x = point.clientX - bounds.left;
       const y = point.clientY - bounds.top;
-      if (kind === 'note') {
-        const at = screenToBoard(useCamera.getState().camera, x, y);
-        if (hitElementAt(hitContext(), at, 'mouse') !== undefined) return show(false);
-      }
       if (root.current) root.current.style.translate = `${x}px ${y}px`;
       show(true);
     };
@@ -115,7 +108,7 @@ export function PlaceGhost({ surface }: { surface: React.RefObject<HTMLDivElemen
     element.addEventListener('pointerdown', onDown, { capture: true });
     window.addEventListener('pointerup', onUp, { capture: true });
     window.addEventListener('pointercancel', onUp, { capture: true });
-    // The camera moves the board under a still pointer (a note may come to sit over an item).
+    // The camera moves the board under a still pointer.
     const offCamera = useCamera.subscribe((state, previous) => {
       if (state.camera !== previous.camera) place();
     });

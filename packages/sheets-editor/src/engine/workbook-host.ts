@@ -12,6 +12,9 @@ import {
 import { runEditOrRefuse, type WorkerLine } from './worker-line.ts';
 import type { SheetsUtilities, WorkbookCore } from './wasm-bindings.ts';
 import type { CoreRead } from './core-reads.ts';
+import type { CopyWritten, WriteCopy } from './written-copy.ts';
+import type { ClipboardContent } from '../state/controller.ts';
+import type { CopiedValues } from '@open-artifact/sheets-core';
 import type { ErrorKind } from '../model/refusals.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { ClockReading } from '../store/frames.ts';
@@ -39,9 +42,22 @@ export interface WorkbookHostOptions {
   wait(ms: number): Promise<void>;
   nowMs(): number;
   calculateLater(calculate: () => void): void;
+  /** Writes a copy the page asks for; the page's own code, given here so the host does not load it. */
+  writeCopy: WriteCopy;
 }
 
 export type StoreQuestion = { kind: 'save'; edit: EditToSave } | { kind: 'loadOps' } | { kind: 'askRevision' };
+
+/**
+ * A copy written on the worker as it is sent to the page: its values beside its contents, and the text with numbers
+ * whole only where it differs from the text.
+ */
+export interface CopyAnswered {
+  contents: Omit<ClipboardContent, 'valuesOfCopiedCells' | 'textWithNumbersWhole'>;
+  values: CopiedValues | null;
+  textWithNumbersWhole: string | null;
+  whatTheLookThrew: string | null;
+}
 
 /** A question of the page answered on the worker, with the question it answers. */
 export type QuestionAnswered<K extends QuestionKind = QuestionKind> = {
@@ -160,13 +176,31 @@ export function timeInWorkbookZone(reads: WorkbookReads, timeTold: ClockReading)
   return timeTold.timeZone !== null && reads.timeZoneNamed(timeTold.timeZone) === reads.timeZone ? timeTold : { ...timeTold, timeZone: reads.timeZone };
 }
 
-/** For each kind of question, how the workbook's reads answer it. */
+export function copyAnswered({ contents: { valuesOfCopiedCells, textWithNumbersWhole, ...contents }, whatTheLookThrew }: CopyWritten): CopyAnswered {
+  return {
+    contents,
+    values: valuesOfCopiedCells?.values ?? null,
+    textWithNumbersWhole: textWithNumbersWhole === contents.text ? null : textWithNumbersWhole,
+    whatTheLookThrew,
+  };
+}
+
+/** For each kind of question, how the workbook's reads answer it (a copy is written with rows read anew). */
 type QuestionAnswerers = {
-  [K in QuestionKind]: (reads: WorkbookReads, question: QuestionOf<K>, rowsOfATable: RowsOfATable | null) => AnswerOfQuestion<K>;
+  [K in QuestionKind]: (
+    reads: WorkbookReads,
+    question: QuestionOf<K>,
+    rowsOfATable: RowsOfATable | null,
+    opened: SyncedWorkbook,
+    writeCopy: WriteCopy,
+  ) => AnswerOfQuestion<K>;
 };
 
 const QUESTION_ANSWERERS: QuestionAnswerers = {
-  cellsToCopy: (reads, q) => reads.cellsToCopy(q.oneCorner, q.otherCorner, q.rowsOutOfView),
+  writtenCopy(reads, { oneCorner, otherCorner, rowsOutOfView }, rows, opened, writeCopy) {
+    let written = writeCopy(reads, opened.readsWithCellsIn, [oneCorner, otherCorner, rowsOutOfView]);
+    return written === null ? null : copyAnswered(written);
+  },
   dropdownOptionsToOffer: (reads, q) => reads.dropdownOptionsToOffer(q.oneCorner, q.otherCorner),
   cellsThatADropdownWouldClear: (reads, q) => reads.cellsThatADropdownWouldClear(q.oneCorner, q.otherCorner, q.dropdown),
   cellsOfTheDropdownAt: (reads, q) => reads.cellsOfTheDropdownAt(q.cellId),
@@ -184,16 +218,22 @@ const QUESTION_ANSWERERS: QuestionAnswerers = {
   filteredRows: (reads, q) => reads.filteredRows(q.table, q.filter),
   rowsInSortedOrder: (reads, q) => reads.rowsInSortedOrder(q.toSort),
   valuesOfFilteredColumn: (reads, q) => reads.valuesOfFilteredColumn(q.table, q.filter, q.c),
+  tablesOfSheet: (reads, q) => reads.tablesOfSheet(q.sheetId),
+  pivotTableAt: (reads, q) => reads.pivotTableAt(q.cellId),
+  valuesToFilterPivotTableBy: (reads, { source, c, keeps, listed }) => reads.valuesToFilterPivotTableBy(source, c, keeps, listed),
   causeOfError: (reads, q) => reads.causeOfError(q.cellId, q.cellNow),
 };
 
 export function answerQuestion<K extends QuestionKind>(
   question: QuestionOf<K>,
-  reads: WorkbookReads,
+  opened: SyncedWorkbook,
   rowsOfATable: RowsOfATable | null,
+  writeCopy: WriteCopy,
 ): QuestionAnswered<K> | undefined {
   const answerer = QUESTION_ANSWERERS[question.kind];
-  return answerer === undefined ? undefined : { about: question.kind, question, answer: answerer(reads, question, rowsOfATable) };
+  return answerer === undefined
+    ? undefined
+    : { about: question.kind, question, answer: answerer(opened.reads(), question, rowsOfATable, opened, writeCopy) };
 }
 
 const savingStateOf = (workbook: SyncedWorkbook): WorkbookSavingState => ({
@@ -262,10 +302,10 @@ export function hostWorkbook(options: WorkbookHostOptions): void {
   let rowsOfATable: RowsOfATable | null = null;
   const answer = (question: WorkbookQuestion, opened: SyncedWorkbook): void => {
     try {
-      tell({ kind: 'answered', ...answerQuestion(question, opened.reads(), rowsOfATable)! });
+      tell({ kind: 'answered', ...answerQuestion(question, opened, rowsOfATable, options.writeCopy)! });
     } catch (error) {
       tellThrown(error);
-      tell({ kind: 'answered', ...answerQuestion(question, opened.reads(), rowsOfATable)! });
+      tell({ kind: 'answered', ...answerQuestion(question, opened, rowsOfATable, options.writeCopy)! });
     }
   };
   const tablesFollower = createTablesFollower({

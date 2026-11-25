@@ -36,15 +36,21 @@ export async function expectStatus(res, status) {
   }
 }
 
-/** A GET with a Host header of our choosing (fetch will not send one): resolves {status, body}. */
+/** A GET with a Host header of our choosing (fetch will not send one): resolves {status, body, headers}. */
 export function getWithHost(url, host) {
+  return requestWithHost(url, host);
+}
+
+/** A request with a Host header of our choosing: resolves {status, body, headers}. */
+export function requestWithHost(url, host, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, { headers: { host } }, res => {
-      let body = '';
-      res.on('data', d => (body += d));
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+    const req = http.request(url, { method, headers: { ...headers, host } }, res => {
+      let text = '';
+      res.on('data', d => (text += d));
+      res.on('end', () => resolve({ status: res.statusCode, body: text, headers: res.headers }));
     });
     req.on('error', reject);
+    req.end(body);
   });
 }
 

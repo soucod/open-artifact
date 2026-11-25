@@ -1,13 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
-export function watchTabVisibility(onVisibility?: Dynamic) {
-  let tell = () => onVisibility((document as Dynamic).hidden);
+export function watchTabVisibility(onVisibility: (isHidden: boolean) => void) {
+  let tell = () => onVisibility(document.hidden);
   tell();
-  (document as Dynamic).addEventListener('visibilitychange', tell);
-  (window as Dynamic).addEventListener('focus', tell);
-  (window as Dynamic).addEventListener('online', tell);
+  document.addEventListener('visibilitychange', tell);
+  window.addEventListener('focus', tell);
+  window.addEventListener('online', tell);
   return () => {
-    (document as Dynamic).removeEventListener('visibilitychange', tell);
-    (window as Dynamic).removeEventListener('focus', tell);
-    (window as Dynamic).removeEventListener('online', tell);
+    document.removeEventListener('visibilitychange', tell);
+    window.removeEventListener('focus', tell);
+    window.removeEventListener('online', tell);
   };
 }

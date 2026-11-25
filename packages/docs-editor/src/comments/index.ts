@@ -18,6 +18,7 @@ import { CommentsButton } from './CommentsButton.tsx';
 import { commentsPlugin, rangeAt } from './plugin.ts';
 import { CommentsRail } from './Rail.tsx';
 import { SelectionReactionPicker } from './Reactions.tsx';
+import { RefusedDrafts } from './RefusedDrafts.tsx';
 import { canComment, docComments, setActive, setCommentUi, threadById } from './store.ts';
 import { commentInLink, withoutComment } from './threads.ts';
 import './comments.css';
@@ -27,6 +28,7 @@ addEditorExtension({ plugins: () => [commentsPlugin()] });
 fillSlot('topBar', 'comments', CommentsButton, 30);
 fillSlot('rail', 'comments', CommentsRail, 10);
 fillSlot('overlay', 'comment-reaction-picker', SelectionReactionPicker);
+fillSlot('float', 'refused-comments', RefusedDrafts, 40);
 
 provideSuggestionReply(target => void commentOnSuggestion(target));
 

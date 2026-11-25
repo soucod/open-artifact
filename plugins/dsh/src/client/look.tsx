@@ -37,7 +37,7 @@ export const typeStyle = (type: string): CSSProperties => {
   return { '--oa-tint': c.tint, '--oa-wash': c.wash, '--oa-ink': c.ink } as CSSProperties;
 };
 
-export const BETA: readonly string[] = ['whiteboard', 'data', 'sheets'];
+export const BETA: readonly string[] = ['whiteboard', 'data', 'sheets', 'motion'];
 
 export const svg = (size: number): CSSProperties => ({ display: 'block', width: size, height: size, flex: 'none' });
 

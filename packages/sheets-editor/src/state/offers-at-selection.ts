@@ -63,8 +63,8 @@ export function stepOffersAtSelection(before: PageState, state: PageState, event
     ? offers
     : {
         ...offers,
-        areCellsSelectedByPointer: areCellsSelectedByPointer,
-        arePutAway: arePutAway,
+        areCellsSelectedByPointer,
+        arePutAway,
       };
 }
 export function mayOfferAtSelection(state: PageState, reads: WorkbookReads, explained: CellExplained | null): boolean {
@@ -84,7 +84,7 @@ export function isAreaJustActiveCell(state: PageState, reads: WorkbookReads, are
   return activeArea !== null && isSameArea(area, activeArea);
 }
 export function placeOfSelectionOffer(
-  { across: across, down: down }: ReturnType<typeof rangeSpansOnScreen>,
+  { across, down }: ReturnType<typeof rangeSpansOnScreen>,
   view: { width: number; height: number },
   zoom: number,
   { side = 'full', endOfCutText = null }: { side?: SelectionOfferSide; endOfCutText?: number | null } = {},
@@ -103,12 +103,12 @@ export function placeOfSelectionOffer(
   return {
     left: Math.min(left, maxLeft),
     middle: (top + (isTucked ? Math.min(bottomShown, bottom) : bottomShown)) / 2,
-    top: top,
-    bottom: bottom,
+    top,
+    bottom,
   };
 }
 export function isSelectionOfferCovered(
-  { left: left, middle: middle, top: top, bottom: bottom }: SelectionOfferPlace,
+  { left, middle, top, bottom }: SelectionOfferPlace,
   rects: readonly PaneRect[],
   zoom: number,
   side: SelectionOfferSide = 'full',
@@ -126,7 +126,7 @@ export const NO_OFFERS_AT_SELECTION: OffersAtSelection = {
   arePutAway: false,
   hasPersonChosenCells: false,
 };
-export const isExplainedBySelectionWithoutLinks = ({ by: by, cellId: cellId }: CellExplained, state: PageState, reads: WorkbookReads): boolean =>
+export const isExplainedBySelectionWithoutLinks = ({ by, cellId }: CellExplained, state: PageState, reads: WorkbookReads): boolean =>
   by === 'selection' && linkAddressesAt(state, reads, cellId).length === 0;
 export const isChosenCellAlone = (state: PageState, reads: WorkbookReads, area: CellArea): boolean =>
   state.offersAtSelection.hasPersonChosenCells &&

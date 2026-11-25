@@ -1,9 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
 import { hasUnsavedSidePaneTyping } from '../chips/dropdown-pane-edits.ts';
 import { isModalOpen } from '../ui/find.ts';
 import { isNothingOpenButPane } from '../state/edit-refusals.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function withXlsxFileSaved(state?: Dynamic, saved?: Dynamic) {
+import type { PageState, XlsxFileSaved } from '../state/initial-state.ts';
+export function withXlsxFileSaved(state: PageState, saved: XlsxFileSaved): PageState {
   let isToBeToldOf = saved.went === 'sentToGoogleSheets' || saved.notCarriedOver.length > 0;
   return {
     ...state,
@@ -11,8 +10,8 @@ export function withXlsxFileSaved(state?: Dynamic, saved?: Dynamic) {
     xlsxFileYetToBeToldOf: isToBeToldOf ? saved : null,
   };
 }
-export function withXlsxFileToldWhenFree(state: PageState) {
-  let { xlsxFileYetToBeToldOf: xlsxFileYetToBeToldOf } = state;
+export function withXlsxFileToldWhenFree(state: PageState): PageState {
+  let { xlsxFileYetToBeToldOf } = state;
   if (xlsxFileYetToBeToldOf === null) return state;
   return state.mode.kind === 'editing' ||
     state.dragging !== null ||
@@ -26,7 +25,8 @@ export function withXlsxFileToldWhenFree(state: PageState) {
         xlsxFileYetToBeToldOf: null,
       };
 }
-export const withXlsxFileToldLater = (state: PageState) =>
+export const withXlsxFileToldLater = (state: PageState): PageState =>
+
   state.xlsxFileReady === null
     ? state
     : {

@@ -1,7 +1,7 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ShownByAgentAsk } from '../state/event-reducer.ts';
 
 export interface ViewShownByAgentFeed {
-  start(listener: (shown: Dynamic) => void): () => void;
+  start(listener: (shown: ShownByAgentAsk | null) => void): () => void;
 }
 
 export const NO_VIEW_SHOWN_BY_AGENT: ViewShownByAgentFeed = {

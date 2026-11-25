@@ -54,13 +54,13 @@ export function rowRunsOfSpans(reads: WorkbookReads, sheetId: SheetId, spans: re
   let [firstRun, ...moreRuns] = spans.flatMap((span) => rows?.runsIn(span) ?? []);
   return firstRun === undefined ? null : [firstRun, ...moreRuns];
 }
-export function cellBlockOfCorners(reads: WorkbookReads, { sheetId: sheetId, oneCorner: oneCorner, otherCorner: otherCorner }: CornersOfCells): CellBlock | null {
+export function cellBlockOfCorners(reads: WorkbookReads, { sheetId, oneCorner, otherCorner }: CornersOfCells): CellBlock | null {
   let span = rowSpanBetween(reads, sheetId, oneCorner.r, otherCorner.r);
   let runs = span === null ? null : rowRunsOfSpans(reads, sheetId, [span]);
   return runs === null
     ? null
     : {
-        sheetId: sheetId,
+        sheetId,
         rows: runs,
         oneColumn: oneCorner.c,
         otherColumn: otherCorner.c,
@@ -73,13 +73,13 @@ export function shownRowRunsBetween(state: PageState, reads: WorkbookReads, shee
 export function shownCellBlockOfCorners(
   state: PageState,
   reads: WorkbookReads,
-  { sheetId: sheetId, oneCorner: oneCorner, otherCorner: otherCorner }: CornersOfCells,
+  { sheetId, oneCorner, otherCorner }: CornersOfCells,
 ): CellBlock | null {
   let runs = shownRowRunsBetween(state, reads, sheetId, oneCorner.r, otherCorner.r);
   return runs === null
     ? null
     : {
-        sheetId: sheetId,
+        sheetId,
         rows: runs,
         oneColumn: oneCorner.c,
         otherColumn: otherCorner.c,
@@ -104,15 +104,15 @@ export function cellBlockOfSelection(state: PageState, reads: WorkbookReads, sel
   return rowSpan !== null && spansLeftByOwnFilters(state, reads, corners.sheetId, rowSpan).length > 0 ? cellBlockOfCorners(reads, corners) : null;
 }
 export function unbrokenCellBlockOfCorners(state: PageState, reads: WorkbookReads, block: CornersOfCells): CellBlock | null {
-  let { sheetId: sheetId, oneCorner: oneCorner, otherCorner: otherCorner } = block;
+  let { sheetId, oneCorner, otherCorner } = block;
   let selection: CellSelection = {
     activeCell: {
-      sheetId: sheetId,
+      sheetId,
       rowId: oneCorner.r,
       columnId: oneCorner.c,
     },
     selectionCorner: {
-      sheetId: sheetId,
+      sheetId,
       rowId: otherCorner.r,
       columnId: otherCorner.c,
     },
@@ -147,4 +147,4 @@ export function landingRowsSkippingFilters(
 export const shownRowRunsOfSpan = (state: PageState, reads: WorkbookReads, sheetId: SheetId, span: LineSpan): IdRun[] | null =>
   rowRunsOfSpans(reads, sheetId, spansLeftByOwnFilters(state, reads, sheetId, span));
 export const rowCountOfRuns = (runs: readonly IdRun[]): number =>
-  runs.reduce((total, { count: count }) => total + count, 0);
+  runs.reduce((total, { count }) => total + count, 0);

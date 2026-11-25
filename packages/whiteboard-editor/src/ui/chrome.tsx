@@ -7,6 +7,7 @@
  * - Popups may be a little wider (360px, never past the viewport), scroll
  *   when taller than the room left, and open 8px from their trigger; a
  *   menu row's icon is drawn at 16px.
+ * - A popover something was typed into stays open on a press outside.
  * - Icons inside controls are drawn at 18px.
  */
 
@@ -65,7 +66,7 @@ export function ChromeSubmenu(props: ComponentProps<typeof KitChromeSubmenu>) {
   return <KitChromeSubmenu mark={MARK} popupBase={POPUP} {...props} />;
 }
 
-/** A floating chrome panel anchored to a trigger. */
+/** A floating chrome panel anchored to a trigger; once something is typed into it, a press outside leaves it open. */
 export function ChromePopover(props: ChromePopoverProps) {
-  return <KitChromePopover mark={MARK} popupBase={POPUP} {...props} />;
+  return <KitChromePopover mark={MARK} popupBase={POPUP} holdWhileTyped {...props} />;
 }

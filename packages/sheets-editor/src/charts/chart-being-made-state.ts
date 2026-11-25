@@ -1,15 +1,26 @@
-import type { Dynamic } from '../dynamic.ts';
 import { parseA1AreaAsSeen } from '../model/a1-references.ts';
-import { placedViewBox, nodeIdOfRef, isBoxInView } from './placed-views.ts';
+import { placedViewBox, nodeIdOfRef, isBoxInView, type PlacedViewToDraw } from './placed-views.ts';
 import { DEFAULT_CHART_SIZE } from './placement.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { DrawnBox } from '../grid/view-boxes.ts';
+import type { ChartBeingMade, PageState } from '../state/initial-state.ts';
+import type { ChartBeingMadeTold } from '../state/event-reducer.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
+/** A chart being made, as drawn: where it will stand, and whether it has been added and stands elsewhere already. */
+export interface ChartBeingMadeShown {
+  nth: number;
+  box: DrawnBox;
+  isInView: boolean;
+  kind: ChartBeingMade['kind'];
+  isAdded: boolean;
+  placementId: string | null;
+  hasLandedElsewhere: boolean;
+}
 export function chartBeingMadeTold(
-  { sheetId: sheetId, chartBeingMade: chartBeingMade }: Dynamic,
+  { sheetId, chartBeingMade }: Pick<PageState, 'sheetId' | 'chartBeingMade'>,
   workbook: WorkbookReads,
-  { nth: nth, chart: chart }: Dynamic,
-) {
+  { nth, chart }: Pick<ChartBeingMadeTold, 'nth' | 'chart'>,
+): ChartBeingMade | null {
   if (chart === null || !('topLeft' in chart))
     return chartBeingMade?.nth !== nth
       ? chartBeingMade
@@ -20,32 +31,36 @@ export function chartBeingMadeTold(
             ...chart,
           };
   if (chart.sheetId !== sheetId) return null;
-  let sheet = workbook.listSheets().find((sheet2?: Dynamic) => sheet2.sheetId === sheetId);
-  let area =
+  const sheet = workbook.listSheets().find((candidate) => candidate.sheetId === sheetId);
+  const area =
     sheet === undefined
       ? null
       : parseA1AreaAsSeen(chart.topLeft, {
           ...sheet,
           ownRowOrder: null,
         });
-  let topLeft = area === null ? null : workbook.cellIdAt(sheetId, area.topRowIndex, area.leftColumnIndex);
+  const topLeft = area === null ? null : workbook.cellIdAt(sheetId, area.topRowIndex, area.leftColumnIndex);
   return topLeft === null
     ? null
     : {
-        nth: nth,
-        topLeft: topLeft,
+        nth,
+        topLeft,
         kind: chart.kind,
         nodeSent: null,
         nodeAdded: null,
       };
 }
-export function shownChartBeingMade(state: PageState, workbook: ReadsWithTextMeasurer, placedViews?: Dynamic) {
-  let { chartBeingMade: chartBeingMade } = state;
+export function shownChartBeingMade(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  placedViews: readonly PlacedViewToDraw[],
+): ChartBeingMadeShown | null {
+  const { chartBeingMade } = state;
   if (chartBeingMade === null || chartBeingMade.topLeft.sheetId !== state.sheetId) return null;
-  let position = workbook.positionOfCell(chartBeingMade.topLeft);
+  const position = workbook.positionOfCell(chartBeingMade.topLeft);
   if (position === null) return null;
-  let { nth: nth, kind: kind, nodeSent: nodeSent, nodeAdded: nodeAdded } = chartBeingMade;
-  let box = placedViewBox(state, workbook, {
+  const { nth, kind, nodeSent, nodeAdded } = chartBeingMade;
+  const box = placedViewBox(state, workbook, {
     ...position,
     offsetFromAnchorCell: {
       xInPixels: 0,
@@ -53,15 +68,15 @@ export function shownChartBeingMade(state: PageState, workbook: ReadsWithTextMea
     },
     ...DEFAULT_CHART_SIZE,
   });
-  let nodeIdOfPlaced = ({ viewId: viewId }: Dynamic) =>
+  const nodeIdOfPlaced = ({ viewId }: Pick<PlacedViewToDraw, 'viewId'>) =>
     nodeIdOfRef(workbook.viewAsItStands(viewId)?.view.elements[0]?.embed.ref ?? '');
-  let nodeId = nodeAdded ?? nodeSent;
-  let placed = nodeId === null ? undefined : placedViews.find((placed2?: Dynamic) => nodeIdOfPlaced(placed2) === nodeId);
+  const nodeId = nodeAdded ?? nodeSent;
+  const placed = nodeId === null ? undefined : placedViews.find((placedView) => nodeIdOfPlaced(placedView) === nodeId);
   return {
-    nth: nth,
-    box: box,
+    nth,
+    box,
     isInView: isBoxInView(box),
-    kind: kind,
+    kind,
     isAdded: nodeAdded !== null || placed !== undefined,
     placementId: placed?.placementId ?? null,
     hasLandedElsewhere: placed !== undefined && (placed.box.left !== box.left || placed.box.top !== box.top),

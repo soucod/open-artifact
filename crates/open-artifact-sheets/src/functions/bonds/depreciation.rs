@@ -193,7 +193,7 @@ fn dollar(price: f64, denominator: f64, decimal: bool) -> Answer {
 fn future_value(args: &[Arg], locale: &Locale) -> Answer {
     let mut value = args[0].number(locale)?;
     let rates: Vec<Value> = match &args[1] {
-        Arg::Cells(cells) => cells.values().iter().filter(|v| !matches!(v, Value::Blank)).cloned().collect(),
+        Arg::Cells(cells) => cells.values().filter(|v| !matches!(v, Value::Blank)).cloned().collect(),
         Arg::Value(v) => vec![v.clone()],
         Arg::Missing | Arg::Place(_) => vec![Value::Blank],
     };

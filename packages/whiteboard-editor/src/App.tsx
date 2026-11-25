@@ -6,12 +6,11 @@
  * .wb-root
  *   BoardContextMenu                 right-click / long-press menus
  *     BoardSurface
- *       camera layer (board units)   ElementsLayer, UploadPlaceholders, CollabBoardLayer
- *       engine canvas                the board, when the canvas engine runs
- *       live layer (board units)     LiveElements and the rest, above the canvas
+ *       camera layer (board units)   ElementsLayer, UploadPlaceholders, CollabBoardLayer, NextItemOffer
  *       overlay (screen units)       SelectionOverlay, CollabOverlay
- *   TimerEndGlow, BoardPill, BoardFoot, SelectionBar, CollabChrome, FindBar,
+ *   TimerEndGlow, BoardPill, BoardFoot, SelectionBar, LinkCard, CollabChrome, FindBar,
  *   VersionHistory                   the history panel and a past version's preview
+ * .wb-veil                           over the board until its first view settles
  * ```
  */
 
@@ -20,14 +19,17 @@ import { EmptyState } from '@open-artifact/ui';
 import { LoaderCircle, TriangleAlert } from 'lucide-react';
 import { BoardSurface } from './canvas/BoardSurface.tsx';
 import { CollabBoardLayer, CollabChrome, CollabOverlay, UploadPlaceholders } from './collab/index.ts';
-import { ElementsLayer, LiveElements } from './elements/ElementsLayer.tsx';
+import { ElementsLayer } from './elements/ElementsLayer.tsx';
 import { FindBar } from './find/FindBar.tsx';
 import { NextItemOffer } from './selection/NextItemOffer.tsx';
 import { SelectionOverlay } from './selection/SelectionOverlay.tsx';
 import { useBoardRecovery, showBoardMedia } from './services/load-recovery.ts';
 import { startBoard } from './services/boot.ts';
+import { waitForViewportReady } from './services/reveal.ts';
+import { setBoardRevealed, useBoard } from './state/board.ts';
 import { BoardPill } from './ui/BoardPill.tsx';
 import { BoardContextMenu } from './ui/ContextMenu.tsx';
+import { LinkCard } from './ui/LinkCard.tsx';
 import { SelectionBar } from './ui/SelectionBar.tsx';
 import { TimerEndGlow } from './ui/Timer.tsx';
 import { BoardFoot } from './ui/Toolbar.tsx';
@@ -72,6 +74,8 @@ function releaseBoard(): void {
 /** The editor root. */
 export function App() {
   const paused = useBoardRecovery((state) => state.paused);
+  const loaded = useBoard((state) => state.status !== 'loading');
+  const revealed = useBoard((state) => state.revealed);
   const [phase, setPhase] = useState<Phase>({ kind: 'starting' });
 
   useEffect(() => {
@@ -89,6 +93,16 @@ export function App() {
     };
   }, []);
 
+  // The board is shown once loaded and its first view has settled (see services/reveal.ts).
+  useEffect(() => {
+    if (phase.kind !== 'ready' || !loaded || revealed) return;
+    const controller = new AbortController();
+    void waitForViewportReady(controller.signal).then(() => {
+      if (!controller.signal.aborted) setBoardRevealed(true);
+    });
+    return () => controller.abort();
+  }, [phase.kind, loaded, revealed]);
+
   if (phase.kind === 'failed') {
     return (
       <EmptyState icon={<TriangleAlert className="size-6" />} title="This board could not open">
@@ -100,41 +114,38 @@ export function App() {
   const ready = phase.kind === 'ready';
   return (
     <div className="wb-root">
-      <BoardContextMenu>
-        <BoardSurface
-          overlay={
-            ready ? (
-              <>
-                <SelectionOverlay />
-                <CollabOverlay />
-              </>
-            ) : null
-          }
-          elements={<ElementsLayer />}
-          live={<LiveElements />}
-        >
-          {ready ? <UploadPlaceholders /> : null}
-          {ready ? <CollabBoardLayer /> : null}
-          {ready ? <NextItemOffer /> : null}
-        </BoardSurface>
-      </BoardContextMenu>
-      {ready ? (
-        <>
-          {paused && <div role="status" className="wb-recovery">
-            Pictures and embeds are paused because the last load was interrupted.
-            <button type="button" onClick={() => void showBoardMedia()}>Show pictures and embeds</button>
-          </div>}
-          <TimerEndGlow />
-          <BoardPill />
-          <BoardFoot />
-          <SelectionBar />
-          <CollabChrome />
-          <FindBar />
-          <VersionHistory />
-        </>
-      ) : (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center text-fg-muted" role="status">
-          <LoaderCircle className="size-5 animate-spin" aria-label="Opening the board" />
+      <div inert={!revealed} className="contents">
+        <BoardContextMenu>
+          <BoardSurface
+            overlay={ready ? <><SelectionOverlay /><CollabOverlay /></> : null}
+            elements={<ElementsLayer />}
+          >
+            {ready && <UploadPlaceholders />}
+            {ready && <CollabBoardLayer />}
+            {ready && <NextItemOffer />}
+          </BoardSurface>
+        </BoardContextMenu>
+        {ready && (
+          <>
+            {paused && <div role="status" className="wb-recovery">
+              Pictures and embeds are paused because the last load was interrupted.
+              <button type="button" onClick={() => void showBoardMedia()}>Show pictures and embeds</button>
+            </div>}
+            <TimerEndGlow />
+            <BoardPill />
+            <BoardFoot />
+            <SelectionBar />
+            <LinkCard />
+            <CollabChrome />
+            <FindBar />
+            <VersionHistory />
+          </>
+        )}
+      </div>
+      {!revealed && (
+        <div className="wb-veil" data-wb-veil="" role="status">
+          <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+          <span>Opening the board…</span>
         </div>
       )}
     </div>

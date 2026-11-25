@@ -1,3 +1,4 @@
+import type { PressesHeardAtStart } from '../app/sheet-page.tsx';
 /** Finds the storage of this tab, which may throw where storage is blocked. */
 export type StorageOf = () => Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 export function takeStoredCaretPlace(storageOf: StorageOf, pageStartMs: number, wallNowMs: number): StoredCaretPlace | null {
@@ -8,7 +9,7 @@ export function takeStoredCaretPlace(storageOf: StorageOf, pageStartMs: number, 
     if (raw === null) return null;
     let stored: unknown = JSON.parse(raw);
     if (!isPlainObjectValue(stored)) return 'outsideCells';
-    let { isInCells: isInCells, isInEntry: isInEntry, leftAtMs: leftAtMs, leftAtWallMs: leftAtWallMs } = stored;
+    let { isInCells, isInEntry, leftAtMs, leftAtWallMs } = stored;
     let placeIfLeft: StoredCaretPlace = isInEntry === true ? 'inEntry' : 'outsideCells';
     if (isInCells === false && typeof leftAtWallMs === 'number') return leftAtWallMs + 1000 < wallNowMs ? null : placeIfLeft;
     if (isInCells === false) return placeIfLeft;
@@ -25,7 +26,7 @@ export function forgetStoredCaretPlace(storageOf: StorageOf): void {
     storageOf().removeItem('sheets-caret');
   } catch {}
 }
-export function keepCaretPlaceStored(storageOf: StorageOf, afterEvents: (callback: () => void) => void, page: PageOfCaret): () => void {
+export function keepCaretPlaceStored(storageOf: StorageOf, afterEvents: (run: () => void) => void, page: PageOfCaret): () => void {
   let isStopped: boolean = false;
   let isInCells: boolean | null = null;
   let isInEntry: boolean = false;
@@ -34,10 +35,10 @@ export function keepCaretPlaceStored(storageOf: StorageOf, afterEvents: (callbac
   let store = (leftAt?: CaretLeftAt) => {
     if (isInCells === null) return;
     let stored = JSON.stringify({
-      isInCells: isInCells,
-      isInEntry: isInEntry,
+      isInCells,
+      isInEntry,
       ...leftAt,
-      keptBy: keptBy,
+      keptBy,
     });
     storedWithoutLeaving = leftAt === undefined ? stored : null;
     try {
@@ -80,6 +81,20 @@ export function keepCaretPlaceStored(storageOf: StorageOf, afterEvents: (callbac
 export const isPlainObjectValue = (candidate: unknown): candidate is Partial<Record<string, unknown>> => typeof candidate === 'object' && candidate !== null;
 export const doCellsTakeCaretAtStart = (storedPlace: CaretAtStart | null, haveActsCome: boolean): boolean =>
   storedPlace === 'inSpreadsheetTakenOff' || storedPlace === 'inCells' || storedPlace === 'inEntry' || (storedPlace === null && !haveActsCome);
+/** How soon after the page starts a keyboard may still be handed over to the cells. */
+export const KEYBOARD_HANDED_OVER_WITHIN_MS = 1e4;
+/** Whether the page took the keyboard from the page it was opened from: a place was kept, and nothing was pressed or left since. */
+export const isKeyboardHandedOverAtStart = (
+  storedPlace: CaretAtStart | null,
+  hasKeyboard: boolean,
+  msSinceStart: number,
+  pressesHeard: PressesHeardAtStart,
+): boolean =>
+  hasKeyboard &&
+  storedPlace !== null &&
+  msSinceStart < KEYBOARD_HANDED_OVER_WITHIN_MS &&
+  pressesHeard.pressesBegun === 0 &&
+  pressesHeard.timesFocusLeft === 0;
 export const shouldFocusEntryAtStart = (storedPlace: CaretAtStart | null, haveActsCome: boolean, isFirstEntryOpen: boolean): boolean =>
   storedPlace !== 'inSpreadsheetTakenOff' && (haveActsCome || (storedPlace === 'inEntry' && !isFirstEntryOpen));
 export const CARET_ARROW_KEY_PATTERN = /^Arrow(?:Up|Down|Left|Right)$/;

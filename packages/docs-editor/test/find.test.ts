@@ -86,7 +86,7 @@ describe('replacing', () => {
     const plan = planReplace(d, findMatches(d, 'x', false), 0, { query: 'x', caseSensitive: false, text: 'y', all: true });
     assert.equal(plan.targets.length, REPLACE_BATCH);
     assert.equal(plan.left, 5);
-    assert.equal(outcomeWords({ serial: 1, all: true, replaced: REPLACE_BATCH, frozen: 0, already: 0, left: 5, more: false, refused: false }), `Replaced ${REPLACE_BATCH}. 5 left: press Replace all again.`);
+    assert.equal(outcomeWords({ serial: 1, all: true, replaced: REPLACE_BATCH, frozen: 0, chips: 0, already: 0, left: 5, more: false, refused: false }), `Replaced ${REPLACE_BATCH}. 5 left: press Replace all again.`);
   });
 
   it('does not grow a replacement that contains the words on a second press', () => {
@@ -97,7 +97,7 @@ describe('replacing', () => {
   });
 
   it('says how a press went', () => {
-    const base = { serial: 1, all: true, replaced: 3, frozen: 0, already: 0, left: 0, more: false, refused: false };
+    const base = { serial: 1, all: true, replaced: 3, frozen: 0, chips: 0, already: 0, left: 0, more: false, refused: false };
     assert.equal(outcomeWords(base), 'Replaced 3 matches');
     assert.equal(outcomeWords({ ...base, replaced: 0, already: 2 }), 'Nothing left to replace');
     assert.equal(outcomeWords({ ...base, all: false, replaced: 1 }), null);
@@ -178,7 +178,7 @@ describe('counting the other tabs', () => {
     await flush();
     assert.deepEqual(asked, ['a', 'b']);
     assert.equal(seen.get('a'), 2);
-    assert.equal(seen.get('b'), 'uncounted');
+    assert.equal(seen.get('b'), 'failed');
     assert.equal(ended, true);
     assert.equal(cache.get(tab('a'), 'x', false), 2);
     assert.equal(cache.get(tab('a', 2), 'x', false), undefined);
@@ -190,7 +190,7 @@ describe('counting the other tabs', () => {
     assert.deepEqual(stopped, []);
   });
 
-  it('leaves the tabs past the limit uncounted, and the rest after a failure', async () => {
+  it('skips the tabs past the limit, and marks the rest failed after a failure', async () => {
     const tabs = Array.from({ length: MAX_TABS_SEARCHED + 2 }, (_, i) => tab(`t${i}`));
     const seen = new Map<string, TabCount>();
     countTabs({
@@ -205,10 +205,10 @@ describe('counting the other tabs', () => {
       onCount: (id, count) => seen.set(id, count),
       onEnd: () => undefined,
     });
-    assert.equal(seen.get(`t${MAX_TABS_SEARCHED}`), 'uncounted');
+    assert.equal(seen.get(`t${MAX_TABS_SEARCHED}`), 'skipped');
     await flush();
     assert.equal(seen.get('t0'), 0);
-    assert.equal(seen.get('t1'), 'uncounted');
-    assert.equal(seen.get('t2'), 'uncounted');
+    assert.equal(seen.get('t1'), 'failed');
+    assert.equal(seen.get('t2'), 'failed');
   });
 });

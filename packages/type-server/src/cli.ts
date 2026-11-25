@@ -3,13 +3,15 @@
  * `open-artifact-type-server`: the command line an agent uses to work on Design and
  * Design System artifacts.
  *
- *     open-artifact-type-server open <dir> [--type design|design-system|slides|whiteboard|data|sheets|docs] [--title T] [--browser] [--lan]
+ *     open-artifact-type-server open <dir> [--type design|design-system|slides|whiteboard|data|sheets|docs|motion] [--title T] [--browser] [--lan]
  *     open-artifact-type-server check <dir> [--json]
  *     open-artifact-type-server generate <dir>
  *     open-artifact-type-server upload <dir> <file>… [--group G] [--name N]
  *     open-artifact-type-server list [dir…]
  *     open-artifact-type-server wait <dir> [--timeout 600]
+ *     open-artifact-type-server asking <dir> [--done]
  *     open-artifact-type-server context <dir>
+ *     open-artifact-type-server stills <dir> --at <t1,t2,…> [--scale n] [--out dir] [--rough]
  *     open-artifact-type-server history <dir> [show|restore <n> [path…]] [--json]
  *     open-artifact-type-server read|update|batch|widget|export|info <dir> …   (a Sheet's calls)
  *     open-artifact-type-server share <dir> [--off] [--enable R] [--disable R] [--reset R] [--role G=R] [--remove G] [--json]
@@ -29,7 +31,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { clearWaiter, formatRequests, markTaken, pending, touchWaiter, WAITER_HEARTBEAT_MS, agentPaths } from './agent.ts';
+import { clearAsking, clearWaiter, formatRequests, markAsking, markTaken, pending, touchWaiter, WAITER_HEARTBEAT_MS, agentPaths } from './agent.ts';
 import type { ReadyLine } from '@open-artifact/protocol';
 import { daemonFromEnv, envPort, typeServerEnv } from './daemon.ts';
 import { mimeOf } from './http.ts';
@@ -46,6 +48,7 @@ import { cmdCommentAdd, cmdComments, cmdCommentReply, cmdCommentResolve } from '
 import { cmdArchive, cmdDeleteAsset, cmdDsSync } from './more-cli.ts';
 import { ensureGitignore } from './artifact-files.ts';
 import { runCheck } from './project-check.ts';
+import { cmdStills } from './stills-cli.ts';
 import { readEdits } from './agent.ts';
 import { SheetRefusalError } from '@open-artifact/sheets-core';
 import { SheetStore } from './sheets/store.ts';
@@ -80,7 +83,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 /** Flags that take a value. */
-const VALUE_FLAGS = new Set(['type', 'name', 'title', 'timeout', 'port', 'assets', 'idle', 'shell', 'id', 'group', 'enable', 'disable', 'reset', 'role', 'remove', 'out', 'from', 'tab', 'on', 'nth', 'block', 'suggestion']);
+const VALUE_FLAGS = new Set(['type', 'name', 'title', 'timeout', 'port', 'assets', 'idle', 'shell', 'id', 'group', 'enable', 'disable', 'reset', 'role', 'remove', 'out', 'from', 'tab', 'on', 'nth', 'block', 'suggestion', 'at', 'scale']);
 
 const flag = (args: Args, name: string): string | undefined => {
   const value = args.flags.get(name);
@@ -387,6 +390,7 @@ async function cmdWait(args: Args): Promise<number> {
   const stop = async (): Promise<void> => {
     await clearWaiter(root);
   };
+  clearAsking(root);
   process.once('SIGINT', () => void stop().then(() => process.exit(130)));
   process.once('SIGTERM', () => void stop().then(() => process.exit(143)));
   try {
@@ -408,6 +412,14 @@ async function cmdWait(args: Args): Promise<number> {
   } finally {
     await stop();
   }
+}
+
+/** `asking <dir> [--done]`: the agent is about to ask the person something, and its work waits on the answer. */
+async function cmdAsking(args: Args): Promise<number> {
+  const root = artifactRoot(args);
+  if (args.flags.has('done')) clearAsking(root);
+  else await markAsking(root);
+  return 0;
 }
 
 async function cmdContext(args: Args): Promise<number> {
@@ -613,7 +625,7 @@ async function cmdServe(args: Args): Promise<void> {
 
 const USAGE = `open-artifact-type-server <command>
 
-  open <dir> [--type design|design-system|slides|whiteboard|data|sheets|docs] [--title T] [--browser] [--lan] [--json]
+  open <dir> [--type design|design-system|slides|whiteboard|data|sheets|docs|motion] [--title T] [--browser] [--lan] [--json]
       Open (creating if empty) an artifact folder in its editor; prints the URL.
       --lan also shares it on the local network and prints the role links.
   check <dir> [--json]          Check project files; exit 1 on errors.
@@ -624,6 +636,8 @@ const USAGE = `open-artifact-type-server <command>
       --name gives one file the name it is shown and typed by.
   list [dir…]                   Find design systems (here, or in the folders given).
   wait <dir> [--timeout 600]    Wait for a request sent from the page; exit 2 on timeout.
+  asking <dir> [--done]         Just before asking the person something: open pages show that your
+                                work waits on them, until you next read, write or wait (--done: now).
   context <dir> [--json]        Print what the viewer has selected and on screen.
   history <dir> [--all] [--json]
                                 List versions, newest first (who changed which files when).
@@ -679,6 +693,10 @@ const USAGE = `open-artifact-type-server <command>
                                 folders; --check only reports (exit 1 when a copy is behind).
   delete-asset <dir> </_blob/id>
                                 Remove an upload; refused ({"error":"IN_USE"}) while anything names it.
+  stills <dir> --at <t1,t2,…> [--scale n] [--out dir] [--rough]
+                                PNG stills of a motion artifact at played seconds, drawn as its export draws them,
+                                by a headless Chrome or Chromium (CHROME_PATH, Playwright's cache or the system's);
+                                prints each PNG's path, the score's counts and the film's warnings and errors.
   share <dir> [--off] [--enable R] [--disable R] [--reset R] [--role G=R] [--remove G] [--json]
       Share on the local network (alone: turn it on) and print a link per
       role: editor, commenter, viewer (R: one, a comma list, or all). --off
@@ -716,6 +734,8 @@ export async function main(argv: string[]): Promise<number> {
         return 0;
       case 'wait':
         return await cmdWait(args);
+      case 'asking':
+        return await cmdAsking(args);
       case 'context':
         return await cmdContext(args);
       case 'history':
@@ -740,6 +760,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdArchive(args.positional.slice(1), args.flags);
       case 'ds-sync':
         return await cmdDsSync(args.positional.slice(1), args.flags);
+      case 'stills':
+        return await cmdStills(args.positional.slice(1), args.flags);
       case 'delete-asset':
         return await cmdDeleteAsset(args.positional.slice(1));
       case 'status':

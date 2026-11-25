@@ -1,10 +1,25 @@
-import type { Dynamic } from '../dynamic.ts';
-export function crc32Of(bytes?: Dynamic) {
-  let crc: Dynamic = 4294967295;
-  for (let index: Dynamic = 0; index < bytes.length; index += 1) crc = (CRC32_TABLE[(crc ^ (bytes[index] ?? 0)) & 255] ?? 0) ^ (crc >>> 8);
+import type { XlsxFileAnswer } from '@open-artifact/sheets-core';
+/** A file to put in a zip archive: its path and its text. */
+export interface ZipFileText {
+  path: string;
+  text: string;
+}
+/** A file as it is written into the archive: its path and data as bytes, how the data is packed, and its checksum. */
+export interface ZipEntry {
+  path: Uint8Array;
+  data: Uint8Array;
+  method: number;
+  crc32: number;
+  sizeUnpacked: number;
+}
+/** Packs bytes for a zip entry. */
+export type ZipCompressor = (bytes: Uint8Array<ArrayBuffer>) => Promise<Uint8Array>;
+export function crc32Of(bytes: Uint8Array): number {
+  let crc = 4294967295;
+  for (let index = 0; index < bytes.length; index += 1) crc = (CRC32_TABLE[(crc ^ (bytes[index] ?? 0)) & 255] ?? 0) ^ (crc >>> 8);
   return (crc ^ 4294967295) >>> 0;
 }
-export function writeZipEntryHeader(view?: Dynamic, offset?: Dynamic, entry?: Dynamic) {
+export function writeZipEntryHeader(view: DataView, offset: number, entry: ZipEntry): void {
   view.setUint16(offset, ZIP_VERSION_NEEDED, true);
   view.setUint16(offset + 2, ZIP_UTF8_FLAG, true);
   view.setUint16(offset + 4, entry.method, true);
@@ -16,10 +31,10 @@ export function writeZipEntryHeader(view?: Dynamic, offset?: Dynamic, entry?: Dy
   view.setUint16(offset + 22, entry.path.length, true);
   view.setUint16(offset + 24, 0, true);
 }
-export async function writeZipArchive(files?: Dynamic, compress?: Dynamic): Promise<Dynamic> {
-  let encoder = new (TextEncoder as Dynamic)();
+export async function writeZipArchive(files: readonly ZipFileText[], compress: ZipCompressor | null): Promise<ArrayBuffer> {
+  let encoder = new TextEncoder();
   let entries = await Promise.all(
-    files.map(async ({ path: path, text: text }: Dynamic): Promise<Dynamic> => {
+    files.map(async ({ path, text }): Promise<ZipEntry> => {
       let unpacked = encoder.encode(text);
       let packed = compress === null ? null : await compress(unpacked);
       return {
@@ -31,21 +46,21 @@ export async function writeZipArchive(files?: Dynamic, compress?: Dynamic): Prom
       };
     }),
   );
-  let sumOfRecords = (headerSize?: Dynamic, withData?: Dynamic) =>
+  let sumOfRecords = (headerSize: number, withData: boolean) =>
     entries.reduce(
-      (total: Dynamic, { path: path, data: data }: Dynamic) => total + headerSize + path.length + (withData ? data.length : 0),
+      (total, { path, data }) => total + headerSize + path.length + (withData ? data.length : 0),
       0,
     );
   let localSectionSize = sumOfRecords(ZIP_LOCAL_HEADER_SIZE, true);
   let centralSectionSize = sumOfRecords(ZIP_CENTRAL_HEADER_SIZE, false);
   let endRecordOffset = localSectionSize + centralSectionSize;
-  if (endRecordOffset + ZIP_END_RECORD_SIZE > ZIP32_MAX_SIZE || entries.some((input?: Dynamic) => input.sizeUnpacked > ZIP32_MAX_SIZE))
+  if (endRecordOffset + ZIP_END_RECORD_SIZE > ZIP32_MAX_SIZE || entries.some((entry) => entry.sizeUnpacked > ZIP32_MAX_SIZE))
     throw Error('the archive is too large for the records that are written');
-  let bytes = new (Uint8Array as Dynamic)(endRecordOffset + ZIP_END_RECORD_SIZE);
-  let view = new (DataView as Dynamic)(bytes.buffer);
-  let localOffset: Dynamic = 0;
-  let centralOffset: Dynamic = localSectionSize;
-  for (let entry of entries as Dynamic) {
+  let bytes = new Uint8Array(endRecordOffset + ZIP_END_RECORD_SIZE);
+  let view = new DataView(bytes.buffer);
+  let localOffset = 0;
+  let centralOffset = localSectionSize;
+  for (let entry of entries) {
     view.setUint32(centralOffset, 33639248, true);
     view.setUint16(centralOffset + 4, ZIP_VERSION_NEEDED, true);
     writeZipEntryHeader(view, centralOffset + 6, entry);
@@ -65,24 +80,24 @@ export async function writeZipArchive(files?: Dynamic, compress?: Dynamic): Prom
   view.setUint32(endRecordOffset + 16, localSectionSize, true);
   return bytes.buffer;
 }
-export function deflateRawCompressor() {
+export function deflateRawCompressor(): ZipCompressor | null {
   try {
-    new (CompressionStream as Dynamic)('deflate-raw');
+    new CompressionStream('deflate-raw');
   } catch {
     return null;
   }
-  return async (bytes?: Dynamic): Promise<Dynamic> => {
-    let stream = new (Blob as Dynamic)([bytes]).stream().pipeThrough(new (CompressionStream as Dynamic)('deflate-raw'));
-    return new (Uint8Array as Dynamic)(await new (Response as Dynamic)(stream).arrayBuffer());
+  return async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array> => {
+    let stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
   };
 }
 export const CRC32_TABLE = Uint32Array.from(
   {
     length: 256,
   },
-  (slot?: Dynamic, index?: Dynamic) => {
-    let crc: Dynamic = index;
-    for (let bit: Dynamic = 0; bit < 8; bit += 1) crc = (crc & 1) === 1 ? 3988292384 ^ (crc >>> 1) : crc >>> 1;
+  (slot, index) => {
+    let crc = index;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) === 1 ? 3988292384 ^ (crc >>> 1) : crc >>> 1;
     return crc;
   },
 );
@@ -95,11 +110,12 @@ export const ZIP32_MAX_SIZE = 4294967295;
 export const ZIP_LOCAL_HEADER_SIZE = 30;
 export const ZIP_CENTRAL_HEADER_SIZE = 46;
 export const ZIP_END_RECORD_SIZE = 22;
-export const zipXlsxParts = ({ parts: parts }: Dynamic, compress?: Dynamic) =>
+export const zipXlsxParts = ({ parts }: Pick<XlsxFileAnswer, 'parts'>, compress: ZipCompressor | null): Promise<ArrayBuffer> =>
+
   writeZipArchive(
     parts.map(
-      ({ path: path, xml: xml }: Dynamic) => ({
-        path: path,
+      ({ path, xml }) => ({
+        path,
         text: xml,
       }),
     ),

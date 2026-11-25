@@ -1,10 +1,44 @@
-import type { Dynamic } from '../dynamic.ts';
-import { translateMessage } from './messages.ts';
+import type { BorderStyle, Color, Edges, HorizontalAlignment, Hue, VerticalAlignment } from '@open-artifact/sheets-core';
+import type { CellType, CurrencyCode } from '../format/number-format-choices.ts';
+import { MESSAGE_LOCALE, translateMessage } from './messages.ts';
 import { sheetMessages } from './sheet-messages.ts';
-import { CUSTOM_FORMAT_PLACEHOLDERS } from '../format/number-format-choices.ts';
+import { CUSTOM_FORMAT_PLACEHOLDERS, isCurrencyCodeOffered } from '../format/number-format-choices.ts';
 import { colorsEqual, WHITE_COLOR, BLACK_COLOR, LIGHT_GRAY_COLOR } from '../model/colors.ts';
 import { menuMatchCountChooseRowWords } from '../messages/command-search.ts';
-export function checkboxCellLabel({ isChecked: isChecked, isNamedReadOnly: isNamedReadOnly }: Dynamic) {
+/** The groups of the number format menu. */
+export type NumberFormatGroup = 'numbers' | 'percents' | 'currencies' | 'datesAndTimes';
+/** A format that can be chosen for cells from the number format menu, or `mixed` when the cells' formats differ. */
+export type CellFormatChoiceName =
+  | 'general'
+  | 'number'
+  | 'roundedNumber'
+  | 'numberInParentheses'
+  | 'currency'
+  | 'roundedCurrency'
+  | 'percent'
+  | 'roundedPercent'
+  | 'scientific'
+  | 'fraction'
+  | 'date'
+  | 'mediumDate'
+  | 'longDate'
+  | 'monthAndDay'
+  | 'monthAndYear'
+  | 'time'
+  | 'dateAndTime'
+  | 'duration'
+  | 'text'
+  | 'dropdown'
+  | 'checkbox'
+  | 'mixed'
+  | CurrencyCode;
+/** Why a custom number format typed by the user can't be used yet. */
+export type CustomFormatProblem = 'textNeedsQuotationMarks' | 'notPrintedYet' | 'unreadable' | 'notJudged';
+/** How text longer than its cell is shown: spilling over the next cells, wrapped onto more lines, or cut at the cell's edge. */
+export type TextWrapping = 'overflow' | 'wrap' | 'clip';
+/** The format property a color is chosen for. */
+export type ColorProperty = 'fillColor' | 'textColor';
+export function checkboxCellLabel({ isChecked, isNamedReadOnly }: { isChecked: boolean; isNamedReadOnly: boolean }): string {
   if (!isNamedReadOnly)
     return isChecked
       ? translateMessage({
@@ -25,26 +59,54 @@ export function checkboxCellLabel({ isChecked: isChecked, isNamedReadOnly: isNam
         id: 'y9WtkL2seH',
       });
 }
-export function numberFormatGroupLabel(group?: Dynamic) {
+export function numberFormatGroupLabel(group: NumberFormatGroup): string {
   switch (group) {
     case 'numbers':
       return translateMessage({
         defaultMessage: 'Number',
-        id: '051maVd5as',
+        id: '5IZQfK4OKe',
+      });
+    case 'percents':
+      return translateMessage({
+        defaultMessage: 'Percent',
+        id: 'f9g3Wu/4Qy',
       });
     case 'currencies':
       return translateMessage({
         defaultMessage: 'Currency',
-        id: 'WGl56IweqH',
+        id: 'uRT0Ww8vqV',
       });
     case 'datesAndTimes':
       return translateMessage({
         defaultMessage: 'Date and time',
-        id: 'O6p4z3CR0Q',
+        id: 'NrEmBKhems',
       });
   }
 }
-export function numberFormatChoiceLabel(choice?: Dynamic) {
+export function cellTypeLabel(cellType: CellType): string {
+  switch (cellType) {
+    case 'general':
+    case 'text':
+    case 'checkbox':
+    case 'dropdown':
+      return numberFormatChoiceLabel(cellType);
+    case 'person':
+      return sheetMessages.personCells();
+    case 'numbers':
+    case 'percents':
+    case 'currencies':
+    case 'datesAndTimes':
+      return numberFormatGroupLabel(cellType);
+  }
+}
+export function currencyName(currency: CurrencyCode): string {
+  currencyNamesKnown ??= new Intl.DisplayNames(MESSAGE_LOCALE, {
+    type: 'currency',
+  });
+  return (currencyNamesKnown.of(currency) ?? currency).replace(/ \S+$/u, (lastWord) => lastWord.toLowerCase());
+}
+export function numberFormatChoiceLabel(choice: CellFormatChoiceName): string {
+  if (isCurrencyCodeOffered(choice)) return currencyName(choice);
   switch (choice) {
     case 'general':
       return translateMessage({
@@ -80,6 +142,11 @@ export function numberFormatChoiceLabel(choice?: Dynamic) {
       return translateMessage({
         defaultMessage: 'Percent',
         id: '5A4QNvMCYL',
+      });
+    case 'roundedPercent':
+      return translateMessage({
+        defaultMessage: 'Percent (rounded)',
+        id: '2DTwPYXjdQ',
       });
     case 'scientific':
       return translateMessage({
@@ -147,7 +214,7 @@ export function numberFormatChoiceLabel(choice?: Dynamic) {
       });
   }
 }
-export function customFormatProblemText(why?: Dynamic) {
+export function customFormatProblemText(why: CustomFormatProblem): string {
   switch (why) {
     case 'textNeedsQuotationMarks':
       return translateMessage(
@@ -163,7 +230,7 @@ export function customFormatProblemText(why?: Dynamic) {
       return translateMessage(
         {
           defaultMessage: 'Sheets can’t show this format yet. Try one like {pattern}.',
-          id: 'dydLtsDj0Y',
+          id: 'Pf6ZURYTHb',
         },
         {
           pattern: CUSTOM_FORMAT_PLACEHOLDERS.withDecimals,
@@ -182,7 +249,7 @@ export function customFormatProblemText(why?: Dynamic) {
       );
   }
 }
-export function horizontalAlignmentLabel(alignment?: Dynamic) {
+export function horizontalAlignmentLabel(alignment: HorizontalAlignment): string {
   switch (alignment) {
     case 'left':
       return translateMessage({
@@ -206,7 +273,7 @@ export function horizontalAlignmentLabel(alignment?: Dynamic) {
       });
   }
 }
-export function verticalAlignmentLabel(alignment?: Dynamic) {
+export function verticalAlignmentLabel(alignment: VerticalAlignment): string {
   switch (alignment) {
     case 'top':
       return translateMessage({
@@ -225,7 +292,7 @@ export function verticalAlignmentLabel(alignment?: Dynamic) {
       });
   }
 }
-export function textWrappingLabel(wrapping?: Dynamic) {
+export function textWrappingLabel(wrapping: TextWrapping): string {
   switch (wrapping) {
     case 'overflow':
       return translateMessage({
@@ -237,9 +304,14 @@ export function textWrappingLabel(wrapping?: Dynamic) {
         defaultMessage: 'Wrap',
         id: '5cGeTxizAm',
       });
+    case 'clip':
+      return translateMessage({
+        defaultMessage: 'Clip',
+        id: '4HAjgN3GtE',
+      });
   }
 }
-export function cellColorName(property?: Dynamic, color?: Dynamic) {
+export function cellColorName(property: ColorProperty, color: Color | null): string {
   if (color === null)
     return translateMessage({
       defaultMessage: 'Mixed',
@@ -272,19 +344,19 @@ export function cellColorName(property?: Dynamic, color?: Dynamic) {
       return standardColorName(color.hue, color.shade);
   }
 }
-export function colorButtonLabel(property?: Dynamic, color?: Dynamic) {
+export function colorButtonLabel(property: ColorProperty, color: Color | null): string {
   return translateMessage(
     {
       defaultMessage: '{property, select, fillColor {Cell color, {color}} other {Text color, {color}}}',
       id: '6jdqajSVqt',
     },
     {
-      property: property,
+      property,
       color: cellColorName(property, color),
     },
   );
 }
-export function borderEdgesLabel(edges?: Dynamic) {
+export function borderEdgesLabel(edges: Edges | 'clear'): string {
   switch (edges) {
     case 'all':
       return translateMessage({
@@ -338,7 +410,7 @@ export function borderEdgesLabel(edges?: Dynamic) {
       });
   }
 }
-export function borderStyleLabel(style?: Dynamic) {
+export function borderStyleLabel(style: BorderStyle): string {
   switch (style) {
     case 'thin':
       return translateMessage({
@@ -372,61 +444,72 @@ export function borderStyleLabel(style?: Dynamic) {
       });
   }
 }
-export const commandMatchCountText = (count?: Dynamic, takesLabel?: Dynamic) =>
+export const commandMatchCountText = (count: number, takesLabel: string | null): string =>
   takesLabel === null
     ? translateMessage(
         {
           defaultMessage: '{count, plural, =0 {No matches} one {# match} other {# matches}}',
-          id: 'cLNwD3b7vW',
+          id: 'ddzYQhP1El',
         },
         {
-          count: count,
+          count,
         },
       )
     : menuMatchCountChooseRowWords(count, takesLabel);
-export const commandSearchStopWords = () =>
+export const commandSearchStopWords = (): string =>
   translateMessage({
     defaultMessage: 'a an the and as format formats formatted formatting please',
-    id: 'kCLF6xVAPN',
+    id: 'zs1LWZOMWE',
   });
-export const checkboxAndDropdownSearchWords = () =>
+export const checkboxAndDropdownSearchWords = (): string =>
   translateMessage({
     defaultMessage:
       'todo, to do, todos, task, tasks, task list, checklist, check list, done, complete, completed, checked, yes no, true false, boolean, list, options, choices, multiple choice, data validation, validation, status, category, categories, tags, labels',
-    id: 'TTXOUUIkar',
+    id: 'uCuuCQSEwp',
   });
-export const customFormatOfferLabel = (typed?: Dynamic) =>
+export const customFormatOfferLabel = (typed: string): string =>
   translateMessage(
     {
       defaultMessage: 'Custom format: {typed}',
-      id: 'kS97Fr0CFn',
+      id: 'GiIx7b7X8a',
     },
     {
-      typed: typed,
+      typed,
     },
   );
-export const numberFormatGroupHeardAs = (group?: Dynamic, choice?: Dynamic) =>
+export const numberFormatGroupHeardAs = (group: NumberFormatGroup, choice: CellFormatChoiceName): string =>
   translateMessage(
     {
       defaultMessage: '{list}, {format}',
-      id: 'dnOMAM3Lt8',
+      id: 'vk1duNnGcN',
     },
     {
       list: numberFormatGroupLabel(group),
       format: numberFormatChoiceLabel(choice),
     },
   );
-export const formatPreviewText = (example?: Dynamic) =>
+export const chosenCellTypeHeardAs = (cellType: string): string =>
+  translateMessage(
+    {
+      defaultMessage: '{type}, chosen',
+      id: 'Bm/u7L44Fd',
+    },
+    {
+      type: cellType,
+    },
+  );
+export let currencyNamesKnown: Intl.DisplayNames | null = null;
+export const formatPreviewText = (example: string): string =>
   translateMessage(
     {
       defaultMessage: 'Preview: {example}',
       id: 'hyYXjbj84A',
     },
     {
-      example: example,
+      example,
     },
   );
-export const textWrappingButtonLabel = (wrapping?: Dynamic) =>
+export const textWrappingButtonLabel = (wrapping: TextWrapping | null): string =>
   wrapping === null
     ? translateMessage({
         defaultMessage: 'Text wrapping, Mixed',
@@ -435,13 +518,13 @@ export const textWrappingButtonLabel = (wrapping?: Dynamic) =>
     : translateMessage(
         {
           defaultMessage: 'Text wrapping, {choice}',
-          id: 'N7KjY9ZMiO',
+          id: 'f5zkTL/6TG',
         },
         {
           choice: textWrappingLabel(wrapping),
         },
       );
-export const standardColorName = (hue?: Dynamic, shade?: Dynamic) =>
+export const standardColorName = (hue: Hue, shade: number): string =>
   translateMessage(
     {
       defaultMessage:
@@ -449,11 +532,11 @@ export const standardColorName = (hue?: Dynamic, shade?: Dynamic) =>
       id: '9f78KhXUcW',
     },
     {
-      hue: hue,
+      hue,
       shade: String(shade),
     },
   );
-export const sampleNumberText = () =>
+export const sampleNumberText = (): string =>
   translateMessage({
     defaultMessage: '1,200',
     id: 'ZmomhS4XmP',
@@ -485,7 +568,7 @@ export const borderMenuMessages = {
       id: '8QSaLG0zPm',
     }),
 };
-export const bordersButtonLabel = (which?: Dynamic) =>
+export const bordersButtonLabel = (which: string): string =>
   translateMessage(
     {
       defaultMessage:
@@ -493,10 +576,10 @@ export const bordersButtonLabel = (which?: Dynamic) =>
       id: 'IkSDLcg4tk',
     },
     {
-      which: which,
+      which,
     },
   );
-export const borderThicknessButtonLabel = (style?: Dynamic) =>
+export const borderThicknessButtonLabel = (style: BorderStyle): string =>
   translateMessage(
     {
       defaultMessage: 'Border thickness, {style}',
@@ -506,7 +589,7 @@ export const borderThicknessButtonLabel = (style?: Dynamic) =>
       style: borderStyleLabel(style),
     },
   );
-export const borderColorButtonLabel = (color?: Dynamic) =>
+export const borderColorButtonLabel = (color: Color | null): string =>
   translateMessage(
     {
       defaultMessage: 'Border color, {color}',
@@ -520,7 +603,7 @@ export const dropdownPaneMessages = {
   dropdown: () =>
     translateMessage({
       defaultMessage: 'Dropdown',
-      id: 'kTo3a+3erf',
+      id: '0HohQBiRC5',
     }),
   paneTitle: () =>
     translateMessage({

@@ -199,6 +199,7 @@ export function StickerPicker({ onPick, onUpload, me }: StickerPickerProps) {
                 gridRef.current?.querySelector<HTMLButtonElement>('[data-sticker-cell]')?.focus();
               }
             }}
+            role="searchbox"
             placeholder="Search stickers"
             aria-label="Search stickers"
             maxLength={40}

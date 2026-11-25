@@ -299,15 +299,15 @@ fn sum_product(args: &[Arg]) -> Answer {
     if arrays.iter().any(|a| a.rows() != rows || a.columns() != columns) {
         return Err(CellError::Value);
     }
-    if let Some(e) = arrays.iter().find_map(|a| a.values().iter().find_map(Value::error)) {
+    if let Some(e) = arrays.iter().find_map(|a| a.values().find_map(Value::error)) {
         return Err(e);
     }
     let mut sum = 0.0;
     for i in 0..rows * columns {
         let mut product = 1.0;
         for a in &arrays {
-            product *= match a.values()[i] {
-                Value::Number(n) => n,
+            product *= match a.array.get_flat(i) {
+                Value::Number(n) => *n,
                 _ => 0.0,
             };
         }
@@ -351,8 +351,8 @@ fn sum_ifs(args: &[Arg], locale: &Locale) -> Answer {
         conditions.push((range, Criterion::new(&pair[1].value()?, locale)));
     }
     let mut sum = 0.0;
-    for (i, v) in summed.values().iter().enumerate() {
-        if conditions.iter().all(|(range, criterion)| criterion.matches(&range.values()[i])) {
+    for (i, v) in summed.values().enumerate() {
+        if conditions.iter().all(|(range, criterion)| criterion.matches(range.array.get_flat(i))) {
             match v {
                 Value::Number(n) => sum = coerce::add(sum, *n),
                 Value::Error(e) => return Err(*e),

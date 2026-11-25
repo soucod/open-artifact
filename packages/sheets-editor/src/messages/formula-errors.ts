@@ -1,6 +1,70 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ErrorValue } from '@open-artifact/sheets-core';
 import { translateMessage, MESSAGE_LOCALE } from '../i18n/messages.ts';
-export function errorCodeExplanation(code?: Dynamic, canEdit?: Dynamic) {
+
+/** Why a cell shows its error, in terms short enough to tell in a sentence. */
+export type ErrorTell =
+  | {
+      cause:
+        | 'holdsTheError'
+        | 'dividesByAWrittenZero'
+        | 'refersToItself'
+        | 'cellsAreGone'
+        | 'wrongKindOrSize'
+        | 'quotationMarkNotClosed'
+        | 'parenthesisNotClosed'
+        | 'tooManyClosingParentheses'
+        | 'curlyBracketNotClosed'
+        | 'notOnlyValuesInCurlyBrackets'
+        | 'rowsOfDifferentLengthsInCurlyBrackets'
+        | 'somethingMissingAtTheEnd'
+        | 'readIfEnteredAgain'
+        | 'sheetEndsTooSoon'
+        | 'pivotTotalsNothing'
+        | 'pivotWithColumnsTotalsSeveral';
+    }
+  | {
+      cause:
+        | 'comesFromACellFurtherBack'
+        | 'usesACellWithTheSameError'
+        | 'dividesByAnEmptyCell'
+        | 'dividesByAZeroCell'
+        | 'refersBackToItself'
+        | 'textInArithmetic'
+        | 'holdsANestedSubtotal'
+        | 'filledCellInTheWay'
+        | 'earlierFormulaKeepsTheCells';
+      /** The cell's address. */
+      cell: string;
+    }
+  | { cause: 'spilledTextInArithmetic'; cell: string; from: string }
+  | { cause: 'filledByANestedSubtotal'; cells: string }
+  | { cause: 'filledCellsInTheWay'; count: number; cells: string }
+  | { cause: 'fewFilledCellsOnTwoSidesInTheWay'; cells: string[] }
+  | { cause: 'manyFilledCellsOnTwoSidesInTheWay'; count: number }
+  | { cause: 'noSuchCell' | 'noSuchCellInARange'; address: string }
+  | {
+      cause: 'lookupFoundNothing' | 'noSuchFunction' | 'functionWithoutParentheses' | 'unknownName' | 'rangesOfDifferentSizes' | 'noSuchSheet';
+      name: string;
+    }
+  | { cause: 'missingArgument' | 'severalCellsForOneValue' | 'argumentIsNoReference'; name: string; argument: string }
+  | { cause: 'incompletePair'; name: string; first: string; second: string }
+  | { cause: 'filterKeepsNothing'; name: string; argument: string; hasSeveralConditions: boolean }
+  | { cause: 'includeOfAnotherSize'; name: string; include: string; range: string; canBeARow: boolean }
+  | { cause: 'conditionsOfAnotherSize'; name: string; range: string; canBeARow: boolean }
+  | { cause: 'noSuchColumnToSortBy'; name: string; range: string; columns: number; column: number }
+  | { cause: 'orderNotRead'; name: string; order: string }
+  | { cause: 'wordIsNotRead'; name: string; word: string }
+  | { cause: 'functionCodeSkipsHiddenRows'; name: string; functionCode: number; codeThatCountsHiddenRows: number }
+  | { cause: 'wrongSignBetweenArguments'; rightSign: string }
+  | { cause: 'tooManyArguments'; name: string; most: number; given: number; isOnlyCount: boolean };
+
+/** A cell's error and, when one is known, why it shows. */
+export interface ErrorExplanation {
+  code: ErrorValue;
+  tell: ErrorTell | null;
+}
+
+export function errorCodeExplanation(code: ErrorValue, canEdit: boolean): string {
   switch (code) {
     case '#TIMEOUT!':
       return canEdit
@@ -56,7 +120,7 @@ export function errorCodeExplanation(code?: Dynamic, canEdit?: Dynamic) {
       });
   }
 }
-export function errorTellExplanation(tell?: Dynamic, code?: Dynamic) {
+export function errorTellExplanation(tell: ErrorTell, code: ErrorValue): string {
   switch (tell.cause) {
     case 'comesFromACellFurtherBack':
       return translateMessage(
@@ -85,7 +149,7 @@ export function errorTellExplanation(tell?: Dynamic, code?: Dynamic) {
           id: '1Jjtkzqz4b',
         },
         {
-          code: code,
+          code,
         },
       );
     case 'dividesByAWrittenZero':
@@ -316,6 +380,27 @@ export function errorTellExplanation(tell?: Dynamic, code?: Dynamic) {
           name: tell.name,
         },
       );
+    case 'wordIsNotRead':
+      return translateMessage(
+        {
+          defaultMessage: '{name} can’t use “{word}” here.',
+          id: '/fr4INTkaM',
+        },
+        {
+          name: tell.name,
+          word: tell.word,
+        },
+      );
+    case 'pivotTotalsNothing':
+      return translateMessage({
+        defaultMessage: 'PIVOT needs a way to total, such as “sum”, and a column.',
+        id: 'NMJLuEatF2',
+      });
+    case 'pivotWithColumnsTotalsSeveral':
+      return translateMessage({
+        defaultMessage: 'With a “columns field”, PIVOT totals only one field.',
+        id: '1FvqZTH8+B',
+      });
     case 'noSuchColumnToSortBy':
       return translateMessage(
         {
@@ -489,7 +574,7 @@ export function errorTellExplanation(tell?: Dynamic, code?: Dynamic) {
           id: '8fRbXzRp/h',
         },
         {
-          cells: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(tell.cells),
+          cells: new Intl.ListFormat(MESSAGE_LOCALE).format(tell.cells),
         },
       );
     case 'manyFilledCellsOnTwoSidesInTheWay':
@@ -552,5 +637,5 @@ export const formulasTookTooLongWords = () =>
     defaultMessage: 'Formulas took too long. You can remove or simplify some to see results.',
     id: 'vz1MlW5UWL',
   });
-export const errorExplanationWords = ({ code: code, tell: tell }: Dynamic, canEdit?: Dynamic) =>
+export const errorExplanationWords = ({ code, tell }: ErrorExplanation, canEdit: boolean): string =>
   tell === null || (tell.cause === 'readIfEnteredAgain' && !canEdit) ? errorCodeExplanation(code, canEdit) : errorTellExplanation(tell, code);

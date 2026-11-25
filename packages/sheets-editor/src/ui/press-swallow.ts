@@ -1,23 +1,42 @@
-import type { Dynamic } from '../dynamic.ts';
 import { afterNextFrameOrTimeout } from '../utils/next-frame.ts';
 import { MODIFIER_KEYS } from '../state/escape.ts';
-export function createRestOfPressTracker(press?: Dynamic, isStrict: Dynamic = false) {
-  let lastTimeStamp: Dynamic = press.timeStamp;
-  let phase: Dynamic = null;
-  let wasHeld: Dynamic = false;
-  let isOver: Dynamic = false;
+/** The press whose rest is swallowed: where and when it was made, and on what. */
+export interface PressToSwallow {
+  clientX: number;
+  clientY: number;
+  timeStamp: number;
+  currentTarget: Element;
+}
+/** An event that may follow a press, as the tracker reads it. */
+export interface PressEventSeen {
+  type: string;
+  clientX: number;
+  clientY: number;
+  timeStamp: number;
+  button: number;
+  ctrlKey: boolean;
+  /** The event is on something that takes a press as a new one, so it ends the repeat sooner. */
+  isMeantAnew: boolean;
+}
+/** The events that follow a pointer press. */
+export type PressFollowUpEventType = 'mousedown' | 'pointerup' | 'pointercancel' | 'mouseup' | 'click' | 'dblclick' | 'auxclick' | 'contextmenu';
+export function createRestOfPressTracker(press: Pick<PressToSwallow, 'clientX' | 'clientY' | 'timeStamp'>, isStrict: boolean = false) {
+  let lastTimeStamp = press.timeStamp;
+  let phase: 'held' | 'lifted' | null = null;
+  let wasHeld = false;
+  let isOver = false;
   return {
     isOver: () => isOver,
     afterKey() {
       if (phase === 'lifted') phase = null;
     },
-    isPartOfRepeat(input?: Dynamic) {
+    isPartOfRepeat(input: PressEventSeen) {
       if (isOver) return false;
       if (input.type === 'pointercancel') {
-        let value = phase === 'held';
-        if (value) lastTimeStamp = input.timeStamp;
+        let wasHeld = phase === 'held';
+        if (wasHeld) lastTimeStamp = input.timeStamp;
         phase = null;
-        return value;
+        return wasHeld;
       }
       if (isZeroPointPointerEvent(input)) return false;
       if (input.type === 'pointerdown' && ((input.button ?? 0) !== 0 || input.ctrlKey === true)) {
@@ -25,11 +44,11 @@ export function createRestOfPressTracker(press?: Dynamic, isStrict: Dynamic = fa
         return false;
       }
       if (input.type === 'pointerdown') {
-        let value = Math.hypot(input.clientX - press.clientX, input.clientY - press.clientY);
+        let distance = Math.hypot(input.clientX - press.clientX, input.clientY - press.clientY);
         isOver =
           (isStrict && wasHeld) ||
-          (input.isMeantAnew === true && value >= PRESS_MOVE_ANEW_MAX_PX) ||
-          value >= PRESS_MOVE_MAX_PX ||
+          (input.isMeantAnew === true && distance >= PRESS_MOVE_ANEW_MAX_PX) ||
+          distance >= PRESS_MOVE_MAX_PX ||
           input.timeStamp - lastTimeStamp > PRESS_REPEAT_MAX_MS;
         phase = isOver ? null : 'held';
         wasHeld = !isOver;
@@ -45,66 +64,71 @@ export function createRestOfPressTracker(press?: Dynamic, isStrict: Dynamic = fa
     },
   };
 }
-export function swallowRestOfPress(event?: Dynamic, isMeantAnew: Dynamic = () => false, isStrict: Dynamic = false) {
+export function swallowRestOfPress(
+  event: PressToSwallow,
+  isMeantAnew: (target: EventTarget | null) => boolean = () => false,
+  isStrict: boolean = false,
+) {
   let win = event.currentTarget.ownerDocument.defaultView;
   if (win === null || isZeroPointPointerEvent(event)) return;
-  let { isPartOfRepeat: isPartOfRepeat, afterKey: afterKey, isOver: isOver } = createRestOfPressTracker(event, isStrict);
-  let eventTypes = ['pointerdown', ...PRESS_FOLLOW_UP_EVENT_TYPES];
-  let onEvent = (event2?: Dynamic) => {
-    let { type: value, clientX: value2, clientY: value3, timeStamp: value4, button: value5, ctrlKey: value6 } = event2;
-    let value7 = value === 'pointerdown' && isMeantAnew(event2.target);
+  let { isPartOfRepeat, afterKey, isOver } = createRestOfPressTracker(event, isStrict);
+  let eventTypes: ('pointerdown' | PressFollowUpEventType)[] = ['pointerdown', ...PRESS_FOLLOW_UP_EVENT_TYPES];
+  let onEvent = (followingEvent: MouseEvent) => {
+    let { type, clientX, clientY, timeStamp, button, ctrlKey } = followingEvent;
+    let isMeantAnewHere = type === 'pointerdown' && isMeantAnew(followingEvent.target);
     if (
       isPartOfRepeat({
-        type: value,
-        clientX: value2,
-        clientY: value3,
-        timeStamp: value4,
-        button: value5,
-        ctrlKey: value6,
-        isMeantAnew: value7,
+        type,
+        clientX,
+        clientY,
+        timeStamp,
+        button,
+        ctrlKey,
+        isMeantAnew: isMeantAnewHere,
       })
     ) {
-      event2.preventDefault();
-      event2.stopImmediatePropagation();
+      followingEvent.preventDefault();
+      followingEvent.stopImmediatePropagation();
     }
     if (!isOver()) return;
-    for (let value8 of eventTypes as Dynamic) win.removeEventListener(value8, onEvent, true);
+    for (let type of eventTypes) win.removeEventListener(type, onEvent, true);
     win.removeEventListener('keydown', afterKey, true);
   };
-  for (let value of eventTypes as Dynamic) win.addEventListener(value, onEvent, true);
+  for (let type of eventTypes) win.addEventListener(type, onEvent, true);
   win.addEventListener('keydown', afterKey, true);
 }
-export function swallowRestOfPressFromEvent(event?: Dynamic, isStrict?: Dynamic) {
+export function swallowRestOfPressFromEvent(event: Event, isStrict: boolean) {
   if (!('clientX' in event) || !(event.target instanceof Element)) return;
-  let { clientX: clientX, clientY: clientY, timeStamp: timeStamp, target: target } = event;
+  // The checks above make it a mouse or pointer event on an element.
+  let { clientX, clientY, timeStamp, target } = event as MouseEvent & { target: Element };
   swallowRestOfPress(
     {
-      clientX: clientX,
-      clientY: clientY,
-      timeStamp: timeStamp,
+      clientX,
+      clientY,
+      timeStamp,
       currentTarget: target,
     },
     undefined,
     isStrict,
   );
 }
-export function swallowPressAfterItemPress(reason?: Dynamic, event?: Dynamic) {
+export function swallowPressAfterItemPress(reason: string, event: Event) {
   if (reason === 'item-press') swallowRestOfPressFromEvent(event, false);
 }
-export function swallowPressAfterTriggerPress(reason?: Dynamic, event?: Dynamic) {
+export function swallowPressAfterTriggerPress(reason: string, event: Event) {
   if (reason === 'trigger-press') swallowRestOfPressFromEvent(event, true);
 }
-export function swallowRepeatedDeleteKeys(win?: Dynamic, onEventsFinished?: Dynamic) {
+export function swallowRepeatedDeleteKeys(win: Window | null | undefined, onEventsFinished: (then: () => void) => void) {
   if (win === null || win === undefined) return;
-  let swallowFrom: Dynamic = Number.POSITIVE_INFINITY;
+  let swallowFrom = Number.POSITIVE_INFINITY;
   onEventsFinished(
     () =>
       afterNextFrameOrTimeout(win, () => {
         swallowFrom = win.performance.now();
       }),
   );
-  let eventTypes = ['keydown', 'keyup', 'pointerdown'];
-  let onEvent = (event?: Dynamic) => {
+  let eventTypes: ('keydown' | 'keyup' | 'pointerdown')[] = ['keydown', 'keyup', 'pointerdown'];
+  let onEvent = (event: KeyboardEvent | PointerEvent) => {
     let key = 'key' in event && typeof event.key === 'string' ? event.key : null;
     let isDeleteKey = key === 'Delete' || key === 'Backspace';
     let isSoon = event.timeStamp - swallowFrom <= PRESS_REPEAT_MAX_MS;
@@ -115,16 +139,16 @@ export function swallowRepeatedDeleteKeys(win?: Dynamic, onEventsFinished?: Dyna
       event.stopImmediatePropagation();
       return;
     }
-    for (let type of eventTypes as Dynamic) win.removeEventListener(type, onEvent, true);
+    for (let type of eventTypes) win.removeEventListener(type, onEvent, true);
   };
-  for (let type of eventTypes as Dynamic) win.addEventListener(type, onEvent, true);
+  for (let type of eventTypes) win.addEventListener(type, onEvent, true);
 }
 export const PRESS_MOVE_MAX_PX = 24;
 export const PRESS_MOVE_ANEW_MAX_PX = 6;
 export const PRESS_REPEAT_MAX_MS = 1000;
 export const PRESS_LIFT_REPEAT_MAX_MS = 400;
-export const isZeroPointPointerEvent = ({ clientX: clientX, clientY: clientY }: Dynamic) => clientX === 0 && clientY === 0;
-export const PRESS_FOLLOW_UP_EVENT_TYPES = [
+export const isZeroPointPointerEvent = ({ clientX, clientY }: Pick<MouseEvent, 'clientX' | 'clientY'>) => clientX === 0 && clientY === 0;
+export const PRESS_FOLLOW_UP_EVENT_TYPES: PressFollowUpEventType[] = [
   'mousedown',
   'pointerup',
   'pointercancel',
@@ -134,4 +158,4 @@ export const PRESS_FOLLOW_UP_EVENT_TYPES = [
   'auxclick',
   'contextmenu',
 ];
-export const isModifierOrFnKey = (key?: Dynamic) => MODIFIER_KEYS.has(key) || key === 'Fn' || key === 'FnLock';
+export const isModifierOrFnKey = (key: string) => MODIFIER_KEYS.has(key) || key === 'Fn' || key === 'FnLock';

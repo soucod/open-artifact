@@ -269,7 +269,7 @@ export function Button({
     >
       <span
         aria-hidden
-        className={`absolute -z-[1] rounded-[inherit] ${solid ? 'inset-[0.5px]' : 'inset-0'} cds-btn-squish`}
+        className={`absolute -z-[1] rounded-[inherit] ${solid ? 'inset-[0.5px] forced-colors:inset-0' : 'inset-0'} btn-squish`}
       >
         <span
           data-cds-part="paint"
@@ -324,6 +324,9 @@ export interface MenuItemSpec {
   separatorBefore?: boolean;
   /** Drawn at the row's end, muted (the header menu's comment count). */
   trailing?: ReactNode;
+  disabled?: boolean;
+  /** Why it is disabled (its tooltip and its description to assistive technology). */
+  disabledReason?: string;
   onSelect: () => void;
 }
 
@@ -336,6 +339,9 @@ export function MenuItems({ items }: { items: readonly MenuItemSpec[] }) {
           <BaseMenu.Item
             className={cn(MENU_ITEM, MENU_ITEM_VARIANT[item.variant ?? 'default'])}
             data-cds-icon-row={item.icon ? '' : undefined}
+            disabled={item.disabled}
+            title={item.disabled ? item.disabledReason : undefined}
+            aria-description={item.disabled ? item.disabledReason : undefined}
             onClick={item.onSelect}
           >
             {item.icon && (
@@ -549,4 +555,4 @@ export function PlainEditor({ ref, value, onChange, onSubmit, onKeyDown, rows = 
 
 /** The field box comment editors sit in. */
 export const FIELD_CLASS =
-  'rounded bg-fill-field shadow-field-ring data-[invalid]:shadow-field-invalid px-md py-sm transition duration-fast [&:hover:not(:focus-within):not([data-invalid]):not([data-disabled])]:shadow-field-hover focus-within:shadow-focus data-[invalid]:focus-within:shadow-focus-danger font-sans text-body text-primary';
+  'rounded bg-fill-field shadow-field-ring data-[invalid]:shadow-field-invalid px-md py-sm transition duration-fast [&:hover:not(:focus-within):not([data-invalid]):not([data-disabled])]:shadow-field-hover focus-within:shadow-focus data-[invalid]:focus-within:shadow-focus-danger font-sans text-body text-primary forced-colors:outline forced-colors:outline-1 forced-colors:outline-[CanvasText] forced-colors:-outline-offset-1 forced-colors:data-[invalid]:outline-2 forced-colors:data-[invalid]:-outline-offset-2';

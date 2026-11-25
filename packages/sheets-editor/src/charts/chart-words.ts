@@ -1,8 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
-import { chartMessages } from '../messages/charts.ts';
+import { chartMessages, type ChartChangeRefusal } from '../messages/charts.ts';
+import type { StockKind } from './stock-programs.ts';
 import { cleanAskWords } from '../agent/chat-with-agent.ts';
-export function chartKindName(chartKind?: Dynamic) {
+/** A kind of chart asked for, or 'any' when the agent is to pick it. */
+export type ChartKindOrAny = StockKind | 'any';
+/** Why no chart was made or changed. */
+export type WhyNoChart = 'noCells' | 'filterCutsTable' | ChartChangeRefusal;
+export function chartKindName(chartKind: StockKind): string {
   switch (chartKind) {
     case 'bar':
       return translateMessage({
@@ -41,7 +45,7 @@ export function chartKindName(chartKind?: Dynamic) {
       });
   }
 }
-export function makeThisChartKindPrompt(chartKind?: Dynamic) {
+export function makeThisChartKindPrompt(chartKind: StockKind): string {
   switch (chartKind) {
     case 'bar':
       return translateMessage({
@@ -80,7 +84,7 @@ export function makeThisChartKindPrompt(chartKind?: Dynamic) {
       });
   }
 }
-export function insertChartKindLabel(chartKind?: Dynamic) {
+export function insertChartKindLabel(chartKind: StockKind): string {
   switch (chartKind) {
     case 'bar':
       return translateMessage({
@@ -180,7 +184,7 @@ export const CHART_MESSAGES = {
       defaultMessage: 'Chart added',
       id: 'cx77hK/q4s',
     }),
-  chartAddedWithValuesNotShown: (count?: Dynamic) =>
+  chartAddedWithValuesNotShown: (count: number) =>
     translateMessage(
       {
         defaultMessage:
@@ -188,7 +192,7 @@ export const CHART_MESSAGES = {
         id: 'Mxr9vMyv89',
       },
       {
-        count: count,
+        count,
       },
     ),
   chartNotAdded: () =>
@@ -252,11 +256,11 @@ export const CHART_MESSAGES = {
       id: 'k8yqYuBise',
     }),
 };
-export const chartCaptionOrName = (chartKind?: Dynamic, caption?: Dynamic) =>
+export const chartCaptionOrName = (chartKind: ChartKindOrAny, caption: string): string =>
   caption !== '' ? caption : chartKind === 'any' ? CHART_MESSAGES.quickChart() : chartKindName(chartKind);
-export const chartKindNameOrAny = (chartKind?: Dynamic) =>
+export const chartKindNameOrAny = (chartKind: ChartKindOrAny): string =>
   chartKind === 'any' ? CHART_MESSAGES.nameOfChartOfAnyKind() : chartKindName(chartKind);
-export const chartRefusalText = (why?: Dynamic) =>
+export const chartRefusalText = (why: WhyNoChart): string =>
   (
     ({
       noCells: CHART_MESSAGES.noCellsToChart,
@@ -266,10 +270,10 @@ export const chartRefusalText = (why?: Dynamic) =>
       forChat: chartMessages.changeNeedsChatWithChart,
       notHere: CHART_MESSAGES.chartNotToBeHadHere,
       notChanged: CHART_MESSAGES.chartNotMade,
-    }) as Dynamic
+    })
   )[why]();
 export const MAX_CHART_TITLE_CHARS = 60;
-export const newChartTitle = (chartKind?: Dynamic, prompt?: Dynamic) =>
+export const newChartTitle = (chartKind: ChartKindOrAny, prompt: string): string =>
   chartKind !== 'any'
     ? chartKindName(chartKind)
     : prompt !== ''

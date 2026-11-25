@@ -15,6 +15,8 @@ export interface ColumnCard {
   render(open: boolean): ReactNode;
   /** Opens the card (`true`) or closes it, from a marker in the gutter. */
   select(open: boolean): void;
+  /** How many suggestions it stands for, in its marker's count: 1 unless it gathers several. */
+  count?: number;
 }
 
 export interface ColumnFeed {

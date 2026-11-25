@@ -232,6 +232,33 @@ describe('live board sync', () => {
     assert.equal(transport.docs.get('elements/n1')?.text, 'mine');
   });
 
+  it('merges fills and heat maps set by two people cell by cell (the later write wins a cell)', async () => {
+    const tableDoc = { type: 'table', x: 0, y: 0, head: true, color: 'white', cols: { c1: { at: 1 }, c2: { at: 2 } }, rows: { r1: { at: 1, c1: 'h', c2: 'h' }, r2: { at: 2, c1: '1', c2: '2' } } };
+    const { transport, timers, doc } = await open({ 'board/meta': { v: 1, title: 'Board', order: ['t1'] }, 'board/inks': { colors: {} }, 'elements/t1': tableDoc });
+    const withTints = (fields: Record<string, unknown>): BoardContent => ({
+      ...doc.content(),
+      elements: doc.content().elements.map((element) => (element.id === 't1' && element.type === 'table' ? { ...element, ...fields } : element)),
+    });
+    doc.setContent(withTints({ fills: { r1: { c1: 'blue' }, r2: { c2: 'peach' } } }));
+    transport.remote({ 'elements/t1': { ...tableDoc, fills: { r2: { c1: 'pink', c2: 'green' } }, heat: { cols: { c2: 'purple' } } } });
+    await timers.advance(LIVE_EDIT_DEBOUNCE_MS + 50);
+    const stored = transport.docs.get('elements/t1');
+    assert.deepEqual(stored?.fills, { r1: { c1: 'blue' }, r2: { c1: 'pink', c2: 'peach' } });
+    assert.deepEqual(stored?.heat, { cols: { c2: 'purple' } });
+    const table = doc.content().elements[0];
+    assert.deepEqual(table?.type === 'table' && table.fills, stored?.fills);
+  });
+
+  it('keeps a drawing style set by someone else while the drawing moves', async () => {
+    const src = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')}`;
+    const drawingDoc = { type: 'image', x: 0, y: 0, w: 100, h: 100, src };
+    const { transport, timers, doc } = await open({ 'board/meta': { v: 1, title: 'Board', order: ['d1'] }, 'board/inks': { colors: {} }, 'elements/d1': drawingDoc });
+    doc.setContent({ ...doc.content(), elements: doc.content().elements.map((element) => ({ ...element, x: 250 })) });
+    transport.remote({ 'elements/d1': { ...drawingDoc, style: 'watercolor' } });
+    await timers.advance(LIVE_EDIT_DEBOUNCE_MS + 50);
+    assert.deepEqual(transport.docs.get('elements/d1'), { ...drawingDoc, x: 250, style: 'watercolor' });
+  });
+
   it('applies remote changes with remote: true and keeps unchanged elements identical', async () => {
     const { transport, doc } = await open(seedDocs(note('n1', 'a'), note('n2', 'b')));
     const before = doc.content().elements;

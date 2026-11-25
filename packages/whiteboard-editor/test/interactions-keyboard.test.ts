@@ -10,6 +10,7 @@ import type { BoardElement, TableElement } from '@open-artifact/whiteboard-core'
 import {
   arrowKeyDirection,
   editTargetFor,
+  fieldTakesUndo,
   groupingKeyCommand,
   isCommentModeShortcut,
   isContextMenuKey,
@@ -21,6 +22,7 @@ import {
   rotationKeyStep,
   undoKeyCommand,
   zoomKeyCommand,
+  type FieldFacts,
   type KeyPress,
 } from '../src/services/keyboard.ts';
 
@@ -47,6 +49,31 @@ describe('undo and redo keys', () => {
 
   it('reads the physical key on other keyboard layouts', () => {
     assert.equal(undoKeyCommand({ ...press('я', { metaKey: true }), code: 'KeyZ' }), 'undo');
+  });
+});
+
+describe('undo from a focused field', () => {
+  const field = (facts: Partial<FieldFacts>): FieldFacts => ({ tag: 'input', type: '', role: null, editable: false, committed: false, ...facts });
+
+  it('is held back in text fields, text areas, selects and editable text', () => {
+    assert.equal(fieldTakesUndo(field({})), false);
+    assert.equal(fieldTakesUndo(field({ type: 'search' })), false);
+    assert.equal(fieldTakesUndo(field({ tag: 'textarea' })), false);
+    assert.equal(fieldTakesUndo(field({ tag: 'select' })), false);
+    assert.equal(fieldTakesUndo(field({ tag: 'div', editable: true })), false);
+  });
+
+  it('reaches the board from a number field only once its value is committed', () => {
+    assert.equal(fieldTakesUndo(field({ type: 'number' })), false);
+    assert.equal(fieldTakesUndo(field({ type: 'number', committed: true })), true);
+    assert.equal(fieldTakesUndo(field({ role: 'spinbutton', committed: true })), true);
+    assert.equal(fieldTakesUndo(field({ role: 'spinbutton' })), false);
+  });
+
+  it('reaches the board from checkboxes, sliders and buttons', () => {
+    assert.equal(fieldTakesUndo(field({ type: 'checkbox' })), true);
+    assert.equal(fieldTakesUndo(field({ type: 'range' })), true);
+    assert.equal(fieldTakesUndo(field({ tag: 'button' })), true);
   });
 });
 
@@ -117,6 +144,9 @@ describe('zoom keys', () => {
     assert.equal(zoomKeyCommand({ ...press('+', { ctrlKey: true, shiftKey: true }), code: 'Equal' }, false), 'in');
     assert.equal(zoomKeyCommand({ ...press('-', { metaKey: true }), code: 'Minus' }, false), 'out');
     assert.equal(zoomKeyCommand({ ...press('=', { metaKey: true, altKey: true }), code: 'Equal' }, false), undefined);
+    const altGraph = (key: string) => key === 'AltGraph';
+    assert.equal(zoomKeyCommand({ ...press('+', { ctrlKey: true }), code: 'Equal', getModifierState: altGraph }, false), undefined);
+    assert.equal(zoomKeyCommand({ ...press('!', { shiftKey: true }), code: 'Digit1', getModifierState: altGraph }, true), undefined);
   });
 
   it('reads ⇧0 / ⇧1 / ⇧2 only while single keys are on', () => {

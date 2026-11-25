@@ -9,7 +9,7 @@ export function toggleGridlines(state: PageState, workbook: WorkbookReads) {
     state,
     {
       kind: 'setSheetSettings',
-      sheetId: sheetId,
+      sheetId,
       settings: {
         areGridlinesHidden: hidesGridlines,
       },

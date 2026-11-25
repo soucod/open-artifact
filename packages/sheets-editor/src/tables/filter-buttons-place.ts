@@ -1,44 +1,55 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ColumnId, SheetId } from '@open-artifact/sheets-core';
 import { cellPaddingBeside, textLineMiddleY } from '../grid/cell-metrics.ts';
 import { clampBetween } from '../grid/geometry.ts';
 import { clampSpanToShown } from './own-filter-list.ts';
 import { columnLabelOf } from '../format/conditional/editor-view.ts';
 import { isColumnFiltered } from './filter-model.ts';
-export function roomAroundFilterButton(start: Dynamic, { showFrom: showFrom, showTo: showTo }: Dynamic) {
-  let [roomBefore, roomAfter] = [start - showFrom, showTo - start - FILTER_BUTTON_SIZE];
+import type { ColumnSpanOfId, PlacedFilterButton, TableWithFilterButtons, TextLookOfHeaderCell } from './table-drawing.ts';
+import type { ShownStretch, SpanOnScreen } from '../grid/geometry.ts';
+import type { CellDensity } from '../grid/cell-metrics-values.ts';
+/** Where the columns of a table found in sight are on screen, and the room its filter buttons leave at its end. */
+export interface FoundTableSpan {
+  table: SpanOnScreen;
+  takenAtEnd: number;
+}
+export function roomAroundFilterButton(
+  start: number,
+  { showFrom, showTo }: ShownStretch,
+): [roomBefore: number, roomAfter: number] | null {
+  const [roomBefore, roomAfter] = [start - showFrom, showTo - start - FILTER_BUTTON_SIZE];
   return Math.min(roomBefore, roomAfter) <= -FILTER_BUTTON_SIZE ? null : [roomBefore, roomAfter];
 }
 export function filterButtonLeftInTable(
-  left: Dynamic,
-  across: Dynamic,
-  { table: table, takenAtEnd: takenAtEnd }: Dynamic,
-  padding?: Dynamic,
-) {
-  let tableStart = Math.max(table.start, table.showFrom);
-  let minLeft = table.showFrom < across.showFrom ? Math.max(across.showFrom - padding - FILTER_BUTTON_SIZE, tableStart) : left;
-  let maxLeft = Math.max(table.showTo - Math.max(padding, takenAtEnd) - FILTER_BUTTON_SIZE, tableStart);
+  left: number,
+  across: ShownStretch,
+  { table, takenAtEnd }: FoundTableSpan,
+  padding: number,
+): number {
+  const tableStart = Math.max(table.start, table.showFrom);
+  const minLeft = table.showFrom < across.showFrom ? Math.max(across.showFrom - padding - FILTER_BUTTON_SIZE, tableStart) : left;
+  const maxLeft = Math.max(table.showTo - Math.max(padding, takenAtEnd) - FILTER_BUTTON_SIZE, tableStart);
   return Math.min(Math.max(left, minLeft), maxLeft);
 }
 export function filterButtonsOfTable(
-  filterTable?: Dynamic,
-  placeOfColumn?: Dynamic,
-  rowSpan?: Dynamic,
-  density?: Dynamic,
-  columnWithListOpen?: Dynamic,
-  textLookOfColumn?: Dynamic,
-  foundTableSpan: Dynamic = null,
-) {
-  let rowHeight = rowSpan.end - rowSpan.start;
+  filterTable: TableWithFilterButtons,
+  placeOfColumn: (columnId: ColumnId) => ColumnSpanOfId | null,
+  rowSpan: SpanOnScreen,
+  density: CellDensity,
+  columnWithListOpen: ColumnId | null,
+  textLookOfColumn: (columnIndex: number) => TextLookOfHeaderCell,
+  foundTableSpan: FoundTableSpan | null = null,
+): PlacedFilterButton[] {
+  const rowHeight = rowSpan.end - rowSpan.start;
   if (rowHeight < FILTER_BUTTON_SIZE) return [];
-  let columnIndexOfColumn = (input?: Dynamic, options?: Dynamic) => placeOfColumn(options)?.columnIndex ?? null;
-  return filterTable.columns.flatMap(({ c: columnId, name: name }: Dynamic) => {
-    let place = placeOfColumn(columnId);
+  const columnIndexOfColumn = (sheetId: SheetId, columnId: ColumnId) => placeOfColumn(columnId)?.columnIndex ?? null;
+  return filterTable.columns.flatMap(({ c: columnId, name }): PlacedFilterButton[] => {
+    const place = placeOfColumn(columnId);
     if (place === null) return [];
-    let { start: acrossStart, end: acrossEnd } = place.across;
-    let padding = cellPaddingBeside(density);
-    let restingLeft = Math.max(acrossStart, acrossEnd - padding - FILTER_BUTTON_SIZE);
-    let left = foundTableSpan === null ? restingLeft : filterButtonLeftInTable(restingLeft, place.across, foundTableSpan, padding);
-    let span =
+    const { start: acrossStart, end: acrossEnd } = place.across;
+    const padding = cellPaddingBeside(density);
+    const restingLeft = Math.max(acrossStart, acrossEnd - padding - FILTER_BUTTON_SIZE);
+    const left = foundTableSpan === null ? restingLeft : filterButtonLeftInTable(restingLeft, place.across, foundTableSpan, padding);
+    const span =
       foundTableSpan === null
         ? place.across
         : {
@@ -46,20 +57,16 @@ export function filterButtonsOfTable(
             showFrom: Math.max(foundTableSpan.table.start, foundTableSpan.table.showFrom),
             showTo: Math.min(foundTableSpan.table.end, foundTableSpan.table.showTo + 1),
           };
-    let clearAcross = roomAroundFilterButton(left, span);
-    let heldBy = Math.max(Math.abs(left - restingLeft), span.showFrom < place.across.showFrom ? place.across.showFrom - left : 0);
-    let {
-      fontSizeInPoints: fontSizeInPoints,
-      isAt: isAt,
-      hiddenByBorderAtFoot: hiddenByBorderAtFoot2,
-    } = textLookOfColumn(place.columnIndex);
-    let textMiddle = textLineMiddleY(rowHeight, fontSizeInPoints, isAt, density, hiddenByBorderAtFoot2);
-    let top = rowSpan.start + clampBetween(Math.floor(textMiddle - FILTER_BUTTON_SIZE / 2), 0, rowHeight - FILTER_BUTTON_SIZE);
-    let clearDown = roomAroundFilterButton(top, rowSpan);
+    const clearAcross = roomAroundFilterButton(left, span);
+    const heldBy = Math.max(Math.abs(left - restingLeft), span.showFrom < place.across.showFrom ? place.across.showFrom - left : 0);
+    const { fontSizeInPoints, isAt, hiddenByBorderAtFoot } = textLookOfColumn(place.columnIndex);
+    const textMiddle = textLineMiddleY(rowHeight, fontSizeInPoints, isAt, density, hiddenByBorderAtFoot);
+    const top = rowSpan.start + clampBetween(Math.floor(textMiddle - FILTER_BUTTON_SIZE / 2), 0, rowHeight - FILTER_BUTTON_SIZE);
+    const clearDown = roomAroundFilterButton(top, rowSpan);
     if (acrossEnd - acrossStart < FILTER_BUTTON_SIZE || clearAcross === null || clearDown === null) return [];
-    let [[cellLeft, cellWidth], [cellTop, cellHeight]] = [clampSpanToShown(place.across), clampSpanToShown(rowSpan)];
-    let heldRight = left < place.across.showFrom ? Math.min(span.showTo, left + FILTER_BUTTON_SIZE + padding) : span.showTo;
-    let fade = clampBetween(left - span.showFrom, 0, Math.min(heldBy, MAX_FILTER_BUTTON_FADE));
+    const [[cellLeft, cellWidth], [cellTop, cellHeight]] = [clampSpanToShown(place.across), clampSpanToShown(rowSpan)];
+    const heldRight = left < place.across.showFrom ? Math.min(span.showTo, left + FILTER_BUTTON_SIZE + padding) : span.showTo;
+    const fade = clampBetween(left - span.showFrom, 0, Math.min(heldBy, MAX_FILTER_BUTTON_FADE));
     return [
       {
         tableKey: filterTable.key,
@@ -74,11 +81,11 @@ export function filterButtonsOfTable(
           filterTable.table.sheetId,
           {
             c: columnId,
-            name: name,
+            name,
           },
         ),
-        left: left,
-        top: top,
+        left,
+        top,
         clearAt: {
           left: clearAcross[0],
           right: clearAcross[1],
@@ -101,7 +108,7 @@ export function filterButtonsOfTable(
                 width: heldRight - (heldRight === span.end ? 1 : 0) - left + fade,
                 top: cellTop,
                 height: Math.min(cellHeight, rowSpan.end - 1 - cellTop),
-                fade: fade,
+                fade,
               },
       },
     ];

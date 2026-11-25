@@ -128,4 +128,13 @@ However you write the piece:
 [data-read-sound][aria-pressed="true"] > :first-child, [data-read-sound]:not([aria-pressed="true"]) > :last-child { visibility: hidden; }
 @container (max-width: 560px) { .vs-line { gap: 4px; } .vs-say { block-size: 3lh; } .vs-chapters { padding-top: calc(var(--row) + 4px); } .vs-label { padding: 0; } }
 .vs-now { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media print {
+  .vs-stage { aspect-ratio: auto; width: 100%; border: 0; background: none; }
+  .vs-line, .vs-controls { display: none; }
+  .vs-ch { grid-area: auto; opacity: 1; aspect-ratio: 16 / 10; }
+  .vs-ch + .vs-ch { break-before: page; }
+  .vs-say { block-size: 4lh; }
+  .vs-cap { display: block; }
+  .vs-cap, .vs-s, .vs-hush .vs-caps { opacity: 1; }
+}
 ```

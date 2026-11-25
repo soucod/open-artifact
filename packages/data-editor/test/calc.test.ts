@@ -164,6 +164,48 @@ describe('calculations as sources', () => {
     assert.equal('message' in gone && gone.message, 'Nothing in this dashboard is called orders, so this didn’t run.');
   });
 
+  it('uses the earliest input time, weighing live queries and stale files ahead of fresh files', () => {
+    const baseReport: CalculationReport = {
+      id: 'combined',
+      inputs: ['a', 'b'],
+      code: '',
+      title: '',
+      description: '',
+      status: 'ok',
+      result: [{ total: 1 }],
+      error: '',
+      at: 999,
+    };
+    const calc = calculationReportToDataset(baseReport);
+    assert.equal(calc.source.kind, 'calc');
+    if (calc.source.kind !== 'calc') return;
+
+    const fileA = { id: 'a', title: 'A', description: '', source: { kind: 'file', url: 'a', name: 'a.csv', format: 'csv' }, updated: { at: 100, by: 'owner' }, schedule: '', staleAfterHours: null } as const;
+    const fileB = { id: 'b', title: 'B', description: '', source: { kind: 'file', url: 'b', name: 'b.csv', format: 'csv' }, updated: { at: 500, by: 'owner' }, schedule: '', staleAfterHours: null } as const;
+    const twoFiles = getCalculationRun(
+      calc.source,
+      (id) => (id === 'a' ? fileA : id === 'b' ? fileB : undefined),
+      (id) => ({ status: 'ok', at: id === 'a' ? 100 : 500, table: { columns: [], rows: [] } }),
+    );
+    assert.equal(twoFiles.status === 'ok' && twoFiles.at, 100);
+
+    const liveB = { id: 'b', title: 'B', description: '', source: { kind: 'query', connector: 'crm', tool: 'q', args: '{}' }, updated: null, schedule: '', staleAfterHours: null } as const;
+    const liveAndFreshFile = getCalculationRun(
+      calc.source,
+      (id) => (id === 'a' ? fileA : id === 'b' ? liveB : undefined),
+      (id) => ({ status: 'ok', at: id === 'a' ? 100 : 500, table: { columns: [], rows: [] } }),
+    );
+    assert.equal(liveAndFreshFile.status === 'ok' && liveAndFreshFile.at, 500);
+
+    const staleFileA = { ...fileA, staleAfterHours: 1 };
+    const liveAndStaleFile = getCalculationRun(
+      calc.source,
+      (id) => (id === 'a' ? staleFileA : id === 'b' ? liveB : undefined),
+      (id) => ({ status: 'ok', at: id === 'a' ? 100 : 500, table: { columns: [], rows: [] } }),
+    );
+    assert.equal(liveAndStaleFile.status === 'ok' && liveAndStaleFile.at, 100);
+  });
+
   it('formats names and code', () => {
     assert.equal(humanizeIdentifier('monthly_signups'), 'Monthly signups');
     assert.equal(dedentFunctionCode('(x) => {\n    return x;\n  }'), '(x) => {\n  return x;\n}');

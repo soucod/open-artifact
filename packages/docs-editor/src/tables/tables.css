@@ -61,3 +61,29 @@
 .table-drop-line[data-allowed] {
   background: var(--table-drop);
 }
+
+/* The scrollbar held at the foot of the window for a wide, tall table (DockedScrollbar.tsx): drawn even where the
+   system hides scrollbars until they are used, since it is there only to be seen and dragged. */
+.doc-table-dock::-webkit-scrollbar {
+  height: 12px;
+}
+
+.doc-table-dock::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.doc-table-dock::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background: var(--doc-muted) padding-box;
+}
+
+.doc-table-dock::-webkit-scrollbar-thumb:hover {
+  background-color: var(--doc-secondary);
+}
+
+@media print {
+  .doc-table-dock {
+    display: none;
+  }
+}

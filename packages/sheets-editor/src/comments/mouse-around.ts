@@ -1,11 +1,65 @@
-import type { Dynamic } from '../dynamic.ts';
-export function createHoverOpenTimer(options?: Dynamic) {
-  let { open: open, shut: shut, restMs: restMs, leaveMs: leaveMs, after: after } = options;
-  let openTimer: Dynamic = null;
-  let shutTimer: Dynamic = null;
-  let isMenuOpen: Dynamic = false;
-  let hasLeft: Dynamic = false;
-  let restPoint: Dynamic = {
+import type { CancelableTimer, RunAfter } from '../format/border-pen-hover.ts';
+import type { PagePoint } from './page-comments.ts';
+/** What a hover timer opens and shuts, how long the pointer rests before it opens, and how long after leaving it shuts. */
+export interface HoverOpenTimerHooks {
+  open(): void;
+  shut(): void;
+  restMs: number;
+  leaveMs: number;
+  after: RunAfter;
+}
+/** What the mouse around comment marks needs of the page: the preview or card shown, and how to show and hide them. */
+export interface CommentPreviewHooks {
+  shown(): string | null;
+  isCardShown(): boolean;
+  isMouseOnShown(): boolean;
+  show(handle: string): void;
+  showCard(handle: string): void;
+  hide(): void;
+  after: RunAfter;
+}
+/** What the page tells of the mouse around comment marks, to show a comment's preview while the mouse rests on it. */
+export interface MouseAroundComments {
+  isOver(markKey: string | null, point: PagePoint): void;
+  hasLeftGrid(isOnPreview: boolean): void;
+  hostSaysItIsOnPreview(isOnPreview: boolean): void;
+  /** Puts away the preview or card shown, and tells the comment of a card put away. */
+  putAway(): string | null;
+  putAwayAtDraw(keepCard?: boolean): void;
+  isPressedOnCells(point: PagePoint): void;
+  isDraggedTo(point: PagePoint): void;
+  isLetGo(markKey: string | null): void;
+  isPressLost(): void;
+  isTappedByFinger(markKey: string, point: PagePoint): void;
+  isUp(): boolean;
+  stop(): void;
+}
+/** What a card opened by a tap needs of the host's comment cards. */
+export interface CommentCardOnTapHooks {
+  cardAskedFor(): string | null;
+  mayCome(): boolean;
+  hasPageKeyboard(): boolean;
+  open(handle: string): void;
+  shut(): void;
+}
+/** A preview about to be shown, of a comment mark, from where the mouse rested. */
+interface PreviewToShow extends CancelableTimer {
+  of: string;
+  from: PagePoint;
+  isForCard: boolean;
+}
+/** A press on a comment mark, and where it began. */
+interface PressOnMark {
+  of: string;
+  at: PagePoint;
+}
+export function createHoverOpenTimer(hover: HoverOpenTimerHooks) {
+  let { open, shut, restMs, leaveMs, after } = hover;
+  let openTimer: CancelableTimer | null = null;
+  let shutTimer: CancelableTimer | null = null;
+  let isMenuOpen = false;
+  let hasLeft = false;
+  let restPoint = {
     x: 0,
     y: 0,
   };
@@ -25,12 +79,12 @@ export function createHoverOpenTimer(options?: Dynamic) {
     });
   };
   return {
-    restedOn(x?: Dynamic, y?: Dynamic) {
+    restedOn(x: number, y: number) {
       if (openTimer !== null && Math.hypot(x - restPoint.x, y - restPoint.y) <= 3) return;
       cancelOpen();
       restPoint = {
-        x: x,
-        y: y,
+        x,
+        y,
       };
       hasLeft = false;
       openTimer = after(restMs, () => {
@@ -47,7 +101,7 @@ export function createHoverOpenTimer(options?: Dynamic) {
       hasLeft = true;
       shutAfterLeave();
     },
-    menuIsOpen(isOpen?: Dynamic) {
+    menuIsOpen(isOpen: boolean) {
       isMenuOpen = isOpen;
       if (isOpen) cancelShut();
       else if (hasLeft) shutAfterLeave();
@@ -58,24 +112,24 @@ export function createHoverOpenTimer(options?: Dynamic) {
     },
   };
 }
-export function createMouseAroundComments(options?: Dynamic) {
+export function createMouseAroundComments(previews: CommentPreviewHooks): MouseAroundComments {
   let {
-    shown: shown,
-    isCardShown: isCardShown,
-    isMouseOnShown: isMouseOnShown,
-    show: show,
-    showCard: showCard,
-    hide: hide,
-    after: after,
-  } = options;
-  let isMouseOnPreview: Dynamic = false;
-  let hasLeftGrid: Dynamic = false;
-  let markUnderMouse: Dynamic = null;
-  let markToIgnore: Dynamic = null;
-  let ignoreNextMark: Dynamic = false;
-  let press: Dynamic = null;
-  let showTimer: Dynamic = null;
-  let hideTimer: Dynamic = null;
+    shown,
+    isCardShown,
+    isMouseOnShown,
+    show,
+    showCard,
+    hide,
+    after,
+  } = previews;
+  let isMouseOnPreview = false;
+  let hasLeftGrid = false;
+  let markUnderMouse: string | null = null;
+  let markToIgnore: string | null = null;
+  let ignoreNextMark = false;
+  let press: PressOnMark | null = null;
+  let showTimer: PreviewToShow | null = null;
+  let hideTimer: CancelableTimer | null = null;
   let cancelShow = () => {
     showTimer?.cancel();
     showTimer = null;
@@ -88,7 +142,7 @@ export function createMouseAroundComments(options?: Dynamic) {
     cancelHide();
     if (shown() !== null) hide();
   };
-  let showAfterDelay = (markKey?: Dynamic, point?: Dynamic, isForCard: Dynamic = false) => {
+  let showAfterDelay = (markKey: string, point: PagePoint, isForCard: boolean = false) => {
     showTimer = {
       ...after(COMMENT_PREVIEW_SHOW_DELAY_MS, () => {
         showTimer = null;
@@ -97,7 +151,7 @@ export function createMouseAroundComments(options?: Dynamic) {
       }),
       of: markKey,
       from: point,
-      isForCard: isForCard,
+      isForCard,
     };
   };
   let isCardComing = () => isCardShown() || showTimer?.isForCard === true;
@@ -118,7 +172,7 @@ export function createMouseAroundComments(options?: Dynamic) {
     });
   };
   return {
-    isOver(markKey?: Dynamic, point?: Dynamic) {
+    isOver(markKey, point) {
       isMouseOnPreview = false;
       markUnderMouse = markKey;
       press = null;
@@ -136,7 +190,7 @@ export function createMouseAroundComments(options?: Dynamic) {
       cancelShow();
       showAfterDelay(markKey, point);
     },
-    hasLeftGrid(isOnPreview?: Dynamic) {
+    hasLeftGrid(isOnPreview) {
       hasLeftGrid = true;
       isMouseOnPreview = isOnPreview;
       [markUnderMouse, markToIgnore, ignoreNextMark, press] = [null, null, false, null];
@@ -144,7 +198,7 @@ export function createMouseAroundComments(options?: Dynamic) {
       if (isOnPreview) cancelHide();
       hideSoon();
     },
-    hostSaysItIsOnPreview(isOnPreview?: Dynamic) {
+    hostSaysItIsOnPreview(isOnPreview) {
       if (!isOnPreview && isMouseOnPreview) hideSoon();
       if (!isOnPreview || hasLeftGrid) return;
       isMouseOnPreview = true;
@@ -155,10 +209,10 @@ export function createMouseAroundComments(options?: Dynamic) {
       press = null;
       return putAwayNow();
     },
-    putAwayAtDraw(keepCard: Dynamic = false) {
+    putAwayAtDraw(keepCard = false) {
       if (press === null && !(keepCard && isCardComing())) putAwayNow();
     },
-    isPressedOnCells(point?: Dynamic) {
+    isPressedOnCells(point) {
       isMouseOnPreview = false;
       press =
         markUnderMouse === null
@@ -169,31 +223,31 @@ export function createMouseAroundComments(options?: Dynamic) {
             };
       if (press === null) putAwayNow();
     },
-    isDraggedTo(point?: Dynamic) {
+    isDraggedTo(point) {
       if (press === null || Math.hypot(point.x - press.at.x, point.y - press.at.y) <= MOUSE_STILL_SLOP) return;
       press = null;
       putAwayNow();
     },
-    isLetGo(markKey?: Dynamic) {
-      let press2 = press;
+    isLetGo(markKey) {
+      let pressLetGo = press;
       press = null;
       cancelShow();
-      if (press2 === null || markKey !== press2.of) {
-        if (press2 !== null) hideNow();
+      if (pressLetGo === null || markKey !== pressLetGo.of) {
+        if (pressLetGo !== null) hideNow();
         [markUnderMouse, markToIgnore, ignoreNextMark] = [markKey, markKey, false];
         return;
       }
       [markUnderMouse, markToIgnore, ignoreNextMark] = [markKey, null, false];
       if (shown() === markKey) return;
       hideNow();
-      showAfterDelay(markKey, press2.at);
+      showAfterDelay(markKey, pressLetGo.at);
     },
     isPressLost() {
       if (press === null) return;
       press = null;
       putAwayNow();
     },
-    isTappedByFinger(markKey?: Dynamic, point?: Dynamic) {
+    isTappedByFinger(markKey, point) {
       cancelShow();
       showAfterDelay(markKey, point, true);
     },
@@ -204,16 +258,16 @@ export function createMouseAroundComments(options?: Dynamic) {
     },
   };
 }
-export function createCommentCardOnTap(options?: Dynamic) {
-  let { cardAskedFor: cardAskedFor, mayCome: mayCome, hasPageKeyboard: hasPageKeyboard, open: open, shut: shut } = options;
-  let cardOpenedByTap: Dynamic = null;
+export function createCommentCardOnTap(cards: CommentCardOnTapHooks) {
+  let { cardAskedFor, mayCome, hasPageKeyboard, open, shut } = cards;
+  let cardOpenedByTap: string | null = null;
   let cardOfTap = () => {
     if (cardAskedFor() !== cardOpenedByTap) cardOpenedByTap = null;
     return cardOpenedByTap;
   };
   return {
     of: cardOfTap,
-    show(markKey?: Dynamic) {
+    show(markKey: string) {
       if (!mayCome() || cardAskedFor() !== null) return;
       open(markKey);
       if (cardAskedFor() === markKey) cardOpenedByTap = markKey;
@@ -233,7 +287,7 @@ export function createCommentCardOnTap(options?: Dynamic) {
 export const MOUSE_STILL_SLOP = 3;
 export const COMMENT_PREVIEW_SHOW_DELAY_MS = 300;
 export const COMMENT_PREVIEW_HIDE_DELAY_MS = 300;
-export const noMouseAroundComments = {
+export const noMouseAroundComments: MouseAroundComments = {
   isOver() {},
   hasLeftGrid() {},
   hostSaysItIsOnPreview() {},

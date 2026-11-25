@@ -1,40 +1,70 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Border, BorderStyle, Hue, VerticalAlignment } from '@open-artifact/sheets-core';
 import { strongerBorder, borderPaint, borderStyleWidth } from '../grid/borders.ts';
 import { PAGE_TEXT_COLORS, PAGE_BACKGROUND_COLORS, CELL_COLOR_PALETTE } from '../format/cell-colors.ts';
 import { DEFAULT_CELL_FORMAT } from '../model/cell-format.ts';
-export function cssBorderDeclaration(side?: Dynamic, neighborBorder?: Dynamic, ownBorder?: Dynamic) {
+import type { ShownHorizontalAlignment } from '../format/toolbar-choices.ts';
+import type { CellLook } from '../grid/header-gray-fill.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { BorderSide } from '../model/cell-format.ts';
+
+/** A copied cell as its HTML is written: how it is drawn, its alignment as shown, and the name of its number format's text color. */
+export interface CellToCopyAsHtml {
+  look: CellLook;
+  alignment: ShownHorizontalAlignment;
+  tint: string | null;
+}
+
+/** A merged area over the copied cells, by positions among them, with the cell at its top left. */
+export interface MergedAreaToCopy extends CellArea {
+  first: CellToCopyAsHtml | null;
+}
+
+/** A merged area clipped to the copied cells: its first and last rows and columns. */
+interface MergeInCopy {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+  of: MergedAreaToCopy;
+}
+
+export function cssBorderDeclaration(side: BorderSide, neighborBorder: Border, ownBorder: Border): string[] {
   let border = strongerBorder(neighborBorder, ownBorder);
   if (border === null) return [];
   let { onLight: color } = borderPaint(border) ?? PAGE_TEXT_COLORS;
   return cssColorDeclaration(`border-${side}`, `${borderStyleWidth(border.style)}px ${HTML_BORDER_STYLES[border.style]}`, color);
 }
-export function formatColorCss(tint?: Dynamic) {
+export function formatColorCss(tint: string): string {
   if (tint === 'black' || tint === 'white') return (tint === 'black' ? PAGE_TEXT_COLORS : PAGE_BACKGROUND_COLORS).onLight;
   return CELL_COLOR_PALETTE[FORMAT_COLOR_PALETTE_FAMILIES[tint]][600];
 }
-export function htmlCellAttributesOf(cellRows?: Dynamic, mergedAreas?: Dynamic, isInsideTable?: Dynamic) {
+export function htmlCellAttributesOf(
+  cellRows: readonly (readonly (CellToCopyAsHtml | null)[])[],
+  mergedAreas: readonly MergedAreaToCopy[],
+  isInsideTable: boolean,
+): (string | null)[][] {
   let columnCount = cellRows[0]?.length ?? 0;
-  let mergeByIndex = new (Map as Dynamic)();
-  for (let mergedArea of mergedAreas as Dynamic) {
-    let merge = {
+  const mergeByIndex = new Map<number, MergeInCopy>();
+  for (let mergedArea of mergedAreas) {
+    let merge: MergeInCopy = {
       top: Math.max(mergedArea.topRowIndex, 0),
       left: Math.max(mergedArea.leftColumnIndex, 0),
       bottom: Math.min(mergedArea.topRowIndex + mergedArea.rowCount, cellRows.length) - 1,
       right: Math.min(mergedArea.leftColumnIndex + mergedArea.columnCount, columnCount) - 1,
       of: mergedArea,
     };
-    for (let rowIndex: Dynamic = merge.top; rowIndex <= merge.bottom; rowIndex += 1)
-      for (let columnIndex: Dynamic = merge.left; columnIndex <= merge.right; columnIndex += 1)
+    for (let rowIndex = merge.top; rowIndex <= merge.bottom; rowIndex += 1)
+      for (let columnIndex = merge.left; columnIndex <= merge.right; columnIndex += 1)
         mergeByIndex.set(rowIndex * columnCount + columnIndex, merge);
   }
-  let bordersAt = (rowIndex?: Dynamic, columnIndex?: Dynamic) => cellRows[rowIndex]?.[columnIndex]?.look.format.border;
-  let borderSideAt = (rowIndex?: Dynamic, columnIndex?: Dynamic, side?: Dynamic) => {
+  let bordersAt = (rowIndex: number, columnIndex: number) => cellRows[rowIndex]?.[columnIndex]?.look.format.border;
+  let borderSideAt = (rowIndex: number, columnIndex: number, side: BorderSide): Border => {
     let border = bordersAt(rowIndex, columnIndex)?.[side] ?? NO_BORDER_SIDE;
     return border.kind === 'line' && !Object.hasOwn(HTML_BORDER_STYLES, border.style) ? NO_BORDER_SIDE : border;
   };
   return cellRows.map(
-    (row?: Dynamic, rowIndex?: Dynamic) =>
-      row.map((cell?: Dynamic, columnIndex?: Dynamic) => {
+    (row, rowIndex) =>
+      row.map((cell, columnIndex) => {
         let merge = mergeByIndex.get(rowIndex * columnCount + columnIndex);
         if (merge !== undefined && (merge.top !== rowIndex || merge.left !== columnIndex)) return null;
         let { bottom = rowIndex, right = columnIndex, of: mergedArea } = merge ?? {};
@@ -45,7 +75,7 @@ export function htmlCellAttributesOf(cellRows?: Dynamic, mergedAreas?: Dynamic, 
           bottom: mergedArea === undefined || mergedArea.topRowIndex + mergedArea.rowCount - 1 === bottom,
           left: mergedArea === undefined || mergedArea.leftColumnIndex === columnIndex,
         };
-        let { font: font, alignment: alignment } = anchorCell?.look.format ?? DEFAULT_CELL_FORMAT;
+        let { font, alignment } = anchorCell?.look.format ?? DEFAULT_CELL_FORMAT;
         let { text: textPaint = null, fill: fillPaint = null } = anchorCell?.look.paints ?? {};
         let backgroundStyles = fillPaint === null ? [] : cssColorDeclaration('background-color', '', fillPaint.onLight);
         let tint = anchorCell?.look.isTextColorFromRule === true ? null : (anchorCell?.tint ?? null);
@@ -86,7 +116,7 @@ export function htmlCellAttributesOf(cellRows?: Dynamic, mergedAreas?: Dynamic, 
 }
 export const HTML_CELL_BORDER_STYLE = 'border:1px solid #ccc';
 export const HTML_BORDERED_STYLE_ATTRIBUTE = ` style="${HTML_CELL_BORDER_STYLE}"`;
-export const HTML_BORDER_STYLES = {
+export const HTML_BORDER_STYLES: Record<BorderStyle, string> = {
   thin: 'solid',
   medium: 'solid',
   thick: 'solid',
@@ -94,16 +124,17 @@ export const HTML_BORDER_STYLES = {
   dotted: 'dotted',
   double: 'double',
 };
-export const NO_BORDER_SIDE = {
+export const NO_BORDER_SIDE: Border = {
   kind: 'none',
 };
-export const HTML_VERTICAL_ALIGN = {
+export const HTML_VERTICAL_ALIGN: Partial<Record<VerticalAlignment, string>> = {
   center: 'middle',
   bottom: 'bottom',
 };
-export const cssColorDeclaration = (property?: Dynamic, prefix?: Dynamic, color?: Dynamic) =>
+export const cssColorDeclaration = (property: string, prefix: string, color: string): string[] =>
   /^#[0-9a-f]{6}$/i.test(color) ? [`${property}:${prefix === '' ? '' : `${prefix} `}${color}`] : [];
-export const FORMAT_COLOR_PALETTE_FAMILIES = {
+/** The palette family of each text color a number format names. */
+export const FORMAT_COLOR_PALETTE_FAMILIES: Readonly<Record<string, Hue>> = {
   blue: 'blue',
   cyan: 'teal',
   gray: 'gray',

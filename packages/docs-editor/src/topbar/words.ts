@@ -68,13 +68,24 @@ export function otherNotes(notes: readonly ExportNoteLike[] = []): ExportNoteLik
 
 export const couldntTitle = (format: DocExportFormat) => `Couldn’t export as ${TITLE_NAMES[format]}`;
 
-/** Why an export failed, in a sentence, from the server's code. */
-export function exportFailure(format: DocExportFormat, scope: 'tab' | 'doc', code: string | undefined): string {
+/**
+ * The toast while the browser's print dialog makes the PDF (no Chrome on this computer, or a cloud host, which never
+ * prints on its side): which destination to pick. In Chinese for a Chinese browser, as Chrome names it there.
+ */
+export function printToPdfWords(languages: readonly string[] = typeof navigator === 'undefined' ? [] : navigator.languages ?? [navigator.language]): { title: string; description: string } {
+  if (/^zh\b/i.test(languages[0] ?? '')) return { title: '用浏览器打印成 PDF', description: '在打印对话框里，把“目标打印机”选为“另存为 PDF”，再点“保存”。' };
+  return { title: 'Print to PDF in your browser', description: 'In the print dialog, choose “Save as PDF” as the destination, then Save.' };
+}
+
+/** Why an export failed, in a sentence, from the server's code (and, for a refusal, the host's own words). */
+export function exportFailure(format: DocExportFormat, scope: 'tab' | 'doc', code: string | undefined, message?: string): string {
   const what = scope === 'tab' ? 'this tab' : 'this document';
   const name = TITLE_NAMES[format];
   switch (code) {
     case 'no_chrome':
       return 'A PDF is printed by Chrome, and there is none on this computer. Export as HTML and print it from your browser.';
+    case 'no_print':
+      return 'Your browser couldn’t open its print dialog. Export as HTML, open the file and print it from your browser.';
     case 'renderer_unavailable':
       return 'PDF export is busy. Try again in a moment.';
     case 'no_node':
@@ -85,6 +96,10 @@ export function exportFailure(format: DocExportFormat, scope: 'tab' | 'doc', cod
       return 'This document can’t be exported.';
     case 'unavailable':
       return `Couldn’t reach the server to export ${what}. Check it’s running, then try again.`;
+    case 'not_writer':
+    case 'not_granted':
+      // The host's refusal says why (a viewer, while the owner does not let viewers export).
+      return message || 'You can’t export this document.';
     default:
       return `Couldn’t export ${what} as ${name}. Try again in a moment.`;
   }

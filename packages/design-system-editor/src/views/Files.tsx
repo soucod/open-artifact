@@ -16,6 +16,7 @@ import { projectUrl } from '../lib/color.ts';
 import { editText } from '../services/edit.ts';
 import { deleteFiles, ensureLoaded, isGenerated, isTextPath } from '../services/sync.ts';
 import { ContextMenu, PageHeader } from './common.tsx';
+import { titleWhenCut } from '../lib/cut-title.ts';
 
 /** What the tree's rows do: select (with ⌘/Ctrl or Shift, several) and open a context menu. */
 interface TreeActions {
@@ -94,7 +95,7 @@ function TreeDir({ dir, depth, selected, problems, actions }: { dir: Dir; depth:
                 style={{ paddingLeft: depth * 12 + 6 }}
               >
                 {isTextPath(path) ? <FileText className="size-3.5 shrink-0" /> : <FileIcon className="size-3.5 shrink-0" />}
-                <span className={cn('min-w-0 flex-1 truncate', isGenerated(path) && 'italic')}>{path.slice(dir.path.length)}</span>
+                <span onPointerEnter={(event) => titleWhenCut(event.currentTarget)} className={cn('min-w-0 flex-1 truncate', isGenerated(path) && 'italic')}>{path.slice(dir.path.length)}</span>
                 {level ? <span className={cn('size-1.5 shrink-0 rounded-full', level === 'error' ? 'bg-danger' : 'bg-warning')} /> : null}
               </button>
             );

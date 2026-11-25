@@ -5,20 +5,10 @@
  *
  * Layers, back to front: paper, grid, the camera layer (elements, in board
  * units) and the screen-space overlay (handles, cursors, pins).
- *
- * With the canvas engine (see `engine/board.ts`) the canvas sits between
- * the camera layer and the overlay and draws the board and its grid (the
- * DOM grid is left out, so holes show plain paper); the camera layer
- * keeps the element views whose text shows through the canvas's holes,
- * and a second camera layer above the canvas holds the live elements and
- * the other board-unit content (`children`), kept on the engine's camera
- * every frame.
  */
 
 import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { COMMENT_CURSOR } from '@open-artifact/editor-kit/react';
-import { startEngineBoard } from '../engine/board.ts';
-import { engineOwnsPress, useEngineView } from '../engine/mode.ts';
 import { cameraLayerTransform } from '../lib/camera.ts';
 import { useCamera } from '../state/camera.ts';
 import { effectiveTool, useTool } from '../state/tool.ts';
@@ -33,10 +23,8 @@ export { surfaceRef } from './surface.ts';
 
 /** Props of {@link BoardSurface}. */
 export interface BoardSurfaceProps {
-  /** The element layer, in board units (under the engine canvas when it runs). */
+  /** The element layer, in board units. */
   elements?: ReactNode;
-  /** Elements that stay interactive DOM above the engine canvas, in board units (engine only). */
-  live?: ReactNode;
   /** Other content in board units, above the elements. */
   children?: ReactNode;
   /** Content in screen units, above the board. */
@@ -44,48 +32,25 @@ export interface BoardSurfaceProps {
 }
 
 /** The board's viewport. */
-export function BoardSurface({ elements, live, children, overlay }: BoardSurfaceProps) {
+export function BoardSurface({ elements, children, overlay }: BoardSurfaceProps) {
   const surface = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const liveLayer = useRef<HTMLDivElement>(null);
   const tool = useTool((state) => effectiveTool(state));
   const commenting = useTool((state) => state.commentMode);
-  const status = useEngineView((state) => state.status);
-  const engine = status === 'starting' || status === 'on';
-
-  // The canvas engine (unless `?open_artifact_engine=off`; the DOM draws the board when it cannot start).
-  useEffect(() => {
-    const element = surface.current;
-    if (!engine || !element || !canvas.current || !liveLayer.current) return;
-    const abort = new AbortController();
-    let stop: (() => void) | undefined;
-    void startEngineBoard({ surface: element, canvas: canvas.current, live: liveLayer.current }, abort.signal).then((board) => {
-      if (board) stop = () => board.destroy();
-    });
-    return () => {
-      abort.abort();
-      stop?.();
-    };
-  }, [engine]);
-
-  // Size and pointer coarseness.
+  // Size.
   useEffect(() => {
     const element = surface.current;
     if (!element) return;
     surfaceRef.current = element;
-    const coarse = matchMedia('(pointer: coarse)');
     const measure = (): void => {
       const bounds = element.getBoundingClientRect();
-      useCamera.getState().setViewport(bounds.width, bounds.height, coarse.matches);
+      useCamera.getState().setViewport(bounds.width, bounds.height);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(element);
-    coarse.addEventListener('change', measure);
     measure();
     return () => {
       observer.disconnect();
-      coarse.removeEventListener('change', measure);
       if (surfaceRef.current === element) surfaceRef.current = null;
     };
   }, []);
@@ -98,7 +63,6 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
       const { camera } = useCamera.getState();
       element.style.transform = cameraLayerTransform(camera, window.devicePixelRatio || 1);
       element.toggleAttribute('data-wb-zoomed-out', camera.zoom < 1);
-      liveLayer.current?.toggleAttribute('data-wb-zoomed-out', camera.zoom < 1);
     };
     apply();
     return useCamera.subscribe((state, previous) => {
@@ -117,8 +81,6 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
         active.current?.gesture.cancel?.();
         active.current = null;
       },
-      // The engine pans and zooms on its own canvas.
-      skipWheel: (event) => event.target === canvas.current,
     });
   }, []);
 
@@ -127,7 +89,7 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
     const element = surface.current;
     if (!element) return;
     const onDown = (event: PointerEvent): void => {
-      if (active.current || element.dataset.wbPinching !== undefined || engineOwnsPress(event)) return;
+      if (active.current || element.dataset.wbPinching !== undefined) return;
       // Only presses on the board itself; chrome inside the surface opts out.
       if (event.target instanceof Element && event.target.closest('[data-wb-chrome],[data-no-pan]')) return;
       const sample = sampleOf(event, element);
@@ -137,6 +99,15 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
       const gesture = middle ? panGesture(sample) : (toolPress(name)?.(sample) ?? null);
       if (!gesture) return;
       event.preventDefault();
+      // preventDefault keeps focus where it was; a press on the board still takes it from a field in a panel. After the
+      // press has been dispatched, as a browser moves focus, so an open panel sees the press before it loses focus; and
+      // only if nothing has moved focus since (a cell editor, a picker the press opened).
+      const before = document.activeElement;
+      if (!middle && !element.contains(before)) {
+        setTimeout(() => {
+          if (document.activeElement === before) element.focus({ preventScroll: true });
+        });
+      }
       active.current = { pointerId: event.pointerId, gesture };
       try {
         element.setPointerCapture(event.pointerId);
@@ -147,6 +118,8 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
     const onMove = (event: PointerEvent): void => {
       const current = active.current;
       if (!current || current.pointerId !== event.pointerId) return;
+      // The release happened where the surface could not hear it (see onLost).
+      if (event.pointerType === 'mouse' && event.buttons === 0) return onUp(event);
       // Coalesced events keep pen strokes smooth at high pointer rates.
       const events = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
       for (const each of events.length ? events : [event]) current.gesture.move?.(sampleOf(each, element));
@@ -163,6 +136,11 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
       active.current = null;
       current.gesture.cancel?.();
     };
+    // Chrome can drop the capture just after the press while the button is still down (and again if taken back): the
+    // gesture goes on with the surface's own events, and a move with no button down ends it if its release was missed.
+    const onLost = (event: PointerEvent): void => {
+      if (event.buttons === 0) onCancel(event);
+    };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || !active.current) return;
       const current = active.current;
@@ -174,7 +152,7 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
     element.addEventListener('pointermove', onMove);
     element.addEventListener('pointerup', onUp);
     element.addEventListener('pointercancel', onCancel);
-    element.addEventListener('lostpointercapture', onCancel);
+    element.addEventListener('lostpointercapture', onLost);
     window.addEventListener('keydown', onKey, { capture: true });
     const cancel = (): void => {
       const current = active.current;
@@ -188,7 +166,7 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
       element.removeEventListener('pointermove', onMove);
       element.removeEventListener('pointerup', onUp);
       element.removeEventListener('pointercancel', onCancel);
-      element.removeEventListener('lostpointercapture', onCancel);
+      element.removeEventListener('lostpointercapture', onLost);
       window.removeEventListener('keydown', onKey, { capture: true });
     };
   }, []);
@@ -217,21 +195,14 @@ export function BoardSurface({ elements, live, children, overlay }: BoardSurface
       // Comment mode's pointer is the comments' speech bubble, as in every editor (styles.css).
       style={commenting ? ({ '--wb-comment-cursor': COMMENT_CURSOR } as CSSProperties) : undefined}
       tabIndex={-1}
+      data-wb-region="canvas"
       data-testid="board-surface"
-      data-wb-engine={engine ? status : undefined}
     >
-      {engine ? null : <Grid />}
+      <Grid />
       <div ref={layer} className="wb-layer">
         {elements}
-        {engine ? null : children}
+        {children}
       </div>
-      {engine ? <canvas ref={canvas} className="wb-engine-canvas" data-testid="board-canvas" /> : null}
-      {engine ? (
-        <div ref={liveLayer} className="wb-layer wb-live-layer">
-          {live}
-          {children}
-        </div>
-      ) : null}
       <PlaceGhost surface={surface} />
       <div className="wb-overlay">{overlay}</div>
     </div>

@@ -1,7 +1,6 @@
 /**
- * The suggestions in the text: the looked-at one outlined, a suggested line break or empty block given a sign, Edit
- * with Agent's words marked while its prompt is open and the agent works. It also follows the caret and the pointer
- * into suggestions, and lets the undo keys take back a decision made right before.
+ * The suggestions in the text: the looked-at one outlined, a suggested line break or empty block given a sign. It also
+ * follows the caret and the pointer into suggestions, and lets the undo keys take back a decision made right before.
  */
 import { keymap } from 'prosemirror-keymap';
 import type { Node as PMNode } from 'prosemirror-model';
@@ -14,16 +13,9 @@ import { refreshOpenSuggestions } from './model.ts';
 import { rangesOf, suggestionAt } from './positions.ts';
 import { getSuggest, setSuggest } from './store.ts';
 
-export interface TextRange {
-  from: number;
-  to: number;
-}
-
 /** What the page tells the plugin to draw. */
 export interface SuggestUi {
   highlight: string | null;
-  target: TextRange | null;
-  working: boolean;
 }
 
 interface SuggestPluginState extends SuggestUi {
@@ -82,29 +74,16 @@ function marksOf(doc: PMNode, ui: SuggestUi): DecorationSet {
       decorations.push(
         range.block ? Decoration.node(range.from, range.to, { class: 'doc-suggest-focused' }) : Decoration.inline(range.from, range.to, { class: 'doc-suggest-focused' }),
       );
-  if (ui.target && ui.target.to > ui.target.from)
-    decorations.push(Decoration.inline(ui.target.from, ui.target.to, { class: ui.working ? 'doc-suggest-target doc-suggest-working' : 'doc-suggest-target' }));
   return DecorationSet.create(doc, decorations);
 }
-
-const sameRange = (a: TextRange | null, b: TextRange | null) => a === b || (!!a && !!b && a.from === b.from && a.to === b.to);
 
 function apply(tr: Transaction, value: SuggestPluginState, _before: EditorState, state: EditorState): SuggestPluginState {
   const synced = isSyncedTransaction(tr);
   const meta = tr.getMeta(suggestKey) as Partial<SuggestUi> | undefined;
   let next = value;
-  if (tr.docChanged) {
-    const target = value.target ? { from: tr.mapping.map(value.target.from, 1), to: tr.mapping.map(value.target.to, -1) } : null;
-    next = { ...value, target: target && target.to > target.from ? target : null, signs: signsOf(state.doc), editSerial: synced ? value.editSerial : value.editSerial + 1 };
-  }
+  if (tr.docChanged) next = { ...value, signs: signsOf(state.doc), editSerial: synced ? value.editSerial : value.editSerial + 1 };
   if (tr.selectionSet && !synced) next = { ...next, selectSerial: next.selectSerial + 1 };
-  if (meta) {
-    const changed =
-      ('highlight' in meta && meta.highlight !== next.highlight) ||
-      ('target' in meta && !sameRange(meta.target ?? null, next.target)) ||
-      ('working' in meta && meta.working !== next.working);
-    if (changed) next = { ...next, ...meta };
-  }
+  if (meta && 'highlight' in meta && meta.highlight !== next.highlight) next = { ...next, ...meta };
   if (next !== value && (tr.docChanged || meta)) next = { ...next, marks: marksOf(state.doc, next) };
   return next;
 }
@@ -112,18 +91,11 @@ function apply(tr: Transaction, value: SuggestPluginState, _before: EditorState,
 /** The person's edits counted so far in the editor's state: a decision remembers it, the undo keys compare. */
 export const editSerialOf = (state: EditorState): number => suggestKey.getState(state)?.editSerial ?? 0;
 
-/** Edit with Agent's words where they are now (mapped through the edits since the prompt opened). */
-export const targetOf = (state: EditorState): TextRange | null => suggestKey.getState(state)?.target ?? null;
-
 /** Tells the editor what to draw; only dispatches when something changed. */
 export function showUi(view: EditorView, ui: Partial<SuggestUi>): void {
   const current = suggestKey.getState(view.state);
   if (!current) return;
-  const changed =
-    ('highlight' in ui && ui.highlight !== current.highlight) ||
-    ('target' in ui && !sameRange(ui.target ?? null, current.target)) ||
-    ('working' in ui && ui.working !== current.working);
-  if (changed) view.dispatch(view.state.tr.setMeta(suggestKey, ui).setMeta('addToHistory', false));
+  if ('highlight' in ui && ui.highlight !== current.highlight) view.dispatch(view.state.tr.setMeta(suggestKey, ui).setMeta('addToHistory', false));
 }
 
 function suggestionUnder(view: EditorView, target: EventTarget | null): string | null {
@@ -150,15 +122,13 @@ function pointAt(id: string | null): void {
 export interface SuggestPluginOptions {
   /** The undo keys right after a decision: takes it back and answers true, or answers false to undo text. */
   undoDecision(state: EditorState): boolean;
-  /** Escape in the text: stops what the page shows (Edit with Agent at work) and answers true, or answers false. */
-  escape(): boolean;
 }
 
 export function suggestPlugins(options: SuggestPluginOptions): Plugin[] {
   const ui = new Plugin<SuggestPluginState>({
     key: suggestKey,
     state: {
-      init: (_config, state) => ({ highlight: null, target: null, working: false, editSerial: 0, selectSerial: 0, signs: signsOf(state.doc), marks: DecorationSet.empty }),
+      init: (_config, state) => ({ highlight: null, editSerial: 0, selectSerial: 0, signs: signsOf(state.doc), marks: DecorationSet.empty }),
       apply,
     },
     props: {
@@ -192,5 +162,5 @@ export function suggestPlugins(options: SuggestPluginOptions): Plugin[] {
       };
     },
   });
-  return [keymap({ 'Mod-z': state => options.undoDecision(state), Escape: () => options.escape() }), ui];
+  return [keymap({ 'Mod-z': state => options.undoDecision(state) }), ui];
 }

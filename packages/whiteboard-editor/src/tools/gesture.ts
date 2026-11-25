@@ -38,6 +38,17 @@ export interface Gesture {
 export type ToolPress = (sample: PointerSample) => Gesture | null;
 
 const tools = new Map<ToolName, ToolPress>();
+let gestureSerial = 0;
+
+/** A unique undo key for a gesture, including any pauses before it ends. */
+export function gestureKey(gesture: string, id: string): string {
+  return `${gesture}:${id}:#${++gestureSerial}`;
+}
+
+/** Distinguishes gesture keys from reusable keys for typing and keyboard edits. */
+export function isGestureKey(key: string): boolean {
+  return /:#\d+$/.test(key);
+}
 
 /** Registers a tool's press handler. */
 export function registerTool(name: ToolName, press: ToolPress): void {

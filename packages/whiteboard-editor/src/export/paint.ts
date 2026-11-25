@@ -9,9 +9,6 @@
  * their outlines, arrows their heads and labels, pictures their frame and
  * tape; embeds and link cards become plain cards with their titles; the
  * shared timer is not drawn.
- *
- * The same painters draw element sprites for the canvas renderer
- * ({@link paintElementSprite}): text without bodies, and whole pictures.
  */
 
 import {
@@ -81,8 +78,10 @@ import {
   shapePathData,
   shapeStrokePaint,
   shapeTextInsets,
+  showsTextPlaceholder,
   singleLineTitleText,
   strokePointsToPath,
+  tableCellPaints,
   tableColumnIds,
   tableRowIds,
   textBackdropColors,
@@ -125,7 +124,9 @@ import {
   tableCellShape,
   tableHeadColors,
   tableHeadWeight,
+  tableTintDividers,
   textAlignOf,
+  type TableCellDividers,
 } from './look.ts';
 import { clipToRect, drawRasterTextLines, layoutRasterTextLines, traceRoundedRect, type RasterLine, type TextLook } from './raster-text.ts';
 import { canvasFontFor, truncateToWidth } from './text-layout.ts';
@@ -192,6 +193,9 @@ export function paintBoardGrid(ctx: Ctx, area: Box, scale: number, scheme: Color
 interface RasterTableCell {
   shape: ShapeElement;
   head: boolean;
+  /** The background of a tinted cell. */
+  tint?: string;
+  dividers?: TableCellDividers;
   look: TextLook;
   lines: RasterLine[];
 }
@@ -199,19 +203,30 @@ interface RasterTableCell {
 /** Lays out every cell of a table, and each row's height. */
 export function layoutRasterTableCells(ctx: Ctx, table: TableElement, scheme: ColorScheme): { laid: RasterTableCell[][]; heights: number[] } {
   const headColors = tableHeadColors(table, scheme);
+  const paints = tableCellPaints(table, scheme);
+  const dividers = tableTintDividers(table, paints);
   const laid = tableRowIds(table).map((rowId) =>
     tableColumnIds(table).map((columnId): RasterTableCell => {
       const shape = tableCellShape(table, rowId, columnId);
       const head = shape.hollow !== true;
+      const paint = paints[rowId]?.[columnId];
       const style = TEXT_SIZE_STYLES[shape.size ?? 'body'];
       const look: TextLook = {
         px: style.px,
         weight: head ? tableHeadWeight(table) : style.weight,
         bold: style.bold,
-        ink: head ? headColors.ink : paperTextColor(shape, scheme),
-        chip: head ? headColors.chip : defaultChipColor(scheme),
+        ink: head ? headColors.ink : (paint?.ink ?? paperTextColor(shape, scheme)),
+        chip: head ? headColors.chip : paint !== undefined ? chipColorOn(paint.fill) : defaultChipColor(scheme),
       };
-      return { shape, head, look, lines: layoutRasterTextLines(ctx, shape.text, look, shape.w - 2 * TABLE_CELL_PADDING.padX, textAlignOf(shape)) };
+      const cellDividers = dividers[rowId]?.[columnId];
+      return {
+        shape,
+        head,
+        ...(paint !== undefined ? { tint: paint.fill } : {}),
+        ...(cellDividers !== undefined ? { dividers: cellDividers } : {}),
+        look,
+        lines: layoutRasterTextLines(ctx, shape.text, look, shape.w - 2 * TABLE_CELL_PADDING.padX, textAlignOf(shape)),
+      };
     }),
   );
   const heights = laid.map(
@@ -228,8 +243,6 @@ interface PaintScope {
   backdrops: ReadonlyMap<string, string>;
   dark: boolean;
   palette: (typeof BOARD_THEME_COLORS)[ColorScheme];
-  /** Paint only text (sprites over bodies drawn elsewhere): no note paper, no shape body. */
-  textOnly?: boolean;
 }
 
 /** Paints an arrow: its line (knocked out under text it crosses), heads and label. */
@@ -323,17 +336,15 @@ function paintNote(scope: PaintScope, el: NoteElement, turn: number): void {
   ctx.rotate((el.tilt * Math.PI) / 180);
   const angle = ((el.tilt + turn) * Math.PI) / 180;
   ctx.translate(-w / 2, -h / 2);
-  if (!scope.textOnly) {
-    ctx.fillStyle = blockColorHex(el.color);
-    for (const shadow of NOTE_SHADOWS[options.scheme]) {
-      ctx.shadowColor = shadow.ink;
-      ctx.shadowBlur = shadow.blur * options.frame.scale;
-      ctx.shadowOffsetX = (shadow.x * Math.cos(angle) - shadow.y * Math.sin(angle)) * options.frame.scale;
-      ctx.shadowOffsetY = (shadow.x * Math.sin(angle) + shadow.y * Math.cos(angle)) * options.frame.scale;
-      ctx.fillRect(0, 0, w, h);
-    }
-    ctx.shadowColor = 'transparent';
+  ctx.fillStyle = blockColorHex(el.color);
+  for (const shadow of NOTE_SHADOWS[options.scheme]) {
+    ctx.shadowColor = shadow.ink;
+    ctx.shadowBlur = shadow.blur * options.frame.scale;
+    ctx.shadowOffsetX = (shadow.x * Math.cos(angle) - shadow.y * Math.sin(angle)) * options.frame.scale;
+    ctx.shadowOffsetY = (shadow.x * Math.sin(angle) + shadow.y * Math.cos(angle)) * options.frame.scale;
+    ctx.fillRect(0, 0, w, h);
   }
+  ctx.shadowColor = 'transparent';
   if (showAuthor && el.author !== undefined) {
     ctx.save();
     ctx.fillStyle = contrastTextColorOn(el.color);
@@ -386,7 +397,7 @@ function paintShapeBody(scope: PaintScope, el: ShapeElement, fill: string): void
 function paintShape(scope: PaintScope, el: ShapeElement): void {
   const { ctx, options } = scope;
   const fill = shapeFillColor(el);
-  if (!scope.textOnly) paintShapeBody(scope, el, fill);
+  paintShapeBody(scope, el, fill);
   if (!el.text) return;
   const insets = shapeTextInsets(el.kind, el.w, el.h);
   const box = {
@@ -408,9 +419,10 @@ function paintShape(scope: PaintScope, el: ShapeElement): void {
   ctx.restore();
 }
 
-/** Paints free text in the ink that reads on whatever is behind it. */
+/** Paints free text in the ink that reads on whatever is behind it (a placeholder shows only on screen). */
 function paintText(scope: PaintScope, el: TextElement): void {
   const { ctx, options, backdrops } = scope;
+  if (showsTextPlaceholder(el)) return;
   const backdrop = backdrops.get(el.id);
   const look: TextLook = {
     ...TEXT_SIZE_STYLES[el.size],
@@ -418,11 +430,13 @@ function paintText(scope: PaintScope, el: TextElement): void {
     chip: backdrop !== undefined ? chipColorOn(backdrop) : defaultChipColor(options.scheme),
   };
   const lines = layoutRasterTextLines(ctx, el.text, look, el.wrap ?? Infinity, textAlignOf(el));
+  ctx.save();
   drawRasterTextLines(ctx, lines, look, el.x, el.y, look.px * TEXT_LINE_HEIGHT, {
     side: textAlignOf(el),
     w: el.wrap ?? Math.max(0, ...lines.map((line) => line.w)),
     unpicked: el.textAlign === undefined,
   });
+  ctx.restore();
 }
 
 /**
@@ -524,7 +538,7 @@ function paintCard(scope: PaintScope, box: Box, radius: number): void {
   ctx.fillStyle = dark ? DARK_THEME_INK : DARK_CONTRAST_TEXT;
 }
 
-/** Paints a table: paper, header fill, cells and grid lines, rows snapped to whole pixels. */
+/** Paints a table: paper, header fill, tinted cells, cells and grid lines (in the paper color between tinted cells), rows snapped to whole pixels. */
 function paintTable(scope: PaintScope, el: TableElement): void {
   const { ctx, options, palette } = scope;
   const box = elementLayoutBox(el, options.measures);
@@ -546,9 +560,14 @@ function paintTable(scope: PaintScope, el: TableElement): void {
     let x = box.x;
     const rowBottom = snapY(y + (heights[rowIndex] ?? 0));
     for (const cell of row) {
-      if (cell.head) {
-        ctx.fillStyle = head.fill;
+      const background = cell.head ? head.fill : cell.tint;
+      if (background !== undefined) {
+        ctx.fillStyle = background;
         ctx.fillRect(x, y, cell.shape.w, rowBottom - y);
+      }
+      if (cell.dividers?.right) {
+        ctx.fillStyle = palette.paper;
+        ctx.fillRect(x + cell.shape.w - 1, y, 1, rowBottom - y);
       }
       drawRasterTextLines(ctx, cell.lines, cell.look, x + TABLE_CELL_PADDING.padX, y + TABLE_CELL_PADDING.padY, cell.look.px * TABLE_CELL_PADDING.line, {
         side: textAlignOf(cell.shape),
@@ -558,8 +577,16 @@ function paintTable(scope: PaintScope, el: TableElement): void {
       x += cell.shape.w;
     }
     y += heights[rowIndex] ?? 0;
-    ctx.fillStyle = lineColor;
-    if (rowIndex < laid.length - 1) ctx.fillRect(box.x + 1, rowBottom - 1, box.w - 2, 1);
+    if (rowIndex < laid.length - 1) {
+      ctx.fillStyle = lineColor;
+      ctx.fillRect(box.x + 1, rowBottom - 1, box.w - 2, 1);
+      ctx.fillStyle = palette.paper;
+      let cellX = box.x;
+      for (const cell of row) {
+        if (cell.dividers?.bottom) ctx.fillRect(cellX, rowBottom - 1, cell.shape.w, 1);
+        cellX += cell.shape.w;
+      }
+    }
   });
   ctx.restore();
   ctx.strokeStyle = lineColor;
@@ -669,18 +696,18 @@ function paintElement(scope: PaintScope, el: BoardElement, turn: number): void {
   }
 }
 
-/** Paints a section's title above it at a title scale, on a halo of paper. */
 /**
  * Where a section title is drawn, in board units: its scale, how far the
  * bottom of its line sits above the section, and how far its text starts
  * from the section's left edge.
  */
-export interface SectionTitleSpot {
+interface SectionTitleSpot {
   scale: number;
   gap: number;
   inset: number;
 }
 
+/** Paints a section's title above it at a title scale, on a halo of paper. */
 function paintSectionTitle(scope: PaintScope, el: ContainerElement, spot: SectionTitleSpot): void {
   const { ctx, options, palette } = scope;
   const { scale, gap, inset } = spot;
@@ -715,77 +742,6 @@ function paintSectionTitles(scope: PaintScope): void {
   }
 }
 
-/** What an element sprite is painted from (see {@link paintElementSprite}). */
-export interface SpritePaint {
-  scheme: ColorScheme;
-  measures: ElementMeasures;
-  /** The shown elements, for arrow ends and label placement. */
-  byId: ElementsById;
-  /** Fills behind free text, by text id. */
-  backdrops: ReadonlyMap<string, string>;
-  /** Loaded pictures by source. */
-  images: ReadonlyMap<string, HTMLImageElement>;
-  /** The source each image element draws, by element id. */
-  imageSources: ReadonlyMap<string, string>;
-  /** Sticker art: rendered icons by lucide icon name, Noto emoji by `emojiArtKey`. */
-  icons: ReadonlyMap<string, HTMLImageElement>;
-  showAuthors: boolean;
-  faceName(personId: string): string | undefined;
-  /** Device pixels per board unit of the sprite (shadow offsets and blurs are in pixels). */
-  scale: number;
-  /** Where a section's title is drawn; without it a section paints no title. */
-  title?: SectionTitleSpot;
-}
-
-/**
- * Paints the sprite of one element, unrotated and untilted, in board units
- * (the caller maps its sprite box onto the canvas): the text of notes,
- * shapes and free text without their bodies, an arrow's label, a section's
- * title, and the whole picture of images, stickers, link cards, tables and
- * embed cards. The canvas renderer draws everything else itself.
- */
-export function paintElementSprite(ctx: Ctx, el: BoardElement, paint: SpritePaint): void {
-  const scope: PaintScope = {
-    ctx,
-    options: {
-      elements: [],
-      title: '',
-      measures: paint.measures,
-      // Sticker rims are stamped this far off and shadowed back: well clear of a sprite.
-      frame: { board: { x: 0, y: 0, w: 4 * MAX_ELEMENT_SIZE, h: 0 }, width: 0, height: 0, scale: paint.scale, titleBar: 0 },
-      scheme: paint.scheme,
-      images: paint.images,
-      imageSources: paint.imageSources,
-      icons: paint.icons,
-      showAuthors: paint.showAuthors,
-      faceName: paint.faceName,
-    },
-    byId: paint.byId,
-    backdrops: paint.backdrops,
-    dark: paint.scheme === 'dark',
-    palette: BOARD_THEME_COLORS[paint.scheme],
-    textOnly: true,
-  };
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  switch (el.type) {
-    case 'note':
-      return paintNote(scope, { ...el, tilt: 0 }, 0);
-    case 'arrow': {
-      const line = measuredArrowGeometry(el, paint.byId, paint.measures);
-      if (line) paintArrowLabel(scope, el, line, arrowHeads(el));
-      return;
-    }
-    case 'container':
-      return paint.title ? paintSectionTitle(scope, el, paint.title) : undefined;
-    case 'stroke':
-    case 'timer':
-      return;
-    default:
-      return paintElement(scope, el, 0);
-  }
-}
-
 /** Paints the board picture onto a new canvas of the frame's size. */
 export function drawBoardCanvas(options: PaintOptions): HTMLCanvasElement {
   const { elements, frame, scheme, measures } = options;
@@ -799,7 +755,7 @@ export function drawBoardCanvas(options: PaintOptions): HTMLCanvasElement {
     ctx,
     options,
     byId: new Map(elements.map((element) => [element.id, element])),
-    backdrops: textBackdropColors(withMeasuredNoteHeights(elements, measures), measures),
+    backdrops: textBackdropColors(withMeasuredNoteHeights(elements, measures), measures, scheme),
     dark: scheme === 'dark',
     palette,
   };

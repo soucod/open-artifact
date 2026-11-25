@@ -3,13 +3,17 @@
  * Builds dsh-open-artifact. DSH links a plugin folder in place and installs none of its dependencies, so everything
  * the plugin runs is in these files:
  *
- *   lib/index.js   the server half (src/server/index.ts), one Node ESM file with the protocol and the daemon client in it
+ *   lib/index.js   the server half (src/server/index.ts), one Node ESM file with the protocol and @open-artifact/harness-kit in it
  *   lib/client.js  the browser half (src/client/index.tsx), CommonJS in the app's `window.__ModuleLoader__.load`
  *                  wrapper, with React and the app's platform modules left to the loader
  *   vendor/        the daemon (`open-artifact.mjs`), the built Shell and home pages, frame-host (the type server from dist/daemon/frame-host), the harness profiles, the type server (type-server/) and the built-in types that run it;
- *                  a piece that is not there is skipped with a warning
+ *                  a piece that is not there is skipped with a warning; and `runtime.json`, the daemon's version and protocols
+ *   scripts/open-artifact.mjs  the open-artifact skill's launcher (skills/open-artifact/scripts/open-artifact.mjs), so this
+ *                  folder is a runtime folder: the daemon records it from the plugin's `hello`, and another harness on
+ *                  this computer can start it
  *   LICENSE, NOTICE the repository's license files, copied here so the npm package carries them
  *   CHANGELOG.md   the repository's release notes: the page's "What's new" and changelog (src/server/changelog.ts)
+ *   skills/open-artifact/SKILL.md  the skill from the protocol's template, the file the skill candidate's `path` names
  *
  * The page's CSS is plain CSS in src/client/styles.ts, on the app's own design tokens, with every class prefixed.
  *
@@ -19,6 +23,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFil
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSync } from 'esbuild';
+import { PROTOCOL_MAX, PROTOCOL_MIN } from '../../../packages/protocol/src/harness.ts';
 import { vendorTypes } from '../../../scripts/vendor-types.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,9 +34,9 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const PLATFORM_MODULES = ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'];
 
 const warn = (message) => console.warn(`dsh-open-artifact build: ${message}`);
-// The built-in types: the daemon's own list (BUILTIN_TYPE_IDS).
+// The built-in types: the protocol's list (BUILTIN_TYPE_IDS), which the daemon and a site share.
 const BUILTIN_TYPES = JSON.parse(
-  /BUILTIN_TYPE_IDS[^=]*=\s*(\[[^\]]*\])/.exec(readFileSync(join(repo, 'packages', 'daemon', 'src', 'types.ts'), 'utf8'))[1].replace(/'/g, '"'),
+  /BUILTIN_TYPE_IDS[^=]*=\s*(?:Object\.freeze\()?(\[[^\]]*\])/.exec(readFileSync(join(repo, 'packages', 'protocol', 'src', 'type-authoring.ts'), 'utf8'))[1].replace(/'/g, '"'),
 );
 const log = (message) => console.log(`dsh-open-artifact build: ${message}`);
 
@@ -134,9 +139,38 @@ function buildVendor() {
   vendorCopy(join(repo, 'packages', 'daemon', 'harnesses'), join(vendor, 'harnesses'), 'the harness profiles');
   // The built-in types, with one type server for them all, not a copy in each (scripts/vendor-types.mjs).
   vendorTypes({ repo, vendor, types: BUILTIN_TYPES, warn });
+  buildRuntimeFolder(vendor);
+}
+
+/**
+ * What makes the plugin folder a runtime folder (harness-kit `runtimeInfo`): `scripts/open-artifact.mjs`, the skill's
+ * launcher, which runs `vendor/open-artifact.mjs` with the vendored folders, and `vendor/runtime.json`, the version
+ * and the protocol range of the daemon just bundled.
+ */
+function buildRuntimeFolder(vendor) {
+  const launcher = join(repo, 'skills', 'open-artifact', 'scripts', 'open-artifact.mjs');
+  if (!existsSync(join(vendor, 'open-artifact.mjs'))) return;
+  if (!existsSync(launcher)) return warn('the launcher: skills/open-artifact/scripts/open-artifact.mjs is not there; scripts/open-artifact.mjs skipped.');
+  cpSync(launcher, join(root, 'scripts', 'open-artifact.mjs'));
+  writeFileSync(join(vendor, 'runtime.json'), `${JSON.stringify({ version: pkg.version, protocols: { min: PROTOCOL_MIN, max: PROTOCOL_MAX } }, null, 2)}\n`);
 }
 
 // ---------------------------------------------------------------- main
+
+/**
+ * skills/open-artifact/SKILL.md: the protocol's template as the kit renders it without a daemon (no installed types),
+ * so the skill candidate's `path` names a real file. DSH's registry reads the skill through the provider's `get`,
+ * which renders it fresh each time (src/server/skill.ts).
+ */
+export async function writeSkill(into = root) {
+  const { localSkill } = await import('../../../packages/harness-kit/src/skill.ts');
+  const { renderedSkillFile } = await import('../../../packages/protocol/src/skill.ts');
+  const { SKILL_RENDER, skillFile } = await import('../src/server/skill.ts');
+  const file = skillFile(into);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, renderedSkillFile(localSkill({ ...SKILL_RENDER, agentName: 'Agent' })));
+  return file;
+}
 
 /** The whole build; `--no-vendor` leaves vendor/ as it is. */
 async function main() {
@@ -146,6 +180,8 @@ async function main() {
   log('lib/index.js');
   buildClient();
   log('lib/client.js');
+  await writeSkill();
+  log('skills/open-artifact/SKILL.md');
   if (process.argv.includes('--no-vendor')) log('vendor/ skipped (--no-vendor)');
   else {
     buildVendor();

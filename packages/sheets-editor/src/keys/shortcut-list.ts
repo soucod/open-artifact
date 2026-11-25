@@ -1,11 +1,133 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { PageState } from '../state/initial-state.ts';
 import { isModalOpen } from '../ui/find.ts';
-export function shortcutKeysFor(act?: Dynamic) {
-  let keys = KEY_SHORTCUT_ROWS.find((row?: Dynamic) => row.does === act)?.keys[0];
+
+/** A group of the list of keys, under one heading. */
+export type KeyShortcutGroupName =
+  | 'general'
+  | 'navigation'
+  | 'selection'
+  | 'rowsColumnsAndSheets'
+  | 'groups'
+  | 'editing'
+  | 'typing'
+  | 'typingAFormula'
+  | 'formatting'
+  | 'numberFormats';
+/** The act of a row of the list of keys. */
+export type KeyShortcutAct =
+  | 'listKeys'
+  | 'find'
+  | 'findNext'
+  | 'findPrevious'
+  | 'findAndReplace'
+  | 'undo'
+  | 'redo'
+  | 'showFormulas'
+  | 'copyLinkToSheet'
+  | 'comment'
+  | 'openMenu'
+  | 'searchMenu'
+  | 'goToNextPart'
+  | 'goToPartBefore'
+  | 'closeWhatIsOpen'
+  | 'leaveCells'
+  | 'leaveSheet'
+  | 'moveByOneCell'
+  | 'moveToNextCell'
+  | 'moveToCellBefore'
+  | 'moveToEdgeOfData'
+  | 'moveToStartOfRow'
+  | 'moveToEndOfRow'
+  | 'moveToStartOfSheet'
+  | 'moveToEndOfSheet'
+  | 'moveUpAScreen'
+  | 'moveDownAScreen'
+  | 'showNextSheet'
+  | 'openOwnFilterList'
+  | 'showSheetBefore'
+  | 'selectMore'
+  | 'selectToEdgeOfData'
+  | 'selectRow'
+  | 'selectColumn'
+  | 'selectAll'
+  | 'insertRowsOrColumns'
+  | 'deleteRowsOrColumns'
+  | 'addSheet'
+  | 'clearFormatting'
+  | 'group'
+  | 'ungroup'
+  | 'expandGroup'
+  | 'collapseGroup'
+  | 'editCell'
+  | 'startFormula'
+  | 'insertByAt'
+  | 'addLink'
+  | 'clearCells'
+  | 'cut'
+  | 'copy'
+  | 'paste'
+  | 'pasteValuesOnly'
+  | 'fillDown'
+  | 'fillRight'
+  | 'enterToday'
+  | 'sumUp'
+  | 'tickCheckbox'
+  | 'openLink'
+  | 'finishAndMoveDown'
+  | 'finishAndMoveUp'
+  | 'finishAndMoveRight'
+  | 'finishAndMoveLeft'
+  | 'finishInAllSelected'
+  | 'breakLine'
+  | 'finishExpandedCell'
+  | 'expandCell'
+  | 'startNextListItem'
+  | 'checkBoxOfLine'
+  | 'moveCaretByArrows'
+  | 'cancelEntry'
+  | 'pickCell'
+  | 'pickMoreCells'
+  | 'pickCellInNextSheet'
+  | 'pickCellInSheetBefore'
+  | 'switchArrows'
+  | 'turnDollars'
+  | 'bold'
+  | 'italic'
+  | 'underline'
+  | 'strikethrough'
+  | 'numberedList'
+  | 'bulletedList'
+  | 'checklist'
+  | 'alignLeft'
+  | 'alignCenter'
+  | 'formatAsNumber'
+  | 'formatAsTime'
+  | 'formatAsDate'
+  | 'formatAsCurrency'
+  | 'formatAsPercent'
+  | 'formatAsScientific';
+/** One row of the list of keys: an act and the keys that do it. */
+export interface KeyShortcutRow {
+  does: KeyShortcutAct;
+  /** Each way to press it, as `mod+mod+key`; the first is the one shown beside commands. */
+  keys: string[];
+  /** The keys on a Mac, where they differ. */
+  keysOnAMac?: string[];
+  isForViewersToo?: boolean;
+  /** The keys mean nothing on a touch screen. */
+  isNotForAFinger?: boolean;
+  isOnlyWithComments?: boolean;
+}
+export interface KeyShortcutGroup {
+  group: KeyShortcutGroupName;
+  rows: KeyShortcutRow[];
+}
+export function shortcutKeysFor(act: string): string {
+  let keys = KEY_SHORTCUT_ROWS.find((row) => row.does === act)?.keys[0];
   if (keys === undefined) throw Error(`KEYS_LISTED has no key for ${act}.`);
   return keys;
 }
-export const KEYS_LISTED = [
+export const KEYS_LISTED: KeyShortcutGroup[] = [
   {
     group: 'general',
     rows: [
@@ -460,8 +582,8 @@ export const KEYS_LISTED = [
     ],
   },
 ];
-export const KEY_SHORTCUT_ROWS = KEYS_LISTED.flatMap(({ rows: rows }: Dynamic) => rows);
-export const openListOfKeys = (view?: Dynamic) =>
+export const KEY_SHORTCUT_ROWS: KeyShortcutRow[] = KEYS_LISTED.flatMap(({ rows }) => rows);
+export const openListOfKeys = (view: PageState): PageState =>
   isModalOpen(view) || view.dragging !== null
     ? view
     : {

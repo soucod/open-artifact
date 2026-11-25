@@ -13,7 +13,7 @@ import { closeFind, openFind, replace, setCaseSensitive, setQuery, setReplacemen
 import { findChord, undoChord } from './keys.ts';
 import { OtherTabsRow, useOtherTabs } from './OtherTabs.tsx';
 import { findState } from './plugin.ts';
-import { MAX_QUERY, isFrozen, outcomeWords } from './search.ts';
+import { CHIP_MATCH_WORDS, MAX_QUERY, ONLY_CHIPS_WORDS, isFrozen, outcomeWords } from './search.ts';
 import { getFindBar, setFindBar, useFindBar } from './store.ts';
 
 const FIELD =
@@ -70,7 +70,8 @@ function FindCard(): ReactNode {
   const inStep = found.query === query && found.caseSensitive === caseSensitive;
   const count = inStep ? found.matches.length : 0;
   const shown = inStep && count > 0 ? found.matches[found.current] : undefined;
-  const frozen = !!(editorState && shown && isFrozen(editorState.doc, shown));
+  const frozen = !!(editorState && shown && !shown.chip && isFrozen(editorState.doc, shown));
+  const onlyChips = inStep && count > 0 && found.matches.every(match => match.chip);
   const others = useOtherTabs(true, query, caseSensitive);
 
   useLayoutEffect(() => {
@@ -80,9 +81,9 @@ function FindCard(): ReactNode {
   }, [summons, summoned, writable]);
 
   const status = !query ? '' : count === 0 ? 'No matches' : `${found.current + 1} of ${count}`;
-  const offAll = !query ? 'Type to search' : count === 0 ? 'No matches' : null;
-  const offOne = offAll ?? (frozen ? 'This match can’t be replaced yet' : null);
-  const words = outcomeWords(outcome);
+  const offAll = !query ? 'Type to search' : count === 0 ? 'No matches' : onlyChips ? ONLY_CHIPS_WORDS : null;
+  const offOne = offAll ?? (shown?.chip ? CHIP_MATCH_WORDS : frozen ? 'This match can’t be replaced yet' : null);
+  const words = outcomeWords(outcome) ?? (writable && onlyChips ? ONLY_CHIPS_WORDS : null);
 
   // Keys and clicks in the bar itself: a portaled menu's events also pass through here, and keep their own meaning.
   const inCard = (target: EventTarget) => target instanceof Node && !!card.current?.contains(target);

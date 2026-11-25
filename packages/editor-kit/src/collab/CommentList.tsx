@@ -15,7 +15,7 @@ import { Actions, Comment, CommentCard, DeleteConfirm, MoreMenu, ResolveAction, 
 import { CommentsLayer } from './cds/layer.tsx';
 import { commentMarkdown } from './cds/markdown.tsx';
 import { commentAgo } from './cds/time.ts';
-import type { CommentsController } from './comments.ts';
+import { WAIT_FOR_STATUS_CHANGE, type CommentsController } from './comments.ts';
 import type { AgentBadge } from './CommentViews.tsx';
 
 /** The panel: 300px, 12px from the right edge and from the bar above it. */
@@ -193,8 +193,8 @@ function SendAll<A>({ comments, agent, threads }: { comments: CommentsController
  */
 function PanelThread<A>({ comments, agent, thread, current }: { comments: CommentsController<A>; agent: AgentBadge; thread: CommentThread; current: boolean }): ReactNode {
   const [confirming, setConfirming] = useState(false);
-  const [resolving, setResolving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const change = comments.store((s) => s.statusChange);
   const nameId = useId();
   const first = thread.messages[0]!;
   const replies = thread.messages.length - 1;
@@ -243,16 +243,13 @@ function PanelThread<A>({ comments, agent, thread, current }: { comments: Commen
         actions={
           <Actions placement={current ? 'pinned' : undefined}>
             {commenting ? (
-              <ResolveAction
-                resolved={resolved}
-                busy={resolving}
-                onResolve={() => {
-                  setResolving(true);
-                  void comments.resolve(thread.id, true).finally(() => setResolving(false));
-                }}
-              />
+              <ResolveAction resolved={resolved} disabled={change !== null} onResolve={() => void comments.resolve(thread.id, true)} />
             ) : null}
-            <MoreMenu items={items} />
+            <MoreMenu
+              items={items}
+              disabled={change !== null && change.id !== thread.id}
+              waitReason={change?.id === thread.id ? WAIT_FOR_STATUS_CHANGE : undefined}
+            />
           </Actions>
         }
       >

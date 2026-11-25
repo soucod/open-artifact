@@ -628,15 +628,15 @@ export interface ElementKindAffordance {
 
 /** Selection behavior per element type. */
 export const ELEMENT_KIND_AFFORDANCES: Record<ElementType, ElementKindAffordance> = {
-  note: { words: 'body', resizes: true, dots: 'adds' },
+  note: { words: 'body', resizes: true, dots: 'adds, connects' },
   shape: { words: 'body', resizes: true, dots: 'adds, connects' },
-  text: { words: 'body', resizes: true, dots: 'connects', hairline: true },
-  table: { words: 'body', resizes: true, dots: 'connects' },
-  container: { words: 'label', resizes: true, dots: 'connects' },
+  text: { words: 'body', resizes: true, dots: 'none', hairline: true },
+  table: { words: 'body', resizes: true, dots: 'none' },
+  container: { words: 'label', resizes: true, dots: 'none' },
   arrow: { words: 'label', resizes: false, dots: 'none', line: true },
-  image: { words: 'none', resizes: true, dots: 'connects' },
-  link: { words: 'none', resizes: false, dots: 'connects' },
-  timer: { words: 'none', resizes: false, dots: 'connects' },
+  image: { words: 'none', resizes: true, dots: 'none' },
+  link: { words: 'none', resizes: false, dots: 'none' },
+  timer: { words: 'none', resizes: false, dots: 'none' },
   sticker: { words: 'none', resizes: true, dots: 'none' },
   stroke: { words: 'none', resizes: true, dots: 'none' },
   html: { words: 'source', resizes: true, dots: 'none' },
@@ -684,7 +684,7 @@ export function selectionChromeFor(kind: ElementType, state: SelectionChromeStat
       return {
         outline: 'thin',
         dots:
-          context.finger === true || context.tool === 'hand' || (kind === 'text' && context.empty === true)
+          context.finger === true || context.tool === 'hand' || affordance.dots === 'none'
             ? 'none'
             : context.tool === 'arrow'
               ? 'connects'

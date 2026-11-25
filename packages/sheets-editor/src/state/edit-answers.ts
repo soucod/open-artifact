@@ -4,9 +4,9 @@ import type { LineSizes } from '../model/line-sizes.ts';
 import type { OwnRowOrder } from '../model/line-ids.ts';
 import type { RefusalMessageKey } from '../model/refusals.ts';
 import type { GridLayout } from '../grid/layout.ts';
-import type { CellArea, CellSelection, SelectionToRead } from '../selection/model.ts';
+import type { CellArea, CellSelection, SelectionPositions, SelectionToRead } from '../selection/model.ts';
 import type { LastDone, PageState } from './initial-state.ts';
-import type { DoneWithDetail, IfQueued, PageEvent, PlaceAreaChanged } from './event-reducer.ts';
+import type { DoneToArea, DoneWithDetail, IfQueued, PageEvent, PlaceAreaChanged } from './event-reducer.ts';
 import type { PageEffect, UndoOrRedoEffect } from './transitions.ts';
 import type { Place } from './places.ts';
 import { nearestShownLine } from '../model/line-sizes.ts';
@@ -29,7 +29,7 @@ import {
 } from '../selection/model.ts';
 import { newsOfLossIfTypingLost, dropdownEditorOfPane } from './queries.ts';
 import { clearPassingNotice, NAVIGATING_MODE, lastDoneWorthKeeping } from './transitions.ts';
-import { firstPlaceInSheet, firstPlaceInWorkbook } from './places.ts';
+import { firstPlaceInSheet, firstPlaceInWorkbook, isAreaReadByInteractive } from './places.ts';
 import { showSheet } from './sheet-tabs.ts';
 import { areaToA1AsStored, areasToA1AsStored } from '../formulas/from-words/where.ts';
 import { rowLabelEnds, columnLabelEnds, isAreaSplitWhenStored } from '../model/a1-references.ts';
@@ -41,6 +41,7 @@ import { withoutOtherRanges, areasOfAllRanges } from '../selection/several-range
 import { bringEndIntoView } from '../grid/lines-at-end.ts';
 import { usersOfCell } from '../model/cell-values.ts';
 import { actOfEdit } from '../edits/rows-out-of-view.ts';
+import type { ActStoppedByHiddenRows } from '../messages/filter-refusals.ts';
 import { refusalMessageKey, isEditRefusalReason, undoRefusalKind } from '../model/refusals.ts';
 import { afterFormatApplied } from '../format/custom-number-format.ts';
 import { discardCopiedChartNodes } from '../charts/copied-chart-nodes.ts';
@@ -51,10 +52,10 @@ import type { ReadsWithTextMeasurer } from './controller.ts';
 export function keepSelectionInShownLines(
   selection: SelectionToRead,
   previousState: Place,
-  { rowEdges: rowEdges, rowCount: rowCount, columnEdges: columnEdges, columnCount: columnCount }: GridLayout,
+  { rowEdges, rowCount, columnEdges, columnCount }: GridLayout,
   workbook: WorkbookReads,
 ): SelectionToRead {
-  let { sheetId: sheetId } = previousState;
+  let { sheetId } = previousState;
   let activePosition = workbook.positionOfCell(selection.activeCell);
   let cornerPosition = workbook.positionOfCell(selection.selectionCorner);
   if (activePosition === null || cornerPosition === null) return selection;
@@ -71,21 +72,21 @@ export function keepSelectionInShownLines(
   return activeCell === null || selectionCorner === null
     ? selection
     : {
-        activeCell: activeCell,
-        selectionCorner: selectionCorner,
+        activeCell,
+        selectionCorner,
       };
 }
 export function reconcileWithWorkbook(
   state: PageState,
   previousWorkbook: ReadsWithTextMeasurer,
   workbook: ReadsWithTextMeasurer,
-  { ownCollapsing: ownCollapsing, rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters }: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters'> = state,
+  { ownCollapsing, rowsOutOfViewByOwnFilters }: Pick<PageState, 'ownCollapsing' | 'rowsOutOfViewByOwnFilters'> = state,
 ): PageState {
   let anchored = keepScrollAnchoredAcrossChange(
     {
       ...state,
-      ownCollapsing: ownCollapsing,
-      rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters,
+      ownCollapsing,
+      rowsOutOfViewByOwnFilters,
     },
     previousWorkbook,
     workbook,
@@ -114,15 +115,15 @@ export function reconcileWithWorkbook(
       dragging: null,
       ...placeRemapped,
     };
-    let { scrollLeft: scrollLeft, scrollTop: scrollTop } = scrollToShowSelection(scrolledState, workbook, 'pointer');
+    let { scrollLeft, scrollTop } = scrollToShowSelection(scrolledState, workbook, 'pointer');
     if (scrollTop === scrolledState.scrollTop)
       return {
         ...placeRemapped,
-        scrollLeft: scrollLeft,
+        scrollLeft,
       };
     return {
       ...placeRemapped,
-      scrollLeft: scrollLeft,
+      scrollLeft,
       scrollTop: scrollToShowSelection(scrolledState, workbook).scrollTop,
     };
   };
@@ -144,7 +145,7 @@ export function reconcileWithWorkbook(
     ...(wasEditing ? clearPassingNotice(remapped) : remapped),
     mode: NAVIGATING_MODE,
     dragging: null,
-    newsOfLoss: newsOfLoss,
+    newsOfLoss,
   };
   let remappedHere = remapPlace(
     wasEditing
@@ -156,9 +157,9 @@ export function reconcileWithWorkbook(
     stateWithoutEntry,
   );
   if (remappedHere !== null) return remappedHere;
-  let sheetExists = ({ sheetId: sheetId }: Pick<Place, 'sheetId'>) =>
+  let sheetExists = ({ sheetId }: Pick<Place, 'sheetId'>) =>
     workbook.listSheets().some((sheet: SheetSummary) => sheet.sheetId === sheetId);
-  let sheetHasPlace = ({ sheetId: sheetId }: Pick<Place, 'sheetId'>) => firstPlaceInSheet(workbook, sheetId) !== null;
+  let sheetHasPlace = ({ sheetId }: Pick<Place, 'sheetId'>) => firstPlaceInSheet(workbook, sheetId) !== null;
   let sheetIdToShow = (
     remapped.placesLeft.find((place: Place) => place.sheetId === remapped.sheetPointedIn && sheetHasPlace(place)) ??
     remapped.placesLeft.findLast(sheetHasPlace) ??
@@ -174,7 +175,7 @@ export function reconcileWithWorkbook(
     notice: stateWithoutEntry.notice,
   };
 }
-export function lastDoneForArea(done: string | DoneWithDetail, area: CellArea, ownRowOrder: OwnRowOrder | null): LastDone {
+export function lastDoneForArea(done: DoneToArea | DoneWithDetail, area: CellArea, ownRowOrder: OwnRowOrder | null): LastDone {
   if (typeof done === 'string')
     return {
       what: done,
@@ -205,7 +206,7 @@ export function lastDoneForArea(done: string | DoneWithDetail, area: CellArea, o
       };
     case 'checkboxesMade':
     case 'cellsSorted': {
-      let { headingRowCount: headingRowCount, ...doneWithoutHeading } = done;
+      let { headingRowCount, ...doneWithoutHeading } = done;
       if (doneWithoutHeading.what === 'cellsSorted' && doneWithoutHeading.cells !== undefined)
         return {
           ...doneWithoutHeading,
@@ -218,8 +219,8 @@ export function lastDoneForArea(done: string | DoneWithDetail, area: CellArea, o
         cells: areaToA1AsStored(
           {
             ...area,
-            topRowIndex: topRowIndex,
-            rowCount: rowCount,
+            topRowIndex,
+            rowCount,
           },
           ownRowOrder,
         ),
@@ -229,6 +230,10 @@ export function lastDoneForArea(done: string | DoneWithDetail, area: CellArea, o
     case 'columnsFrozen':
     case 'gridlinesHidden':
     case 'gridlinesShown':
+    case 'interactiveReset':
+    case 'interactiveDefaultsSaved':
+    case 'pivotTableAdded':
+    case 'pivotTableUpdated':
     case 'formattedAsTable':
     case 'notFormattedAsTable':
     case 'placedViewMoved':
@@ -274,6 +279,10 @@ export function lastDoneForArea(done: string | DoneWithDetail, area: CellArea, o
     case 'ruleMoved':
     case 'offerDiscarded':
     case 'agentStopped':
+    case 'namedViewPicked':
+    case 'namedViewSaved':
+    case 'namedViewUpdated':
+    case 'namedViewRenamed':
       return done;
   }
 }
@@ -305,8 +314,8 @@ export function selectAfterEdit(state: PageState, workbook: ReadsWithTextMeasure
   let selected = applySelectionAfterEdit(state, workbook, ifQueued, answer);
   let area = answer?.area ?? null;
   if (ifQueued.isPlaceOnlyShown !== true || ifQueued.select !== 'placeChanged' || area === null) return selected;
-  let { topRowIndex: topRowIndex, rowCount: rowCount, leftColumnIndex: leftColumnIndex } = area;
-  let { frozenRowCount: frozenRowCount } = layoutOfView(selected, workbook);
+  let { topRowIndex, rowCount, leftColumnIndex } = area;
+  let { frozenRowCount } = layoutOfView(selected, workbook);
   let topRowToShow = Math.max(frozenRowCount, topRowIndex - ROWS_SHOWN_ABOVE_PLACE);
   let bottomShown = scrollToShowPosition(
     selected,
@@ -335,34 +344,34 @@ export function selectAfterEdit(state: PageState, workbook: ReadsWithTextMeasure
           'key',
         );
   let {
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
-    otherRanges: otherRanges,
-    rangeWalked: rangeWalked,
-    cameToMergedCellsAt: cameToMergedCellsAt,
+    activeCell,
+    selectionCorner,
+    otherRanges,
+    rangeWalked,
+    cameToMergedCellsAt,
   } = showSheet(state, workbook, selected.sheetId);
   return {
     ...shown,
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
-    otherRanges: otherRanges,
-    rangeWalked: rangeWalked,
-    cameToMergedCellsAt: cameToMergedCellsAt,
+    activeCell,
+    selectionCorner,
+    otherRanges,
+    rangeWalked,
+    cameToMergedCellsAt,
   };
 }
 export function applySelectionAfterEdit(
   state: PageState,
   workbook: ReadsWithTextMeasurer,
   {
-    select: select,
-    foundBy: foundBy,
-    isViewLeftAsItIs: isViewLeftAsItIs,
-    isSelectedAlone: isSelectedAlone,
-    endBroughtIntoView: endBroughtIntoView,
-    done: done,
-    thenSheet: thenSheet,
-    keepsWordsOnEntryBefore: keepsWordsOnEntryBefore,
-    onlyCellOfPlaceChanged: onlyCellOfPlaceChanged,
+    select,
+    foundBy,
+    isViewLeftAsItIs,
+    isSelectedAlone,
+    endBroughtIntoView,
+    done,
+    thenSheet,
+    keepsWordsOnEntryBefore,
+    onlyCellOfPlaceChanged,
   }: IfQueued,
   answer: PlaceAreaChanged | null,
 ): PageState {
@@ -379,7 +388,7 @@ export function applySelectionAfterEdit(
       {
         select: selectionPastHiddenRow,
         foundBy: positions === select ? 'fillHandle' : 'key',
-        done: done,
+        done,
       },
       answer,
     );
@@ -394,7 +403,10 @@ export function applySelectionAfterEdit(
           ...stateOnSheet,
           lastDone: null,
         };
-  let selectTarget = isPlaceChanged ? narrowToLineOfCell(answer?.area ?? null, onlyCellOfPlaceChanged, workbook) : select;
+  // `isPlaceChanged` is false here, so `select` is not 'placeChanged'; positions returned above.
+  let selectTarget = isPlaceChanged
+    ? narrowToLineOfCell(answer?.area ?? null, onlyCellOfPlaceChanged, workbook)
+    : (select as Exclude<IfQueued['select'], 'placeChanged' | SelectionPositions>);
   if (selectTarget === null) {
     let areaSelected = done === null ? null : selectedArea(stateWithDone, workbook);
     if (done === null || areaSelected === null) return stateWithDone;
@@ -441,12 +453,12 @@ export function applySelectionAfterEdit(
   if (endBroughtIntoView !== undefined) return bringEndIntoView(selectedState, workbook, endBroughtIntoView);
   if (foundBy === 'key') {
     let scrolled = scrollToShowSelection(selectedState, workbook, foundBy);
-    let { scrollLeft: scrollLeft, scrollTop: scrollTop } = scrolled;
+    let { scrollLeft, scrollTop } = scrolled;
     return {
       ...scrolled,
       leftByKeyAt: {
-        scrollLeft: scrollLeft,
-        scrollTop: scrollTop,
+        scrollLeft,
+        scrollTop,
       },
     };
   }
@@ -454,7 +466,7 @@ export function applySelectionAfterEdit(
   return position === null ? selectedState : scrollToShowPosition(selectedState, workbook, position, BOTH_AXES, foundBy);
 }
 export function selectionToQueue(ifQueued: IfQueued, edit: Edit, state: PageState, workbook: WorkbookReads): IfQueued {
-  let { scrollIfRefused: scrollIfRefused, movesColumnsOfTable: movesColumnsOfTable, ...withoutScroll } = ifQueued;
+  let { scrollIfRefused, movesColumnsOfTable, ...withoutScroll } = ifQueued;
   let rest =
     movesColumnsOfTable === undefined
       ? withoutScroll
@@ -465,7 +477,7 @@ export function selectionToQueue(ifQueued: IfQueued, edit: Edit, state: PageStat
             before: null,
           },
         };
-  let { select: select } = rest;
+  let { select } = rest;
   if (select === null || select === 'placeChanged' || 'activeCell' in select) return rest;
   if ('corner' in select) return rest;
   let selection = LINE_COUNT_EDIT_KINDS.has(edit.kind) ? null : selectAreaUnlessHeld(state, workbook, select);
@@ -476,25 +488,25 @@ export function selectionToQueue(ifQueued: IfQueued, edit: Edit, state: PageStat
       done: null,
       isSelectionGivenUp: true,
     };
-  let { activeCell: activeCell, selectionCorner: selectionCorner } = selection;
+  let { activeCell, selectionCorner } = selection;
   return {
     ...rest,
     select: {
-      activeCell: activeCell,
-      selectionCorner: selectionCorner,
+      activeCell,
+      selectionCorner,
     },
   };
 }
 export function isSelectionLostByAnswer(event: PageEvent, workbook: WorkbookReads): boolean {
   if (event.kind !== 'editAnswered' || event.outcome.kind === 'refused') return false;
-  let { select: select, isSelectionGivenUp: isSelectionGivenUp } = event.ifQueued;
+  let { select, isSelectionGivenUp } = event.ifQueued;
   if (isSelectionGivenUp === true) return true;
   return select !== null && select !== 'placeChanged' && 'activeCell' in select && selectedArea(select, workbook) === null;
 }
 export function askedKindOfEdit(
   edit: Edit,
   state: PageState,
-  { done: done, undoOffer: undoOffer, thenEvent: thenEvent }: Pick<IfQueued, 'done' | 'undoOffer' | 'thenEvent'>,
+  { done, undoOffer, thenEvent, movesColumnsOfTable }: Pick<IfQueued, 'done' | 'undoOffer' | 'thenEvent' | 'movesColumnsOfTable'>,
 ): AskedKindOfEdit {
   let doneWhat = done !== null && typeof done === 'object' ? done.what : done;
   if (doneWhat === 'checked' || doneWhat === 'unchecked' || doneWhat === 'replaced') return 'otherEdit';
@@ -502,9 +514,15 @@ export function askedKindOfEdit(
   if (undoOffer?.kind === 'replacedInCells' || undoOffer?.kind === 'textsConverted') return 'otherEdit';
   if (thenEvent?.kind === 'fixesKeptAnswered' || thenEvent?.kind === 'fixKeptAnswered') return 'otherEdit';
   if (thenEvent?.kind === 'linkFormShut') return 'otherEdit';
+  if (doneWhat === 'namedViewUpdated') return 'updateOfNamedView';
+  if (doneWhat === 'namedViewRenamed') return 'renameOfNamedView';
   if (PASTE_EDIT_KINDS.has(edit.kind)) return 'paste';
   if (edit.kind === 'moveCells') return 'pasteOfCut';
   if (edit.kind === 'moveRows' || edit.kind === 'moveColumns') return 'move';
+  if (edit.kind === 'moveColumnsOfCells')
+    return movesColumnsOfTable !== undefined && movesColumnsOfTable.area.columnCount - movesColumnsOfTable.count > 1
+      ? 'moveOfColumnsOfTable'
+      : 'moveOfColumnsOfTablePastOne';
   if (edit.kind === 'sortRows') return 'sort';
   if (edit.kind === 'sortCells') return 'sortOfRange';
   if (edit.kind === 'fillCells') return 'fill';
@@ -513,20 +531,22 @@ export function askedKindOfEdit(
   if (edit.kind === 'groupColumns') return 'groupOfColumns';
   if (edit.kind === 'duplicateSheet') return 'duplicateOfSheet';
   if (edit.kind === 'fitColumns') return 'fitOfColumns';
+  if (edit.kind === 'insertPivotTable') return 'newPivotTable';
+  if (edit.kind === 'changePivotTable') return 'changeOfPivotTable';
   if (edit.kind !== 'setDropdownOptions')
     return edit.kind === 'formatCells' || edit.kind === 'setBorders' || edit.kind === 'makeDropdown' ? 'format' : 'otherEdit';
   if (edit.appliesTo.kind === 'cellsInRows') return 'format';
-  let optionIds = new Set(edit.options.map(({ optionId: optionId }: OptionInAnEditor) => optionId));
-  return (dropdownEditorOfPane(state)?.options ?? []).filter(({ optionId: optionId }: OptionOfDropdownEditor) => !optionIds.has(optionId)).length === 1
+  let optionIds = new Set(edit.options.map(({ optionId }: OptionInAnEditor) => optionId));
+  return (dropdownEditorOfPane(state)?.options ?? []).filter(({ optionId }: OptionOfDropdownEditor) => !optionIds.has(optionId)).length === 1
     ? 'removalOfOneOption'
     : 'otherEdit';
 }
 export function noticeOfRefusedEdit(state: PageState, workbook: WorkbookReads, edit: Edit, reason: string, ifQueued: IfQueued): PageState {
   if (edit.kind === 'addUserToCell' && reason === 'tooManyUsersInCell') {
-    let { sheetId: sheetId, cell: cell } = edit;
+    let { sheetId, cell } = edit;
     let length = usersOfCell(
       workbook.cellOf({
-        sheetId: sheetId,
+        sheetId,
         rowId: cell.r,
         columnId: cell.c,
       }),
@@ -547,36 +567,59 @@ export function noticeOfRefusedEdit(state: PageState, workbook: WorkbookReads, e
         most: workbook.deepestGroup(),
       },
     };
-  if (reason === 'rowNotNamedInTheWay' && ownRowOrderOfSheet(workbook, state.sheetId) !== null)
+  if (reason === 'tooManyNamedViews') {
+    let most = workbook.limitsOfNamedViews().mostNamedViewsInASheet;
+    return {
+      ...state,
+      notice: {
+        kind: 'tooManyNamedViews',
+        most,
+      },
+    };
+  }
+  if (reason === 'unknownNamedView' && edit.kind === 'removeNamedView') return state;
+  if (reason === 'formulaReadsAnotherRow') {
+    let act: OwnSortInTheWayNotice['act'] = edit.kind === 'fillCells' ? 'fillOfFormula' : 'pasteOfFormula';
     return {
       ...state,
       notice: {
         kind: 'ownSortInTheWay',
-        act: actOfEdit(edit),
+        act,
       },
     };
-  if (reason === 'rowNotNamedInTheWay' && state.rowsOutOfViewByOwnFilters.size > 0) {
+  }
+  if (reason === 'rowNotNamedInTheWay') {
     let act = actOfEdit(edit);
-    return {
-      ...state,
-      notice: {
-        kind: 'rowsOutOfViewInTheWay',
-        act: act,
-      },
-    };
+    let hasRowsOutOfView = state.rowsOutOfViewByOwnFilters.size > 0;
+    if (!(hasRowsOutOfView && (act === 'paste' || act === 'fill')) && ownRowOrderOfSheet(workbook, state.sheetId) !== null)
+      return {
+        ...state,
+        notice: {
+          kind: 'ownSortInTheWay',
+          act,
+        },
+      };
+    if (hasRowsOutOfView)
+      return {
+        ...state,
+        notice: {
+          kind: 'rowsOutOfViewInTheWay',
+          act,
+        },
+      };
   }
   let why = refusalMessageKey(reason);
   let customNumberFormat = afterFormatApplied(state.customNumberFormat, edit, reason);
   if (customNumberFormat !== null && customNumberFormat !== state.customNumberFormat)
     return {
       ...state,
-      customNumberFormat: customNumberFormat,
+      customNumberFormat,
     };
   if (edit.kind !== 'renameSheet') {
     let isTypingLost = state.customNumberFormat !== null && customNumberFormat === null;
     let noticeOfRefusal: EditAnswerRefusedNotice = {
       kind: 'editRefused',
-      why: why,
+      why,
       asked: askedKindOfEdit(edit, state, ifQueued),
     };
     let mergeBroken =
@@ -590,20 +633,20 @@ export function noticeOfRefusedEdit(state: PageState, workbook: WorkbookReads, e
           };
     return {
       ...state,
-      customNumberFormat: customNumberFormat,
+      customNumberFormat,
       notice: isTypingLost
         ? {
             ...refusalNotice,
-            isTypingLost: isTypingLost,
+            isTypingLost,
           }
         : refusalNotice,
     };
   }
   let refusedName: SheetNameRefusal = {
     name: edit.name,
-    why: why,
+    why,
   };
-  let { sheetBeingRenamed: sheetBeingRenamed } = state;
+  let { sheetBeingRenamed } = state;
   return sheetBeingRenamed?.sheetId === edit.sheetId
     ? {
         ...state,
@@ -624,53 +667,53 @@ export function discardEffectsOfRefusal(edit: Edit, reason: string): PageEffect[
   return isEditRefusalReason(refusalMessageKey(reason)) || reason === 'widgetNodeOfAnotherView' ? [] : discardCopiedChartNodes(edit);
 }
 export function noticeOfStepNotTaken(
-  { refusal: refusal, sheetNameInTheWay: sheetNameInTheWay }: Pick<StepGivenUpAnswer, 'refusal' | 'sheetNameInTheWay'>,
+  { refusal, sheetNameInTheWay }: Pick<StepGivenUpAnswer, 'refusal' | 'sheetNameInTheWay'>,
   direction: UndoOrRedoEffect['direction'],
 ): StepNotTakenNotice {
   if (sheetNameInTheWay?.kind === 'ofSheetToBringBack')
     return {
       kind: 'sheetNotBroughtBack',
-      direction: direction,
+      direction,
     };
   if (sheetNameInTheWay?.kind === 'ofSheetToName' && sheetNameInTheWay.takenBy !== null)
     return {
       kind: 'sheetNameTakenSinceEdit',
-      direction: direction,
+      direction,
       name: sheetNameInTheWay.takenBy,
     };
   switch (undoRefusalKind(refusal)) {
     case 'changedSince':
       return {
         kind: 'changedSinceEdit',
-        direction: direction,
+        direction,
       };
     case 'formatsTooMixed':
       return {
         kind: 'formatsTooMixedSinceEdit',
-        direction: direction,
+        direction,
       };
     case 'noOtherSheetLeft':
       return {
         kind: 'nothingElseLeftSinceEdit',
-        direction: direction,
+        direction,
         lastOf: 'sheet',
       };
     case 'noOtherRowLeft':
       return {
         kind: 'nothingElseLeftSinceEdit',
-        direction: direction,
+        direction,
         lastOf: 'row',
       };
     case 'noOtherColumnLeft':
       return {
         kind: 'nothingElseLeftSinceEdit',
-        direction: direction,
+        direction,
         lastOf: 'column',
       };
     case null:
       return {
         kind: 'stepGivenUp',
-        direction: direction,
+        direction,
       };
   }
 }
@@ -721,19 +764,19 @@ export function showChangedPlace(
     ...state,
     dragging: null,
   };
-  if (place === null)
+  if (place === null || isAreaReadByInteractive(state, workbook, place))
     return {
       ...stateNotDragging,
       lastDone: {
-        what: what,
+        what,
         cells: null,
       },
     };
-  let { sheetId: sheetId, placementId: placementId } = place;
+  let { sheetId, placementId } = place;
   let chartShown =
     placementId === undefined ? null : showPlacedViewChange(showSheet(stateNotDragging, workbook, sheetId), workbook, placementId, what);
   if (chartShown !== null) return chartShown;
-  let { area: area } = place;
+  let { area } = place;
   if (area === null) {
     let shownState = selectAfterEdit(
       stateNotDragging,
@@ -749,9 +792,9 @@ export function showChangedPlace(
     return {
       ...shownState,
       lastDone: {
-        what: what,
+        what,
         cells: null,
-        sheetShown: sheetShown,
+        sheetShown,
       },
     };
   }
@@ -798,19 +841,20 @@ export function showChangedPlace(
   };
 }
 export function showUndoneOrRedone(state: PageState, workbook: ReadsWithTextMeasurer, what: StepShown, places: PlaceAreaChanged[]): PageState {
-  let areas = places.flatMap(({ area: area }: PlaceAreaChanged) => area ?? []);
+  let areas = places.flatMap(({ area }: PlaceAreaChanged) => area ?? []);
   let distinctAreas = areas.filter(
     (area: CellArea, index: number) => !areas.slice(0, index).some((earlierArea: CellArea) => isSameArea(earlierArea, area)),
   );
   let [lastPlace = null, lastArea] = [places.at(-1), distinctAreas.at(-1)];
   if (lastPlace === null || lastArea === undefined) return showChangedPlace(state, workbook, what, lastPlace);
-  let { sheetId: sheetId } = lastPlace;
+  if (places.every((place: PlaceAreaChanged) => isAreaReadByInteractive(state, workbook, place))) return showChangedPlace(state, workbook, what, null);
+  let { sheetId } = lastPlace;
   let unhiddenState = distinctAreas.reduce(
     (stateUnhidden: PageState, area: CellArea) => unhideAreaIfAllFiltered(stateUnhidden, workbook, area, sheetId),
     state,
   );
   let shown = showChangedPlace(unhiddenState, workbook, what, {
-    sheetId: sheetId,
+    sheetId,
     area: lastArea,
   });
   let otherRanges = distinctAreas
@@ -819,14 +863,14 @@ export function showUndoneOrRedone(state: PageState, workbook: ReadsWithTextMeas
     .flatMap((area: CellArea) => selectionOfArea(shown, workbook, trimAreaToShownRows(shown, workbook, area, sheetId)) ?? []);
   let stateWithRanges: PageState = {
     ...shown,
-    otherRanges: otherRanges,
+    otherRanges,
   };
   if (otherRanges.length === 0) return stateWithRanges;
   let allAreas = areasOfAllRanges(stateWithRanges, workbook);
   return {
     ...stateWithRanges,
     lastDone: {
-      what: what,
+      what,
       cells: areasToA1AsStored(allAreas, ownRowOrderOfSheet(workbook, stateWithRanges.sheetId)),
       rangeCount: allAreas.length,
     },
@@ -844,7 +888,7 @@ export const PASTE_EDIT_KINDS = new Set<Edit['kind']>([
 ]);
 export const restoreViewOfRefusedEdit = (
   state: PageState,
-  { scrollIfRefused: scrollIfRefused, selectionIfRefused: selectionIfRefused, isViewLeftAsItIs: isViewLeftAsItIs }: IfQueued,
+  { scrollIfRefused, selectionIfRefused, isViewLeftAsItIs }: IfQueued,
   workbook: ReadsWithTextMeasurer,
 ): PageState =>
   clampScrollOfView(
@@ -870,7 +914,13 @@ export type AskedKindOfEdit =
   | 'duplicateOfSheet'
   | 'fitOfColumns'
   | 'format'
-  | 'removalOfOneOption';
+  | 'removalOfOneOption'
+  | 'updateOfNamedView'
+  | 'renameOfNamedView'
+  | 'moveOfColumnsOfTable'
+  | 'moveOfColumnsOfTablePastOne'
+  | 'newPivotTable'
+  | 'changeOfPivotTable';
 /** The notice that the workbook refused an edit, why, and what was asked. */
 export interface EditAnswerRefusedNotice {
   kind: 'editRefused';
@@ -892,9 +942,17 @@ export interface GroupsTooDeepNotice {
   most: number;
 }
 /** The notice that the page's own sort, or rows filtered out of view, are in the way of an act. */
-export interface LinesInTheWayNotice {
-  kind: 'ownSortInTheWay' | 'rowsOutOfViewInTheWay';
-  act: ReturnType<typeof actOfEdit>;
+export type LinesInTheWayNotice = OwnSortInTheWayNotice | RowsOutOfViewInTheWayNotice;
+/** An act stopped by the page's own sort of the rows. */
+export interface OwnSortInTheWayNotice {
+  kind: 'ownSortInTheWay';
+  /** The act stopped; a formula's reference is stopped only by the page's own sort. */
+  act: ActStoppedByHiddenRows | 'referTo' | 'fillOfFormula' | 'pasteOfFormula';
+}
+/** An edit stopped by rows the page's own filters keep out of view. */
+export interface RowsOutOfViewInTheWayNotice {
+  kind: 'rowsOutOfViewInTheWay';
+  act: ActStoppedByHiddenRows;
 }
 /** A name of a sheet the workbook refused, and why. */
 export interface SheetNameRefusal {
@@ -906,11 +964,17 @@ export interface SheetNameRefusedNotice {
   kind: 'sheetNameRefused';
   refused: SheetNameRefusal;
 }
+/** The notice that a sheet holds as many named views as it may. */
+export interface TooManyNamedViewsNotice {
+  kind: 'tooManyNamedViews';
+  most: number;
+}
 /** The notices of an edit the workbook refused. */
 export type RefusedEditNotice =
   | EditAnswerRefusedNotice
   | CellHoldsNoMorePeopleNotice
   | GroupsTooDeepNotice
+  | TooManyNamedViewsNotice
   | LinesInTheWayNotice
   | SheetNameRefusedNotice;
 /** The notice that an undo or a redo was not taken, and why. */

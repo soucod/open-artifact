@@ -39,6 +39,8 @@ export interface SheetContents {
   conditionalFormats?: { conditionalFormatId: string; ranges: unknown[]; liveRanges?: unknown[]; priority?: number; effect: unknown }[];
   /** The charts that lie over the sheet (charts.ts): where each lies, and the view (the chart) it shows. */
   placements?: { placementId: string; placement: Placement; liveTopLeft?: CellIds | null }[];
+  /** The view this sheet shows as an interactive panel (charts.ts), when the whole tab is one. */
+  interactive?: string | null;
 }
 
 export interface CellIds {
@@ -54,7 +56,18 @@ export interface Placement {
   heightInPixels: number;
 }
 
-/** A view (a chart): its name and its one element, the widget it draws and the cells each input stands for. */
+/** A cell an interactive panel may write, with the value it held when the panel was made (null: blank). */
+export interface WritableCell {
+  r: string;
+  c: string;
+  value: { kind: string; value: unknown } | null;
+}
+
+/**
+ * A view (a chart, or an interactive panel): its name and its one element, the widget it draws and the cells each
+ * input stands for. A panel's element (kind "interactive") also lists the inputs its controls may write, each with the
+ * values its cells go back to on a reset.
+ */
 export interface ChartView {
   name: string;
   elements: {
@@ -62,6 +75,7 @@ export interface ChartView {
     elementId: string;
     embed: { ref: string; caption: string };
     inputs: { name: string; range: { sheetId: string; topLeft: CellIds; bottomRight: CellIds } }[];
+    writes?: { input: string; saved: WritableCell[] }[];
   }[];
 }
 

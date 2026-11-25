@@ -1,21 +1,77 @@
-import type { Dynamic } from '../dynamic.ts';
-import { ownRowOrderOfSheet } from '../model/line-ids.ts';
+import type { ColumnId } from '@open-artifact/sheets-core';
+import { ownRowOrderOfSheet, type OwnRowOrder } from '../model/line-ids.ts';
 import { rowNumberAsStored, columnLetters } from '../model/a1-references.ts';
 import { selectedArea, mergedAreaOrCellOf, isSameArea, activeAnchorCell, scrollToShowActiveCell, isSameCell } from '../selection/model.ts';
 import { hasOtherRanges } from '../selection/several-ranges.ts';
 import { isModalOpen } from '../ui/find.ts';
-import { withNoEffects } from '../state/transitions.ts';
-import { MOST_LOOKS_IN_VAIN, authorsToLookUp, withoutAuthors, authorShown } from './version-history.ts';
+import { withNoEffects, type PageTransition } from '../state/transitions.ts';
+import { MOST_LOOKS_IN_VAIN, authorsToLookUp, withoutAuthors, authorShown, type ShownAuthor } from './version-history.ts';
 import { stickyHeadersOverRow } from '../grid/sticky-headers.ts';
 import { headingTextAt } from '../ui/sort-menu.ts';
 import { lookStampOfWorkbook } from '../tables/own-filters.ts';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { cellInputText } from '../model/cell-values.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { CellHistory, CellHistoryScope, PageState } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellPosition } from '../selection/model.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export let lastShownCellHistory: Dynamic;
-export function cellHistoryPlace(cellId: Dynamic, workbook: WorkbookReads) {
+import type { CellHistoryChange, CellHistoryOutcome, HeldContent } from '../state/event-reducer.ts';
+
+/** Where the cell of the history is: its address and the number of its row, as stored. */
+export interface CellHistoryPlace {
+  address: string;
+  rowNumber: number;
+}
+/** How a column is named in the history: by its heading when that names it alone, or by its letters. */
+export type ColumnOfHistory = { kind: 'lettered'; letters: string } | { kind: 'named'; name: string };
+/** Where a column a change touched stands in the row of the history. */
+export interface ColumnOfChange {
+  columnIndex: number;
+  address: string;
+  column: ColumnOfHistory;
+}
+/** A cell a change touched, as the history shows it. */
+export interface ShownChangedCell {
+  columnId: ColumnId;
+  held: HeldContent;
+  address: string;
+  column: ColumnOfHistory;
+}
+/** A change of the history, as the card lists it. */
+export interface ShownCellChange {
+  revision: number;
+  atMs: number;
+  cells: ShownChangedCell[];
+  author: ShownAuthor | null;
+}
+/** The history of a cell or its row, as the card shows it. */
+export interface ShownCellHistory {
+  address: string;
+  rowNumber: number;
+  scope: CellHistoryScope;
+  canRowBeRead: boolean;
+  isAwaited: boolean;
+  changes: ShownCellChange[] | null;
+  areEarlierLeftOut: boolean;
+  whyNotRead: Extract<CellHistoryOutcome, { kind: 'notRead' }>['why'] | null;
+  /** The change count the history is behind at, while it waits to be read again. */
+  behindAtChangeCount: number | null;
+}
+/** The cell history last shown, and what it was worked out from. */
+interface ShownCellHistoryKept {
+  open: CellHistory;
+  profilesById: PageState['profilesById'];
+  tablesRead: PageState['tablesRead'];
+  ownFilters: PageState['ownFilters'];
+  asOfWorkbook: number;
+  behindAtChangeCount: number | null;
+  /** The columns of the changes and where they stand, as JSON. */
+  places: string;
+  shown: ShownCellHistory;
+}
+
+export let lastShownCellHistory: ShownCellHistoryKept | null;
+export function cellHistoryPlace(cellId: CellId, workbook: WorkbookReads): CellHistoryPlace | null {
   let position = workbook.positionOfCell(cellId);
   let ownRowOrder = ownRowOrderOfSheet(workbook, cellId.sheetId);
   return position === null
@@ -25,20 +81,21 @@ export function cellHistoryPlace(cellId: Dynamic, workbook: WorkbookReads) {
         rowNumber: rowNumberAsStored(position.rowIndex, ownRowOrder),
       };
 }
-export function rowHeldNow({ sheetId: sheetId, rowId: rowId }: Dynamic, workbook: WorkbookReads) {
+/** What the row of the cell holds now, as JSON of the column ids and texts of its cells that hold something. */
+export function rowHeldNow({ sheetId, rowId }: Pick<CellId, 'sheetId' | 'rowId'>, workbook: WorkbookReads): string {
   let rowIndex = workbook.rowIndexOf(sheetId, rowId);
   let columnCount = workbook.linesOf(sheetId)?.columns.count ?? 0;
   if (rowIndex === null) return '';
-  let held: Dynamic = [];
-  for (let columnIndex: Dynamic = 0; columnIndex < columnCount; columnIndex += 1) {
+  let held: [ColumnId, string][] = [];
+  for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
     let cellId = workbook.cellIdAt(sheetId, rowIndex, columnIndex);
     let shown = cellId === null ? '' : shownTextOfCell(cellId, workbook);
     if (cellId !== null && shown !== '') held.push([cellId.columnId, shown]);
   }
-  held.sort(([columnIdA]: Dynamic, [columnIdB]: Dynamic) => columnIdA.localeCompare(columnIdB));
+  held.sort(([columnIdA], [columnIdB]) => columnIdA.localeCompare(columnIdB));
   return JSON.stringify(held);
 }
-export function canOpenCellHistory(state: PageState, workbook: WorkbookReads) {
+export function canOpenCellHistory(state: PageState, workbook: WorkbookReads): boolean {
   let area = selectedArea(state, workbook);
   let cellArea = mergedAreaOrCellOf(workbook, state.activeCell);
   return (
@@ -49,7 +106,7 @@ export function canOpenCellHistory(state: PageState, workbook: WorkbookReads) {
     (isSameArea(area, cellArea) || (area.rowCount === 1 && area.topRowIndex === cellArea.topRowIndex))
   );
 }
-export function openCellHistory(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function openCellHistory(state: PageState, workbook: ReadsWithTextMeasurer): PageState {
   let cell = activeAnchorCell(state, workbook);
   let place = cellHistoryPlace(cell, workbook);
   if (
@@ -65,7 +122,7 @@ export function openCellHistory(state: PageState, workbook: ReadsWithTextMeasure
     ...scrollToShowActiveCell(state, workbook, 'cellAlone'),
     menu: null,
     cellHistory: {
-      cell: cell,
+      cell,
       scope: 'row',
       ...place,
       canRowBeRead: true,
@@ -75,19 +132,19 @@ export function openCellHistory(state: PageState, workbook: ReadsWithTextMeasure
       read: null,
       hasChangedSinceAsked: false,
       looksInVainInARow: 0,
-      authorsLookedUp: new (Set as Dynamic)(),
-      authorsAwaited: new (Set as Dynamic)(),
+      authorsLookedUp: new Set(),
+      authorsAwaited: new Set(),
     },
   };
 }
-export function setCellHistoryScope(state: PageState, workbook: WorkbookReads, scope?: Dynamic) {
+export function setCellHistoryScope(state: PageState, workbook: WorkbookReads, scope: CellHistoryScope): PageState {
   let cellHistory = state.cellHistory;
   if (cellHistory === null || cellHistory.scope === scope) return state;
   return {
     ...state,
     cellHistory: {
       ...cellHistory,
-      scope: scope,
+      scope,
       heldNow: heldNowInScope(cellHistory.cell, scope, workbook),
       heldAtChangeCount: state.workbookChangeCount,
       awaited: 'toBePut',
@@ -97,7 +154,7 @@ export function setCellHistoryScope(state: PageState, workbook: WorkbookReads, s
     },
   };
 }
-export function followCellHistory(state: PageState, workbook: WorkbookReads) {
+export function followCellHistory(state: PageState, workbook: WorkbookReads): PageState {
   let cellHistory = state.cellHistory;
   if (cellHistory === null) return state;
   let place =
@@ -123,13 +180,13 @@ export function followCellHistory(state: PageState, workbook: WorkbookReads) {
     cellHistory: {
       ...cellHistory,
       ...place,
-      heldNow: heldNow,
+      heldNow,
       heldAtChangeCount: changeCount,
       hasChangedSinceAsked: hasChanged,
     },
   };
 }
-export function cellHistoryAnswered(state: PageState, workbook: WorkbookReads, askId?: Dynamic, answer?: Dynamic) {
+export function cellHistoryAnswered(state: PageState, workbook: WorkbookReads, askId: number, answer: CellHistoryOutcome): PageTransition {
   let cellHistory = state.cellHistory;
   if (cellHistory === null || cellHistory.awaited !== askId) return withNoEffects(state);
   if (cellHistory.scope === 'row' && answer.kind === 'notRead' && answer.why === 'storeDoesNotKnowHow') {
@@ -153,8 +210,8 @@ export function cellHistoryAnswered(state: PageState, workbook: WorkbookReads, a
         looksInVainInARow: looksInVain,
       },
     });
-  let authors = answer.kind === 'read' ? answer.changes.flatMap(({ author: author }: Dynamic) => author ?? []) : [];
-  let authorsToLookUp2 = authorsToLookUp(state, cellHistory, authors);
+  let authors = answer.kind === 'read' ? answer.changes.flatMap(({ author }) => author ?? []) : [];
+  let userIdsToLookUp = authorsToLookUp(state, cellHistory, authors);
   return {
     state: {
       ...state,
@@ -163,28 +220,28 @@ export function cellHistoryAnswered(state: PageState, workbook: WorkbookReads, a
         awaited: null,
         read: answer,
         looksInVainInARow: 0,
-        authorsLookedUp: new (Set as Dynamic)([...cellHistory.authorsLookedUp, ...authorsToLookUp2]),
-        authorsAwaited: new (Set as Dynamic)([...cellHistory.authorsAwaited, ...authorsToLookUp2]),
+        authorsLookedUp: new Set([...cellHistory.authorsLookedUp, ...userIdsToLookUp]),
+        authorsAwaited: new Set([...cellHistory.authorsAwaited, ...userIdsToLookUp]),
       },
     },
     effects:
-      authorsToLookUp2.length === 0
+      userIdsToLookUp.length === 0
         ? []
         : [
             {
               kind: 'lookUpPeople',
-              userIds: authorsToLookUp2,
+              userIds: userIdsToLookUp,
             },
           ],
   };
 }
-export function askForCellHistory({ state: state, effects: effects }: Dynamic, workbook: WorkbookReads) {
+export function askForCellHistory({ state, effects }: PageTransition, workbook: WorkbookReads): PageTransition {
   let followed = followCellHistory(state, workbook);
   let cellHistory = followed.cellHistory;
   if (cellHistory === null || cellHistory.awaited !== 'toBePut' || followed.saving === 'saving')
     return {
       state: followed,
-      effects: effects,
+      effects,
     };
   let askId = followed.versionHistoryAskCount + 1;
   let asking = {
@@ -203,7 +260,7 @@ export function askForCellHistory({ state: state, effects: effects }: Dynamic, w
         ...effects,
         {
           kind: 'readCellHistory',
-          askId: askId,
+          askId,
           cell: cellHistory.cell,
           scope: cellHistory.scope,
         },
@@ -218,7 +275,7 @@ export function askForCellHistory({ state: state, effects: effects }: Dynamic, w
     effects: [...effects, ...answered.effects],
   };
 }
-export function cellHistoryAuthorsArrived(state: PageState, userIds?: Dynamic) {
+export function cellHistoryAuthorsArrived(state: PageState, userIds: string[]): PageState {
   let cellHistory = state.cellHistory;
   if (cellHistory === null) return state;
   let awaited = withoutAuthors(cellHistory.authorsAwaited, userIds);
@@ -232,21 +289,27 @@ export function cellHistoryAuthorsArrived(state: PageState, userIds?: Dynamic) {
         },
       };
 }
-export function headingNamesOfColumns(state: PageState, workbook: WorkbookReads, rowIndex?: Dynamic, columnIndexes?: Dynamic) {
+/** The headings over the row that name their columns alone, by column index. */
+export function headingNamesOfColumns(
+  state: PageState,
+  workbook: WorkbookReads,
+  rowIndex: number,
+  columnIndexes: number[],
+): Map<number, string> {
   let headings = stickyHeadersOverRow(state, workbook, rowIndex).flatMap(
-    ({ header: header, columns: columns }: Dynamic) =>
-      Array.from<Dynamic, Dynamic>(
+    ({ header, columns }) =>
+      Array.from(
         {
           length: columns.last - columns.first + 1,
         },
-        (input?: Dynamic, offset?: Dynamic) => {
+        (_unused, offset): [number, string] => {
           let columnIndex = columns.first + offset;
           let heading = headingTextAt(
             state,
             workbook,
             {
               rowIndex: header.last,
-              columnIndex: columnIndex,
+              columnIndex,
             },
             true,
           );
@@ -254,37 +317,43 @@ export function headingNamesOfColumns(state: PageState, workbook: WorkbookReads,
         },
       ),
   );
-  let allColumnIndexes = new (Set as Dynamic)([...columnIndexes, ...headings.map(([columnIndex]: Dynamic) => columnIndex)]);
-  let nameCounts = new (Map as Dynamic)();
-  for (let name of [...[...allColumnIndexes].map(columnLetters), ...headings.map(([, heading]: Dynamic) => heading)] as Dynamic)
+  let allColumnIndexes = new Set([...columnIndexes, ...headings.map(([columnIndex]) => columnIndex)]);
+  let nameCounts = new Map<string, number>();
+  for (let name of [...[...allColumnIndexes].map(columnLetters), ...headings.map(([, heading]) => heading)])
     nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-  return new (Map as Dynamic)(headings.filter(([, heading]: Dynamic) => heading !== '' && nameCounts.get(heading) === 1));
+  return new Map(headings.filter(([, heading]) => heading !== '' && nameCounts.get(heading) === 1));
 }
-export function columnsOfCellChanges(state: PageState, workbook: WorkbookReads, { sheetId: sheetId, rowId: rowId }: Dynamic, changes?: Dynamic) {
+/** The columns the changes touched that are still in the row, by column id. */
+export function columnsOfCellChanges(
+  state: PageState,
+  workbook: WorkbookReads,
+  { sheetId, rowId }: Pick<CellId, 'sheetId' | 'rowId'>,
+  changes: CellHistoryChange[],
+): Map<ColumnId, ColumnOfChange> {
   let columns = [
-    ...new (Set as Dynamic)(
-      changes.flatMap(({ cells: cells }: Dynamic) => cells.map(({ columnId: columnId }: Dynamic) => columnId)),
+    ...new Set(
+      changes.flatMap(({ cells }) => cells.map(({ columnId }) => columnId)),
     ),
-  ].flatMap((columnId?: Dynamic) => {
+  ].flatMap((columnId) => {
     let position = workbook.positionOfCell({
-      sheetId: sheetId,
-      rowId: rowId,
-      columnId: columnId,
+      sheetId,
+      rowId,
+      columnId,
     });
     return position === null
       ? []
       : [
           {
-            columnId: columnId,
+            columnId,
             at: position,
           },
         ];
   });
   let rowIndex = workbook.rowIndexOf(sheetId, rowId);
-  let columnIndexes = columns.map(({ at: position }: Dynamic) => position.columnIndex);
+  let columnIndexes = columns.map(({ at: position }) => position.columnIndex);
   let headingNames = rowIndex === null ? null : headingNamesOfColumns(state, workbook, rowIndex, columnIndexes);
-  return new (Map as Dynamic)(
-    columns.map(({ columnId: columnId, at: position }: Dynamic) => {
+  return new Map(
+    columns.map(({ columnId, at: position }): [ColumnId, ColumnOfChange] => {
       let headingName = headingNames?.get(position.columnIndex);
       return [
         columnId,
@@ -306,36 +375,36 @@ export function columnsOfCellChanges(state: PageState, workbook: WorkbookReads, 
     }),
   );
 }
-export function changedCellsShown(cells?: Dynamic, columns?: Dynamic) {
-  let shownCells = cells.flatMap(({ columnId: columnId, held: held }: Dynamic) => {
+export function changedCellsShown(cells: CellHistoryChange['cells'], columns: Map<ColumnId, ColumnOfChange>): ShownChangedCell[] {
+  let shownCells = cells.flatMap(({ columnId, held }) => {
     let column = columns.get(columnId);
     return column === undefined
       ? []
       : [
           {
-            columnId: columnId,
-            held: held,
+            columnId,
+            held,
             ...column,
           },
         ];
   });
-  shownCells.sort((cellA?: Dynamic, cellB?: Dynamic) => cellA.columnIndex - cellB.columnIndex);
+  shownCells.sort((cellA, cellB) => cellA.columnIndex - cellB.columnIndex);
   return shownCells.map(
-    ({ columnId: columnId, held: held, address: address, column: column }: Dynamic) => ({
-      columnId: columnId,
-      held: held,
-      address: address,
-      column: column,
+    ({ columnId, held, address, column }) => ({
+      columnId,
+      held,
+      address,
+      column,
     }),
   );
 }
-export function shownCellHistory(state: PageState, workbook: WorkbookReads) {
+export function shownCellHistory(state: PageState, workbook: WorkbookReads): ShownCellHistory | null {
   let {
-    cellHistory: cellHistory,
-    profilesById: profilesById,
-    tablesRead: tablesRead,
-    ownFilters: ownFilters,
-    workbookChangeCount: workbookChangeCount,
+    cellHistory,
+    profilesById,
+    tablesRead,
+    ownFilters,
+    workbookChangeCount,
   } = state;
   if (cellHistory === null) {
     lastShownCellHistory = null;
@@ -355,19 +424,19 @@ export function shownCellHistory(state: PageState, workbook: WorkbookReads) {
     lastShownCellHistory.ownFilters === ownFilters
   )
     return lastShownCellHistory.shown;
-  let { read: read } = cellHistory;
+  let { read } = cellHistory;
   let columns = columnsOfCellChanges(state, workbook, cellHistory.cell, read?.kind === 'read' ? read.changes : []);
   let places = JSON.stringify([...columns]);
   if (isSameOpen && lastShownCellHistory?.places === places) {
     lastShownCellHistory = {
       ...lastShownCellHistory,
-      tablesRead: tablesRead,
-      ownFilters: ownFilters,
-      asOfWorkbook: asOfWorkbook,
+      tablesRead,
+      ownFilters,
+      asOfWorkbook,
     };
     return lastShownCellHistory.shown;
   }
-  let shown = {
+  let shown: ShownCellHistory = {
     address: cellHistory.address,
     rowNumber: cellHistory.rowNumber,
     scope: cellHistory.scope,
@@ -376,13 +445,13 @@ export function shownCellHistory(state: PageState, workbook: WorkbookReads) {
     changes:
       read?.kind !== 'read'
         ? null
-        : read.changes.flatMap(({ revision: revision, atMs: atMs, cells: cells, author: author }: Dynamic) => {
+        : read.changes.flatMap(({ revision, atMs, cells, author }) => {
             let shownCells = changedCellsShown(cells, columns);
             if (shownCells.length === 0) return [];
             return [
               {
-                revision: revision,
-                atMs: atMs,
+                revision,
+                atMs,
                 cells: shownCells,
                 author: author === null ? null : authorShown(author, profilesById, cellHistory.authorsAwaited),
               },
@@ -390,21 +459,21 @@ export function shownCellHistory(state: PageState, workbook: WorkbookReads) {
           }),
     areEarlierLeftOut: read?.kind === 'read' && read.areEarlierLeftOut,
     whyNotRead: read?.kind === 'notRead' ? read.why : null,
-    behindAtChangeCount: behindAtChangeCount,
+    behindAtChangeCount,
   };
   lastShownCellHistory = {
     open: cellHistory,
-    profilesById: profilesById,
-    tablesRead: tablesRead,
-    ownFilters: ownFilters,
-    asOfWorkbook: asOfWorkbook,
-    behindAtChangeCount: behindAtChangeCount,
-    places: places,
-    shown: shown,
+    profilesById,
+    tablesRead,
+    ownFilters,
+    asOfWorkbook,
+    behindAtChangeCount,
+    places,
+    shown,
   };
   return shown;
 }
-export const singleCellAddress = (position?: Dynamic, ownRowOrder?: Dynamic) =>
+export const singleCellAddress = (position: CellPosition, ownRowOrder: OwnRowOrder | null): string =>
   areaToA1AsStored(
     {
       topRowIndex: position.rowIndex,
@@ -414,11 +483,11 @@ export const singleCellAddress = (position?: Dynamic, ownRowOrder?: Dynamic) =>
     },
     ownRowOrder,
   );
-export const shownTextOfCell = (cellId: Dynamic, workbook: WorkbookReads) =>
+export const shownTextOfCell = (cellId: CellId, workbook: WorkbookReads): string =>
   cellInputText(workbook.cellOf(cellId), workbook.decimalSign);
-export const heldNowInScope = (cellId: Dynamic, scope: Dynamic, workbook: WorkbookReads) =>
+export const heldNowInScope = (cellId: CellId, scope: CellHistoryScope, workbook: WorkbookReads): string =>
   scope === 'row' ? rowHeldNow(cellId, workbook) : shownTextOfCell(cellId, workbook);
-export const askCellHistoryAgain = (state: PageState) =>
+export const askCellHistoryAgain = (state: PageState): PageState =>
   state.cellHistory === null || state.cellHistory.awaited !== null
     ? state
     : {
@@ -429,13 +498,13 @@ export const askCellHistoryAgain = (state: PageState) =>
           looksInVainInARow: 0,
         },
       };
-export const isCellHistoryOutdated = ({ cellHistory: cellHistory, saving: saving }: Dynamic) =>
+export const isCellHistoryOutdated = ({ cellHistory, saving }: Pick<PageState, 'cellHistory' | 'saving'>): boolean =>
   cellHistory !== null &&
   cellHistory.read?.kind === 'read' &&
   cellHistory.awaited === null &&
   cellHistory.hasChangedSinceAsked &&
   saving === 'allSaved';
-export const refreshCellHistory = (state: PageState) =>
+export const refreshCellHistory = (state: PageState): PageState =>
   state.cellHistory !== null && isCellHistoryOutdated(state)
     ? {
         ...state,
@@ -445,9 +514,10 @@ export const refreshCellHistory = (state: PageState) =>
         },
       }
     : state;
-export const isCellHistoryAwaiting = ({ cellHistory: cellHistory }: Dynamic, askId?: Dynamic) => cellHistory?.awaited === askId;
+export const isCellHistoryAwaiting = ({ cellHistory }: Pick<PageState, 'cellHistory'>, askId: number): boolean =>
+  cellHistory?.awaited === askId;
 lastShownCellHistory = null;
-export const isSameOpenCellHistory = (lastOpen?: Dynamic, cellHistory?: Dynamic) =>
+export const isSameOpenCellHistory = (lastOpen: CellHistory, cellHistory: CellHistory): boolean =>
   lastOpen.cell === cellHistory.cell &&
   lastOpen.scope === cellHistory.scope &&
   lastOpen.address === cellHistory.address &&

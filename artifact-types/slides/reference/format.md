@@ -25,7 +25,7 @@ Lints are estimates from your styles: `open-artifact check` does not render the 
 
 One line per property: the values it takes · the elements it applies to. `text` = `h1`, `h2`, `h3`,
 `p`, `ul`, `ol` and `<div data-text>`; `box` = `section` and `div`; `flow child` = a child that is not
-`position:absolute`; `pinned` = `position:absolute`. Anything else (`margin`, `z-index`, `float`,
+`position:absolute`; `pinned` = `position:absolute`. Anything else (`z-index`, `float`,
 `em`, `rem`, `vw`, `%` padding, `var()`, `calc()` outside `left`/`top`, …) is dropped.
 
 ```
@@ -55,16 +55,17 @@ justify-self: start | center | end | stretch | auto · grid child
 flex: none | auto | N [N] [LEN | 0% | auto] · flow child (flex:1 = an equal share; an empty div + flex:1 = a spacer)
 flex-grow flex-shrink: N · flow child
 flex-basis: LEN | auto · flow child
+margin margin-top -right -bottom -left: (LEN | auto) ×1–4, −1920–1920 (clamped) · flow child, not the section, tr or cells (on a pinned element: dropped — place it with its offsets; on an `<li>`: see Text)
 grid-template-columns grid-template-rows: (LEN | Nfr | auto | repeat(INT, …))+, ≤24 tracks — no minmax, auto-fill, names, areas · grid box
 grid-column grid-row: span INT (cells fill in source order) · grid child
-padding: LEN ×1–4, 0–256 (no %) · box, text, table; td/th: 0–64, one value per table
+padding: LEN ×1–4, 0–1920 (no %) · box, text, table; td/th: 0–64, one value per table
 overflow: hidden | visible · div
 background: COLOR | [repeating-]linear-gradient(ANGLE | to SIDE, COLOR [PCT [PCT]], … 2–8 stops) | radial-gradient([circle|ellipse] [at X% Y%], …); one gradient[, COLOR under it] · box, text, img, table, x-icon; tr: COLOR; x-shape and hr: a flat fill (a gradient heals to one color)
 background-clip: text (+ -webkit-text-fill-color:transparent): the glyphs show the gradient; url(IMG) center / cover|contain is allowed only here · text
 color: COLOR · text, box, span, td/th, table, x-icon, x-connector, hr
 font-family: FAMILY · text, box, table (inherits)
 font-size: LEN 8–400 (clamped) · text, box, table; inherits into p and li, not h1–h3
-font-weight: 100–900 (rounded to hundreds) | normal | bold · text, box, table, th; span: ≥600 = bold
+font-weight: 100–900 (rounded to hundreds) | normal | bold · text, box, table, th; span: ≥600 = bold, 400 or normal = regular, nothing else
 font-style: normal | italic · text, box, span
 font: [italic] [weight] SIZE[/LINE] FAMILY · expands to the longhands
 line-height: N | PCT | LEN | normal (0.5–4× the size) · text, box, table
@@ -74,12 +75,16 @@ text-transform: none | uppercase | lowercase | capitalize · text, box
 white-space: normal | nowrap · text
 text-decoration: none | underline | line-through [solid|double|dotted|dashed|wavy] [COLOR] · text; span: underline only
 font-variant-numeric: normal | tabular-nums · text, table
+list-style-type: none | disc | circle | square | decimal | lower-alpha | upper-alpha | lower-roman | upper-roman | "TEXT" (up to 8 characters) · ul, ol (lower-latin, upper-latin heal)
+list-style-position: outside | inside · ul, ol
+list-style: [TYPE] [POSITION] (no image) · expands to the two, disc and outside when left out
 -webkit-text-stroke: LEN 0–8 COLOR · text
 text-shadow: LEN LEN [LEN] COLOR, … ≤8 (x y ±64, blur ≤64) · text, table
 border: [LEN 0–16, else 1] solid | dashed | dotted | double | none [COLOR] — the style word is required · div, text, img, table, x-icon; the stroke of x-shape, hr, x-connector (≤32)
 border-top -right -bottom -left: as border · div, text, img, table, x-icon; hr: border-top = its stroke
 border-width, border-style: alone on x-connector only (elsewhere write border)
 border-radius: LEN | PCT (≤50%) ×1–4 (TL TR BR BL; no / form) · div, text, img, table; x-shape rect/rounded
+clip-path: none | polygon([nonzero|evenodd,] X Y, …) · div, img, x-shape; 3–128 points in px, %, or calc(N% ± Npx), relative to the border box
 box-shadow: [inset] LEN LEN [LEN [LEN]] COLOR, … ≤8 (x y ±64, blur ≤160, spread ±32) · div, text, img, table, x-icon, x-shape
 opacity: N 0–1 | PCT · any but span, cells, tr
 transform: translate(LEN[, LEN]) | translateX|Y(LEN | -50%), rotate(ANGLE), scale(N 0.5–2), skew[X|Y](ANGLE ±60) — any subset, in that order, each once · any but section, span, cells, tr, x-connector; x-shape: rotate only
@@ -123,6 +128,8 @@ hold until set on them).
   `<aside>` is joined to the first (a warning).
 - `hidden`: the slide is skipped when presenting. `data-transition`: how this slide arrives (`magic`:
   see Motion).
+- Comments are `<!-- text -->`. A browser ends `<!-->`, `<!--->` and `--!>` at once, so the text after
+  them shows on the slide, and a comment inside an `<iframe>` is text to it: both are warnings.
 - Nothing outside the section: no `<!doctype>`, `<html>`, `<head>`, `<body>`, `<title>`, `<meta>`,
   `<link>` or `<style>` (errors). The deck's title, outline and fonts live in `project/deck.json`.
 
@@ -132,16 +139,24 @@ hold until set on them).
   1.1/1.15/1.2/1.4; text with no `font-family` anywhere uses the system UI font). Set `font-size`
   yourself: 24px and up everywhere, labels, cells and footers too (not checked). `<h4>`–`<h6>` are
   errors: use `<h3>` or `<p>`.
-- `<ul>`/`<ol>` of plain `<li>`; style the list, not the items. An item may end with a `<ul>` or `<ol>`
+- `<ul>`/`<ol>` of plain `<li>`; style the list, not the items. The one exception is space between
+  items: `style="margin:12px 0"` (px, 0 or more, top and bottom only), the same on every `<li>` of the
+  list, nested ones too, and not in a list inside `<div data-text>`. An item may end with a `<ul>` or `<ol>`
   of sub-items one level further in, up to 9 levels; markers change by level (bullets: disc, circle,
-  square; numbers: 1, a, i) and each level indents 1.25em. `data-indent="N"` on an `<li>` puts it N
+  square; numbers: 1, a, i) and each level indents 1.25em. `list-style-type` and `list-style-position`
+  on the list pick its markers; a nested `<ul>`/`<ol>` takes only those two, and they hold for its whole
+  level (nested lists of one level that ask for different markers all get the default, a warning).
+  A top-level `<ol>` takes `start="N"` (a whole number) and `reversed`; on a `<ul>`, a nested list or a
+  list in a text box they are ignored with a warning and the list counts from 1. `data-indent="N"` on an `<li>` puts it N
   levels further in than where it sits (an outline that skips a level). The page's Tab / Shift+Tab nest
   and un-nest the line being typed.
 - `<div data-text>` (`data-text="N"`: the list indent in px, 0–256) of unstyled `<p>`, `<h1>`–`<h3>`,
-  `<ul>`, `<ol>` = ONE text box: style the div; styles on its children are dropped.
+  `<ul>`, `<ol>` = ONE text box: style the div; styles on its children are dropped, except a list's
+  `list-style-type` and `list-style-position`.
 - Inline, inside text only: `<b>` `<i>` `<u>` `<a href="https://…">` `<span style="color:…">` and
   `<br>`. `<strong>` → `<b>`, `<em>` → `<i>` (notes); `<code>`, `<s>`, `<mark>`, `<sup>`, `<sub>` and
-  the like keep their text and lose the tag. A `<span>` takes `color`, `font-weight` (→ `<b>`),
+  the like keep their text and lose the tag. A `<span>` takes `color`, `font-weight` (600 and up → `<b>`; `400` or
+  `normal` is a regular phrase, a lighter word in a bold heading; other weights are dropped),
   `font-style:italic` (→ `<i>`), `text-decoration:underline` (→ `<u>`) and nothing else: no sizes or
   fonts on spans (use two blocks). Links are http(s) only.
 - Text written straight into a `div` or the section is wrapped in a `<p>` (a warning).
@@ -191,8 +206,8 @@ hold until set on them).
 - `<table>` of `<tr>` with `<th>`/`<td>` of plain inline text; at most 100 rows × 24 columns.
   `<thead>`/`<tbody>` are implied (notes); `<caption>`, `<col>`, `colspan` and `rowspan` are dropped.
   A short row is filled with empty cells (a warning).
-- A first row of `<th>` is the header. Column widths: `width:N%` on EVERY cell of the first row (any
-  missing = equal columns).
+- A first row of `<th>` is the header. Column widths: a `width` in % or px on cells of the first row,
+  the two mixed if you like; columns given none split what is left evenly.
 - `text-align` on a cell aligns its column; `color` works on a cell; set `font-family`, `font-size` or
   `color` on the `<table>`, or it inherits them. A `<tr>` may carry `background:COLOR`; cells take no
   background.
@@ -271,7 +286,7 @@ None of these hold content (anything inside is dropped with a warning).
 
 Any CSS not in the table (dropped); `<style>`, `<link>`, `<script>`, `<iframe>`, `<canvas>` and
 `<object>` outside `<x-embed>` (errors); `on*=` handlers (dropped, a warning); merged
-cells; hover states; keyframes (a source deck plays them, `source-decks.md`); `class` (ignored); `margin` (use `gap`, `padding` or a spacer);
+cells; hover states; keyframes (a source deck plays them, `source-decks.md`); `class` (ignored);
 `z-index` (paint order is source order).
 
 ## Errors, in one list

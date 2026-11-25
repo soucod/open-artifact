@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { failureOf } from '../store/workbook-node.ts';
 import { syncRetryDelayMs } from '../store/workbook-sync.ts';
 import {
@@ -13,23 +12,47 @@ import {
   readRowHistory,
 } from './requests.ts';
 import { loadAtRevisionRequest, readLoadedOps, type LoadedOps } from '../store/requests.ts';
+import type { StoreCall, StoreOutcome } from '../store/sheet-stream.ts';
+import type { OpenedNode, ViewOnlyVersion } from '../store/sheet-connection.ts';
 import { reportErrorSoftly } from '../engine/loader.ts';
-export function createVersionHistoryReader(deps?: Dynamic) {
-  let workbookNode: Dynamic = null;
-  let changesQueue: Dynamic = Promise.resolve();
-  let asItWasQueue: Dynamic = Promise.resolve();
+import type { BrowserSide } from '../state/controller.ts';
+import type {
+  CellHistoryOutcome,
+  EditsThatTakeBackOutcome,
+  VersionsReadOutcome,
+  WhyVersionNotShown,
+} from '../state/event-reducer.ts';
+import type { TakeBack } from './requests.ts';
+
+/** An earlier version opened to be looked at, or why it was not. */
+export type EarlierVersionOpened = { kind: 'read'; version: ViewOnlyVersion } | { kind: 'notRead'; why: WhyVersionNotShown };
+
+/** The reads of the history the page asks of the store, and the earlier versions it opens. */
+export type VersionHistoryReader = BrowserSide['versionHistory'] & {
+  workbookOpened(node: OpenedNode): void;
+  asItWas(revision: number, isStillWanted: () => boolean): Promise<EarlierVersionOpened>;
+};
+
+/** Any read of the history: of the versions, of edits that take back, or of the changes of a cell or row. */
+type HistoryRead = VersionsReadOutcome | EditsThatTakeBackOutcome | CellHistoryOutcome;
+
+export function createVersionHistoryReader(deps: { newOpId: () => string; wait: (ms: number) => Promise<void> }): VersionHistoryReader {
+  let workbookNode: OpenedNode | null = null;
+  // Each queue holds the last read asked for, so the next waits for it; what it came to is not looked at.
+  let changesQueue: Promise<CellHistoryOutcome | void> = Promise.resolve();
+  let asItWasQueue: Promise<EarlierVersionOpened | void> = Promise.resolve();
   let cachedVersions = new Map<number, LoadedOps>();
   let keepVersion = (revision: number, loaded: LoadedOps): void => {
     cachedVersions.delete(revision);
     cachedVersions.set(revision, loaded);
     for (let oldRevision of [...cachedVersions.keys()].slice(0, -MAX_CACHED_VERSION_BODIES)) cachedVersions.delete(oldRevision);
   };
-  let askNode = async (
-    requestFor?: Dynamic,
-    readReply?: Dynamic,
-    isStillWanted: Dynamic = () => true,
-    attempt: Dynamic = 0,
-  ): Promise<Dynamic> => {
+  let askNode = async <Read extends HistoryRead>(
+    requestFor: () => StoreCall,
+    readReply: (reply: StoreOutcome) => Read,
+    isStillWanted: () => boolean = () => true,
+    attempt: number = 0,
+  ): Promise<Read> => {
     if (workbookNode === null)
       return readReply({
         kind: 'notSent',
@@ -48,8 +71,9 @@ export function createVersionHistoryReader(deps?: Dynamic) {
     await deps.wait(syncRetryDelayMs(attempt));
     return isStillWanted() ? askNode(requestFor, readReply, isStillWanted, attempt + 1) : answer;
   };
-  let collectEditsThatTakeBack = (takeBack: Dynamic): Promise<Dynamic> => askNode(() => editsThatTakeBackRequest(takeBack), readEditsThatTakeBack);
-  let openAsItWas = async (revision?: Dynamic, isStillWanted?: Dynamic): Promise<Dynamic> => {
+  let collectEditsThatTakeBack = (takeBack: TakeBack): Promise<EditsThatTakeBackOutcome> =>
+    askNode(() => editsThatTakeBackRequest(takeBack), readEditsThatTakeBack);
+  let openAsItWas = async (revision: number, isStillWanted: () => boolean): Promise<EarlierVersionOpened> => {
     let node = workbookNode;
     if (node === null)
       return {
@@ -63,9 +87,9 @@ export function createVersionHistoryReader(deps?: Dynamic) {
       };
     let { call, noteFailure } = node;
     let isStillCurrent = () => isStillWanted() && workbookNode === node;
-    let whyNotRead: Dynamic = 'notOffered';
+    let whyNotRead: WhyVersionNotShown = 'notOffered';
     let version = await node.openViewOnly(revision, {
-      async loadOps(): Promise<Dynamic> {
+      async loadOps() {
         if (!isStillCurrent()) return null;
         let cached = cachedVersions.get(revision);
         if (cached !== undefined) {
@@ -104,13 +128,13 @@ export function createVersionHistoryReader(deps?: Dynamic) {
         }
       : {
           kind: 'read',
-          version: version,
+          version,
         };
   };
-  let asItWas = (revision?: Dynamic, isStillWanted?: Dynamic) => {
-    let result = asItWasQueue
+  let asItWas = (revision: number, isStillWanted: () => boolean): Promise<EarlierVersionOpened> => {
+    let opened: Promise<EarlierVersionOpened> = asItWasQueue
       .then(
-        () =>
+        (): Promise<EarlierVersionOpened> | EarlierVersionOpened =>
           isStillWanted()
             ? openAsItWas(revision, isStillWanted)
             : {
@@ -119,7 +143,7 @@ export function createVersionHistoryReader(deps?: Dynamic) {
               },
       )
       .catch(
-        (error?: Dynamic) => (
+        (error: unknown) => (
           reportErrorSoftly(error, 'versionHistory'),
           {
             kind: 'notRead',
@@ -127,11 +151,15 @@ export function createVersionHistoryReader(deps?: Dynamic) {
           }
         ),
       );
-    asItWasQueue = result;
-    return result;
+    asItWasQueue = opened;
+    return opened;
   };
-  let queueChangesRead = (requestFor?: Dynamic, readReply?: Dynamic, isStillWanted?: Dynamic) => {
-    let result = changesQueue.then(
+  let queueChangesRead = (
+    requestFor: () => StoreCall,
+    readReply: (reply: StoreOutcome) => CellHistoryOutcome,
+    isStillWanted: () => boolean,
+  ): Promise<CellHistoryOutcome> => {
+    let changesRead = changesQueue.then(
       () =>
         isStillWanted()
           ? askNode(requestFor, readReply, isStillWanted)
@@ -139,24 +167,24 @@ export function createVersionHistoryReader(deps?: Dynamic) {
               kind: 'notSent',
             }),
     );
-    changesQueue = result;
-    return result;
+    changesQueue = changesRead;
+    return changesRead;
   };
   return {
-    workbookOpened(node?: Dynamic) {
+    workbookOpened(node) {
       workbookNode = node;
       cachedVersions.clear();
     },
-    asItWas: asItWas,
-    versions: (before?: Dynamic) => askNode(() => versionsRequest(before ?? null), readVersions),
-    editsThatTakeBack: (takeBack?: Dynamic) => collectEditsThatTakeBack(takeBack),
-    changesOfCell: (cell?: Dynamic, isStillWanted?: Dynamic) =>
+    asItWas,
+    versions: (before) => askNode(() => versionsRequest(before ?? null), readVersions),
+    editsThatTakeBack: (takeBack) => collectEditsThatTakeBack(takeBack),
+    changesOfCell: (cell, isStillWanted) =>
       queueChangesRead(
         () => cellHistoryRequest(cell),
-        (reply?: Dynamic) => readCellHistory(reply, cell.columnId),
+        (reply) => readCellHistory(reply, cell.columnId),
         isStillWanted,
       ),
-    changesOfRow: (row?: Dynamic, isStillWanted?: Dynamic) =>
+    changesOfRow: (row, isStillWanted) =>
       queueChangesRead(() => rowHistoryRequest(row), readRowHistory, isStillWanted),
   };
 }

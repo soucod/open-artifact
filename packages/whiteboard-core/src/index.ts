@@ -20,6 +20,7 @@ export * from './links.ts';
 export * from './stickers.ts';
 export * from './sticker-hosts.ts';
 export * from './table.ts';
+export * from './table-tints.ts';
 export * from './timer.ts';
 export * from './inks.ts';
 export * from './theme.ts';
@@ -51,6 +52,7 @@ export * from './drawn-svg/svg-geometry.ts';
 export * from './drawn-svg/vetting.ts';
 export * from './drawn-svg/restyle.ts';
 export * from './drawn-svg/contrast.ts';
+export * from './drawn-svg/looks.ts';
 export * from './text/inline-markdown.ts';
 export * from './text/note-markdown.ts';
 export * from './text/text-arrows.ts';
@@ -58,6 +60,9 @@ export * from './text/markup.ts';
 export * from './text/measure.ts';
 export * from './text/fit.ts';
 export * from './text/links.ts';
+export * from './text/placeholder.ts';
+export * from './text/push-down.ts';
+export * from './text/turned-anchor.ts';
 
 // Collaboration: live sync, undo history, claims, ideas, comments, the view
 // context, the clipboard and board files.

@@ -1,7 +1,28 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { FunctionFamily } from '@open-artifact/sheets-core';
 import { translateMessage } from '../i18n/messages.ts';
 import { describeFunction } from '../formulas/function-help.ts';
-export function functionCategoryLabel(category?: Dynamic) {
+
+/** A column offered by formula autocomplete: its heading and its cells as an address. */
+export interface AutocompleteColumn {
+  heading: string;
+  cells: string;
+}
+
+/** A row of the formula autocomplete list: a function name or a column. */
+export type AutocompleteRow = string | AutocompleteColumn;
+
+/** The argument the caret is in, to be read out. */
+export interface ArgumentToAnnounce {
+  /** `null` when the function name is not to be read out. */
+  functionName: string | null;
+  number: number;
+  /** `null` when the function takes any number of arguments. */
+  count: number | null;
+  argument: string;
+  isOptional: boolean;
+}
+
+export function functionCategoryLabel(category: FunctionFamily): string {
   switch (category) {
     case 'math':
       return translateMessage({
@@ -40,7 +61,7 @@ export function functionCategoryLabel(category?: Dynamic) {
       });
   }
 }
-export function functionNameWithDescription(functionName?: Dynamic) {
+export function functionNameWithDescription(functionName: string): string {
   let description = describeFunction(functionName)?.description;
   if (description === undefined) return functionName;
   return translateMessage(
@@ -50,17 +71,17 @@ export function functionNameWithDescription(functionName?: Dynamic) {
     },
     {
       name: functionName,
-      description: description,
+      description,
     },
   );
 }
 export function functionArgumentWords({
-  functionName: functionName,
-  number: number,
-  count: count,
-  argument: argument,
-  isOptional: isOptional,
-}: Dynamic) {
+  functionName,
+  number,
+  count,
+  argument,
+  isOptional,
+}: ArgumentToAnnounce): string {
   let canBe = isOptional ? 'leftOut' : 'other';
   if (functionName !== null && count !== null)
     return translateMessage(
@@ -70,11 +91,11 @@ export function functionArgumentWords({
         id: 'lULrFCuZh2',
       },
       {
-        canBe: canBe,
-        functionName: functionName,
-        number: number,
-        count: count,
-        argument: argument,
+        canBe,
+        functionName,
+        number,
+        count,
+        argument,
       },
     );
   if (functionName !== null)
@@ -85,10 +106,10 @@ export function functionArgumentWords({
         id: 'MCQzYaxyV9',
       },
       {
-        canBe: canBe,
-        functionName: functionName,
-        number: number,
-        argument: argument,
+        canBe,
+        functionName,
+        number,
+        argument,
       },
     );
   if (count !== null)
@@ -99,10 +120,10 @@ export function functionArgumentWords({
         id: 'FcHVknxLGP',
       },
       {
-        canBe: canBe,
-        number: number,
-        count: count,
-        argument: argument,
+        canBe,
+        number,
+        count,
+        argument,
       },
     );
   return translateMessage(
@@ -111,13 +132,13 @@ export function functionArgumentWords({
       id: '/zepenytWd',
     },
     {
-      canBe: canBe,
-      number: number,
-      argument: argument,
+      canBe,
+      number,
+      argument,
     },
   );
 }
-export const formulaAutocompleteLabel = (hasColumns?: Dynamic) =>
+export const formulaAutocompleteLabel = (hasColumns: boolean): string =>
   hasColumns
     ? translateMessage({
         defaultMessage: 'Columns and functions',
@@ -142,7 +163,7 @@ export const autocompleteFunctionsHeading = () =>
     defaultMessage: 'Functions',
     id: '4Tle03spNC',
   });
-export const autocompleteColumnWords = (row?: Dynamic) =>
+export const autocompleteColumnWords = (row: AutocompleteRow): string =>
   typeof row === 'string'
     ? functionNameWithDescription(row)
     : translateMessage(
@@ -155,24 +176,24 @@ export const autocompleteColumnWords = (row?: Dynamic) =>
           cells: row.cells,
         },
       );
-export const autocompleteRowWords = (heading?: Dynamic, row?: Dynamic) =>
+export const autocompleteRowWords = (heading: string, row: AutocompleteRow): string =>
   translateMessage(
     {
       defaultMessage: '{heading}: {row}',
       id: 'r+Q8k9rQbO',
     },
     {
-      heading: heading,
+      heading,
       row: autocompleteColumnWords(row),
     },
   );
-export const functionWithoutArgumentsWords = (functionName?: Dynamic) =>
+export const functionWithoutArgumentsWords = (functionName: string): string =>
   translateMessage(
     {
       defaultMessage: '{functionName}, no arguments',
       id: 'IhIu6eAA4b',
     },
     {
-      functionName: functionName,
+      functionName,
     },
   );

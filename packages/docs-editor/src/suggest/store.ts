@@ -1,5 +1,4 @@
-/** The suggestions feature's own state: what the pointer is over, the last decision (for undo), the notice, Edit with Agent. */
-import type { AgentStatus } from '@open-artifact/runtime';
+/** The suggestions feature's own state: what the pointer is over, the last decision (for undo), the notice. */
 import { create } from 'zustand';
 
 export type Verdict = 'accept' | 'reject' | 'withdraw';
@@ -21,28 +20,6 @@ export interface DecisionNotice {
   serial: number;
 }
 
-/** One text block of the words Edit with Agent changes: the block and its first and last char. */
-export interface RewriteTarget {
-  block: string;
-  fromChar: string;
-  toChar: string;
-  text: string;
-}
-
-export type RewritePhase = 'prompt' | 'sending' | 'working';
-
-/** Edit with Agent's prompt over a selection, and then the agent at work on it. */
-export interface Rewrite {
-  phase: RewritePhase;
-  tab: string;
-  /** The selected words, as positions in the editor when the prompt opened (the plugin maps them as the text changes). */
-  from: number;
-  to: number;
-  /** The suggestions already open in the tab when it was sent: a new one is the agent's answer. */
-  known?: string[];
-  sentAt?: number;
-}
-
 export interface SuggestState {
   /** The suggestion whose words the pointer is over. */
   hoveredText: string | null;
@@ -52,8 +29,6 @@ export interface SuggestState {
   /** A decision or undo is on its way. */
   busy: boolean;
   notice: DecisionNotice | null;
-  rewrite: Rewrite | null;
-  agent: AgentStatus | null;
   /** The cards fit beside the text; otherwise the looked-at one floats over the page. */
   margin: boolean;
 }
@@ -64,8 +39,6 @@ export const useSuggest = create<SuggestState>(() => ({
   last: null,
   busy: false,
   notice: null,
-  rewrite: null,
-  agent: null,
   margin: true,
 }));
 

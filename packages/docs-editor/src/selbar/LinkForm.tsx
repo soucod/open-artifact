@@ -7,7 +7,8 @@ import { orderedTabs, useDocs } from '../app/store.ts';
 import { useEditor } from '../editor/format.ts';
 import { type DocHeading, type DocTab, docHeadings, headingHref, matchTargets, tabHref } from './fragments.ts';
 import { closeLink, commitLink, type LinkPop, unlink } from './links.ts';
-import { normalizeHref, stripInvisible } from './link-url.ts';
+import { suggestingNow } from '../suggest/mode.ts';
+import { checkHref, hrefProblem, normalizeHref, stripInvisible } from './link-url.ts';
 import { placeExists } from './navigate.ts';
 
 type Target = { kind: 'heading'; heading: DocHeading } | { kind: 'tab'; tab: DocTab };
@@ -47,7 +48,7 @@ export function LinkForm({ view, pop }: { view: EditorView; pop: LinkPop }): Rea
   const urlRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState(pop.text);
   const [url, setUrl] = useState(stripInvisible(pop.href));
-  const [invalid, setInvalid] = useState(false);
+  const [invalid, setInvalid] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [keyed, setKeyed] = useState(-1);
   const [hovered, setHovered] = useState(-1);
@@ -58,6 +59,14 @@ export function LinkForm({ view, pop }: { view: EditorView; pop: LinkPop }): Rea
     field?.focus();
     if (field === urlRef.current) urlRef.current?.select();
   }, [pop.text, pop.textFixed]);
+
+  useEffect(() => {
+    if (!pop.changed) return;
+    setText(pop.text);
+    if (pop.textFixed) return;
+    textRef.current?.focus();
+    textRef.current?.select();
+  }, [pop.changed]);
 
   const typed = url.trim();
   const offersTargets = all.headings.length + all.tabs.length > 0;
@@ -90,18 +99,19 @@ export function LinkForm({ view, pop }: { view: EditorView; pop: LinkPop }): Rea
       else urlRef.current?.focus();
       return;
     }
-    const href = normalizeHref(typed);
-    if (!href || (href.startsWith('#') && !placeExists(href, view))) {
-      setInvalid(true);
+    const suggesting = suggestingNow();
+    const checked = checkHref(typed, suggesting);
+    if (!('href' in checked) || (checked.href.startsWith('#') && !placeExists(checked.href, view))) {
+      setInvalid('href' in checked ? hrefProblem({ problem: 'not_link' }, suggesting) : hrefProblem(checked, suggesting));
       urlRef.current?.focus();
       return;
     }
-    commitLink(href, text);
+    commitLink(checked.href, text);
   };
 
   const onUrl = (next: string) => {
     setUrl(next);
-    setInvalid(false);
+    setInvalid(null);
     setDismissed(false);
     setKeyed(-1);
     setHovered(-1);
@@ -156,6 +166,13 @@ export function LinkForm({ view, pop }: { view: EditorView; pop: LinkPop }): Rea
           onKeyDown={onEnter}
         />
         {pop.textFixed ? <span className="text-[12px] text-chrome-muted">Text that spans several paragraphs or holds chips can't be edited here.</span> : null}
+        {pop.changed ? (
+          <span role="alert" className="text-[12px] text-danger" data-testid="link-text-changed">
+            {pop.text || pop.textFixed
+              ? 'Someone else changed this text while you were editing. It now shows what the doc says: make your change again, then save.'
+              : 'The linked text was removed while you were editing. Type the text again, then save.'}
+          </span>
+        ) : null}
       </label>
       <div className="relative flex flex-col gap-1">
         <label htmlFor={`${listId}-url`} className="font-medium text-chrome-muted">
@@ -174,15 +191,15 @@ export function LinkForm({ view, pop }: { view: EditorView; pop: LinkPop }): Rea
           aria-expanded={offersTargets ? listing : undefined}
           aria-controls={listing ? `${listId}-list` : undefined}
           aria-activedescendant={listing && highlighted >= 0 ? `${listId}-${highlighted}` : undefined}
-          aria-invalid={invalid || undefined}
+          aria-invalid={invalid ? true : undefined}
           className="placeholder-shown:text-ellipsis"
           onChange={event => onUrl(event.target.value)}
           onKeyDown={onUrlKey}
           onPaste={onPaste}
         />
         {invalid ? (
-          <span role="alert" className="text-[12px] text-danger">
-            That doesn't look like a link
+          <span role="alert" className="text-[12px] text-danger" data-testid="link-url-problem">
+            {invalid}
           </span>
         ) : null}
         {listing && targets.length === 0 ? (

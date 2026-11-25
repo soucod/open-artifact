@@ -1,121 +1,157 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
+import type { EntryEditorElement } from '../dom/entry-editor.ts';
+import type { EntryBox } from '../editor/entry-boxes.ts';
 import { isNonNullObject } from '../utils/objects.ts';
 import { DRAG_START_DISTANCE } from './geometry.ts';
+import type { GridPoint } from './geometry.ts';
 import { useKeysOffCells, doCellsTakeNoText } from '../app/keys-off-cells.ts';
-export function caretOffsetAtPoint(element: Dynamic, { x: x, y: y }: Dynamic) {
+/** A box an entry is typed in; the entry editor finds the caret offset at a point itself. */
+export type BoxToPlaceCaretIn = EntryBox & Partial<Pick<EntryEditorElement, 'offsetAtPoint'>>;
+/** A finger that came down in an entry box, to put the caret where it lifts if it did not move. */
+interface FingerInBox {
+  box: BoxToPlaceCaretIn;
+  pointerId: number;
+  at: GridPoint;
+}
+/** A finger press, and what had the caret when it came down. */
+interface FingerPress {
+  pointerId: number;
+  hadCaret: Element | null;
+}
+/** What the check run when the window gets focus back needs of the page. */
+export interface WindowFocusCheckSetup {
+  check: () => void;
+  isDialogOpen: () => boolean;
+  isDialogOwedCaret: () => boolean;
+  timesFocusLeft: () => number;
+}
+/** A press to note, and whether it was by a finger, on a chart, and what had the caret. */
+export interface PressToNote {
+  pointerId: number;
+  isByFinger: boolean;
+  isOnChart: boolean;
+  hadCaret: Element | null;
+}
+export function caretOffsetAtPoint(element: BoxToPlaceCaretIn, { x, y }: GridPoint): number | null {
   if (element.offsetAtPoint !== undefined)
     return element.offsetAtPoint({
-      x: x,
-      y: y,
+      x,
+      y,
     });
-  let entry = Reflect.get(element.ownerDocument, 'caretPositionFromPoint');
-  if (typeof entry !== 'function') return null;
-  let value = Reflect.apply(entry, element.ownerDocument, [x, y]);
-  if (!isNonNullObject(value) || value.offsetNode !== element) return null;
-  return typeof value.offset === 'number' ? value.offset : null;
+  let caretPositionFromPoint: unknown = Reflect.get(element.ownerDocument, 'caretPositionFromPoint');
+  if (typeof caretPositionFromPoint !== 'function') return null;
+  let caretPosition: unknown = Reflect.apply(caretPositionFromPoint, element.ownerDocument, [x, y]);
+  if (!isNonNullObject(caretPosition) || caretPosition.offsetNode !== element) return null;
+  return typeof caretPosition.offset === 'number' ? caretPosition.offset : null;
 }
 export function createFingerTapCaret() {
-  let value: Dynamic = null;
+  let fingerDown: FingerInBox | null = null;
   return {
-    fingerCameDownIn: (input?: Dynamic, options?: Dynamic, context?: Dynamic) => {
-      value = {
-        box: input,
-        pointerId: options,
-        at: context,
+    fingerCameDownIn: (box: BoxToPlaceCaretIn, pointerId: number, at: GridPoint) => {
+      fingerDown = {
+        box,
+        pointerId,
+        at,
       };
     },
-    fingerLifted: (input: Dynamic, { x: x, y: y }: Dynamic) => {
-      if (value?.pointerId !== input) return false;
-      let { box: value2, at: value3 } = value;
-      value = null;
-      if (Math.hypot(x - value3.x, y - value3.y) >= DRAG_START_DISTANCE) return false;
-      if (value2.ownerDocument.activeElement === value2) return false;
-      let value4 = caretOffsetAtPoint(value2, {
-        x: x,
-        y: y,
+    fingerLifted: (pointerId: number, { x, y }: GridPoint) => {
+      if (fingerDown?.pointerId !== pointerId) return false;
+      let { box: tappedBox, at: downAt } = fingerDown;
+      fingerDown = null;
+      if (Math.hypot(x - downAt.x, y - downAt.y) >= DRAG_START_DISTANCE) return false;
+      if (tappedBox.ownerDocument.activeElement === tappedBox) return false;
+      let caretOffset = caretOffsetAtPoint(tappedBox, {
+        x,
+        y,
       });
-      if (value4 === null) return false;
-      value2.focus({
+      if (caretOffset === null) return false;
+      tappedBox.focus({
         preventScroll: true,
       });
-      value2.setSelectionRange(value4, value4);
+      tappedBox.setSelectionRange(caretOffset, caretOffset);
       return true;
     },
     forget: () => {
-      value = null;
+      fingerDown = null;
     },
   };
 }
-export function refocusInContextBar(input?: Dynamic, options?: Dynamic, context?: Dynamic) {
-  let value = input === null || input.isConnected ? input : context();
-  if (value === null) return false;
-  if (value.closest('[data-part-of-context-bar]:not([data-ending-style])') === null) return false;
-  value.focus({
+export function refocusInContextBar(
+  focusAfterModal: HTMLElement | null,
+  activeElement: () => Element | null,
+  contextBarField: () => HTMLElement | null,
+): boolean {
+  let field = focusAfterModal === null || focusAfterModal.isConnected ? focusAfterModal : contextBarField();
+  if (field === null) return false;
+  if (field.closest('[data-part-of-context-bar]:not([data-ending-style])') === null) return false;
+  field.focus({
     preventScroll: true,
   });
-  return options() === value;
+  return activeElement() === field;
 }
 export function createWindowFocusCheck({
-  check: check,
-  isDialogOpen: isDialogOpen,
-  isDialogOwedCaret: isDialogOwedCaret,
-  timesFocusLeft: timesFocusLeft,
-}: Dynamic) {
-  let value: Dynamic;
+  check,
+  isDialogOpen,
+  isDialogOwedCaret,
+  timesFocusLeft,
+}: WindowFocusCheckSetup) {
+  let checkTimer: ReturnType<typeof setTimeout> | undefined;
   return {
     windowGotFocus() {
-      clearTimeout(value);
+      clearTimeout(checkTimer);
       if (isDialogOpen() && !isDialogOwedCaret()) return check();
-      let value2 = timesFocusLeft();
-      let value3: Dynamic = false;
-      let value4 = () => {
-        if (value3) return;
-        value3 = true;
-        if (timesFocusLeft() === value2) check();
+      let timesLeftAtFocus = timesFocusLeft();
+      let isChecked = false;
+      let checkOnce = () => {
+        if (isChecked) return;
+        isChecked = true;
+        if (timesFocusLeft() === timesLeftAtFocus) check();
       };
-      queueMicrotask(value4);
-      value = setTimeout(value4);
+      queueMicrotask(checkOnce);
+      checkTimer = setTimeout(checkOnce);
     },
-    stop: () => clearTimeout(value),
+    stop: () => clearTimeout(checkTimer),
   };
 }
-export function useCaretAfterComment(input?: Dynamic) {
-  let { doCellsTakeNoText: value, hasKeyboardLeft: value2 } = useKeysOffCells();
+export function useCaretAfterComment(restoreCaret: () => void) {
+  let { doCellsTakeNoText: isTypingElsewhere, hasKeyboardLeft } = useKeysOffCells();
   let ref = React.useRef(false);
-  let value3 = React.useEffectEvent(input);
+  let restoreCaretEvent = React.useEffectEvent(restoreCaret);
   React.useEffect(() => {
-    if (value || !ref.current) return;
+    if (isTypingElsewhere || !ref.current) return;
     ref.current = false;
-    if (!value2 && (document as Dynamic).hasFocus()) value3();
-  }, [value, value2]);
+    if (!hasKeyboardLeft && document.hasFocus()) restoreCaretEvent();
+  }, [isTypingElsewhere, hasKeyboardLeft]);
   return {
     noteCommentChosen: React.useCallback(() => void (ref.current = doCellsTakeNoText()), []),
     isCaretLeft: React.useCallback(() => ref.current && doCellsTakeNoText(), []),
   };
 }
 export function createFingerPressTracker() {
-  let value: Dynamic = null;
+  let fingerPress: FingerPress | null = null;
   return {
-    notePress: ({ pointerId: pointerId, isByFinger: isByFinger, isOnChart: isOnChart, hadCaret: hadCaret }: Dynamic) => (
-      (value =
+    notePress: ({ pointerId, isByFinger, isOnChart, hadCaret }: PressToNote) => (
+      (fingerPress =
         isByFinger && !isOnChart
           ? {
-              pointerId: pointerId,
-              hadCaret: hadCaret,
+              pointerId,
+              hadCaret,
             }
           : null),
-      value === null
+      fingerPress === null
     ),
-    noteLift: (input?: Dynamic, options?: Dynamic) => {
-      if (value?.pointerId !== input) return false;
-      let { hadCaret: value2 } = value;
-      value = null;
-      return options === null || options === value2;
+    noteLift: (pointerId: number, hasCaret: Element | null) => {
+      if (fingerPress?.pointerId !== pointerId) return false;
+      let { hadCaret: hadCaretAtPress } = fingerPress;
+      fingerPress = null;
+      return hasCaret === null || hasCaret === hadCaretAtPress;
     },
   };
 }
-export const pickFocusTarget = (input?: Dynamic, options?: Dynamic, context?: Dynamic) =>
-  options === false ? false : (input ?? context());
-export const isFocusOutsideSearchOrErrors = (input?: Dynamic) =>
-  ['search', '[data-errors-offered]'].every((input2?: Dynamic) => (input?.closest(input2) ?? null) === null);
+export const pickFocusTarget = <Target extends Element>(
+  returnTo: Target | null,
+  caretAfter: Target | false,
+  caretAfterLayer: () => Target | false,
+): Target | false => (caretAfter === false ? false : (returnTo ?? caretAfterLayer()));
+export const isFocusOutsideSearchOrErrors = (active: Element | null | undefined): boolean =>
+  ['search', '[data-errors-offered]'].every((selector) => (active?.closest(selector) ?? null) === null);

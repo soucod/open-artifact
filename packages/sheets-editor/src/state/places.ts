@@ -1,8 +1,14 @@
-import type { IdRun, Reference, SheetId } from '@open-artifact/sheets-core';
+import type { CellWrittenFromAnInteractive, IdRun, InputOfAWidget, Reference, SheetId } from '@open-artifact/sheets-core';
 import type { CellId, WorkbookReads } from '../model/workbook.ts';
 import type { CellArea, CellSelection, RangeWalked } from '../selection/model.ts';
-import type { SavedPlace } from './initial-state.ts';
+import type { PageState, SavedPlace } from './initial-state.ts';
+import type { PlaceAreaChanged } from './event-reducer.ts';
+import type { PageTransition } from './transitions.ts';
+import type { ChartOfView } from '../charts/placed-views.ts';
 import { findSheetById } from '../grid/layout.ts';
+import { cachedChartOfView } from '../charts/placed-views.ts';
+import { withNoEffects } from './transitions.ts';
+import { queueEdit, IF_QUEUED_DEFAULTS } from '../model/edit-effects.ts';
 import { leadingRunCount, collapsedIndexRuns } from '../grid/line-runs.ts';
 import { selectionAtCell, isSameCell, selectionAreaAndKind } from '../selection/model.ts';
 /** Where the page stands on a sheet: the selection and how far the grid is scrolled. */
@@ -34,7 +40,7 @@ export function formulasReadingSheet(workbook: WorkbookReads, sheetId: SheetId):
     if (otherSheetId === sheetId) continue;
     let countBefore = formulaCount;
     for (let row of workbook.cellsHeldByRow(otherSheetId).values())
-      for (let { input: input } of row.values())
+      for (let { input } of row.values())
         if (input.kind === 'formula' && input.formula.references.some(readsSheet)) formulaCount += 1;
     if (formulaCount > countBefore) sheetNames.push(otherSheetName);
   }
@@ -46,6 +52,75 @@ export function formulasReadingSheet(workbook: WorkbookReads, sheetId: SheetId):
         sheetNames: [firstName, ...otherNames],
       };
 }
+/** The interactive a sheet shows in place of its cells: its view, the sheet's name, its code, and what it may do. */
+export interface InteractiveSheet {
+  viewId: string;
+  name: string;
+  code: ChartOfView;
+  doesWrite: boolean;
+  canBeReset: boolean;
+  hasDefaultsToSave: boolean;
+}
+/** The edits made to an interactive as a whole: write back the values it keeps, or keep the values it holds now. */
+export type EditOfWholeInteractive = 'resetInteractive' | 'saveDefaultsOfInteractive';
+/** What was done last to an interactive as a whole. */
+export interface InteractiveDone {
+  what: 'interactiveReset' | 'interactiveDefaultsSaved';
+}
+export function interactiveSheetOf(workbook: WorkbookReads, sheetId: SheetId): InteractiveSheet | null {
+  let sheet = findSheetById(workbook, sheetId);
+  if (sheet === undefined || sheet.interactive === null) return null;
+  let view = workbook.viewAsItStands(sheet.interactive);
+  return {
+    viewId: sheet.interactive,
+    name: sheet.name,
+    code: cachedChartOfView(view),
+    doesWrite: view?.view.elements.some((element) => element.kind === 'interactive' && element.writes.length > 0) === true,
+    canBeReset: view?.canBeReset === true,
+    hasDefaultsToSave: view?.hasDefaultsToSave === true,
+  };
+}
+export function isAreaReadByInteractive(state: PageState, workbook: WorkbookReads, { sheetId, area }: Partial<PlaceAreaChanged> = {}): boolean {
+  let viewId = interactiveOfSheet(workbook, state.sheetId);
+  if (viewId === null || area === null) return false;
+  return (workbook.viewAsItStands(viewId)?.view.elements.flatMap((element): InputOfAWidget[] => element.inputs) ?? []).some(
+    ({ range: { sheetId: inputSheetId, topLeft, bottomRight } }) => {
+      let corners = [topLeft, bottomRight];
+      // A place with no sheet reads no input, so `sheetId` and `area` are there past the first test.
+      return (
+        inputSheetId === sheetId &&
+        spanReachesIndexes(
+          area!.topRowIndex,
+          area!.rowCount,
+          corners.map(({ r: rowId }) => workbook.rowIndexOf(sheetId!, rowId)),
+        ) &&
+        spanReachesIndexes(
+          area!.leftColumnIndex,
+          area!.columnCount,
+          corners.map(({ c: columnId }) => workbook.columnIndexOf(sheetId!, columnId)),
+        )
+      );
+    },
+  );
+}
+export function editInteractiveOfSheet(state: PageState, workbook: WorkbookReads, kind: EditOfWholeInteractive): PageTransition {
+  let viewId = interactiveOfSheet(workbook, state.sheetId);
+  if (viewId === null) return withNoEffects(state);
+  return queueEdit(
+    state,
+    {
+      kind,
+      viewId,
+    },
+    {
+      ...IF_QUEUED_DEFAULTS,
+      select: null,
+      done: {
+        what: kind === 'resetInteractive' ? 'interactiveReset' : 'interactiveDefaultsSaved',
+      },
+    },
+  );
+}
 export function firstPlaceInSheet(workbook: WorkbookReads, sheetId: SheetId): PlaceAtCell | null {
   let sheet = findSheetById(workbook, sheetId);
   let firstCell = workbook.cellIdAt(
@@ -56,14 +131,14 @@ export function firstPlaceInSheet(workbook: WorkbookReads, sheetId: SheetId): Pl
   return firstCell === null
     ? null
     : {
-        sheetId: sheetId,
+        sheetId,
         ...selectionAtCell(firstCell),
         scrollLeft: 0,
         scrollTop: 0,
       };
 }
 export function firstPlaceInWorkbook(workbook: WorkbookReads): PlaceAtCell | null {
-  for (let { sheetId: sheetId } of workbook.listSheets()) {
+  for (let { sheetId } of workbook.listSheets()) {
     let place = firstPlaceInSheet(workbook, sheetId);
     if (place !== null) return place;
   }
@@ -81,7 +156,7 @@ export function fingerprintLineRuns(runs: readonly IdRun[]): string {
     else merged.push(run);
   }
   let [hash, lineCount]: [number, number] = [2166136261, 0];
-  for (let { base: base, first: first, count: count } of merged) {
+  for (let { base, first, count } of merged) {
     lineCount += count;
     let key = `${base}.${first}+${count};`;
     for (let index: number = 0; index < key.length; index += 1) hash = Math.imul(hash ^ key.charCodeAt(index), 16777619);
@@ -105,7 +180,7 @@ export function selectionLinesFingerprint(selectionState: Pick<CellSelection, 'a
 }
 export function restoredPlace(workbook: WorkbookReads, place: SavedPlace | null): PlaceRestored | null {
   if (place === null) return firstPlaceInWorkbook(workbook);
-  let { lines: lines, ...placeWithoutLines } = place;
+  let { lines, ...placeWithoutLines } = place;
   if (workbook.positionOfCell(placeWithoutLines.activeCell) === null)
     return firstPlaceInSheet(workbook, placeWithoutLines.sheetId) ?? firstPlaceInWorkbook(workbook);
   return lines !== null && lines === selectionLinesFingerprint(placeWithoutLines, workbook)
@@ -115,3 +190,31 @@ export function restoredPlace(workbook: WorkbookReads, place: SavedPlace | null)
         ...selectionAtCell(placeWithoutLines.activeCell),
       };
 }
+export const interactiveOfSheet = (workbook: WorkbookReads, sheetId: SheetId): string | null =>
+  findSheetById(workbook, sheetId)?.interactive ?? null;
+/** Whether the run of `count` lines from `firstIndex` reaches the span between the indexes, when every index is known. */
+export const spanReachesIndexes = (firstIndex: number, count: number, indexes: (number | null)[]): boolean =>
+  indexes.every((index): index is number => index !== null) &&
+  firstIndex <= Math.max(...indexes) &&
+  firstIndex + count > Math.min(...indexes);
+export const writeFromInteractive = (
+  state: PageState,
+  workbook: WorkbookReads,
+  viewId: string,
+  cells: readonly CellWrittenFromAnInteractive[],
+): PageTransition =>
+  workbook.listSheets().some(({ interactive }) => interactive === viewId)
+    ? queueEdit(
+        state,
+        {
+          kind: 'writeFromInteractive',
+          viewId,
+          cells: [...cells],
+        },
+        {
+          ...IF_QUEUED_DEFAULTS,
+          select: null,
+          done: null,
+        },
+      )
+    : withNoEffects(state);

@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { instantiateSheetsEngine, type SheetsEngine } from './index.ts';
 
-export type { EngineSession, SheetsEngine } from './index.ts';
+export type { EngineSession, PackedCellBlock, SheetsEngine } from './index.ts';
 
 const FILE = 'open_artifact_sheets_bg.wasm';
 

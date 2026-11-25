@@ -25,20 +25,26 @@
  *   group selected as a whole steps into it; ⇧Enter selects the group
  *   around the item (`group-keys.ts`). With nothing selected and a placing
  *   tool armed, Enter places one in the middle of the view.
- * - Escape leaves editing, then the selection, then the tool.
+ * - Escape leaves editing, then the selection, then the tool; from a
+ *   control in one of the page's bars it also brings focus back to the
+ *   board. An expanded control (its menu is open) and a toast keep their
+ *   Escape.
+ * - ⌘Z while a picture is cropped cancels the crop (`crop.ts`).
  * - Space held is the hand; single letters pick tools when they are on.
  *
  * Keys are left alone while text is being typed (inputs, text areas,
  * contenteditable) and inside chrome popups (`[data-wb-chrome]` menus and
- * dialogs), which handle their own keys.
+ * dialogs), which handle their own keys. Undo is held back only in text
+ * fields and selects: a number field with nothing typed since its last
+ * commit (`data-wb-committed`) lets it reach the board.
  */
 
 import { isElementLocked, orderElementsForReading, tableColumnIds, tableRowIds, type BoardElement, type ElementId } from '@open-artifact/whiteboard-core';
 import { panBy, type Point } from '../lib/camera.ts';
 import { alignShortcutOf, layerOrderShortcutOf, toolShortcutOf, zoomShortcutOf } from '../lib/tools.ts';
-import { embedEnterAction, enterEmbed, runEmbedAgain } from '../elements/embed-control.ts';
+import { embedEnterAction, enterEmbed, focusBoardHome, runEmbedAgain } from '../elements/embed-control.ts';
 import { toggleVideo } from '../elements/video-playback.ts';
-import { boardLinkTarget, openBoardLink } from '../elements/links.ts';
+import { openLink } from './link-card.ts';
 import { describeElement } from '../elements/describe.ts';
 import { markShortcutOf } from '../elements/mark-across.ts';
 import { useContextMenu } from '../selection/menu-store.ts';
@@ -68,6 +74,7 @@ import {
 } from './actions.ts';
 import { NOTHING_SELECTED_MESSAGE, announce, groupSelectedMessage, selectionCountMessage, toolNameMessage } from './announce.ts';
 import { redo, undo } from './commands.ts';
+import { cancelCrop } from './crop.ts';
 import { toggleSelectionMark } from './text-marks.ts';
 import { maybeSession } from './session.ts';
 import { groupKeyStep } from './group-keys.ts';
@@ -86,6 +93,8 @@ export interface KeyPress {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  /** Whether a modifier such as `AltGraph` is held (a key event has it). */
+  getModifierState?(key: string): boolean;
 }
 
 /** True when `event` is the letter (by key, or by physical key on non-Latin layouts). */
@@ -169,8 +178,9 @@ export function nudgeOffset(event: KeyPress): { dx: number; dy: number } | undef
   return { dx: direction[0] * step, dy: direction[1] * step };
 }
 
-/** What a zoom key asks for: ⇧0 / ⇧1 / ⇧2 (single keys on), ⌘0, ⌘= / ⌘+ and ⌘-. */
+/** What a zoom key asks for: ⇧0 / ⇧1 / ⇧2 (single keys on), ⌘0, ⌘= / ⌘+ and ⌘-; nothing with AltGraph held. */
 export function zoomKeyCommand(event: KeyPress, keysOn: boolean): 'actual' | 'board' | 'selection' | 'fit' | 'in' | 'out' | undefined {
+  if (event.getModifierState?.('AltGraph') === true) return undefined;
   const preset = zoomShortcutOf(event, keysOn);
   if (preset) return preset;
   if (!hasMod(event) || event.altKey) return undefined;
@@ -198,6 +208,57 @@ export function nextInReadingOrder(order: readonly ElementId[], selected: readon
 export function isTypingTarget(target: EventTarget | null): boolean {
   if (typeof Element === 'undefined' || !(target instanceof Element)) return false;
   return target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]') !== null;
+}
+
+/** What {@link fieldTakesUndo} reads of the focused element. */
+export interface FieldFacts {
+  /** Lower-case tag name. */
+  tag: string;
+  /** An input's `type` (lower case; `''` for none). */
+  type: string;
+  role: string | null;
+  /** Content-editable, or a text box by role. */
+  editable: boolean;
+  /** A number field with nothing typed since its value was last committed. */
+  committed: boolean;
+}
+
+/** Input types that take text (their undo is the browser's). */
+const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set(['', 'text', 'search', 'url', 'email', 'tel', 'password']);
+
+/** Whether the board's undo may run with focus on this element: everywhere but text fields, selects and number fields being typed in. */
+export function fieldTakesUndo(field: FieldFacts): boolean {
+  if (field.editable || field.tag === 'textarea' || field.tag === 'select') return false;
+  if (field.tag !== 'input') return true;
+  if (field.role === 'spinbutton' || field.type === 'number') return field.committed;
+  return !TEXT_INPUT_TYPES.has(field.type);
+}
+
+/** {@link FieldFacts} of a DOM node (the typing target itself, or the field it is in). */
+function fieldFactsOf(target: EventTarget | null): FieldFacts | undefined {
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return undefined;
+  const field = target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]');
+  if (field === null) return undefined;
+  return {
+    tag: field.tagName.toLowerCase(),
+    type: field instanceof HTMLInputElement ? (field.getAttribute('type') ?? '').toLowerCase() : '',
+    role: field.getAttribute('role'),
+    editable: field.matches('[contenteditable=""], [contenteditable="true"], [role="textbox"]'),
+    committed: field.hasAttribute('data-wb-committed'),
+  };
+}
+
+/** Whether Escape on a DOM node belongs to it: an expanded control (its menu is open) or a toast. */
+export function keepsOwnEscape(target: EventTarget | null): boolean {
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return false;
+  return target.closest('[aria-expanded="true"], [data-toast]') !== null;
+}
+
+/** Whether a DOM node is in one of the page's bars (an F6 region other than the board). */
+function inPageBar(target: EventTarget | null): boolean {
+  if (typeof Element === 'undefined' || !(target instanceof Element)) return false;
+  const region = target.closest('[data-wb-region]');
+  return region !== null && region.getAttribute('data-wb-region') !== 'canvas';
 }
 
 /** True when a DOM node is inside a chrome popup (a menu, popover or dialog that handles its own keys). */
@@ -344,10 +405,7 @@ function actOnSelection(enter: boolean): boolean {
   if (!element) return false;
   switch (itemKeyAction(element, enter, canEditBoard())) {
     case 'open':
-      if (element.type === 'link') {
-        const target = boardLinkTarget(element.href);
-        if (target) openBoardLink(target);
-      }
+      if (element.type === 'link') openLink(element.href);
       return true;
     case 'play':
       toggleVideo(element.id);
@@ -482,12 +540,22 @@ export function installKeyboard(): () => void {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (!useBoard.getState().revealed) return;
     if (event.defaultPrevented || event.isComposing) return;
     const target = event.target;
     const selection = useSelection.getState();
+    const history = undoKeyCommand(event);
+    const field = fieldFactsOf(target);
+    const undoHeld = field !== undefined && !fieldTakesUndo(field);
+
+    if (history === 'undo' && selection.cropping !== null && selection.editing === null && !undoHeld) {
+      event.preventDefault();
+      cancelCrop();
+      return;
+    }
 
     // Text being typed keeps its keys (⌘D still must not bookmark the page).
-    if (isTypingTarget(target) || selection.editing !== null) {
+    if ((isTypingTarget(target) && (history === undefined || undoHeld)) || selection.editing !== null) {
       if (isDuplicateShortcut(event)) event.preventDefault();
       if (event.key === 'Escape' && selection.editing !== null && !isTypingTarget(target)) {
         selection.edit(null);
@@ -495,7 +563,8 @@ export function installKeyboard(): () => void {
       }
       return;
     }
-    if (isChromePopupTarget(target)) return;
+    // A committed number field in a popup still hands undo to the board.
+    if (isChromePopupTarget(target) && !(history !== undefined && field !== undefined)) return;
     const onChrome = isChromeTarget(target);
     const keysOn = usePreferences.getState().letterKeys;
     const editable = canEditBoard();
@@ -503,7 +572,6 @@ export function installKeyboard(): () => void {
       if (done !== false) event.preventDefault();
     };
 
-    const history = undoKeyCommand(event);
     if (history) {
       run();
       if (history === 'undo') undo();
@@ -572,9 +640,15 @@ export function installKeyboard(): () => void {
         run();
         if (!event.repeat) deleteSelection();
         return;
-      case 'Escape':
-        if (escapeStep()) run();
+      case 'Escape': {
+        if (keepsOwnEscape(target)) return;
+        const stepped = escapeStep();
+        if (inPageBar(target)) {
+          focusBoardHome();
+          run();
+        } else if (stepped) run();
         return;
+      }
       case 'Enter':
       case 'F2':
         if (onChrome || hasMod(event) || event.altKey) return;
@@ -642,6 +716,7 @@ export function installKeyboard(): () => void {
   };
 
   const onKeyUp = (event: KeyboardEvent): void => {
+    if (!useBoard.getState().revealed) return;
     if (event.key === ' ') releaseHand();
     if (arrowKeyDirection(event.key)) panner.release(event.code);
   };

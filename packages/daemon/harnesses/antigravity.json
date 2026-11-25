@@ -14,9 +14,47 @@
       "antigravity"
     ]
   },
+  "sessionEnv": "ANTIGRAVITY_CONVERSATION_ID",
   "skillsDir": "~/.gemini/config/skills",
   "wake": [
     "inbox"
   ],
-  "open": "browser"
+  "open": "browser",
+  "markers": [
+    "ANTIGRAVITY_AGENT",
+    "ANTIGRAVITY_CONVERSATION_ID"
+  ],
+  "hookDialect": "antigravity",
+  "nudge": {
+    "command": [
+      "${env:OPEN_ARTIFACT_ANTIGRAVITY_AGENTAPI}",
+      "~/.gemini/antigravity/bin/agentapi",
+      [
+        "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
+        "agentapi"
+      ]
+    ],
+    "args": [
+      "send-message",
+      "${session}",
+      "${text}"
+    ],
+    "envFile": {
+      "dir": "~/.gemini/antigravity/daemon",
+      "pattern": "^hub_\\d+\\.json$",
+      "pid": "pid"
+    },
+    "env": {
+      "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:${file.httpPort}",
+      "ANTIGRAVITY_CSRF_TOKEN": "${file.csrfToken}"
+    }
+  },
+  "caps": {
+    "tools": "mcp",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    }
+  }
 }

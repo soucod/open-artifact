@@ -35,8 +35,13 @@ type Any = any;
   const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
   const params = new URLSearchParams(location.search);
   const LOCAL_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d{1,5}$/;
-  const outerOrigin = LOCAL_ORIGIN.test(params.get('open_artifact_shell') || '') ? params.get('open_artifact_shell')! : null;
-  const outer = outerOrigin && window.parent !== window ? window.parent : null;
+  const askedOuter = params.get('open_artifact_shell') || '';
+  // A loopback Shell is taken at once; any other only when the session names it (a site's app origin), so a page
+  // that frames this one under a made-up parameter speaks to no one. Its messages until then wait in `outerEarly`.
+  let outerOrigin: string | null = LOCAL_ORIGIN.test(askedOuter) ? askedOuter : null;
+  let outer: Window | null = outerOrigin && window.parent !== window ? window.parent : null;
+  const outerPending = !outer && !!askedOuter && window.parent !== window;
+  const outerEarly: unknown[] = [];
   const client = randomId(16);
   const api = (name: string): string => new URL(`api/frame/${name}`, location.href).href;
   const CHROME_PROTOCOL = 1;
@@ -45,6 +50,9 @@ type Any = any;
   const DEFAULT_CAP_BUDGETS = { mcp: { callTool: 130_000 }, sample: { sample: 330_000 }, endpoints: { fetch: 130_000 }, assets: { upload: 270_000 } };
   /** Calls answered after a decision or a long upload: acked so the page waits 900 s instead of its short timer. */
   const ACKED = new Set(['assets.upload', 'comments.sendToAgent', 'room.sendToAgentSession', 'artifact.publish']);
+  /** A snapshot's view (`session.snapshot`): the page has this long to say it is ready, and to hold its reveal. */
+  const SNAPSHOT_READY_S = 8;
+  const SNAPSHOT_HOLD_MS = 5_000;
 
   let session: FrameSession | null = null;
   let frame: HTMLIFrameElement | null = null;
@@ -77,8 +85,12 @@ type Any = any;
     return out;
   }
 
-  async function cap(capName: string, method: string, arg: unknown): Promise<Any> {
-    const out = await post('cap', { cap: capName, method, args: [arg], client, brokerGen: gen });
+  /**
+   * One capability call. `own`: the shell's own (its comments UI), which a site answers with full author names; a call
+   * relayed from the page never sets it, and gets what the declaration's `user` scopes allow.
+   */
+  async function cap(capName: string, method: string, arg: unknown, own = false): Promise<Any> {
+    const out = await post('cap', { cap: capName, method, args: [arg], client, brokerGen: gen, ...(own ? { shell: true } : {}) });
     if (out.error) throw out.error;
     return out.result;
   }
@@ -221,8 +233,14 @@ type Any = any;
     const f = document.createElement('iframe');
     frame = f;
     f.title = session?.title || 'Artifact';
-    f.allow = 'clipboard-read; clipboard-write; fullscreen; autoplay';
+    // `*`, not the default (the src's origin): an artifact id has a '_', and the browser does not delegate a feature to
+    // an origin whose host has one, so the page got none of these. The outer page's frame-src keeps this frame on page
+    // origins of this server.
+    f.allow = 'clipboard-read *; clipboard-write *; fullscreen *; autoplay *';
     f.referrerPolicy = 'origin';
+    // A restricted type's page (installed, or a project not trusted yet): no popups and no top navigation. Set before
+    // src, so the first document has it.
+    if (session?.sandbox) f.setAttribute('sandbox', session.sandbox);
     f.src = pageUrl(ver);
     f.addEventListener('load', () => {
       pageWin = f.contentWindow;
@@ -241,6 +259,7 @@ type Any = any;
     ready = false;
     revealed = false;
     revealHeld = false;
+    shows(null);
     subs.clear();
     closeCard();
     comments.custom = false;
@@ -260,15 +279,27 @@ type Any = any;
 
   function armReadyTimer(): void {
     if (readyTimer) clearTimeout(readyTimer);
-    const s = Math.max(5, Number(session?.readyTimeoutS) || 60);
+    // A snapshot's camera waits about ten seconds for what this shows to be final: a page not ready by then is shown
+    // as the problem it is.
+    const s = Math.min(session?.snapshot ? SNAPSHOT_READY_S : Infinity, Math.max(5, Number(session?.readyTimeoutS) || 60));
     readyTimer = setTimeout(() => {
       if (!ready) showProblem('This page did not start', `It did not say it was ready within ${s} seconds.`);
     }, s * 1000);
   }
 
+  /**
+   * What the shell shows is final (`data-open-artifact-shell` on <html>, which a snapshot's camera waits for): the page,
+   * revealed after its own load (an empty page artifact's empty state too), or the problem card. null: not yet.
+   */
+  function shows(state: 'revealed' | 'problem' | null): void {
+    if (state) document.documentElement.dataset.openArtifactShell = state;
+    else delete document.documentElement.dataset.openArtifactShell;
+  }
+
   function reveal(): void {
     if (revealed) return;
     revealed = true;
+    shows('revealed');
     toPage({ __frame_revealed: true });
     toPage({ __frame_size_poke: true });
   }
@@ -321,6 +352,7 @@ type Any = any;
       return;
     }
     if (outer && ev.source === outer && ev.origin === outerOrigin) fromOuter(m as ShellToPage);
+    else if (outerPending && !session && ev.source === window.parent && ev.origin === askedOuter && outerEarly.length < 50) outerEarly.push(m);
   });
 
   async function fromPage(m: Any): Promise<void> {
@@ -351,7 +383,7 @@ type Any = any;
       setTimeout(() => {
         revealHeld = false;
         if (ready) reveal();
-      }, 15_000);
+      }, session?.snapshot ? SNAPSHOT_HOLD_MS : 15_000);
       return;
     }
     if (m.__frame_reveal_ready === true) {
@@ -869,8 +901,8 @@ type Any = any;
     views = bundle.mount(
       $('comments-ui'),
       {
-        cap: (method, arg) => cap('comments', method, arg),
-        sendToAgent,
+        cap: (method, arg) => cap('comments', method, arg, true),
+        sendToAgent: (a) => sendToAgent(a, true),
         refresh: refreshThreads,
         agent: () => ({ available: !!session?.agent?.available, name: agentName(), ...(session?.agent?.wakesIdle === false ? { wakesIdle: false } : {}) }),
         activeChanged: () => pushThreads(),
@@ -973,7 +1005,7 @@ type Any = any;
   async function refreshThreads(): Promise<void> {
     if (!session?.comments?.available) return;
     try {
-      const r = await cap('comments', 'list', { all: true });
+      const r = await cap('comments', 'list', { all: true }, true);
       comments.threads = r.threads || [];
       comments.listed = true;
     } catch {
@@ -1060,17 +1092,23 @@ type Any = any;
     moves.delete(m.n);
     if (!id || m.refused || m.anchor === undefined) return;
     try {
-      await cap('comments', 'move', { threadId: id, anchor: m.anchor, ...(typeof m.label === 'string' ? { label: m.label } : {}), ...(typeof m.detail === 'string' ? { detail: m.detail } : {}) });
+      await cap('comments', 'move', { threadId: id, anchor: m.anchor, ...(typeof m.label === 'string' ? { label: m.label } : {}), ...(typeof m.detail === 'string' ? { detail: m.detail } : {}) }, true);
     } catch (error) {
       toast((error as Any)?.message || 'Could not move the comment.');
     }
     void refreshThreads();
   }
 
+  function boundedCommentText(value: unknown, maxBytes: number): string | undefined {
+    if (typeof value !== 'string' || value.length > maxBytes || !value.trim()) return undefined;
+    return new TextEncoder().encode(value).length <= maxBytes ? value : undefined;
+  }
+
   const agentName = (): string => session?.agent?.name || 'the agent';
 
   /** A comment for the agent: a page that takes it itself (onSendToAgent) says so; otherwise the server wakes the agent. */
-  async function sendToAgent(a: Record<string, unknown>): Promise<unknown> {
+  /** `own`: from the shell's comments UI (see {@link cap}); a page's call returns what the page may see. */
+  async function sendToAgent(a: Record<string, unknown>, own = false): Promise<unknown> {
     const ticket = randomId(10);
     const asked = new Promise<Any>((resolve) => {
       let timer = setTimeout(() => {
@@ -1091,10 +1129,12 @@ type Any = any;
     });
     toPage({ __open_artifact_comments: true, op: 'send', ticket, payload: a });
     const r = await asked;
-    if (r?.handled) return { status: 'handled', ...(r.reply ? { reply: r.reply } : {}) };
-    const out = await cap('comments', 'sendToAgent', a);
+    const reply = boundedCommentText(r?.reply, 500);
+    if (r?.handled === true) return { status: 'handled', ...(reply && { reply }) };
+    const handoffNote = boundedCommentText(r?.handoffNote, 2000);
+    const out = await cap('comments', 'sendToAgent', { ...a, handoffNote }, own);
     void refreshThreads();
-    return out;
+    return reply ? { ...out, reply } : out;
   }
 
   /** `?comment=<id>`: the thread is shown once the threads are listed, retried until the page placed its pin. */
@@ -1131,10 +1171,16 @@ type Any = any;
     $('problemAgent').hidden = !session?.agent?.available;
     $('problemNote').textContent = '';
     $('problem').hidden = false;
+    shows('problem');
   }
-  const hideProblem = (): void => void ($('problem').hidden = true);
+  const hideProblem = (): void => {
+    $('problem').hidden = true;
+    if (document.documentElement.dataset.openArtifactShell === 'problem') shows(null);
+  };
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   function toast(text: string): void {
+    // A snapshot's picture has nothing of the shell's own on it.
+    if (session?.snapshot) return;
     const t = $('toast');
     t.textContent = text;
     t.hidden = false;
@@ -1179,6 +1225,12 @@ type Any = any;
       showProblem('This artifact cannot open', `The type server did not answer (${(error as Error)?.message || error}).`);
       return;
     }
+    if (outerPending && session.outerOrigins?.includes(askedOuter)) {
+      outerOrigin = askedOuter;
+      outer = window.parent;
+    }
+    const early = outer ? outerEarly.splice(0) : [];
+    outerEarly.length = 0;
     contentOrigin = session.contentOrigin;
     ver = session.ver;
     gen = session.brokerGen;
@@ -1189,5 +1241,6 @@ type Any = any;
     // No outer Shell: the views (and their launcher) are there from the start.
     if (!outer && session.comments?.available) ui();
     sendReport();
+    for (const m of early) fromOuter(m as ShellToPage);
   })();
 })();

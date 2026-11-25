@@ -1,29 +1,29 @@
-import type { Dynamic } from '../dynamic.ts';
 import { MESSAGE_LOCALE, translateMessage } from '../i18n/messages.ts';
-export let languageNamesFormatter: Dynamic;
-export function languageNameOfLocale(locale?: Dynamic) {
-  languageNamesFormatter ??= new (Intl.DisplayNames as Dynamic)(MESSAGE_LOCALE, {
+import type { ComboboxOption } from '../kit/combobox.tsx';
+export let languageNamesFormatter: Intl.DisplayNames | null;
+export function languageNameOfLocale(locale: string): string {
+  languageNamesFormatter ??= new Intl.DisplayNames(MESSAGE_LOCALE, {
     type: 'language',
     languageDisplay: 'standard',
   });
   return languageNamesFormatter.of(locale) ?? locale;
 }
-export const sortByLabel = (choices?: Dynamic) =>
-  [...choices].toSorted((choice?: Dynamic, other?: Dynamic) => (choice.label < other.label ? -1 : choice.label > other.label ? 1 : 0));
-export const foldTextForSearch = (text?: Dynamic) =>
+export const sortByLabel = <Choice extends { label: string }>(choices: Iterable<Choice>): Choice[] =>
+  [...choices].toSorted((choice, other) => (choice.label < other.label ? -1 : choice.label > other.label ? 1 : 0));
+export const foldTextForSearch = (text: string): string =>
   text
     .normalize('NFD')
     .replaceAll(/\p{M}/gu, '')
     .toLowerCase()
     .replaceAll(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
-export const labelMatchesSearch = ({ label: label }: Dynamic, search?: Dynamic) =>
+export const labelMatchesSearch = ({ label }: { label: string }, search: string): boolean =>
   ` ${foldTextForSearch(label)}`.includes(` ${foldTextForSearch(search)}`);
 export const localeMessages = {
   locale: () =>
     translateMessage({
       defaultMessage: 'Locale',
-      id: 'FCjgO9b5WB',
+      id: '4DDuQyzqZV',
     }),
   whatGoesByIt: () =>
     translateMessage({
@@ -33,7 +33,7 @@ export const localeMessages = {
     }),
 };
 languageNamesFormatter = null;
-export const localeSetWords = (locale?: Dynamic) =>
+export const localeSetWords = (locale: string): string =>
   translateMessage(
     {
       defaultMessage: 'Locale set to {locale}',
@@ -43,10 +43,10 @@ export const localeSetWords = (locale?: Dynamic) =>
       locale: languageNameOfLocale(locale),
     },
   );
-export const localeChoices = (locales?: Dynamic) =>
+export const localeChoices = (locales: readonly string[]): ComboboxOption[] =>
   sortByLabel(
     locales.map(
-      (locale?: Dynamic) => ({
+      (locale) => ({
         value: locale,
         label: languageNameOfLocale(locale),
       }),

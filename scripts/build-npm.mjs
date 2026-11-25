@@ -19,6 +19,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { builtinModules } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { relativeTsSpecifiers, rewriteDeclarationSpecifiers } from './declaration-specifiers.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'dist', 'npm');
@@ -28,6 +29,8 @@ const REPOSITORY = 'https://github.com/JimLiu/open-artifact';
 /** The workspace packages published as libraries (folders under packages/). Apps and the daemon stay private. */
 const LIBRARIES = [
   'protocol',
+  'harness-kit',
+  'host-plugin',
   'runtime',
   'server-sdk',
   'ui',
@@ -43,11 +46,16 @@ const LIBRARIES = [
   'data-core',
   'sheets-core',
   'docs-core',
+  'motion-core',
+  'motion-stage',
+  'motion-audio',
+  'motion-export',
   'wasm-canvas',
   'wasm-export',
   'wasm-wb-geom',
   'wasm-data-rules',
   'wasm-sheets',
+  'wasm-motion',
 ];
 /** Imported by a library but left to the app that uses it, which brings its own copy. */
 const PEERS = new Set(['react', 'react-dom']);
@@ -171,13 +179,15 @@ function stageLibrary(dir) {
   mkdirSync(out, { recursive: true });
 
   cpSync(join(compiled, 'src'), join(out, 'src'), { recursive: true });
-  // What the compiler does not carry: stylesheets, pages and other assets next to the sources.
-  for (const file of walk(join(source, 'src')).filter((f) => !/\.tsx?$/.test(f))) {
+  // What the compiler does not carry: authored declarations and assets next to the sources.
+  for (const file of walk(join(source, 'src')).filter((f) => f.endsWith('.d.ts') || !/\.tsx?$/.test(f))) {
     if (dir === 'server-sdk' && file.startsWith(join('frame', 'client'))) continue;
     mkdirSync(dirname(join(out, 'src', file)), { recursive: true });
     cpSync(join(source, 'src', file), join(out, 'src', file));
   }
-  if (existsSync(join(source, 'generated'))) cpSync(join(source, 'generated'), join(out, 'generated'), { recursive: true });
+  const assets = ['generated', ...(dir === 'motion-core' ? ['fonts'] : [])]
+    .filter((name) => existsSync(join(source, name)));
+  for (const name of assets) cpSync(join(source, name), join(out, name), { recursive: true });
   if (existsSync(join(compiled, 'bin'))) cpSync(join(compiled, 'bin'), join(out, 'bin'), { recursive: true });
   if (dir === 'server-sdk') {
     const client = join(ROOT, 'dist', 'daemon', 'frame-host', 'client');
@@ -190,6 +200,16 @@ function stageLibrary(dir) {
     const text = readFileSync(path, 'utf8');
     const fixed = text.replace(/new URL\((['"])(\.\.?\/[^'"]+)\.tsx?\1/g, 'new URL($1$2.js$1');
     if (fixed !== text) writeFileSync(path, fixed);
+  }
+  // Declarations, compiled or authored: tsc rewrites `./x.ts` to `./x.js` in the JavaScript only, so a consumer that
+  // reads the specifiers as they are (node16/nodenext without allowImportingTsExtensions) would look for a missing file.
+  for (const file of walk(out).filter((f) => /\.d\.[cm]?ts$/.test(f))) {
+    const path = join(out, file);
+    const text = readFileSync(path, 'utf8');
+    const fixed = rewriteDeclarationSpecifiers(text);
+    if (fixed !== text) writeFileSync(path, fixed);
+    const left = relativeTsSpecifiers(fixed);
+    if (left.length) fail(`dist/npm/${dir}/${file} still imports ${left.join(', ')}`);
   }
 
   const own = { ...pkg.dependencies, ...pkg.peerDependencies };
@@ -225,7 +245,7 @@ function stageLibrary(dir) {
     type: 'module',
     ...(bin ? { bin } : {}),
     exports,
-    files: ['src', ...(existsSync(join(out, 'generated')) ? ['generated'] : []), ...(bin ? ['bin'] : []), 'LICENSE', 'NOTICE'],
+    files: ['src', ...assets, ...(bin ? ['bin'] : []), 'LICENSE', 'NOTICE'],
     ...(Object.keys(dependencies).length ? { dependencies } : {}),
     ...(Object.keys(peerDependencies).length ? { peerDependencies } : {}),
     ...(Object.keys(peerDependenciesMeta).length ? { peerDependenciesMeta } : {}),
@@ -250,6 +270,9 @@ function stageLibrary(dir) {
 function stageCli() {
   const skill = join(ROOT, 'skills', 'open-artifact');
   if (!existsSync(join(skill, 'vendor', 'open-artifact.mjs'))) fail('skills/open-artifact/vendor is missing; run node scripts/build-skill.mjs first');
+  // The motion type's `stills` command loads this page; it comes from node scripts/build.mjs, beside the shared cli.mjs.
+  if (!existsSync(join(skill, 'vendor', 'type-server', 'motion-tools.html')))
+    fail('the vendored type server has no motion-tools.html; run node scripts/build.mjs, then node scripts/build-skill.mjs');
   const out = join(OUT, 'cli');
   rmSync(out, { recursive: true, force: true });
   cpSync(skill, out, { recursive: true });
@@ -258,13 +281,15 @@ function stageCli() {
     name: '@open-artifact/cli',
     version: daemon.version,
     description:
-      'The open-artifact command: the local Open Artifact daemon with its Shell and the built-in types (slides, design, design system, whiteboard, sheets, data, docs), an MCP server for agent apps, and the hooks that bring page comments back to the agent.',
+      'The open-artifact command: the local Open Artifact daemon with its Shell and the built-in types (slides, design, design system, whiteboard, sheets, data, docs, motion, page), an MCP server for agent apps, and the hooks that bring page comments back to the agent.',
     type: 'module',
     bin: { 'open-artifact': 'scripts/open-artifact.mjs' },
-    files: ['scripts', 'vendor', 'SKILL.md', 'LICENSE', 'NOTICE'],
+    files: ['scripts', 'vendor', 'reference', 'SKILL.md', 'LICENSE', 'NOTICE'],
     engines: rootPkg.engines,
-    keywords: ['artifacts', 'slides', 'design', 'design-system', 'whiteboard', 'sheets', 'spreadsheet', 'data', 'docs', 'dashboard', 'mcp', 'agent'],
+    keywords: ['artifacts', 'slides', 'design', 'design-system', 'whiteboard', 'sheets', 'spreadsheet', 'data', 'docs', 'motion', 'animation', 'dashboard', 'page', 'mcp', 'agent'],
     ...common(daemon, 'skills/open-artifact'),
+    // The Harness API versions this runtime speaks: runtime updates install only versions every adapter here speaks.
+    ...(existsSync(join(skill, 'vendor', 'runtime.json')) ? { openArtifact: { protocols: readJson(join(skill, 'vendor', 'runtime.json')).protocols } } : {}),
   };
   writeJson(join(out, 'package.json'), published);
   copyLegal(out);

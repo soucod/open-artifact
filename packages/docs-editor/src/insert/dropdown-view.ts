@@ -2,13 +2,14 @@
 import type { Node as PMNode } from 'prosemirror-model';
 import type { NodeView } from 'prosemirror-view';
 import { useDocs } from '../app/store.ts';
-import { dropdownOption } from '../editor/node-views.ts';
+import { dropdownOption, setOwnClasses } from '../editor/node-views.ts';
 import { colorOf } from './dropdown-model.ts';
 
 export class DropdownChipView implements NodeView {
   dom: HTMLElement;
   private node: PMNode;
   private selected = false;
+  private own: string[] = [];
   private readonly stop: () => void;
 
   constructor(node: PMNode) {
@@ -23,7 +24,9 @@ export class DropdownChipView implements NodeView {
   private draw(): void {
     const { enum: enumId, index } = this.node.attrs as { enum: string; index: number | null };
     const option = dropdownOption(enumId, index);
-    this.dom.className = ['doc-chip doc-dropdown', option ? '' : 'doc-dropdown-unset', this.selected ? 'doc-selected' : ''].filter(Boolean).join(' ');
+    const own = ['doc-chip', 'doc-dropdown', option ? '' : 'doc-dropdown-unset', this.selected ? 'doc-selected' : ''].filter(Boolean);
+    setOwnClasses(this.dom, this.own, own);
+    this.own = own;
     this.dom.textContent = option?.name ?? 'Select';
     this.dom.dataset.color = colorOf(option ?? undefined, typeof index === 'number' ? index : 0);
     this.dom.dataset.dropdown = '';

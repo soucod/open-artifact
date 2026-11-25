@@ -106,7 +106,7 @@ fn count(args: &[Arg], locale: &Locale) -> usize {
         .map(|arg| match arg {
             Arg::Missing => 1,
             Arg::Value(v) => usize::from(coerce::to_number(v, locale).is_ok()),
-            Arg::Cells(cells) => cells.values().iter().filter(|v| matches!(v, Value::Number(_))).count(),
+            Arg::Cells(cells) => cells.values().filter(|v| matches!(v, Value::Number(_))).count(),
             Arg::Place(_) => 0,
         })
         .sum()
@@ -116,7 +116,7 @@ fn count(args: &[Arg], locale: &Locale) -> usize {
 fn count_all(args: &[Arg]) -> usize {
     args.iter()
         .map(|arg| match arg {
-            Arg::Cells(cells) => cells.values().iter().filter(|v| !matches!(v, Value::Blank)).count(),
+            Arg::Cells(cells) => cells.values().filter(|v| !matches!(v, Value::Blank)).count(),
             _ => 1,
         })
         .sum()
@@ -130,7 +130,7 @@ fn count_blank(arg: &Arg) -> Answer {
         _ => false,
     };
     let cells = range_of(arg)?;
-    number(cells.values().iter().filter(|v| blank(v)).count() as f64)
+    number(cells.values().filter(|v| blank(v)).count() as f64)
 }
 
 /// A range a condition is matched against (or whose cells are worked out): left out, #VALUE!.
@@ -144,7 +144,7 @@ fn range_of(arg: &Arg) -> Result<Cells, CellError> {
 fn count_if(args: &[Arg], locale: &Locale) -> Answer {
     let cells = range_of(&args[0])?;
     let criterion = Criterion::new(&args[1].value()?, locale);
-    number(cells.values().iter().filter(|v| criterion.matches(v)).count() as f64)
+    number(cells.values().filter(|v| criterion.matches(v)).count() as f64)
 }
 
 /// The cells where every (range, condition) pair matches, by their place in the ranges (row by row). The ranges
@@ -179,7 +179,7 @@ fn matched_numbers(args: &[Arg], locale: &Locale) -> Result<Vec<f64>, CellError>
     let cells = range_of(&args[0])?;
     let matched = matching(&args[1..], Some((cells.rows(), cells.columns())), locale)?;
     let mut out = Vec::new();
-    for (v, _) in cells.values().iter().zip(&matched).filter(|(_, m)| **m) {
+    for (v, _) in cells.values().zip(&matched).filter(|(_, m)| **m) {
         match v {
             Value::Number(n) => out.push(*n),
             Value::Error(e) => return Err(*e),
@@ -311,7 +311,7 @@ fn rank(args: &[Arg], locale: &Locale) -> Answer {
     match &args[1] {
         Arg::Value(Value::Number(v)) => n.push(*v),
         Arg::Value(_) => {}
-        Arg::Cells(cells) => n.extend(cells.values().iter().filter_map(|v| match v {
+        Arg::Cells(cells) => n.extend(cells.values().filter_map(|v| match v {
             Value::Number(v) => Some(*v),
             _ => None,
         })),

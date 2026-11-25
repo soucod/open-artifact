@@ -13,7 +13,7 @@
 import { Box, ChevronRight, Eye, EyeOff, GitBranch, Hash, Image, LayoutGrid, Repeat, Shapes, StretchHorizontal, StretchVertical, Type } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { boardsOnPage, groupSelectionUnits, noteGroupIndex, notesOnPage } from '@open-artifact/design-core';
-import { cn } from '@open-artifact/ui';
+import { cn, isComposingKey } from '@open-artifact/ui';
 import { useDocument } from '../state/document.ts';
 import { useView, type ElementSelection } from '../state/view.ts';
 import { attributeValue } from '@open-artifact/dc';
@@ -151,6 +151,7 @@ function TreeRow({
           onMouseDown={(event) => event.stopPropagation()}
           onKeyDown={(event) => {
             event.stopPropagation();
+            if (isComposingKey(event.nativeEvent)) return;
             if (event.key === 'Enter') {
               onRename?.(event.currentTarget.value);
               setRenaming(false);

@@ -1,4 +1,16 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { LimitRefusalKind } from '../model/refusals.ts';
+import type {
+  EditRefusedOnPage,
+  FileNotImportedNotice,
+  NewsOfLoss,
+  Notice,
+  OneRangeAct,
+  SavingState,
+  VersionNotTakenNotice,
+} from '../state/initial-state.ts';
+import type { AskedKindOfEdit, SheetNameRefusal } from '../state/edit-answers.ts';
+import type { CopyRefused, EditsDropped } from '../state/event-reducer.ts';
+import type { AgentUndoRefusalWhy } from './agent-turn-labels.ts';
 import { translateMessage, MESSAGE_LOCALE } from './messages.ts';
 import { savingStoppedText, readOnlyText, commentModeHint } from './status-labels.ts';
 import { fixFailureText } from './formula-fix-labels.ts';
@@ -8,12 +20,35 @@ import { agentUndoRefusalText } from './agent-turn-labels.ts';
 import { filterHidesRowsRefusal } from '../messages/filter-refusals.ts';
 import { dropdownCellsRefusalText } from './chip-labels.ts';
 import { truncateGraphemes, SHEET_NAME_IN_NOTICE_MAX_CHARACTERS } from './grid-action-labels.ts';
+import { namedViewRefusalLabel, namedViewLimitRefusalLabel } from '../tables/named-view-messages.ts';
+import { interactiveNotWritableText, interactiveWritesTooLargeText, interactiveNotDuplicatedText } from '../messages/import.ts';
+/** The modifier key to press instead of a menu command, or null when there is no keyboard. */
+export type KeyInstead = Exclude<CopyRefused['keyInstead'], 'sameInAMoment'>;
+/** Why edits already made were dropped by the workbook, when it said. */
+export type WhyEditsDropped =
+  | LimitRefusalKind
+  | 'noMoreEditsTaken'
+  | 'readOnly'
+  | 'tooLargeForOneEdit'
+  | 'tookTooLong'
+  | 'editingPaused'
+  | 'notTakenForNow'
+  | undefined;
+/** Why a file was not imported. */
+export type WhyFileNotImported = FileNotImportedNotice['why'] | 'folder';
+/** A notice or news of loss, with the reasons some kinds carry that `Notice` and `NewsOfLoss` do not list yet. */
+export type NoticeTold =
+  | Exclude<Notice | NewsOfLoss, VersionNotTakenNotice | FileNotImportedNotice | EditsDropped>
+  | (VersionNotTakenNotice & { kind: 'versionNotTakenBack' | 'versionNotShown' })
+  | { kind: 'turnOfAgentNotUndone'; why: AgentUndoRefusalWhy }
+  | (Omit<FileNotImportedNotice, 'why'> & { why: WhyFileNotImported })
+  | (Omit<EditsDropped, 'why'> & { why?: WhyEditsDropped });
 export function saveStatusText(
-  saveStatus?: Dynamic,
-  isPageOutOfDate?: Dynamic,
-  isRetryingLong: Dynamic = false,
-  isEditingPaused: Dynamic = false,
-) {
+  saveStatus: SavingState,
+  hasUnsavedEdits: boolean,
+  isRetryingLong: boolean = false,
+  isEditingPaused: boolean = false,
+): string | null {
   switch (saveStatus) {
     case 'allSaved':
     case 'saving':
@@ -34,7 +69,7 @@ export function saveStatusText(
             id: 'ViYbsNoIFd',
           });
     case 'stopped':
-      return isPageOutOfDate
+      return hasUnsavedEdits
         ? translateMessage({
             defaultMessage:
               'Your latest changes may not have been saved, and this page can’t save any more. Copy what you need, then reload the page.',
@@ -54,7 +89,7 @@ export function saveStatusText(
       });
   }
 }
-export function sheetNameRefusedText({ name: sheetName, why: why }: Dynamic) {
+export function sheetNameRefusedText({ name: sheetName, why }: SheetNameRefusal): string {
   if (why === 'sheetNameTaken')
     return translateMessage({
       defaultMessage: 'Another sheet already has this name.',
@@ -71,17 +106,27 @@ export function sheetNameRefusedText({ name: sheetName, why: why }: Dynamic) {
         id: 'RGe9E3wHQY',
       });
 }
-export function tooLargeTextForAct(act?: Dynamic) {
+export function tooLargeTextForAct(act: AskedKindOfEdit): string {
   if (act === 'paste') return pasteTooLargeText();
   if (act === 'pasteOfCut') return moveTooLargeText();
   if (act === 'import') return importFileTooLargeText();
   if (act === 'duplicateOfSheet') return duplicateTooLargeText();
   if (act === 'move') return moveChangesTooManyFormulasText();
+  if (act === 'moveOfColumnsOfTablePastOne')
+    return translateMessage({
+      defaultMessage: 'Nothing was moved, because too many cells would change places.',
+      id: 'PlNMTbBBUv',
+    });
+  if (act === 'moveOfColumnsOfTable')
+    return translateMessage({
+      defaultMessage: 'Nothing was moved, because too many cells would change places. Moving past fewer columns may work.',
+      id: 'JYErnzPK1Z',
+    });
   if (act === 'sort') return sortTooLargeText();
   if (act === 'sortOfRange') return sortRangeTooLargeText();
   return act === 'removalOfOneOption' ? optionRemovalTooLargeText() : changeTooLargeText();
 }
-export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: Dynamic) {
+export function editRefusedText(refusal: EditRefusedOnPage['why'], act: AskedKindOfEdit, mergedCells?: string): string {
   switch (refusal) {
     case 'readOnly':
       return readOnlyText();
@@ -152,7 +197,7 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
             'Nothing was imported, because one of the formulas in that file is too long. Shorten that formula, then import the file again.',
           id: '1qdb+k4rzC',
         });
-      if (act === 'pasteOfCut')
+      if (act === 'pasteOfCut' || isMoveOfColumnsOfTable(act))
         return translateMessage({
           defaultMessage:
             'Nothing was moved, because one of the formulas would become too long. Break it into smaller formulas, then move the cells again.',
@@ -173,6 +218,7 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
       if (act === 'import') return importFileTooLargeText();
       if (act === 'duplicateOfSheet') return duplicateTooLargeText();
       if (act === 'sortOfRange') return sortRangeTooLargeText();
+      if (isMoveOfColumnsOfTable(act)) return tooLargeTextForAct(act);
       if (act === 'pasteOfCut')
         return translateMessage({
           defaultMessage: 'Nothing was moved, because those cells have too much mixed formatting to move at once. Move fewer cells at a time.',
@@ -238,6 +284,17 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
           'That change wasn’t made, because this Sheet can’t hold any more conditional formatting rules. To make room, remove rules you don’t need.',
         id: 'LwHDk5S7Gy',
       });
+    case 'namedViewNameTaken':
+    case 'namedViewTooLarge':
+    case 'namedViewIsGone':
+      return namedViewRefusalLabel(refusal, act);
+    case 'interactiveCantWrite':
+      return interactiveNotWritableText();
+    case 'interactiveSavesTooMuch':
+      return interactiveWritesTooLargeText();
+    case 'interactiveNotCopied':
+    case 'interactiveNeverCopied':
+      return interactiveNotDuplicatedText(refusal);
     case 'tableTooLarge':
       return tooLargeTextForAct(act);
     case 'pasteDoesNotFit':
@@ -294,6 +351,16 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
         defaultMessage: 'Nothing was sorted, because the formulas in that column are taking too long to calculate. Sort by another column.',
         id: 'FRBiXEy0de',
       });
+    case 'sortColumnFilledDownByOneFormula':
+      return translateMessage({
+        defaultMessage: 'Nothing was sorted, because one formula fills several rows of that column. Sort by another column, or leave those rows out.',
+        id: 'XW56mV1tFe',
+      });
+    case 'sortColumnFilledFromOutsideTheCells':
+      return translateMessage({
+        defaultMessage: 'Nothing was sorted, because formulas outside the selected cells fill that column. Sort the whole table instead.',
+        id: 'TYBcc5fRnu',
+      });
     case 'tooManyGroups':
       if (act !== 'sort' && act !== 'sortOfRange') return noRoomInWorkbookText();
       return translateMessage({
@@ -301,11 +368,31 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
         id: 'NnaGGdNsuF',
       });
     case 'tooManyFormulasReadMovedCells':
+      if (act === 'moveOfColumnsOfTablePastOne')
+        return translateMessage({
+          defaultMessage: 'Nothing was moved, because too many formulas use this table’s cells.',
+          id: 'CyGkEoPcWQ',
+        });
+      if (act === 'moveOfColumnsOfTable')
+        return translateMessage({
+          defaultMessage: 'Nothing was moved, because too many formulas use this table’s cells. Moving past fewer columns may work.',
+          id: 'O3rbxMvKDh',
+        });
       return translateMessage({
         defaultMessage: 'Nothing was moved, because too many formulas use those cells. Moving fewer cells may help.',
         id: 'Io2klzSkWn',
       });
     case 'formulasNotCalculated':
+      if (act === 'newPivotTable')
+        return translateMessage({
+          defaultMessage: 'No pivot table was made, because some formulas are taking too long to calculate.',
+          id: 'MEqLafyy0Z',
+        });
+      if (act === 'changeOfPivotTable')
+        return translateMessage({
+          defaultMessage: 'This pivot table wasn’t updated, because some formulas are taking too long to calculate.',
+          id: 'nrBxWQGMiH',
+        });
       if (act === 'fitOfColumns')
         return translateMessage({
           defaultMessage: 'Nothing was resized, because some formulas are taking too long to calculate. Drag a column’s edge to set its width.',
@@ -314,6 +401,81 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
       return translateMessage({
         defaultMessage: 'Nothing was moved, because some formulas are taking too long to calculate.',
         id: 'e4PFa7Z8oh',
+      });
+    case 'noTableForPivotTable':
+      return translateMessage({
+        defaultMessage: 'Select a cell in a table to make a pivot table.',
+        id: 'b9NUhxT6Hu',
+      });
+    case 'pivotTableSourceHasNoHeader':
+      return translateMessage({
+        defaultMessage: 'These cells need a header row to make a pivot table.',
+        id: '9XIvnNuEim',
+      });
+    case 'pivotTableSourceHasNoRecords':
+      return translateMessage({
+        defaultMessage: 'This table has no rows to summarize.',
+        id: 'oYczPij74P',
+      });
+    case 'pivotTableSourceRecordsNotClear':
+      return translateMessage({
+        defaultMessage: 'It isn’t clear which rows belong to this table. Unmerge cells and remove repeated headings, then try again.',
+        id: 'MWbybwsHru',
+      });
+    case 'pivotTableSourceHasSectionsOrSubtotals':
+      return translateMessage({
+        defaultMessage: 'This table has sections or subtotals that would be counted twice. Remove them or copy the rows to a new sheet.',
+        id: 'o5nVRBVjJR',
+      });
+    case 'pivotTableColumnNotOfSource':
+      return translateMessage({
+        defaultMessage: 'That column isn’t part of the table anymore.',
+        id: 'qEdh4Viz3f',
+      });
+    case 'pivotTableTotalNeedsNumbers':
+      return translateMessage({
+        defaultMessage: 'This total needs a column of numbers.',
+        id: 'mql3BGJcSF',
+      });
+    case 'pivotTablePeriodNeedsDates':
+      return translateMessage({
+        defaultMessage: 'Grouping by day, month, quarter, or year needs a column of dates.',
+        id: 'uaUg0J4b17',
+      });
+    case 'pivotTableFilterValueCannotBeWritten':
+      return translateMessage({
+        defaultMessage: 'The filter can’t use that error value.',
+        id: 'qs8g9fF63n',
+      });
+    case 'pivotTableWouldReadItself':
+      return translateMessage({
+        defaultMessage: 'The pivot table could grow over that cell. Pick a cell above or to the left of the pivot table, or on another sheet.',
+        id: 'xA4IvOBkWB',
+      });
+    case 'pivotTableWouldTouchATable':
+      return translateMessage({
+        defaultMessage: 'Leave a blank row or column between the pivot table and its data.',
+        id: 'Ac0pGcc02+',
+      });
+    case 'pivotTableWouldBeReadByAnother':
+      return translateMessage({
+        defaultMessage: 'Another pivot table would count these cells as its data. Move this pivot table to its own sheet.',
+        id: 'MkEcbFj9BH',
+      });
+    case 'pivotTableCellsInTheWay':
+      return translateMessage({
+        defaultMessage: 'Some cells the pivot table would fill aren’t empty. Clear them or move the pivot table.',
+        id: 'xDHzCK238+',
+      });
+    case 'pivotTableFormulaInTheWay':
+      return translateMessage({
+        defaultMessage: 'Another formula could fill the same cells. Move the pivot table to its own sheet.',
+        id: 'stofufC2Kl',
+      });
+    case 'pivotTableTooLarge':
+      return translateMessage({
+        defaultMessage: 'This pivot table is too large. Remove a field or add a filter.',
+        id: 'TckOILZu8N',
       });
     case 'moveSplitsMergedCells':
       if (act === 'sort' || act === 'sortOfRange')
@@ -334,6 +496,16 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
       return translateMessage({
         defaultMessage: 'Nothing was moved, because that would split a merged cell. Unmerge the cells first.',
         id: 'aJUnfH1o1b',
+      });
+    case 'moveCrossesSpilledCells':
+      return translateMessage({
+        defaultMessage: 'Nothing was moved, because a formula’s results would be split up. Move or clear that formula first.',
+        id: 'VmW72o2pnN',
+      });
+    case 'moveCrossesHiddenColumn':
+      return translateMessage({
+        defaultMessage: 'Nothing was moved, because a hidden or collapsed column is in the way. Show it first.',
+        id: 'DKQt3RBad5',
       });
     case 'groupsPartlyOverlap':
       return act === 'groupOfColumns'
@@ -359,7 +531,7 @@ export function editRefusedText(refusal?: Dynamic, act?: Dynamic, mergedCells?: 
       });
   }
 }
-export function editsDroppedText(why?: Dynamic) {
+export function editsDroppedText(why: WhyEditsDropped): string {
   switch (why) {
     case 'tooManyFilledCells':
       return translateMessage({
@@ -459,7 +631,7 @@ export function editsDroppedText(why?: Dynamic) {
       });
   }
 }
-export function copyFailedText(keyKind?: Dynamic) {
+export function copyFailedText(keyKind: KeyInstead): string {
   switch (keyKind) {
     case 'command':
       return translateMessage({
@@ -478,7 +650,7 @@ export function copyFailedText(keyKind?: Dynamic) {
       });
   }
 }
-export function cutFailedText(keyKind?: Dynamic) {
+export function cutFailedText(keyKind: KeyInstead): string {
   switch (keyKind) {
     case 'command':
       return translateMessage({
@@ -497,7 +669,7 @@ export function cutFailedText(keyKind?: Dynamic) {
       });
   }
 }
-export function pasteFromMenuHint(keyKind?: Dynamic) {
+export function pasteFromMenuHint(keyKind: KeyInstead): string {
   switch (keyKind) {
     case 'command':
       return translateMessage({
@@ -516,7 +688,7 @@ export function pasteFromMenuHint(keyKind?: Dynamic) {
       });
   }
 }
-export function pasteValuesFromMenuHint(copied?: Dynamic, keyKind?: Dynamic) {
+export function pasteValuesFromMenuHint(copied: string | null, keyKind: KeyInstead): string {
   if (copied === 'copiedCells')
     return translateMessage({
       defaultMessage: 'The copied cells’ values can’t be pasted on their own. Use Paste instead.',
@@ -545,7 +717,7 @@ export function pasteValuesFromMenuHint(copied?: Dynamic, keyKind?: Dynamic) {
       });
   }
 }
-export function importRefusedText(why?: Dynamic) {
+export function importRefusedText(why: WhyFileNotImported): string {
   switch (why) {
     case 'tooLarge':
       return importFileTooLargeText();
@@ -576,7 +748,7 @@ export function importRefusedText(why?: Dynamic) {
       });
   }
 }
-export function oneRangeNeededText(act?: Dynamic) {
+export function oneRangeNeededText(act: OneRangeAct): string {
   switch (act) {
     case 'cut':
       return translateMessage({
@@ -645,7 +817,7 @@ export function oneRangeNeededText(act?: Dynamic) {
       });
   }
 }
-export function noticeText(notice?: Dynamic) {
+export function noticeText(notice: NoticeTold): string | undefined {
   switch (notice.kind) {
     case 'alreadySorted':
       return translateMessage(
@@ -717,6 +889,8 @@ export function noticeText(notice?: Dynamic) {
           count: notice.most,
         },
       );
+    case 'tooManyNamedViews':
+      return namedViewLimitRefusalLabel(notice.most);
     case 'groupsTooDeep':
       return translateMessage(
         {
@@ -779,7 +953,7 @@ export function noticeText(notice?: Dynamic) {
             },
           );
     case 'sheetNameTakenSinceEdit': {
-      let sortNotice = truncateGraphemes(notice.name, SHEET_NAME_IN_NOTICE_MAX_CHARACTERS);
+      let sheetName = truncateGraphemes(notice.name, SHEET_NAME_IN_NOTICE_MAX_CHARACTERS);
       return notice.direction === 'undo'
         ? translateMessage(
             {
@@ -788,7 +962,7 @@ export function noticeText(notice?: Dynamic) {
               id: 'AFMeJMEQLF',
             },
             {
-              name: sortNotice,
+              name: sheetName,
             },
           )
         : translateMessage(
@@ -798,7 +972,7 @@ export function noticeText(notice?: Dynamic) {
               id: '5FVJqQLG56',
             },
             {
-              name: sortNotice,
+              name: sheetName,
             },
           );
     }
@@ -899,7 +1073,7 @@ export function noticeText(notice?: Dynamic) {
           id: '8B2IBDIG4b',
         },
         {
-          cells: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE, {
+          cells: new Intl.ListFormat(MESSAGE_LOCALE, {
             type: 'unit',
           }).format(notice.cells),
         },
@@ -911,7 +1085,7 @@ export function noticeText(notice?: Dynamic) {
       });
   }
 }
-export function cellsInSightText([firstRow, lastRow]: Dynamic, [firstColumn, lastColumn]: Dynamic) {
+export function cellsInSightText([firstRow, lastRow]: readonly [string, string], [firstColumn, lastColumn]: readonly [string, string]): string {
   if (firstRow === lastRow && firstColumn === lastColumn)
     return translateMessage(
       {
@@ -919,8 +1093,8 @@ export function cellsInSightText([firstRow, lastRow]: Dynamic, [firstColumn, las
         id: 'Sc1kqnNpcY',
       },
       {
-        firstRow: firstRow,
-        firstColumn: firstColumn,
+        firstRow,
+        firstColumn,
       },
     );
   if (firstRow === lastRow)
@@ -930,9 +1104,9 @@ export function cellsInSightText([firstRow, lastRow]: Dynamic, [firstColumn, las
         id: '/r7tXixVPX',
       },
       {
-        firstRow: firstRow,
-        firstColumn: firstColumn,
-        lastColumn: lastColumn,
+        firstRow,
+        firstColumn,
+        lastColumn,
       },
     );
   if (firstColumn === lastColumn)
@@ -942,9 +1116,9 @@ export function cellsInSightText([firstRow, lastRow]: Dynamic, [firstColumn, las
         id: 'jDaYKhmDJC',
       },
       {
-        firstRow: firstRow,
-        lastRow: lastRow,
-        firstColumn: firstColumn,
+        firstRow,
+        lastRow,
+        firstColumn,
       },
     );
   return translateMessage(
@@ -953,128 +1127,130 @@ export function cellsInSightText([firstRow, lastRow]: Dynamic, [firstColumn, las
       id: 'WHDsQWT4PB',
     },
     {
-      firstRow: firstRow,
-      lastRow: lastRow,
-      firstColumn: firstColumn,
-      lastColumn: lastColumn,
+      firstRow,
+      lastRow,
+      firstColumn,
+      lastColumn,
     },
   );
 }
-export const editingBackOnText = () =>
+export const editingBackOnText = (): string =>
   translateMessage({
     defaultMessage: 'Editing is back on.',
     id: 'HHN9l7liBu',
   });
-export const reconnectedText = () =>
+export const reconnectedText = (): string =>
   translateMessage({
     defaultMessage: 'Reconnected.',
     id: 'e0hKkfEt7e',
   });
-export const allChangesSavedText = () =>
+export const allChangesSavedText = (): string =>
   translateMessage({
     defaultMessage: 'All changes saved',
     id: 'LTJBQYLROX',
   });
-export const agentMissedMessageText = () =>
+export const agentMissedMessageText = (): string =>
   translateMessage({
     defaultMessage:
       'Agent didn’t get that because the message box wasn’t selected. Click the message box and try again, or press Esc to go back to the cells.',
     id: 'Dl+OZNW/Px',
   });
-export const savingChangesText = () =>
+export const savingChangesText = (): string =>
   translateMessage({
     defaultMessage: 'Saving changes…',
     id: 'rvYL1YoBbZ',
   });
-export const calculatingFormulasText = () =>
+export const calculatingFormulasText = (): string =>
   translateMessage({
     defaultMessage: 'Calculating formulas…',
     id: 'amyQnprk3p',
   });
-export const formulasCalculatedText = () =>
+export const formulasCalculatedText = (): string =>
   translateMessage({
     defaultMessage: 'All formulas calculated',
     id: '3OXrYjq0cQ',
   });
-export const pasteTooLargeText = () =>
+export const pasteTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was pasted, because that’s too much to paste at once. Copy and paste fewer cells at a time.',
     id: 'vRXfEGiNFK',
   });
-export const moveTooLargeText = () =>
+export const moveTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was moved, because that’s too much to move at once. Move fewer cells at a time.',
     id: 'cG0q48J9XT',
   });
-export const changeTooLargeText = () =>
+export const changeTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'That change is too large to make at once. Make it in smaller parts.',
     id: 'Qk1dg5o4JH',
   });
-export const optionRemovalTooLargeText = () =>
+export const optionRemovalTooLargeText = (): string =>
   translateMessage({
     defaultMessage:
       'That change wasn’t made, because an option you removed is in too many cells to remove at once. Clear or change some of those cells first.',
     id: 'zTDVklsi6e',
   });
-export const moveChangesTooManyFormulasText = () =>
+export const moveChangesTooManyFormulasText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was moved, because that would change too many formulas at once.',
     id: 'z713Ojmi5U',
   });
-export const sortTooLargeText = () =>
+export const sortTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was sorted, because this sheet has too many rows or formulas to sort at once.',
     id: 'crzzRwb588',
   });
-export const sortRangeTooLargeText = () =>
+export const sortRangeTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was sorted, because that would move too many cells at once. Select fewer cells, or sort the whole sheet.',
     id: 'yL/JIdwYdd',
   });
-export const importFileTooLargeText = () =>
+export const importFileTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was imported, because that file is too large. Import a smaller file.',
     id: 'Xp8HIRoBLK',
   });
-export const importNoRoomText = () =>
+export const importNoRoomText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was imported, because this Sheet doesn’t have room for that much data. Import a smaller file.',
     id: 'qryIljCQxH',
   });
-export const importTooManySheetsText = () =>
+export const importTooManySheetsText = (): string =>
   translateMessage({
     defaultMessage:
       'Nothing was imported, because this Sheet can’t hold any more sheets. Deleted sheets still count, so import the file into a new Sheet.',
     id: '/YUE+TSsh0',
   });
-export const noRoomInWorkbookText = () =>
+export const noRoomInWorkbookText = (): string =>
   translateMessage({
     defaultMessage: 'That change wasn’t made, because this Sheet doesn’t have room for that much data.',
     id: 'mXRTmLRGqS',
   });
-export const duplicateTooLargeText = () =>
+export const duplicateTooLargeText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was duplicated, because that sheet is too large.',
     id: 'i2voKQxUR6',
   });
-export const duplicateTooManySheetsText = () =>
+export const duplicateTooManySheetsText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was duplicated, because this Sheet can’t hold any more sheets. Deleted sheets still count, so continue in a new Sheet.',
     id: 'Ti8oLizamk',
   });
-export const duplicateMergedCellsText = () =>
+export const duplicateMergedCellsText = (): string =>
   translateMessage({
     defaultMessage: 'Nothing was duplicated, because some merged cells in that sheet overlap or cover other data. Unmerge those cells first.',
     id: 'zOf/w/vtXi',
   });
-export const formatTooMixedText = () =>
+export const isMoveOfColumnsOfTable = (act: AskedKindOfEdit): boolean =>
+  act === 'moveOfColumnsOfTable' || act === 'moveOfColumnsOfTablePastOne';
+export const formatTooMixedText = (): string =>
   translateMessage({
     defaultMessage:
       'That change wasn’t made, because the selected cells have too much mixed formatting to update at once. Select fewer cells, then format the rest.',
     id: '1oJkmXRCQn',
   });
-export const undoableDoneText = (done?: Dynamic) =>
+export const undoableDoneText = (done: string): string =>
   translateMessage(
     {
       defaultMessage: '{done}. You can undo this.',
@@ -1084,7 +1260,7 @@ export const undoableDoneText = (done?: Dynamic) =>
       done: done.replace(/\.$/, ''),
     },
   );
-export const matchesNotReplacedText = (count?: Dynamic) =>
+export const matchesNotReplacedText = (count: number): string =>
   translateMessage(
     {
       defaultMessage:
@@ -1092,6 +1268,6 @@ export const matchesNotReplacedText = (count?: Dynamic) =>
       id: '2gWUhe9NsA',
     },
     {
-      count: count,
+      count,
     },
   );

@@ -1,11 +1,9 @@
 //! The records the conditional formats of some cells are suggested for, and what each of their columns holds.
 //!
-//! The records are those of a declared cell table the cells meet, when just one of those has a body; else the cells
+//! The records are those of a classified table the cells meet, when just one of those has a body; else the cells
 //! themselves. With none met, they are guessed: the block of cells showing something within the cells, or else
 //! around a single cell, grown a row or a column at a time while the next one shows something across it, short of
-//! the declared cell tables; when its top row holds texts across it with rows under it, that row is a header. With
-//! no block, they are those of a declared cell table right above or below a single cell showing nothing, or else the
-//! cells.
+//! other tables. A single cell showing nothing can pick up a table immediately above or below it.
 //!
 //! A column tells its name, how many of its records show something, how many numbers and how many nothing, the texts
 //! that come most (whatever their capitals), the smallest number, the middle one and the largest, and its kind as the
@@ -20,7 +18,7 @@ use serde_json::{json, Value as Json};
 
 use crate::calculate::SpillOutcome;
 use crate::number_format::{Kind as FormatKind, NumberFormat};
-use crate::session::reads::tables::{declared_tables, DeclaredRecords};
+use crate::session::reads::tables::{tables_for_formatting, TableForFormatting};
 use crate::value::Value;
 use crate::workbook::formats::Leaf;
 use crate::workbook::{Input, Sheet, Workbook};
@@ -31,8 +29,6 @@ const MOST_COLUMNS: usize = 50;
 const MOST_COMMONEST: usize = 8;
 /// The most characters of a column's name, and of a text counted among a column's.
 const MOST_CHARACTERS: usize = 100;
-/// The most rows looked at, from the top down, for a header.
-const MOST_HEADER_ROWS: usize = 5;
 /// A column with this many different texts or more holds texts, not few words.
 const MANY_TEXTS: usize = 9;
 
@@ -71,8 +67,8 @@ impl Block {
         other.top <= self.bottom && self.top <= other.bottom && other.left <= self.right && self.left <= other.right
     }
 
-    fn holds(&self, row: usize, column: usize) -> bool {
-        self.top <= row && row <= self.bottom && self.left <= column && column <= self.right
+    fn of((top, left, bottom, right): (usize, usize, usize, usize)) -> Block {
+        Block { top, left, bottom, right }
     }
 
     /// How many rows it takes.
@@ -84,26 +80,29 @@ impl Block {
 /// The records suggestions are made for: where they are, how many of their rows are spacers, and the names of their
 /// columns.
 pub(super) struct Records {
+    pub table: Block,
     pub block: Block,
     pub gaps: usize,
+    pub non_records: Vec<(Block, &'static str)>,
+    pub footer: Option<Block>,
     pub names: BTreeMap<usize, String>,
 }
 
 impl Records {
     /// Records of just some cells: no spacers, no names.
     pub fn of(block: Block) -> Records {
-        Records { block, gaps: 0, names: BTreeMap::new() }
+        Records { table: block, block, gaps: 0, non_records: Vec::new(), footer: None, names: BTreeMap::new() }
     }
 
-    fn declared(records: &DeclaredRecords) -> Records {
-        let (rows, columns) = (records.rows, records.columns);
-        let block = Block {
-            top: rows.0.min(rows.1),
-            left: columns.0.min(columns.1),
-            bottom: rows.0.max(rows.1),
-            right: columns.0.max(columns.1),
-        };
-        Records { block, gaps: records.gaps, names: records.names.clone() }
+    fn in_table(found: TableForFormatting) -> Option<Records> {
+        let block = Block::of(found.records?);
+        let area = |(top, bottom)| Block { top, bottom, ..block };
+        let gaps = found.non_records.iter().filter(|(_, kind)| *kind == "blank")
+            .map(|&(rows, _)| area(rows).rows()).sum();
+        let non_records = found.non_records.into_iter().map(|(rows, kind)| (area(rows), kind)).collect();
+        Some(Records {
+            table: Block::of(found.cells), block, gaps, non_records, footer: found.footer.map(area), names: found.names,
+        })
     }
 }
 
@@ -307,15 +306,9 @@ impl<'a> Values<'a> {
                     match workbook.outcome(&sheet.id, r, c) {
                         Some(outcome) => {
                             if let Some(SpillOutcome::Fills { array, formats, .. }) = &outcome.spill {
-                                for i in 0..array.rows() {
-                                    for j in 0..array.columns() {
-                                        if i + j > 0 {
-                                            let at = i * array.columns() + j;
-                                            let brought =
-                                                formats.as_ref().and_then(|f| Some(f.get(at)?.as_ref()?.kind));
-                                            spilled.push(((row + i, column + j), array.get(i, j).clone(), brought));
-                                        }
-                                    }
+                                for ((i, j), value) in array.stored_entries().filter(|(position, _)| *position != (0, 0)) {
+                                    let brought = formats.as_ref().and_then(|f| f.get(array.columns(), (i, j))).map(|f| f.kind);
+                                    spilled.push(((row + i, column + j), value.clone(), brought));
                                 }
                             }
                             // A formula that reads an empty cell shows 0.
@@ -362,13 +355,6 @@ impl<'a> Values<'a> {
     /// Whether a row shows something from one column to another.
     fn row_shows(&self, row: usize, left: usize, right: usize) -> bool {
         self.rows.get(&row).is_some_and(|columns| shows_within(columns, left, right))
-    }
-
-    /// Whether a row shows something in two cells or more from one column to another: the look down a block
-    /// for its header passes over the first cell showing something, so a row showing a single cell, a title, counts
-    /// as showing nothing.
-    fn shows_two(&self, row: usize, left: usize, right: usize) -> bool {
-        left <= right && self.rows.get(&row).is_some_and(|columns| columns.range(left..=right).nth(1).is_some())
     }
 
     /// Whether a column shows something from one row to another.
@@ -446,102 +432,38 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The block guessed around some cells, and its header row if it has one: the cells showing something within
-    /// them, grown; or around a single cell showing nothing, the block grown from it, when the cell's column is
-    /// within what it shows.
-    fn guess(&self, cells: Block, bounds: &[Block]) -> Option<(Block, Option<usize>)> {
-        let block = match self.bounds(cells) {
-            Some(found) => self.grown(found, bounds),
-            None if cells.top == cells.bottom && cells.left == cells.right => {
-                let found = self.bounds(self.grown(cells, bounds))?;
-                if !(found.left <= cells.left && cells.left <= found.right) {
-                    return None;
-                }
-                found
-            }
-            None => return None,
-        };
-        Some((block, self.header(block)))
-    }
-
-    /// The header row of a guessed block: its top row, when the block has rows under it and the top row shows no
-    /// number, boolean or error across it.
-    fn header(&self, block: Block) -> Option<usize> {
-        let Block { top, left, bottom, right } = block;
-        if top >= bottom {
-            return None;
-        }
-        let across = |row: usize| (left..=right).filter_map(move |c| self.cells.get(&(row, c)));
-        if across(top).any(|shown| !matches!(shown, Shown::Text(_))) {
-            return None;
-        }
-        let mut row = top;
-        for _ in 0..MOST_HEADER_ROWS {
-            if !self.shows_two(row, left, right) {
-                if row.saturating_add(1) == bottom {
-                    return Some(top);
-                }
-                row = row.saturating_add(1);
-                continue;
-            }
-            if row >= bottom || across(row).any(|shown| !matches!(shown, Shown::Text(_))) {
-                return Some(top);
-            }
-            let width = (right - left).saturating_add(1);
-            if across(row).count() != width {
-                return Some(top);
-            }
-            return Some(if self.shows_two(row.saturating_add(1), left, right) { row } else { top });
-        }
-        Some(top)
-    }
-
-    /// The names a header row gives the columns of a block: each text trimmed, its first 100 characters.
-    fn names(&self, row: usize, left: usize, right: usize) -> BTreeMap<usize, String> {
-        let name = |column: usize| match self.cells.get(&(row, column)) {
-            Some(Shown::Text(text)) => {
-                let name: String = text.trim().chars().take(MOST_CHARACTERS).collect();
-                (!name.is_empty()).then_some(name)
-            }
-            _ => None,
-        };
-        (left..=right).filter_map(|column| Some((column, name(column)?))).collect()
-    }
-
     /// The records suggestions for some cells are made for.
     pub fn records(&self, cells: Block) -> Records {
-        let declared = declared_tables(self.workbook, self.sheet);
-        let area = |(top, left, bottom, right): (usize, usize, usize, usize)| Block { top, left, bottom, right };
-        let areas: Vec<Block> = declared.iter().map(|d| area(d.area)).collect();
-        if areas.iter().any(|a| a.meets(&cells)) {
-            let mut met = declared.iter().zip(&areas).filter(|(d, a)| a.meets(&cells) && d.records.is_some());
-            return match (met.next(), met.next()) {
-                (Some((d, _)), None) => Records::declared(d.records.as_ref().expect("records")),
-                _ => Records::of(cells),
-            };
+        let adjacent = cells.top == cells.bottom && cells.left == cells.right && self.is_blank(cells.top, cells.left);
+        let candidate_area = (cells.top, cells.left, cells.bottom, cells.right);
+        let relevant = tables_for_formatting(self.workbook, self.sheet, candidate_area, adjacent);
+        let recognized: Vec<_> = relevant.iter().filter(|t| !t.assumed).collect();
+        let meets = |t: &TableForFormatting| Block::of(t.cells).meets(&cells);
+        let mut named = recognized.iter().filter(|t| meets(t));
+        let known_area = match (named.next(), named.next()) {
+            (Some(first), None) => Some(first.cells),
+            (Some(_), Some(_)) => return Records::of(cells),
+            _ => None,
+        };
+        let known_bounds: Vec<_> = recognized.iter().map(|t| Block::of(t.cells)).collect();
+        if let Some(known_area) = known_area {
+            return relevant.into_iter().find(|t| !t.assumed && t.cells == known_area)
+                .and_then(Records::in_table).unwrap_or_else(|| Records::of(cells));
         }
-        // Around a single cell showing nothing, the records of a declared cell table right above or below it.
-        let mut beside = None;
-        if !declared.is_empty() && cells.top == cells.bottom && cells.left == cells.right {
-            if self.is_blank(cells.top, cells.left) {
-                for row in [cells.top.checked_sub(1), cells.top.checked_add(1)].into_iter().flatten() {
-                    let held = declared.iter().zip(&areas).find(|(_, a)| a.holds(row, cells.left));
-                    if let Some(records) = held.and_then(|(d, _)| d.records.as_ref()) {
-                        beside = Some(Records::declared(records));
-                        break;
-                    }
-                }
+        let mut directly_met = relevant.iter().filter(|t| meets(t));
+        let one = match (directly_met.next(), directly_met.next()) {
+            (Some(first), None) => Some(first.cells),
+            (None, None) if adjacent => relevant.first().map(|t| t.cells),
+            _ => None,
+        };
+        if let Some(one) = one {
+            let found = relevant.into_iter().find(|t| t.cells == one).and_then(Records::in_table);
+            if let Some(records) = found {
+                return records;
             }
         }
-        match self.guess(cells, &areas) {
-            Some((block, header)) => {
-                let first = header.map_or(block.top, |h| h.saturating_add(1));
-                let rows = (first.min(block.bottom), first.max(block.bottom));
-                let names = header.map_or_else(BTreeMap::new, |h| self.names(h, block.left, block.right));
-                Records { block: Block { top: rows.0, bottom: rows.1, ..block }, gaps: 0, names }
-            }
-            None => beside.unwrap_or_else(|| Records::of(cells)),
-        }
+        let loose = self.bounds(cells).map_or(cells, |found| self.grown(found, &known_bounds));
+        Records::of(loose)
     }
 
     /// What the columns of records hold, 50 at most: from one column on, or the last 50.

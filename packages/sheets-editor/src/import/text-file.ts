@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cleanSheetName } from '../state/sheet-tabs.ts';
 import { sanitizeCellText } from '../model/cell-text.ts';
 import { unescapeLoneCellText, unescapeFirstCsvCellText, unescapeCsvCellText } from '../clipboard/text-escaping.ts';
@@ -8,18 +7,20 @@ import { closeImportOfAFile } from './bring-in.ts';
 import { awaitFileAgain } from './file-awaited.ts';
 import { startImportOfAFile } from './import-flow.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function sheetNameOfFileName(fileName?: Dynamic) {
+import type { EditRefusedOnPage, PageState } from '../state/initial-state.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { FileToImportRead, PageEvent } from '../state/event-reducer.ts';
+export function sheetNameOfFileName(fileName: string) {
   let stem = cleanSheetName(sanitizeCellText(fileName.replace(/\.[^.]*$/, '')));
   return stem === '' ? cleanSheetName(sanitizeCellText(fileName)) : stem;
 }
-export function unescapedImportLines(rows?: Dynamic, isCsv?: Dynamic) {
+export function unescapedImportLines(rows: string[][], isCsv: boolean): string[][] {
   let lines =
     unescapedLinesCache.get(rows) ??
     rows.map(
-      (row?: Dynamic, rowIndex?: Dynamic) =>
+      (row, rowIndex) =>
         row.map(
-          (text?: Dynamic, columnIndex?: Dynamic) =>
+          (text, columnIndex) =>
             !isCsv ? unescapeLoneCellText(text) : rowIndex === 0 && columnIndex === 0 ? unescapeFirstCsvCellText(text) : unescapeCsvCellText(text),
         ),
     );
@@ -29,10 +30,10 @@ export function unescapedImportLines(rows?: Dynamic, isCsv?: Dynamic) {
 export function importReadFile(
   state: PageState,
   workbook: WorkbookReads,
-  { filename: filename, delimiter: delimiter, rows: rows, words: words }: Dynamic,
-) {
+  { filename, delimiter, rows, words }: Pick<FileToImportRead, 'filename' | 'delimiter' | 'rows' | 'words'>,
+): PageTransition {
   let lines = unescapedImportLines(rows, delimiter === ',');
-  let columnCount = lines.reduce((widest?: Dynamic, line?: Dynamic) => Math.max(widest, filledCellCountOfLine(line)), 0);
+  let columnCount = lines.reduce((widest, line) => Math.max(widest, filledCellCountOfLine(line)), 0);
   if (columnCount === 0)
     return withNoEffects({
       ...state,
@@ -42,7 +43,7 @@ export function importReadFile(
       },
     });
   let longTexts = lines.flatMap(
-    (line?: Dynamic) => line.filter((text?: Dynamic) => text.length > LONG_IMPORTED_TEXT_LENGTH),
+    (line) => line.filter((text) => text.length > LONG_IMPORTED_TEXT_LENGTH),
   );
   let [fit] =
     longTexts.length > 0
@@ -64,27 +65,27 @@ export function importReadFile(
         asked: 'import',
       },
     });
-  let filledCount: Dynamic = 0;
-  for (let lineOrRefusal of lines as Dynamic) for (let textOrRefused of lineOrRefusal as Dynamic) if (textOrRefused.trim() !== '') filledCount += 1;
+  let filledCount = 0;
+  for (let line of lines) for (let text of line) if (text.trim() !== '') filledCount += 1;
   if (filledCount > workbook.mostFilledCells()) {
-    let lineOrRefusal = {
+    let refusal: EditRefusedOnPage = {
       kind: 'editRefused',
       why: 'noRoomInWorkbook',
       asked: 'import',
     };
-    let textOrRefused = closeImportOfAFile(state);
+    let closed = closeImportOfAFile(state);
     return {
-      ...textOrRefused,
-      state: awaitFileAgain(textOrRefused.state, state.fileAwaited, lineOrRefusal),
+      ...closed,
+      state: awaitFileAgain(closed.state, state.fileAwaited, refusal),
     };
   }
   let nameStem = sheetNameOfFileName(filename);
   let sheetName = nameStem === '' ? words.names.sheet : nameStem;
   let file = {
     fileName: filename,
-    delimiter: delimiter,
-    lines: lines,
-    columnCount: columnCount,
+    delimiter,
+    lines,
+    columnCount,
   };
   let wordsWithName = {
     ...words,
@@ -95,7 +96,7 @@ export function importReadFile(
   };
   return startImportOfAFile(state, workbook, file, wordsWithName);
 }
-export const EVENTS_BEFORE_FILE_IMPORT = [
+export const EVENTS_BEFORE_FILE_IMPORT: PageEvent[] = [
   {
     kind: 'sheetNameLeft',
   },
@@ -104,4 +105,4 @@ export const EVENTS_BEFORE_FILE_IMPORT = [
   },
 ];
 export const LONG_IMPORTED_TEXT_LENGTH = 1e4;
-export const unescapedLinesCache = new (WeakMap as Dynamic)();
+export const unescapedLinesCache = new WeakMap<string[][], string[][]>();

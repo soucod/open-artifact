@@ -120,7 +120,19 @@ impl Leaf {
             Leaf::Horizontal => one_of(v, &["general", "left", "center", "right"]),
             Leaf::Vertical => one_of(v, &["top", "center", "bottom"]),
             Leaf::Underline => one_of(v, &["none", "single", "double"]),
-            Leaf::Wrap | Leaf::Bold | Leaf::Italic | Leaf::Strikethrough => v.as_bool().map(Value::Bool),
+            // Text's wrapping is written as a boolean or by name (from 44); kept as `true` (wrap), `"clip"` or
+            // `false` (overflow, the default).
+            Leaf::Wrap => match v {
+                Value::Bool(b) => Some(Value::Bool(*b)),
+                Value::String(s) => match s.as_str() {
+                    "wrap" => Some(json!(true)),
+                    "overflow" => Some(json!(false)),
+                    "clip" => Some(json!("clip")),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Leaf::Bold | Leaf::Italic | Leaf::Strikethrough => v.as_bool().map(Value::Bool),
             Leaf::FillColor | Leaf::FontColor => read_color(v),
             Leaf::CellControl => match v.get("kind")?.as_str()? {
                 "none" => only_keys(v, &["kind"]).map(|_| json!({"kind": "none"})),

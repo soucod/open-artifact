@@ -19,12 +19,12 @@ export function rememberLatestCausesOfError(readCause: (cell: CellId, cellNow: s
     if (said !== 'yetToCome' && said !== 'neverToCome') {
       latestByCell.delete(cellKey);
       latestByCell.set(cellKey, {
-        cellNow: cellNow,
-        said: said,
+        cellNow,
+        said,
       });
       for (let oldKey of [...latestByCell.keys()].slice(0, -29)) latestByCell.delete(oldKey);
       return {
-        said: said,
+        said,
         isLatest: true,
       };
     }
@@ -45,7 +45,7 @@ export function rememberLatestCausesOfError(readCause: (cell: CellId, cellNow: s
 }
 export function editsMadeOfQueued(queued: EditsQueued, answer: QueueEditAnswer): Edit[] {
   if (answer.kind !== 'editQueued') return [];
-  let { editsThatGoAlong: editsThatGoAlong = [] } = queued;
+  let { editsThatGoAlong = [] } = queued;
   let editsMadeAlong = editsThatGoAlong.filter(
     (_edit, index) => answer.editsThatWentAlong?.[index]?.kind === 'made',
   );
@@ -58,12 +58,12 @@ export const NO_CAUSE_OF_ERROR: CauseOfErrorSaid = {
   cause: null,
   passedOnFrom: null,
 };
-export const editsOfQueued = ({ editsBefore: editsBefore = [], edit: edit, editsThatGoAlong: editsThatGoAlong = [] }: EditsQueued): Edit[] => [
+export const editsOfQueued = ({ editsBefore = [], edit, editsThatGoAlong = [] }: EditsQueued): Edit[] => [
   ...editsBefore.map((before) => before.edit),
   edit,
   ...editsThatGoAlong,
 ];
 export const editAnsweredFor = (
-  { edit: edit, editsBefore: editsBefore = [] }: EditsQueued,
-  { indexOfEditBefore: indexOfEditBefore }: { indexOfEditBefore?: number },
+  { edit, editsBefore = [] }: EditsQueued,
+  { indexOfEditBefore }: { indexOfEditBefore?: number },
 ): Edit => (indexOfEditBefore === undefined ? undefined : editsBefore[indexOfEditBefore]?.edit) ?? edit;

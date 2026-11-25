@@ -21,7 +21,7 @@ import { isFormulaText } from '../chips/dropdown-pane-edits.ts';
 import { MAX_TEXT_ANSWERED_LATER } from '../editor/entries-answered-later.ts';
 import { editsOfQueued } from '../engine/cause-of-error-cache.ts';
 export function followedPartsOfFormat(format: WholeCellFormat): FollowedFormat {
-  let { numberFormat: numberFormat, font: font, border: border, ...rest } = format;
+  let { numberFormat, font, border, ...rest } = format;
   let pattern = {
     pattern: numberFormat.pattern,
   };
@@ -61,10 +61,10 @@ export function formatOfRowsAbove(reads: WorkbookReads, cellId: CellId, [above, 
     }),
   };
 }
-export function tableColumnsAboveEntry(state: PageState, reads: WorkbookReads, { rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition): LinesFromTo | null {
-  let { sheetId: sheetId } = state;
+export function tableColumnsAboveEntry(state: PageState, reads: WorkbookReads, { rowIndex, columnIndex }: CellPosition): LinesFromTo | null {
+  let { sheetId } = state;
   let readsWithEntries = readsWithUnansweredEntries(reads, state);
-  let isRowFilledIn = (row: number, { first: first, last: last }: LinesFromTo) =>
+  let isRowFilledIn = (row: number, { first, last }: LinesFromTo) =>
     readsWithEntries.columnIndexesOnShowIn(sheetId, row).some((column: number) => {
       if (column < first || column > last) return false;
       let cell = readsWithEntries.cellIdAt(sheetId, row, column);
@@ -72,7 +72,7 @@ export function tableColumnsAboveEntry(state: PageState, reads: WorkbookReads, {
       return value?.kind !== 'text' || value.value !== '';
     });
   let table = placedTablesOfSheet(state, readsWithEntries, sheetId)
-    .certain.filter(({ body: body, columns: columns }: PlacedTable) => {
+    .certain.filter(({ body, columns }: PlacedTable) => {
       if (body === null || columnIndex < columns.first || columnIndex > columns.last) return false;
       let rowsBetween = rowIndex - 1 - body.last;
       if (rowsBetween < 0 || rowsBetween > MOST_EMPTY_ROWS_UNDER_TABLE) return false;
@@ -85,7 +85,7 @@ export function tableColumnsAboveEntry(state: PageState, reads: WorkbookReads, {
     })
     .find((table: PlacedTable) => canOutlineTable(table, state, reads));
   if (table === undefined || table.body === null) return null;
-  let { body: body, columns: columns } = table;
+  let { body, columns } = table;
   let rowOfEntry: CellArea = {
     topRowIndex: rowIndex,
     rowCount: 1,
@@ -96,7 +96,7 @@ export function tableColumnsAboveEntry(state: PageState, reads: WorkbookReads, {
   if (rowIndex - 1 === body.first) return null;
   return columns;
 }
-export function formatRunsOfRow({ first: first, last: last }: LinesFromTo, rowIndex: number, formatAt: (column: number) => PartsFollowed): FormatRun[] {
+export function formatRunsOfRow({ first, last }: LinesFromTo, rowIndex: number, formatAt: (column: number) => PartsFollowed): FormatRun[] {
   let runs: FormatRun[] = [];
   for (let column = first; column <= last; column += 1) {
     let format = formatAt(column);
@@ -115,7 +115,7 @@ export function formatRunsOfRow({ first: first, last: last }: LinesFromTo, rowIn
       };
     else
       runs.push({
-        format: format,
+        format,
         area: {
           topRowIndex: rowIndex,
           rowCount: 1,
@@ -127,7 +127,7 @@ export function formatRunsOfRow({ first: first, last: last }: LinesFromTo, rowIn
   return runs;
 }
 export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cellId: CellId, text: string): FormatsToComeOfEntry {
-  let { sheetId: sheetId } = state;
+  let { sheetId } = state;
   let position = reads.positionOfCell(cellId);
   let columns = position === null ? null : tableColumnsAboveEntry(state, reads, position);
   if (position === null || columns === null)
@@ -153,11 +153,11 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
     let cellAt = (up: number) => reads.cellIdAt(sheetId, position.rowIndex - up, column);
     let [own, above, twoAbove] = [cellAt(0), cellAt(1), cellAt(2)];
     if (own === null || above === null || twoAbove === null) return {};
-    let { cellControl: cellControl, ...rest } = formatOfRowsAbove(reads, own, [above, twoAbove]);
+    let { cellControl, ...rest } = formatOfRowsAbove(reads, own, [above, twoAbove]);
     return cellControl !== undefined && (column !== position.columnIndex || fitsControlAbove)
       ? {
           ...rest,
-          cellControl: cellControl,
+          cellControl,
         }
       : rest;
   };
@@ -169,8 +169,8 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
       : [
           {
             kind: 'formatCells',
-            cells: cells,
-            format: format,
+            cells,
+            format,
           },
         ];
   };
@@ -187,21 +187,21 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
     isOptionOfDropdown ||
     isKeptAsText ||
     (parsePlainNumber(text, reads.decimalSign) !== null && NUMBER_KINDS_OF_FORMAT.has(numberFormatAbove.kind) && controlAbove.kind === 'none');
-  let { numberFormat: numberFormat, ...withoutNumberFormat } = followedAtEntry;
+  let { numberFormat, ...withoutNumberFormat } = followedAtEntry;
   let formatOfColumn = (column: number): PartsFollowed => {
     if (column === position.columnIndex) return takesNumberFormat ? followedAtEntry : withoutNumberFormat;
-    let { cellControl: cellControl, ...rest } = followedAt(column);
+    let { cellControl, ...rest } = followedAt(column);
     let cell = reads.cellIdAt(sheetId, position.rowIndex, column);
     if (cellControl === undefined || cell === null) return rest;
     return reads.cellOnShowIn(cell) === null || (cellControl.kind === 'checkbox' && reads.cellOf(cell)?.input.kind === 'formula')
       ? {
           ...rest,
-          cellControl: cellControl,
+          cellControl,
         }
       : rest;
   };
   let formats = formatRunsOfRow(columns, position.rowIndex, formatOfColumn).flatMap(
-    ({ area: area, format: format }: FormatRun) => formatEditsOf(area, format),
+    ({ area, format }: FormatRun) => formatEditsOf(area, format),
   );
   let toCome: FormatToCome[] = [];
   for (let column = columns.first; column <= columns.last; column += 1) {
@@ -211,20 +211,20 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
     if (Object.keys(format).length === 0 || cell === null || above === null) continue;
     let {
       numberFormat: numberFormatOfCellAbove,
-      alignment: alignment,
-      fillColor: fillColor,
-      font: font,
-      cellControl: cellControl,
+      alignment,
+      fillColor,
+      font,
+      cellControl,
     } = reads.formatOf(above);
     let look: LookToCome = {
       ...(format.numberFormat !== undefined && {
         numberFormat: numberFormatOfCellAbove,
       }),
       ...(format.alignment !== undefined && {
-        alignment: alignment,
+        alignment,
       }),
       ...(format.fillColor !== undefined && {
-        fillColor: fillColor,
+        fillColor,
       }),
       ...(format.font !== undefined && {
         font: {
@@ -233,7 +233,7 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
         },
       }),
       ...(format.cellControl !== undefined && {
-        cellControl: cellControl,
+        cellControl,
       }),
     };
     let dropdownSource =
@@ -241,8 +241,8 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
     let dropdownOf = format.cellControl?.kind === 'dropdown' ? dropdownSource : null;
     toCome.push({
       cellId: cell,
-      look: look,
-      dropdownOf: dropdownOf,
+      look,
+      dropdownOf,
       ...(column === position.columnIndex && {
         isOfEntry: true,
       }),
@@ -251,9 +251,9 @@ export function formatsToComeOfEntry(state: PageState, reads: WorkbookReads, cel
   let isTypedAsText = !isKeptAsText || text.startsWith(addTextPrefixQuote(''));
   let entered = isOptionOfDropdown ? textKeptAsText(optionChosen!.label) : isTypedAsText ? null : textKeptAsText(text);
   return {
-    formats: formats,
-    entered: entered,
-    toCome: toCome,
+    formats,
+    entered,
+    toCome,
   };
 }
 export function withFormatsOfRowsAbove(transition: PageTransition, state: PageState, reads: WorkbookReads): PageTransition {
@@ -261,7 +261,7 @@ export function withFormatsOfRowsAbove(transition: PageTransition, state: PageSt
     (candidate: PageEffect) => candidate.kind === 'queueEdit' && candidate.edit.kind === 'enter',
   );
   if (otherEntry !== undefined || effect?.kind !== 'queueEdit' || effect.edit.kind !== 'enter') return transition;
-  let { edit: edit, ifQueued: ifQueued } = effect as QueueEditEffect & { edit: EnterEdit };
+  let { edit, ifQueued } = effect as QueueEditEffect & { edit: EnterEdit };
   if (ifQueued.endsEntryAtOnce !== true) return transition;
   if (edit.entry.kind !== 'text' || edit.entry.text.trim() === '') return transition;
   if (isFormulaText(edit.entry.text)) return transition;
@@ -275,7 +275,7 @@ export function withFormatsOfRowsAbove(transition: PageTransition, state: PageSt
   };
   let dropdown = reads.dropdownOf(cellId);
   if (dropdown !== null && !isOptionText(dropdown, edit.entry.text)) return transition;
-  let { formats: formats, entered: entered, toCome: toCome } = formatsToComeOfEntry(state, reads, cellId, edit.entry.text);
+  let { formats, entered, toCome } = formatsToComeOfEntry(state, reads, cellId, edit.entry.text);
   if (formats.length === 0 || formats.length > MOST_FORMAT_EDITS_OF_ENTRY) return transition;
   let editEntered: EnterEdit =
     entered === null

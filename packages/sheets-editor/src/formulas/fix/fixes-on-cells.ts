@@ -1,10 +1,13 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { Edit, TextThatNoCellShows } from '@open-artifact/sheets-core';
 import { checkAgentForFormulas } from '../from-words/offer.ts';
 import { findCellsHangingOn, areaTouchesHangingCells } from '../dependents.ts';
+import type { CellsHangingBySheet } from '../dependents.ts';
 import { withNoEffects, NAVIGATING_MODE } from '../../state/transitions.ts';
+import type { PageEffect, PageTransition } from '../../state/transitions.ts';
 import { fixAskFor, askAgentToFixFormula, fewestCellsToReadAt, formulaBeforeSortOrMove, cameToBeforeASortAt, formulaLostToLastAct } from './ask.ts';
 import { shiftFormulaRows, withFixesOnCells, STOP_FIX_ASKS_EFFECTS, NO_FIXES_ON_CELLS } from './cells-to-fix.ts';
 import { newAwaitedHold, asLandedHold, holdOneMoreAct, isHoldReleased, answerHoldOf } from '../../format/answer-holds.ts';
+import type { HowActBegan } from '../../format/answer-holds.ts';
 import { readsAsStored } from '../../model/workbook.ts';
 import { mightFormulaSpill } from '../agent-answer-checks.ts';
 import { findFormulaReferences, resolveFormulaReference } from '../references.ts';
@@ -14,6 +17,7 @@ import { whyCallFailed } from '../from-words/ask-agent.ts';
 import { withoutStaleOffer, errorsOfferShown, resetBaselineOfOffer } from './errors-offer.ts';
 import { queueEdit, IF_QUEUED_DEFAULTS } from '../../model/edit-effects.ts';
 import { isSameCell, mergedAreaOrCellOf, scrollToShowSelection, activeAnchorCell } from '../../selection/model.ts';
+import type { CellArea } from '../../selection/model.ts';
 import { areaToA1AsStored } from '../from-words/where.ts';
 import { ownRowOrderOfSheet } from '../../model/line-ids.ts';
 import { cellUnderPoint, isCellInSight, cellKeyText, isExplainingBlocked } from '../../state/explained-under-cell.ts';
@@ -23,223 +27,251 @@ import { isLineShown } from '../../model/line-sizes.ts';
 import { isEffectAnEdit } from '../../state/edit-refusals.ts';
 import { isSameJson } from '../../import/column-readings.ts';
 import { cellKeyOf } from '../error-tells.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
-import type { PageState } from '../../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../../model/workbook.ts';
+import type {
+  FixAwaited,
+  FixesBeingMade,
+  FixesOnCells,
+  FixFound,
+  FormulaFromWords,
+  PageState,
+} from '../../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../../state/controller.ts';
-export function checkAgentWhenOfferGone(state: PageState, transition?: Dynamic) {
-  let [stageBefore, stage] = [transition.state.fixesOnCells, state.fixesOnCells];
-  return (stageBefore.toOffer !== null && stageBefore.toOffer !== stage.toOffer) ||
-    (stageBefore.toOfferInSelection !== null && stageBefore.toOfferInSelection !== stage.toOfferInSelection)
+import type { KeyPressed, PageEvent } from '../../state/event-reducer.ts';
+import type { GridPoint } from '../../grid/geometry.ts';
+import type { NumberFormatReply } from '../../format/custom-number-format.ts';
+/** What a key does to the fix at the active cell, and how the act began. */
+export interface FixKeyAction {
+  does: 'keeps' | 'discards' | 'nothing' | 'bringsPill';
+  fix: FixFound;
+  how: HowActBegan;
+}
+/** The stage of the fixes the bar over the sheet shows, and how many fixes it tells of. */
+export interface FixesBarStage {
+  stage: 'asked' | 'waiting' | 'undecided' | 'offered';
+  count: number;
+}
+/** An area of cells drawn as fixed by one ask of the agent: one cell, or several cells below one another. */
+export interface FixAreaToDraw extends CellArea {
+  key: string;
+  askId: number;
+}
+/** Which fixes to ask for: those offered for the sheet, or those offered for the selection. */
+export type FixesAskedFor = Extract<keyof FixesOnCells, 'toOffer' | 'toOfferInSelection'>;
+export function checkAgentWhenOfferGone(state: PageState, transition: PageTransition): PageTransition {
+  let [fixesAfter, fixesBefore] = [transition.state.fixesOnCells, state.fixesOnCells];
+  return (fixesAfter.toOffer !== null && fixesAfter.toOffer !== fixesBefore.toOffer) ||
+    (fixesAfter.toOfferInSelection !== null && fixesAfter.toOfferInSelection !== fixesBefore.toOfferInSelection)
     ? checkAgentForFormulas(transition)
     : transition;
 }
-export function hangingCellsOf(reads: WorkbookReads, sheetId?: Dynamic) {
-  let entry = hangingCellsCache.get(sheetId);
-  let hangingCells = entry?.reads === reads ? entry.hanging : findCellsHangingOn(reads, sheetId);
-  hangingCellsCache.set(sheetId, {
-    reads: reads,
+export function hangingCellsOf(reads: WorkbookReads, cellIds: CellId[]): CellsHangingBySheet | null {
+  let entry = hangingCellsCache.get(cellIds);
+  let hangingCells = entry?.reads === reads ? entry.hanging : findCellsHangingOn(reads, cellIds);
+  hangingCellsCache.set(cellIds, {
+    reads,
     hanging: hangingCells,
   });
   return hangingCells;
 }
-export function askAgentForFixes(state: PageState, reads: ReadsWithTextMeasurer, which: Dynamic = 'toOffer') {
-  let { [which]: fixes, stage: stage } = state.fixesOnCells;
+export function askAgentForFixes(state: PageState, reads: ReadsWithTextMeasurer, which: FixesAskedFor = 'toOffer'): PageTransition {
+  let { [which]: fixes, stage } = state.fixesOnCells;
   if (state.mode.kind === 'editing' || stage !== null) return withNoEffects(state);
   if (fixes === null || fixes === 'yetToBeKnown') return withNoEffects(state);
   let [firstFix, ...otherFixes] = fixes;
   if (firstFix === undefined) return withNoEffects(state);
-  let value = fixes.flatMap((fix?: Dynamic) => {
-    let fixAskFor2 = fixAskFor(state, reads, fix, fix.copies.at(-1));
-    return fixAskFor2 === null || typeof fixAskFor2 === 'string'
+  let asks = fixes.flatMap((fix) => {
+    let ask = fixAskFor(state, reads, fix, fix.copies.at(-1));
+    return ask === null || typeof ask === 'string'
       ? []
       : [
           {
-            ...fixAskFor2,
+            ...ask,
             cellId: fix.origin,
             cellsOfCopies: fix.copies,
           },
         ];
   });
-  if (value.length < fixes.length) return withNoEffects(fixesCameToNothing(state));
+  if (asks.length < fixes.length) return withNoEffects(fixesCameToNothing(state));
   if (otherFixes.length === 0 && firstFix.copies.length === 0) return askAgentToFixFormula(state, reads, firstFix.origin);
-  let value2 = fixes.flatMap(({ origin: origin, copies: copies }: Dynamic) => [origin].concat(copies));
-  if (hangingCellsOf(reads, value2) === null) return withNoEffects(fixesCameToNothing(state));
-  let value3 = state.fixesOnCells.askCount + 1;
-  let entries = new (Map as Dynamic)(
-    value.map((input?: Dynamic, index?: Dynamic) => {
+  let cellsAsked = fixes.flatMap(({ origin, copies }) => [origin].concat(copies));
+  if (hangingCellsOf(reads, cellsAsked) === null) return withNoEffects(fixesCameToNothing(state));
+  let firstAskId = state.fixesOnCells.askCount + 1;
+  let awaited = new Map<number, FixAwaited>(
+    asks.map((ask, index) => {
       let {
-        cellId: cellId,
-        broken: broken,
-        linesAsTold: linesAsTold,
-        fewestCellsToRead: fewestCellsToRead,
-        formulaBeforeASortOrMove: formulaBeforeASortOrMove,
-      } = input;
-      let { callsForNoNewCell: callsForNoNewCell, isLabelOrHeadingTold: isLabelOrHeadingTold } = input;
-      let value4 = input.cellsOfCopies.flatMap((cell?: Dynamic) => {
+        cellId,
+        broken,
+        linesAsTold,
+        fewestCellsToRead,
+        formulaBeforeASortOrMove,
+      } = ask;
+      let { callsForNoNewCell, isLabelOrHeadingTold } = ask;
+      let copies = ask.cellsOfCopies.flatMap((cell) => {
         let formulaText = reads.cellOf(cell)?.formulaText;
         if (formulaText === undefined) return [];
-        let fewestCellsToReadAt2 = fewestCellsToReadAt(state, cell, reads.decimalSign);
-        let formulaBeforeSortOrMove2 = formulaBeforeSortOrMove(state, cell);
+        let fewestCellsToReadOfCopy = fewestCellsToReadAt(state, cell, reads.decimalSign);
+        let formulaBeforeOfCopy = formulaBeforeSortOrMove(state, cell);
         return [
           {
             cellId: cell,
             broken: formulaText,
-            fewestCellsToRead: fewestCellsToReadAt2,
-            formulaBeforeASortOrMove: formulaBeforeSortOrMove2,
+            fewestCellsToRead: fewestCellsToReadOfCopy,
+            formulaBeforeASortOrMove: formulaBeforeOfCopy,
             cameToBeforeASort: cameToBeforeASortAt(state, cell),
-            callsForNoNewCell: callsForNoNewCell,
-            isLabelOrHeadingTold: isLabelOrHeadingTold,
+            callsForNoNewCell,
+            isLabelOrHeadingTold,
           },
         ];
       });
-      let value5 = formulaLostToLastAct(state, cellId)?.text ?? broken;
-      let value6 = shiftFormulaRows(value5, 1, reads.decimalSign) !== value5;
+      let formulaAsItWas = formulaLostToLastAct(state, cellId)?.text ?? broken;
+      let movesWithItsRow = shiftFormulaRows(formulaAsItWas, 1, reads.decimalSign) !== formulaAsItWas;
       return [
-        value3 + index,
+        firstAskId + index,
         {
-          cellId: cellId,
-          broken: broken,
-          linesAsTold: linesAsTold,
-          fewestCellsToRead: fewestCellsToRead,
-          formulaBeforeASortOrMove: formulaBeforeASortOrMove,
-          cameToBeforeASort: input.cameToBeforeASort,
-          callsForNoNewCell: callsForNoNewCell,
-          isLabelOrHeadingTold: isLabelOrHeadingTold,
-          copies: value4,
-          movesWithItsRow: value6,
+          cellId,
+          broken,
+          linesAsTold,
+          fewestCellsToRead,
+          formulaBeforeASortOrMove,
+          cameToBeforeASort: ask.cameToBeforeASort,
+          callsForNoNewCell,
+          isLabelOrHeadingTold,
+          copies,
+          movesWithItsRow,
         },
       ];
     }),
   );
-  let { sheetId: sheetId, workbookChangeCount: workbookChangeCount } = state;
+  let { sheetId, workbookChangeCount } = state;
   return {
     state: withFixesOnCells(state, {
       stage: {
-        sheetId: sheetId,
+        sheetId,
         atChangeCount: workbookChangeCount,
         tableBeingDeclared: null,
-        awaited: entries,
+        awaited,
         fixes: [],
         whyACallFailed: null,
-        asked: value2,
+        asked: cellsAsked,
         isOfSelection: which === 'toOfferInSelection',
         isKept: false,
         pointedAt: null,
         hasPersonLeft: state.isWindowLeft,
         stoodAt: state.activeCell,
-        hold: newAwaitedHold(value3),
+        hold: newAwaitedHold(firstAskId),
       },
-      askCount: value3 + value.length - 1,
-      offerDueBackOn: state.fixesOnCells.offerDueBackOn.filter((input?: Dynamic) => input !== sheetId),
+      askCount: firstAskId + asks.length - 1,
+      offerDueBackOn: state.fixesOnCells.offerDueBackOn.filter((dueOn) => dueOn !== sheetId),
     }),
-    effects: value.map(
-      ({ asked: asked }: Dynamic, index?: Dynamic) => ({
+    effects: asks.map(
+      ({ asked }, index) => ({
         kind: 'askAgentForAFix',
-        askId: value3 + index,
-        asked: asked,
+        askId: firstAskId + index,
+        asked,
       }),
     ),
   };
 }
-export function doesFixReachHangingCells(workbook: WorkbookReads, { asked: asked }: Dynamic, cell?: Dynamic, formula?: Dynamic) {
+export function doesFixReachHangingCells(workbook: WorkbookReads, { asked }: Pick<FixesBeingMade, 'asked'>, cell: CellId, formula: string): boolean {
   let reads = readsAsStored(workbook);
   let hangingCells = hangingCellsOf(reads, asked);
   if (hangingCells === null) return true;
   if (mightFormulaSpill(formula, reads.decimalSign)) return true;
-  return findFormulaReferences(formula, reads.decimalSign).references.some((reference?: Dynamic) => {
-    let value = resolveFormulaReference(reference, cell.sheetId, reads.listSheets());
-    return value === null || areaTouchesHangingCells(hangingCells, value.sheet.sheetId, value.area);
+  return findFormulaReferences(formula, reads.decimalSign).references.some((reference) => {
+    let resolved = resolveFormulaReference(reference, cell.sheetId, reads.listSheets());
+    return resolved === null || areaTouchesHangingCells(hangingCells, resolved.sheet.sheetId, resolved.area);
   });
 }
 export function fixesOfCopies(
   workbook: WorkbookReads,
-  sheetId: Dynamic,
-  { cellId: cellId, copies: copies, linesAsTold: linesAsTold, movesWithItsRow: movesWithItsRow }: Dynamic,
-  answer?: Dynamic,
-  askId?: Dynamic,
-) {
+  stage: Pick<FixesBeingMade, 'asked'>,
+  { cellId, copies, linesAsTold, movesWithItsRow }: FixAwaited,
+  answer: unknown,
+  askId: number,
+): FixFound[] {
   let reads = readsAsStored(workbook);
-  let value = isNonNullObject(answer) ? answer.formula : null;
-  if (typeof value !== 'string') return [];
+  let formula = isNonNullObject(answer) ? answer.formula : null;
+  if (typeof formula !== 'string') return [];
   let position = reads.positionOfCell(cellId);
-  return copies.flatMap((copy?: Dynamic) => {
-    let value2 = reads.positionOfCell(copy.cellId);
-    let value3 = position === null || value2 === null ? null : shiftFormulaRows(value, value2.rowIndex - position.rowIndex, 'point');
-    let value4 = checkFixAnswer(
+  return copies.flatMap((copy) => {
+    let positionOfCopy = reads.positionOfCell(copy.cellId);
+    let formulaOfCopy = position === null || positionOfCopy === null ? null : shiftFormulaRows(formula, positionOfCopy.rowIndex - position.rowIndex, 'point');
+    let checked = checkFixAnswer(
       reads,
       {
         ...copy,
-        linesAsTold: linesAsTold,
+        linesAsTold,
       },
       {
-        formula: value3,
+        formula: formulaOfCopy,
       },
     );
-    return value4 !== null && (value3 !== value) === movesWithItsRow && !doesFixReachHangingCells(reads, sheetId, copy.cellId, value4.formula)
+    return checked !== null && (formulaOfCopy !== formula) === movesWithItsRow && !doesFixReachHangingCells(reads, stage, copy.cellId, checked.formula)
       ? [
           {
             cellId: copy.cellId,
-            ...value4,
-            askId: askId,
+            ...checked,
+            askId,
           },
         ]
       : [];
   });
 }
-export function receiveFixAnswer(state: PageState, reads: WorkbookReads, askId?: Dynamic, reply?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function receiveFixAnswer(state: PageState, reads: WorkbookReads, askId: number, reply: NumberFormatReply): PageTransition {
+  let { stage } = state.fixesOnCells;
   let asked = stage?.awaited.get(askId);
   if (stage === null || asked === undefined) return withNoEffects(state);
   if (reply.kind === 'notToBeHad') {
     let stopped = stopAwaitingFixes(state);
-    let value7 = stopped.state.fixesOnCells.stage === null ? fixesCameToNothing(stopped.state) : stopped.state;
-    let formulaFromWords = {
+    let stateStopped = stopped.state.fixesOnCells.stage === null ? fixesCameToNothing(stopped.state) : stopped.state;
+    let formulaFromWords: FormulaFromWords = {
       ...state.formulaFromWords,
       agent: 'notToBeHad',
     };
     return {
       ...stopped,
       state: {
-        ...value7,
-        formulaFromWords: formulaFromWords,
+        ...stateStopped,
+        formulaFromWords,
       },
     };
   }
-  let value = reply.kind === 'answered' ? reply.answer : null;
-  let value2 = value === null ? null : checkFixAnswer(reads, asked, value);
-  let value3 = value2 !== null && doesFixReachHangingCells(reads, stage, asked.cellId, value2.formula) ? null : value2;
-  let value4 = reply.kind === 'failed' ? whyCallFailed(reply) : null;
-  let value5 = stage.whyACallFailed === 'rateLimited' ? 'rateLimited' : (value4 ?? stage.whyACallFailed);
-  let entries = new (Map as Dynamic)(stage.awaited);
-  entries.delete(askId);
-  let value6 =
-    value3 === null
+  let answer = reply.kind === 'answered' ? reply.answer : null;
+  let checked = answer === null ? null : checkFixAnswer(reads, asked, answer);
+  let fixFound = checked !== null && doesFixReachHangingCells(reads, stage, asked.cellId, checked.formula) ? null : checked;
+  let whyThisCallFailed = reply.kind === 'failed' ? whyCallFailed(reply) : null;
+  let whyACallFailed = stage.whyACallFailed === 'rateLimited' ? 'rateLimited' : (whyThisCallFailed ?? stage.whyACallFailed);
+  let awaited = new Map(stage.awaited);
+  awaited.delete(askId);
+  let fixes =
+    fixFound === null
       ? stage.fixes
       : [
           ...stage.fixes,
           {
             cellId: asked.cellId,
-            ...value3,
-            askId: askId,
+            ...fixFound,
+            askId,
           },
-          ...fixesOfCopies(reads, stage, asked, value, askId),
+          ...fixesOfCopies(reads, stage, asked, answer, askId),
         ];
   return withNoEffects(
-    entries.size === 0 && value6.length === 0
-      ? fixesCameToNothing(state, value5)
+    awaited.size === 0 && fixes.length === 0
+      ? fixesCameToNothing(state, whyACallFailed)
       : withFixesOnCells(state, {
           stage: {
             ...stage,
-            awaited: entries,
-            fixes: value6,
-            whyACallFailed: value5,
-            hold: entries.size === 0 ? asLandedHold(stage.hold) : stage.hold,
+            awaited,
+            fixes,
+            whyACallFailed,
+            hold: awaited.size === 0 ? asLandedHold(stage.hold) : stage.hold,
           },
         }),
   );
 }
-export function endFixes(state: PageState) {
-  let { stage: stage } = state.fixesOnCells;
+export function endFixes(state: PageState): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage === null) return withNoEffects(state);
   return {
     state: {
@@ -251,27 +283,27 @@ export function endFixes(state: PageState) {
     effects: stage.awaited.size > 0 ? STOP_FIX_ASKS_EFFECTS : [],
   };
 }
-export function stopAwaitingFixes(state: PageState) {
-  let { stage: stage } = state.fixesOnCells;
+export function stopAwaitingFixes(state: PageState): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage === null || stage.fixes.length === 0) return endFixes(state);
-  let nextState = {
+  let stageStopped = {
     ...stage,
-    awaited: new (Map as Dynamic)(),
+    awaited: new Map<number, FixAwaited>(),
     hold: asLandedHold(stage.hold),
   };
   return {
     state: withFixesOnCells(state, {
-      stage: nextState,
+      stage: stageStopped,
     }),
     effects: STOP_FIX_ASKS_EFFECTS,
   };
 }
-export function discardFixes(state: PageState, reads?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function discardFixes(state: PageState, how: HowActBegan): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage === null || stage.isKept) return withNoEffects(state);
-  let held = holdOneMoreAct(state, 'fixes', reads);
+  let held = holdOneMoreAct(state, 'fixes', how);
   if (stage.awaited.size > 0) return stopAwaitingFixes(held);
-  if (!isHoldReleased(stage.hold, reads)) return withNoEffects(held);
+  if (!isHoldReleased(stage.hold, how)) return withNoEffects(held);
   let { state: heldState, effects: heldEffects } = endFixes(state);
   let fixCount = fixesNotKept(stage).length;
   if (fixCount === 0)
@@ -290,8 +322,8 @@ export function discardFixes(state: PageState, reads?: Dynamic) {
     effects: heldEffects,
   };
 }
-export function keepFixes(state: PageState, reads: WorkbookReads, how?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function keepFixes(state: PageState, reads: WorkbookReads, how: HowActBegan): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage === null || stage.isKept) return withNoEffects(state);
   if (!isHoldReleased(stage.hold, how)) return withNoEffects(holdOneMoreAct(state, 'fixes', how));
   if (!hasFixesNotKept(stage)) return withNoEffects(state);
@@ -317,29 +349,29 @@ export function keepFixes(state: PageState, reads: WorkbookReads, how?: Dynamic)
     },
   );
 }
-export function fixAtCell({ fixesOnCells: { stage: stage } }: Dynamic, cellId?: Dynamic) {
+export function fixAtCell({ fixesOnCells: { stage } }: Pick<PageState, 'fixesOnCells'>, cellId: CellId): FixFound | null {
   if (stage === null || stage.awaited.size > 0 || stage.isKept) return null;
-  return fixesNotKept(stage).find((input?: Dynamic) => isSameCell(input.cellId, cellId)) ?? null;
+  return fixesNotKept(stage).find((fix) => isSameCell(fix.cellId, cellId)) ?? null;
 }
-export function keepFix(state: PageState, reads: WorkbookReads, cellId?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function keepFix(state: PageState, reads: WorkbookReads, cellId: CellId): PageTransition {
+  let { stage } = state.fixesOnCells;
   let fix = fixAtCell(state, cellId);
   let area = mergedAreaOrCellOf(reads, cellId);
   if (stage === null || fix === null || area === null) return withNoEffects(state);
   let fixes = stage.fixes.map(
-    (input?: Dynamic) =>
-      input === fix
+    (fixOfCell) =>
+      fixOfCell === fix
         ? {
-            ...input,
-            isKept: true,
+            ...fixOfCell,
+            isKept: true as const,
           }
-        : input,
+        : fixOfCell,
   );
   return queueEdit(
     withFixesOnCells(withErrorsOfferReset(state), {
       stage: {
         ...stage,
-        fixes: fixes,
+        fixes,
       },
     }),
     pasteFixesEdit(stage, reads, [fix]),
@@ -352,20 +384,20 @@ export function keepFix(state: PageState, reads: WorkbookReads, cellId?: Dynamic
       },
       thenEvent: {
         kind: 'fixKeptAnswered',
-        cellId: cellId,
+        cellId,
       },
     },
   );
 }
-export function takeBackKeptFix(state: PageState, cellId?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
-  let isKept = stage?.fixes.some((fix?: Dynamic) => fix.isKept === true && isSameCell(fix.cellId, cellId));
+export function takeBackKeptFix(state: PageState, cellId: CellId): PageTransition {
+  let { stage } = state.fixesOnCells;
+  let isKept = stage?.fixes.some((fix) => fix.isKept === true && isSameCell(fix.cellId, cellId));
   return stage === null || isKept !== true ? withNoEffects(state) : dropFixAtCell(state, stage, cellId);
 }
-export function discardFix(state: PageState, cellId?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function discardFix(state: PageState, cellId: CellId): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage === null || fixAtCell(state, cellId) === null) return withNoEffects(state);
-  let { state: nextState, effects: effects } = dropFixAtCell(state, stage, cellId);
+  let { state: nextState, effects } = dropFixAtCell(state, stage, cellId);
   return {
     state: {
       ...nextState,
@@ -373,11 +405,11 @@ export function discardFix(state: PageState, cellId?: Dynamic) {
         what: 'fixDiscarded',
       },
     },
-    effects: effects,
+    effects,
   };
 }
-export function pointAtFix(state: PageState, reads: ReadsWithTextMeasurer, point?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function pointAtFix(state: PageState, reads: ReadsWithTextMeasurer, point: GridPoint | null): PageState {
+  let { stage } = state.fixesOnCells;
   if (stage === null) return state;
   let pointedAt = point === null ? null : cellUnderPoint(state, reads, point);
   let cellId = pointedAt !== null && fixAtCell(state, pointedAt) !== null ? pointedAt : null;
@@ -390,54 +422,54 @@ export function pointAtFix(state: PageState, reads: ReadsWithTextMeasurer, point
         },
       });
 }
-export function fixPointedAt(state: PageState, reads: ReadsWithTextMeasurer) {
+export function fixPointedAt(state: PageState, reads: ReadsWithTextMeasurer): FixFound | null {
   let pointedAt = state.fixesOnCells.stage?.pointedAt ?? null;
   return pointedAt !== null && isCellInSight(state, reads, pointedAt) ? fixAtCell(state, pointedAt) : null;
 }
-export function fixPillShown(state: PageState, reads: ReadsWithTextMeasurer) {
+export function fixPillShown(state: PageState, reads: ReadsWithTextMeasurer): FixFound | null {
   if (isFixPillBlocked(state)) return null;
   let pointedAt = fixPointedAt(state, reads);
   if (pointedAt !== null || !isFixAtSelectionShown(state)) return pointedAt;
   let atActiveCell = fixAtActiveCell(state, reads);
   return atActiveCell !== null && isCellInSight(state, reads, atActiveCell.cellId) ? atActiveCell : null;
 }
-export function fixPillOfActiveCell(state: PageState, reads: ReadsWithTextMeasurer) {
+export function fixPillOfActiveCell(state: PageState, reads: ReadsWithTextMeasurer): FixFound | null {
   let fix = fixAtActiveCell(state, reads);
-  let isInSight = state.fixesOnCells.stage?.hasPersonLeft === true;
-  return fix !== null && !isInSight && fixPillShown(state, reads) === fix ? fix : null;
+  let hasPersonLeft = state.fixesOnCells.stage?.hasPersonLeft === true;
+  return fix !== null && !hasPersonLeft && fixPillShown(state, reads) === fix ? fix : null;
 }
 export function fixKeyAction(
   state: PageState,
   reads: ReadsWithTextMeasurer,
-  { key: key, pillOfFixSeen: pillOfFixSeen, isReadLate: isReadLate, ...event }: Dynamic,
-) {
+  { key, pillOfFixSeen, isReadLate, ...event }: KeyPressed,
+): FixKeyAction | null {
   let fix = key === 'Enter' || key === 'Escape' || key === 'F2' ? fixAtActiveCell(state, reads) : null;
   if (fix === null || (key === 'Escape' && escapeInCellsDoes(state) !== 'stepsOut')) return null;
   let hasPill = fixPillOfActiveCell(state, reads) !== null;
-  let action = pillOfFixSeen === cellKeyText(fix.cellId) && isHoldReleased(answerHoldOf(state, 'fixes'), event);
-  if (hasPill && key !== 'F2' && action)
+  let isPillSeenAndFree = pillOfFixSeen === cellKeyText(fix.cellId) && isHoldReleased(answerHoldOf(state, 'fixes'), event);
+  if (hasPill && key !== 'F2' && isPillSeenAndFree)
     return {
       does: key === 'Enter' ? 'keeps' : 'discards',
-      fix: fix,
+      fix,
       how: event,
     };
   if (key === 'Escape')
     return hasPill
       ? {
           does: 'nothing',
-          fix: fix,
+          fix,
           how: event,
         }
       : null;
   return {
     does: isReadLate === true && state.fixesOnCells.stage?.hasPersonLeft === true ? 'nothing' : 'bringsPill',
-    fix: fix,
+    fix,
     how: event,
   };
 }
-export function actOnFixKey(state: Dynamic, reads: ReadsWithTextMeasurer, { does: does, fix: fix, how: how }: Dynamic) {
+export function actOnFixKey(state: PageState, reads: ReadsWithTextMeasurer, { does, fix, how }: FixKeyAction): PageTransition {
   let held = holdOneMoreAct(state, 'fixes', how);
-  let { stage: stage } = held.fixesOnCells;
+  let { stage } = held.fixesOnCells;
   if (does === 'keeps') return keepFix(held, reads, fix.cellId);
   if (does === 'discards') return discardFix(held, fix.cellId);
   if (does === 'nothing' || stage === null) return withNoEffects(held);
@@ -463,12 +495,12 @@ export function actOnFixKey(state: Dynamic, reads: ReadsWithTextMeasurer, { does
     },
   });
 }
-export function dropFixesTakenBack(state: PageState, reads: WorkbookReads, takenBack?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function dropFixesTakenBack(state: PageState, reads: WorkbookReads, takenBack: TextThatNoCellShows[]): PageTransition {
+  let { stage } = state.fixesOnCells;
   if (stage?.isKept !== true) return withNoEffects(state);
   let fixesLeft = stage.fixes.filter(
-    ({ cellId: cellId, formula: formula }: Dynamic) =>
-      !takenBack.some(({ r: r2, c: c, written: written }: Dynamic) => written === formula || (r2 === cellId.rowId && c === cellId.columnId)),
+    ({ cellId, formula }) =>
+      !takenBack.some(({ r, c, written }) => written === formula || (r === cellId.rowId && c === cellId.columnId)),
   );
   return fixesLeft.length === 0 || fixesLeft.length === stage.fixes.length
     ? withNoEffects(fixesCameToNothing(endFixes(state).state))
@@ -484,14 +516,14 @@ export function dropFixesTakenBack(state: PageState, reads: WorkbookReads, taken
         {},
       );
 }
-export function areCellsInSight(state: PageState, reads: ReadsWithTextMeasurer, cellIds?: Dynamic) {
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(state, reads);
-  return cellIds.every((input?: Dynamic) => {
-    let value = reads.positionOfCell(input);
-    return value !== null && isLineShown(rowEdges, value.rowIndex) && isLineShown(columnEdges, value.columnIndex);
+export function areCellsInSight(state: PageState, reads: ReadsWithTextMeasurer, cellIds: CellId[]): boolean {
+  let { rowEdges, columnEdges } = layoutOfView(state, reads);
+  return cellIds.every((cellId) => {
+    let position = reads.positionOfCell(cellId);
+    return position !== null && isLineShown(rowEdges, position.rowIndex) && isLineShown(columnEdges, position.columnIndex);
   });
 }
-export function endFixesToldDuringAct({ state: state, effects: effects }: Dynamic, event?: Dynamic) {
+export function endFixesToldDuringAct({ state, effects }: PageTransition, event: PageEvent): PageState {
   let isEndingAct = event.kind === 'editAnswered' || event.kind === 'undoOrRedoAnswered' || event.kind === 'takeBackAnswered';
   if (!state.fixesOnCells.isEndToldDuringAct || isEndingAct || !effects.some(isEffectAnEdit)) return state;
   return {
@@ -501,11 +533,11 @@ export function endFixesToldDuringAct({ state: state, effects: effects }: Dynami
     notice: state.notice?.kind === 'fixesGoneWithChange' ? null : state.notice,
   };
 }
-export function updateFixPresence(state: PageState, event?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function updateFixPresence(state: PageState, event: PageEvent): PageState {
+  let { stage } = state.fixesOnCells;
   if (stage === null) return state;
   let isPressByTouch = event.kind === 'pointerPressed' && event.isByMouse !== true;
-  let isPressOnFix =
+  let stageNow =
     stage.stoodAt !== null && (isPressByTouch || !isSameCell(state.activeCell, stage.stoodAt))
       ? {
           ...stage,
@@ -515,83 +547,90 @@ export function updateFixPresence(state: PageState, event?: Dynamic) {
   if (event.kind === 'windowCaretChanged' && !event.hasCaret)
     return withFixesOnCells(state, {
       stage: {
-        ...isPressOnFix,
+        ...stageNow,
         hasPersonLeft: true,
         pointedAt: null,
       },
     });
-  let pointedAt = (event.kind === 'keyPressed' && event.isReadLate !== true) || event.kind === 'pointerPressed';
-  if (isPressOnFix.hasPersonLeft && pointedAt)
+  let hasPersonActed = (event.kind === 'keyPressed' && event.isReadLate !== true) || event.kind === 'pointerPressed';
+  if (stageNow.hasPersonLeft && hasPersonActed)
     return withFixesOnCells(state, {
       stage: {
-        ...isPressOnFix,
+        ...stageNow,
         hasPersonLeft: false,
       },
     });
-  return isPressOnFix === stage
+  return stageNow === stage
     ? state
     : withFixesOnCells(state, {
-        stage: isPressOnFix,
+        stage: stageNow,
       });
 }
-export function followTableBeingDeclared(state: PageState, reads: WorkbookReads, tables?: Dynamic, event?: Dynamic) {
-  let { stage: stage } = state.fixesOnCells;
+export function followTableBeingDeclared(state: PageState, reads: WorkbookReads, effects: PageEffect[], event: PageEvent): PageState {
+  let { stage } = state.fixesOnCells;
   if (stage === null) return state;
-  let table = tables.find((table2?: Dynamic) => table2.kind === 'declareCellTable');
-  if (table !== undefined && table.sheetId === stage.sheetId)
+  let declared = effects.find(
+    (effect): effect is Extract<PageEffect, { kind: 'declareCellTable' }> => effect.kind === 'declareCellTable',
+  );
+  if (declared !== undefined && declared.sheetId === stage.sheetId)
     return withFixesOnCells(state, {
       stage: {
         ...stage,
-        tableBeingDeclared: table.cellTable,
+        tableBeingDeclared: declared.cellTable,
       },
     });
-  let { tableBeingDeclared: tableBeingDeclared, atChangeCount: atChangeCount } = stage;
+  let { tableBeingDeclared, atChangeCount } = stage;
   if (tableBeingDeclared === null || event.kind !== 'workbookChanged' || event.isUnasked) return state;
   let tablesNow = reads.cellTables(stage.sheetId);
-  let value =
-    Array.isArray(tablesNow) && tablesNow.some(({ cellTable: cellTable }: Dynamic) => isSameJson(cellTable, tableBeingDeclared));
+  let isTableDeclared =
+    Array.isArray(tablesNow) && tablesNow.some(({ cellTable }) => isSameJson(cellTable, tableBeingDeclared));
   return withFixesOnCells(state, {
     stage: {
       ...stage,
       tableBeingDeclared: null,
-      atChangeCount: value ? state.workbookChangeCount : atChangeCount,
+      atChangeCount: isTableDeclared ? state.workbookChangeCount : atChangeCount,
     },
   });
 }
-export function updateFixesOnCellsAfterEvent(transition: Dynamic, reads: ReadsWithTextMeasurer, isInAct?: Dynamic, event?: Dynamic) {
-  let { effects: effects } = transition;
+export function updateFixesOnCellsAfterEvent(
+  transition: PageTransition,
+  reads: ReadsWithTextMeasurer,
+  isInAct: boolean,
+  event: PageEvent,
+): PageTransition {
+  let { effects } = transition;
   let presence = updateFixPresence(endFixesToldDuringAct(transition, event), event);
-  let hasStopEffect = effects.some((state?: Dynamic) => state.kind === 'queueEdit' && state.ifQueued.isKeepOfAgentsFix === true);
-  let following = followTableBeingDeclared(hasStopEffect ? withErrorsOfferReset(presence) : presence, reads, effects, event);
-  let { stage: stage } = following.fixesOnCells;
+  let isFixKept = effects.some((effect) => effect.kind === 'queueEdit' && effect.ifQueued.isKeepOfAgentsFix === true);
+  let following = followTableBeingDeclared(isFixKept ? withErrorsOfferReset(presence) : presence, reads, effects, event);
+  let { stage } = following.fixesOnCells;
   if (stage === null)
     return {
       state: following,
-      effects: effects,
+      effects,
     };
-  let value =
+  let notEditing =
     following.mode.kind === 'editing'
       ? {
           ...following,
           mode: NAVIGATING_MODE,
         }
       : following;
-  let value2 =
-    errorsOfferShown(value, reads) !== null &&
+  let areFixesInSight =
+    errorsOfferShown(notEditing, reads) !== null &&
     !isInAct &&
     areCellsInSight(
       following,
       reads,
-      cellsOfFixes(following).map(({ cellId: cellId }: Dynamic) => cellId),
+      cellsOfFixes(following).map(({ cellId }) => cellId),
     );
-  if (following.workbookChangeCount === stage.atChangeCount && value2)
+  if (following.workbookChangeCount === stage.atChangeCount && areFixesInSight)
     return {
       state: following,
-      effects: effects,
+      effects,
     };
-  let value3 = event.kind === 'workbookChanged' && !event.isUnasked;
-  let value4 = stage.fixes.some(({ isKept: isKept }: Dynamic) => isKept === true);
-  if (value3 && value4 && hasFixesNotKept(stage) && value2)
+  let isAskedChange = event.kind === 'workbookChanged' && !event.isUnasked;
+  let isAnyFixKept = stage.fixes.some(({ isKept }) => isKept === true);
+  if (isAskedChange && isAnyFixKept && hasFixesNotKept(stage) && areFixesInSight)
     return {
       state: withFixesOnCells(following, {
         stage: {
@@ -599,35 +638,35 @@ export function updateFixesOnCellsAfterEvent(transition: Dynamic, reads: ReadsWi
           atChangeCount: following.workbookChangeCount,
         },
       }),
-      effects: effects,
+      effects,
     };
-  let value5 = endFixes(following);
-  let value6 =
+  let ended = endFixes(following);
+  let endedOnSheet =
     following.sheetId === stage.sheetId
-      ? value5
+      ? ended
       : {
-          ...value5,
-          state: withFixesOnCells(value5.state, {
-            offerDueBackOn: [...value5.state.fixesOnCells.offerDueBackOn, stage.sheetId],
+          ...ended,
+          state: withFixesOnCells(ended.state, {
+            offerDueBackOn: [...ended.state.fixesOnCells.offerDueBackOn, stage.sheetId],
           }),
         };
   return {
     state:
       following.workbookChangeCount !== stage.atChangeCount && !stage.isKept && !isInAct && (stage.fixes.length === 0 || hasFixesNotKept(stage))
         ? {
-            ...withFixesOnCells(value6.state, {
-              isEndToldDuringAct: following.notice === null && (value3 || value4),
+            ...withFixesOnCells(endedOnSheet.state, {
+              isEndToldDuringAct: following.notice === null && (isAskedChange || isAnyFixKept),
             }),
             notice: following.notice ?? {
               kind: 'fixesGoneWithChange',
             },
           }
-        : value6.state,
-    effects: [...value6.effects, ...effects],
+        : endedOnSheet.state,
+    effects: [...endedOnSheet.effects, ...effects],
   };
 }
-export function fixesBarStage({ fixesOnCells: fixesOnCells, formulaFromWords: formulaFromWords }: Dynamic) {
-  let { toOffer: toOffer, stage: stage } = fixesOnCells;
+export function fixesBarStage({ fixesOnCells, formulaFromWords }: Pick<PageState, 'fixesOnCells' | 'formulaFromWords'>): FixesBarStage | null {
+  let { toOffer, stage } = fixesOnCells;
   if (stage !== null)
     return stage.awaited.size > 0
       ? {
@@ -645,7 +684,7 @@ export function fixesBarStage({ fixesOnCells: fixesOnCells, formulaFromWords: fo
       stage: 'undecided',
       count: 0,
     };
-  let fixCount = toOffer.reduce((input: Dynamic, { copies: copies }: Dynamic) => input + 1 + copies.length, 0);
+  let fixCount = toOffer.reduce((count, { copies }) => count + 1 + copies.length, 0);
   return agentOnWords === 'available'
     ? {
         stage: 'offered',
@@ -654,64 +693,64 @@ export function fixesBarStage({ fixesOnCells: fixesOnCells, formulaFromWords: fo
     : null;
 }
 export function fixesInSelectionStage({
-  fixesOnCells: { toOfferInSelection: toOfferInSelection, stage: stage },
-  formulaFromWords: { agent: agentOnWords, hasAgentBeenMissed: hasAgentBeenMissed },
-}: Dynamic) {
+  fixesOnCells: { toOfferInSelection, stage },
+  formulaFromWords: { agent: agentOnWords, hasAgentBeenMissed },
+}: Pick<PageState, 'fixesOnCells' | 'formulaFromWords'>): 'undecided' | 'offered' | null {
   if (stage !== null || toOfferInSelection === null) return null;
   if ((agentOnWords === 'checking' || agentOnWords === 'unchecked') && !hasAgentBeenMissed) return 'undecided';
   if (agentOnWords !== 'available') return null;
   return toOfferInSelection === 'yetToBeKnown' ? 'undecided' : 'offered';
 }
-export function cellsOfFixes({ fixesOnCells: { stage: stage } }: Dynamic) {
+export function cellsOfFixes({ fixesOnCells: { stage } }: Pick<PageState, 'fixesOnCells'>) {
   if (stage === null) return [];
   if (stage.awaited.size === 0)
     return stage.fixes.map(
-      ({ cellId: cellId, formula: formula, askId: askId, shown: shown, isKept: isKept }: Dynamic) => ({
-        cellId: cellId,
-        formula: formula,
-        askId: askId,
+      ({ cellId, formula, askId, shown, isKept }) => ({
+        cellId,
+        formula,
+        askId,
         shownWhileItWaits: stage.isKept || isKept === true ? null : shown,
       }),
     );
   let awaitedCells = [...stage.awaited].flatMap(
-    ([input, { cellId: input2, copies: input3 }]: Dynamic) =>
-      [input2, ...input3.map((input4?: Dynamic) => input4.cellId)].map(
-        (input4?: Dynamic) => ({
-          cellId: input4,
-          askId: input,
+    ([askId, { cellId: firstCell, copies }]) =>
+      [firstCell, ...copies.map((copy) => copy.cellId)].map(
+        (cellId) => ({
+          cellId,
+          askId,
         }),
       ),
   );
   return [...stage.fixes, ...awaitedCells].map(
-    ({ cellId: cellId, askId: askId }: Dynamic) => ({
-      cellId: cellId,
-      askId: askId,
+    ({ cellId, askId }) => ({
+      cellId,
+      askId,
       formula: null,
       shownWhileItWaits: null,
     }),
   );
 }
-export function fixAreasToDraw(state: Dynamic, reads: WorkbookReads) {
-  let areas: Dynamic = [];
-  for (let { cellId: cellId, askId: askId } of cellsOfFixes(state) as Dynamic) {
+export function fixAreasToDraw(state: Pick<PageState, 'fixesOnCells'>, reads: WorkbookReads): FixAreaToDraw[] {
+  let areas: FixAreaToDraw[] = [];
+  for (let { cellId, askId } of cellsOfFixes(state)) {
     let area = mergedAreaOrCellOf(reads, cellId);
-    let value = areas.at(-1);
+    let last = areas.at(-1);
     if (area === null) continue;
-    if (value?.askId === askId && value.leftColumnIndex === area.leftColumnIndex && value.topRowIndex + value.rowCount === area.topRowIndex)
+    if (last?.askId === askId && last.leftColumnIndex === area.leftColumnIndex && last.topRowIndex + last.rowCount === area.topRowIndex)
       areas[areas.length - 1] = {
-        ...value,
-        rowCount: value.rowCount + area.rowCount,
+        ...last,
+        rowCount: last.rowCount + area.rowCount,
       };
     else
       areas.push({
         ...area,
         key: cellKeyOf(cellId),
-        askId: askId,
+        askId,
       });
   }
   return areas;
 }
-export const fixesCameToNothing = (state: PageState, reason: Dynamic = null) =>
+export const fixesCameToNothing = (state: PageState, reason: FixesBeingMade['whyACallFailed'] = null): PageState =>
   reason === null
     ? {
         ...withFixesOnCells(state, {
@@ -731,29 +770,29 @@ export const fixesCameToNothing = (state: PageState, reason: Dynamic = null) =>
           why: reason,
         },
       };
-export const hangingCellsCache = new (WeakMap as Dynamic)();
-export const pasteFixesEdit = ({ sheetId: sheetId }: Dynamic, reads: WorkbookReads, fixes?: Dynamic) => ({
+export const hangingCellsCache = new WeakMap<CellId[], { reads: WorkbookReads; hanging: CellsHangingBySheet | null }>();
+export const pasteFixesEdit = ({ sheetId }: Pick<FixesBeingMade, 'sheetId'>, reads: WorkbookReads, fixes: FixFound[]): Edit => ({
   kind: 'pasteTexts',
-  sheetId: sheetId,
+  sheetId,
   cells: fixes.map(
-    ({ cellId: { rowId: fix, columnId: fix2 }, formula: formula }: Dynamic) => ({
-      r: fix,
-      c: fix2,
+    ({ cellId: { rowId, columnId }, formula }) => ({
+      r: rowId,
+      c: columnId,
       text: formula,
     }),
   ),
   pastedTextIs: 'asTyped',
   localeOfTexts: reads.locale,
 });
-export const fixesNotKept = ({ fixes: fixes }: Dynamic) => fixes.filter(({ isKept: isKept }: Dynamic) => isKept !== true);
-export const hasFixesNotKept = (stage?: Dynamic) => fixesNotKept(stage).length > 0;
-export const areFixesWaiting = ({ fixesOnCells: { stage: stage } }: Dynamic) => stage !== null && hasFixesNotKept(stage);
-export const withErrorsOfferReset = (state: PageState) => ({
+export const fixesNotKept = ({ fixes }: Pick<FixesBeingMade, 'fixes'>): FixFound[] => fixes.filter(({ isKept }) => isKept !== true);
+export const hasFixesNotKept = (stage: Pick<FixesBeingMade, 'fixes'>): boolean => fixesNotKept(stage).length > 0;
+export const areFixesWaiting = ({ fixesOnCells: { stage } }: Pick<PageState, 'fixesOnCells'>): boolean => stage !== null && hasFixesNotKept(stage);
+export const withErrorsOfferReset = (state: PageState): PageState => ({
   ...state,
   errorsOffered: resetBaselineOfOffer(state.errorsOffered),
 });
-export const dropFixAtCell = (state: PageState, stage?: Dynamic, cellId?: Dynamic) => {
-  let fixesLeft = stage.fixes.filter((fix?: Dynamic) => !isSameCell(fix.cellId, cellId));
+export const dropFixAtCell = (state: PageState, stage: FixesBeingMade, cellId: CellId): PageTransition => {
+  let fixesLeft = stage.fixes.filter((fix) => !isSameCell(fix.cellId, cellId));
   return fixesLeft.length === 0
     ? endFixes(state)
     : withNoEffects(
@@ -765,13 +804,13 @@ export const dropFixAtCell = (state: PageState, stage?: Dynamic, cellId?: Dynami
         }),
       );
 };
-export const isFixPillBlocked = (state?: Dynamic) =>
+export const isFixPillBlocked = (state: PageState): boolean =>
   isExplainingBlocked({
     ...state,
     fixesOnCells: NO_FIXES_ON_CELLS,
     isSteppedOutOfCells: false,
   });
-export const fixAtActiveCell = (state: PageState, reads: WorkbookReads) =>
+export const fixAtActiveCell = (state: PageState, reads: WorkbookReads): FixFound | null =>
   isFixPillBlocked(state) ? null : fixAtCell(state, activeAnchorCell(state, reads));
-export const isFixAtSelectionShown = ({ explainedUnderCell: explainedUnderCell, fixesOnCells: fixesOnCells }: Dynamic) =>
+export const isFixAtSelectionShown = ({ explainedUnderCell, fixesOnCells }: Pick<PageState, 'explainedUnderCell' | 'fixesOnCells'>): boolean =>
   !explainedUnderCell.isSelectionByMouse && fixesOnCells.stage?.hasPersonLeft !== true && fixesOnCells.stage?.stoodAt === null;

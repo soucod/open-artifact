@@ -147,6 +147,36 @@
   stroke-dasharray: 4 4;
 }
 
+/* The area the open Ask panel is about. */
+.wb-ask-scope {
+  fill-opacity: 0.06;
+  stroke-dasharray: none;
+}
+
+/* A drawn area's origin dot and its corner grip (screen units, centered on the corner). */
+.wb-area-origin,
+.wb-area-grip {
+  box-sizing: border-box;
+  border-radius: 999px;
+}
+
+.wb-area-origin {
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  background: var(--wb-area-color, var(--color-warning));
+}
+
+.wb-area-grip {
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid var(--wb-area-color, var(--color-warning));
+  background: var(--color-surface);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
 .wb-idea-outline {
   fill: none;
   stroke-width: 1.5;

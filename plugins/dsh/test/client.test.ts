@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { WAKE_SOURCE_KIND } from '@open-artifact/protocol';
 import { cardData, isShellMessage, isWakeEvent, threadUrl } from '../src/client/cards.ts';
+import { MAX_VIEWS, ShellViews } from '../src/client/host-open.ts';
 import { countByType, inRange, NO_FILTERS, visibleArtifacts } from '../src/client/filters.ts';
 import { en, translator, zh } from '../src/client/i18n.ts';
+import { captureRecipe } from '../src/client/types.ts';
 import type { PageArtifact } from '../src/shared/routes.ts';
 
 const NOW = Date.parse('2026-11-14T12:00:00.000Z');
@@ -99,9 +101,64 @@ describe('cards', () => {
     assert.equal(typeof isShellMessage(data.requests[0]!), 'boolean');
   });
 
+  it("says who sent it when it is not the owner, and reads a task's result", () => {
+    assert.equal(cardData(event).from, null);
+    assert.equal(cardData(event).task, null);
+    const from = cardData({ ...event, data: { source: { ...event.data!.source, from: { kind: 'collaborator', name: 'Ana', role: 'commenter' } } } });
+    assert.deepEqual(from.from, { name: 'Ana', role: 'commenter' });
+    assert.equal(cardData({ ...event, data: { source: { from: { kind: 'owner' } } } }).from, null);
+    const task = cardData({ ...event, data: { source: { title: 'Deck', from: { kind: 'system' }, task: { id: 'k1', action: 'export', ok: false } } } });
+    assert.deepEqual(task.task, { action: 'export', ok: false });
+    assert.deepEqual(task.threads, []);
+  });
+
   it('links a thread by its comment', () => {
     assert.equal(threadUrl('http://127.0.0.1:4100/a/a1/?x=1', 't1'), 'http://127.0.0.1:4100/a/a1/?x=1&comment=t1');
     assert.equal(threadUrl('not a url', 't1'), 'not a url');
+  });
+});
+
+describe('ShellViews', () => {
+  const request = (view: string) => ({ id: `r-${view}`, session: 's1', url: `http://127.0.0.1:4100/a/a1/?oa_view=${view}`, title: 'Deck', view, agentName: 'DSH' });
+
+  it("answers a view's Shell through the route and turns what it says into the app's calls", async () => {
+    const sent: Array<[string, unknown]> = [];
+    const calls: unknown[][] = [];
+    const ctx = {
+      get: (name: string) =>
+        name === 'uiWorkspace'
+          ? { openSession: (id: string) => calls.push(['open', id]), startSession: (...args: unknown[]) => calls.push(['start', ...args]) }
+          : undefined,
+    };
+    const views = new ShellViews(ctx as never, async (view, command) => void sent.push([view, command]));
+    views.add(request('v1'));
+    views.add(request('v1'));
+    assert.equal(views.size, 1);
+    // The host's answer goes out at once: the Shell may have said hello before the tab was there.
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]![0], 'v1');
+    assert.equal((sent[0]![1] as { openArtifact: string }).openArtifact, 'host_hello');
+    assert.deepEqual((sent[0]![1] as { caps: unknown }).caps, { sessions: true, toolbar: true });
+    assert.equal((sent[0]![1] as { agentName: string }).agentName, 'DSH');
+
+    views.event({ view: 'v1', session: 's1', event: { openArtifact: 'new_session', prompt: 'Tighten it', artifact: 'open-artifact://artifact/a1' } as never });
+    views.event({ view: 'v1', session: 's1', event: { openArtifact: 'open_session', session: null, harness: 'dsh' } as never });
+    views.event({ view: 'v1', session: 's1', event: { openArtifact: 'comment_summon', text: 'Bigger' } as never });
+    // Another view's messages are not this one's.
+    views.event({ view: 'v2', session: 's1', event: { openArtifact: 'new_session', prompt: 'x', artifact: 'open-artifact://artifact/a1' } as never });
+    assert.deepEqual(calls, [
+      ['start', undefined, { prompt: 'Tighten it', whenDraftExists: 'append' }],
+      ['open', 's1'],
+      ['open', 's1'],
+    ]);
+  });
+
+  it('keeps at most MAX_VIEWS views, letting the oldest go', () => {
+    const views = new ShellViews({ get: () => undefined } as never, async () => undefined);
+    for (let i = 0; i <= MAX_VIEWS; i++) views.add(request(`v${i}`));
+    assert.equal(views.size, MAX_VIEWS);
+    views.clear();
+    assert.equal(views.size, 0);
   });
 });
 
@@ -116,5 +173,12 @@ describe('words', () => {
     assert.equal(t('panel'), '作品');
     assert.equal(t('search'), en.search);
     assert.equal(translator(undefined)('prompt.generic', { type: 'Design' }), en['prompt.generic'].replace('{type}', 'Design'));
+  });
+
+  it('includes the motion type labels and thumbnail recipe', () => {
+    assert.ok(en['type.motion'] && zh['type.motion']);
+    assert.ok(en['prompt.motion'] && zh['prompt.motion']);
+    assert.ok(en['about.motion'] && zh['about.motion']);
+    assert.match(captureRecipe('motion').find, /data-video-stage/);
   });
 });

@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { schema } from '../src/editor/schema.ts';
 import { formatChord } from '../src/selbar/chords.ts';
 import { docHeadings, findPlace, headingHref, matchTargets, parseDocHref, tabHref } from '../src/selbar/fragments.ts';
-import { normalizeHref, shortLink, webLinkParts } from '../src/selbar/link-url.ts';
+import { checkHref, hrefProblem, normalizeHref, shortLink, webLinkParts } from '../src/selbar/link-url.ts';
 import { placeBeside } from '../src/selbar/placement.ts';
 
 const { nodes } = schema;
@@ -67,6 +67,56 @@ describe('typed links', () => {
     assert.equal(webLinkParts('ftp://x.com'), null);
     assert.equal(shortLink('https://example.com/'), 'example.com');
     assert.equal(shortLink('https://example.com/a/very/long/path/that/goes/on/and/on'), 'example.com/a/very/long/pat…n/and/on');
+  });
+});
+
+describe('how long a link may be', () => {
+  const web = (bytes: number) => {
+    const head = 'https://maps.example.org/route?stops=';
+    return head + 'x'.repeat(bytes - head.length);
+  };
+  it('takes web addresses up to 8,192 bytes and keeps them whole', () => {
+    const long = `${web(6000)}#leg-3`;
+    assert.equal(normalizeHref(long), long);
+    assert.equal(webLinkParts(long)?.open, long);
+    assert.deepEqual(checkHref(web(8192)), { href: web(8192) });
+    assert.deepEqual(checkHref(web(8193)), { problem: 'too_long', limit: 8192 });
+  });
+  it('counts the bytes of the address as stored, after percent-encoding', () => {
+    const head = 'https://shop.example.net/?q=';
+    const stored = normalizeHref(head + 'é'.repeat(1300));
+    assert.ok(stored === head + '%C3%A9'.repeat(1300), 'stored percent-encoded');
+    assert.equal(normalizeHref(head + 'é'.repeat(1400)), null, '1,400 é take 8,428 bytes once encoded');
+    assert.equal(webLinkParts(head + 'é'.repeat(1400)), null, 'webLinkParts enforces the 8,192-byte limit after encoding');
+    assert.deepEqual(checkHref(head + 'é'.repeat(1300), true), { problem: 'too_long', limit: 2048 });
+  });
+  it('keeps every other link to 2,048 bytes, counting its own characters', () => {
+    assert.deepEqual(checkHref(`/notes/${'ü'.repeat(1000)}`), { href: `/notes/${'ü'.repeat(1000)}` });
+    assert.deepEqual(checkHref(`/notes/${'ü'.repeat(1021)}`), { problem: 'too_long', limit: 2048 });
+    assert.deepEqual(checkHref(`mailto:team@example.com?subject=${'a'.repeat(2048)}`), { problem: 'too_long', limit: 2048 });
+    assert.deepEqual(checkHref(`#${'b'.repeat(2048)}`), { problem: 'too_long', limit: 2048 });
+    assert.deepEqual(checkHref(`tel:+1${'5'.repeat(2048)}`), { problem: 'too_long', limit: 2048 });
+  });
+  it('keeps web links in suggestions to 2,048 bytes', () => {
+    assert.deepEqual(checkHref(web(2048), true), { href: web(2048) });
+    assert.deepEqual(checkHref(web(3000), true), { problem: 'too_long', limit: 2048 });
+    assert.equal(normalizeHref(web(3000)), web(3000), 'outside suggestions it is a link');
+  });
+  it('tells a long text from one that is not a link', () => {
+    assert.deepEqual(checkHref('just words'), { problem: 'not_link' });
+    assert.deepEqual(checkHref(`  ${web(40000)}`), { problem: 'too_long', limit: 8192 });
+    assert.deepEqual(checkHref(`/${'c'.repeat(40000)}`), { problem: 'too_long', limit: 2048 });
+  });
+  it('says which limit a long link went over', () => {
+    const say = (input: string, suggesting = false) => {
+      const checked = checkHref(input, suggesting);
+      return 'href' in checked ? null : hrefProblem(checked, suggesting);
+    };
+    assert.equal(say(web(9000)), 'Web addresses can be at most 8,192 bytes long');
+    assert.equal(say(`/files/${'d'.repeat(2100)}`), 'Links other than web addresses can be at most 2,048 bytes long');
+    assert.equal(say(web(3000), true), 'Links in a suggestion can be at most 2,048 bytes long');
+    assert.equal(say('not a link at all'), "That doesn't look like a link");
+    assert.equal(say(web(3000)), null);
   });
 });
 

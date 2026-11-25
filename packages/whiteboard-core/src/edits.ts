@@ -64,9 +64,9 @@ export function arrowNeedsEndsMessage(verb: string): string {
   return 'To ' + verb + ' an arrow, select what it is attached to as well.';
 }
 
-/** The stored size of a table's cells and columns (what {@link TABLE_LIMITS}.bytes bounds). */
-export function tableContentBytes(table: Pick<TableElement, 'cols' | 'rows'>): number {
-  return escapedJsonByteLength({ cols: table.cols, rows: table.rows });
+/** The stored size of a table's cells, columns, fills and heat maps (what {@link TABLE_LIMITS}.bytes bounds). */
+export function tableContentBytes(table: Pick<TableElement, 'cols' | 'rows' | 'fills' | 'heat'>): number {
+  return escapedJsonByteLength({ cols: table.cols, rows: table.rows, ...(table.fills !== undefined ? { fills: table.fills } : {}), ...(table.heat !== undefined ? { heat: table.heat } : {}) });
 }
 
 /** A new table (at the origin, header row on, white header) from pasted cell text. */

@@ -23,13 +23,24 @@ import type {
   EndsOfGroup,
   HorizontalAlignment,
   Input,
+  NamedView,
   Placement,
   StoredFormula,
   Underline,
   VerticalAlignment,
   View,
+  Wrap,
 } from './ops.ts';
-import type { CellsBetween, FurtherKey, SortDirection, TableIntoSheet } from './edits.ts';
+import type {
+  CellsBetween,
+  FurtherKey,
+  PivotKeeps,
+  PivotTable,
+  PivotTableSource,
+  PivotWrittenValue,
+  SortDirection,
+  TableIntoSheet,
+} from './edits.ts';
 import type { ErrorValue } from './utility.ts';
 
 // ---------------------------------------------------------------------------
@@ -46,8 +57,11 @@ export type ValueContents =
   | { kind: 'boolean'; value: boolean }
   | { kind: 'error'; value: CellErrorText };
 
-/** The color a number format's section gives the text it shows. */
-export type ShownColor = { kind: 'named'; name: string } | { kind: 'indexed'; index: number };
+/** A color a number format's section names (`[Red]`), in lowercase. */
+export type NamedFormatColor = 'black' | 'blue' | 'cyan' | 'green' | 'magenta' | 'red' | 'white' | 'yellow';
+
+/** The color a number format's section gives the text it shows: named, or by its number (`[Color12]`, 1 to 56). */
+export type ShownColor = { kind: 'named'; name: NamedFormatColor } | { kind: 'indexed'; index: number };
 
 /** Why a value cannot be shown with its number format. */
 export type CannotBeShownReason = 'noSectionApplies' | 'outsideTheCalendar' | 'notPrintedYet' | 'tooLong';
@@ -185,12 +199,20 @@ export interface CellTableContents {
   liveCellTable: CellTable;
 }
 
+/** A named view a sheet keeps, by its id (`nvw_…`). */
+export interface NamedViewContents {
+  namedViewId: string;
+  namedView: NamedView;
+}
+
 /** What a sheet holds besides its cells; each list is left out when empty. */
 export interface SheetLayoutContents {
   sheetId: SheetId;
   name: string;
   rows: IdRun[];
   columns: IdRun[];
+  /** The interactive view (a view id) the sheet shows in place of its grid. */
+  interactive?: string;
   mergedRanges?: MergedRangeContents[];
   columnWidths?: ColumnWidthContents[];
   rowHeights?: RowHeightContents[];
@@ -204,6 +226,7 @@ export interface SheetLayoutContents {
   conditionalFormats?: ConditionalFormatContents[];
   placements?: PlacementContents[];
   cellTables?: CellTableContents[];
+  namedViews?: NamedViewContents[];
   spilledCells?: SpilledCell[];
 }
 
@@ -445,7 +468,7 @@ export interface ReadSharedCellFormatRequest {
 /** Each property the cells all have; `null` where they differ. */
 export interface SharedCellFormat {
   numberFormat: { kind: NumberFormatKind; pattern: string } | null;
-  alignment: { horizontal: HorizontalAlignment | null; vertical: VerticalAlignment | null; wrap: boolean | null };
+  alignment: { horizontal: HorizontalAlignment | null; vertical: VerticalAlignment | null; wrap: Wrap | null };
   fillColor: Color | null;
   cellControl: CellControl | null;
   border: { top: Border | null; bottom: Border | null; left: Border | null; right: Border | null };
@@ -497,8 +520,8 @@ export type KindOfAColumn = 'number' | 'currency' | 'percent' | 'date' | 'fewWor
 
 /** A column of the records around some cells, counted. */
 export interface ColumnOfRecords {
-  /** The column's id (letters, as the agent is told). */
-  c: string | null;
+  /** The column's id (letters, as the agent is told). Every column of the records lies in the sheet, so it has one. */
+  c: string;
   name: string | null;
   kind: KindOfAColumn;
   filled: number;
@@ -540,7 +563,8 @@ export interface ConditionalFormatSuggestionsAnswer {
   isWidenedToColumn: boolean;
   suggestions: ConditionalFormatSuggestion[];
   ruleToStartFrom: RuleInIds;
-  table: { records: RangeCorners; columns: ColumnOfRecords[] };
+  /** The table around the cells: all of it, its records, and their columns. */
+  table: { cells: RangeCorners; records: RangeCorners; columns: ColumnOfRecords[] };
 }
 
 /** Rules written by address to read into ids; anything else is told as a problem. */
@@ -569,7 +593,8 @@ export interface ProblemOfARule {
 /** Rules read into ids, or what is wrong with them (the first so many). */
 export type RulesRead =
   | { kind: 'notAList'; refusal: string }
-  | { kind: 'rules'; rules: (RuleInIds | null)[] }
+  /** Every rule read: a list with a rule that cannot be read is told as `notRules`. */
+  | { kind: 'rules'; rules: RuleInIds[] }
   | { kind: 'notRules'; problems: ProblemOfARule[]; rowCount: number; columnCount: number };
 
 export interface ConditionalFormatsInIdsAnswer {
@@ -679,6 +704,10 @@ export interface InputsOfViewAnswer {
   kind: 'inputsOfView';
   viewId: string;
   elements: { elementId: string; inputs: InputRead[] }[];
+  /** An interactive view only: a reset would change some cell of its inputs. */
+  canBeReset?: true;
+  /** An interactive view only: its inputs hold values other than the ones it keeps. */
+  hasDefaultsToSave?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -702,13 +731,15 @@ export interface TableInIds {
 
 /** A column of a table: its name and the kind of what it holds. */
 export interface ColumnOfATable {
-  c: ColumnId | null;
+  /** Every column of a table lies in the sheet, so it has an id. */
+  c: ColumnId;
   name: string | null;
   kind: KindOfAColumn;
 }
 
 /** A table guessed, with its columns. */
 export interface TableWithColumns {
+  basis: BasisOfATable;
   table: TableInIds;
   columns: ColumnOfATable[];
 }
@@ -892,6 +923,49 @@ export interface ValuesOfFilteredColumnAnswer {
   areMoreLeftOut: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Pivot tables
+// ---------------------------------------------------------------------------
+
+/** The pivot table at a cell: the one whose formula is in the cell, or whose values spill over it. */
+export interface ReadPivotTableAtRequest {
+  kind: 'readPivotTableAt';
+  sheetId: SheetId;
+  cell: CellAt;
+}
+
+/** A pivot table found at a cell. */
+export interface PivotTableRead {
+  /** The cell that holds its formula. */
+  cell: CellAt;
+  /** `null`: the formula does not read as a pivot table. */
+  pivotTable: PivotTable | null;
+  /** The table of the sheet it reads (`null`: none is found under its header row). */
+  table: TableOfASheet | null;
+  /** Whether each source column it reads ends at the table's last record, or runs on with no end. */
+  readsJustTheRecords: boolean;
+}
+
+export interface PivotTableAtAnswer {
+  kind: 'pivotTableAt';
+  /** `null`: no pivot table at the cell. */
+  read: PivotTableRead | null;
+}
+
+/**
+ * The values a column of a pivot table's source holds, in order, each with
+ * whether a filter that keeps (or leaves out) the listed ones keeps it. With
+ * nothing listed, every value is kept.
+ */
+export interface ReadValuesToFilterPivotTableByRequest {
+  kind: 'readValuesToFilterPivotTableBy';
+  source: PivotTableSource;
+  c: ColumnId;
+  keeps: PivotKeeps;
+  /** `null`: blank. */
+  listed: (PivotWrittenValue | null)[];
+}
+
 /** The rows a `sortRows` of the same fields would order, in its order. */
 export interface ReadRowsInSortedOrderRequest {
   kind: 'readRowsInSortedOrder';
@@ -935,7 +1009,11 @@ export interface ReadXlsxFileRequest {
   nameOfTheSheetOfOptions: string;
   /** By hue, then shade: `#` and six lower-case hex digits, every hue with every shade. */
   rgbOfStandardColors: Record<string, Record<string, string>>;
-  charts?: { viewId: string; description: ChartDescription }[];
+  /**
+   * The charts by their views, each with a description as the agent or the server gave it, unchecked. The engine reads
+   * it strictly: one that is not a `ChartDescription` leaves its chart out, as `descriptionNotReadable`.
+   */
+  charts?: { viewId: string; description: unknown }[];
 }
 
 /** What the file does not carry over. */
@@ -953,7 +1031,11 @@ export type NotCarriedOver =
   | 'sizesOfTheLargestRowsAndColumns'
   | 'conditionalFormats'
   | 'placedViews'
-  | 'looksOfCharts';
+  | 'looksOfCharts'
+  /** A sheet that shows an interactive view is written as its cells. */
+  | 'interactives'
+  /** Saved views; the engine does not report them yet. */
+  | 'namedViews';
 
 /** Why a placed view is not a chart in the file. */
 export type WhyAChartIsLeftOut =
@@ -1035,6 +1117,11 @@ export interface ReadKinds {
   readValuesOfFilteredColumn: { request: ReadValuesOfFilteredColumnRequest; answer: ValuesOfFilteredColumnAnswer };
   readRowsInSortedOrder: { request: ReadRowsInSortedOrderRequest; answer: RowsInSortedOrderAnswer };
   readTablesOfSheet: { request: ReadTablesOfSheetRequest; answer: TablesOfSheetAnswer };
+  readPivotTableAt: { request: ReadPivotTableAtRequest; answer: PivotTableAtAnswer };
+  readValuesToFilterPivotTableBy: {
+    request: ReadValuesToFilterPivotTableByRequest;
+    answer: ValuesOfFilteredColumnAnswer;
+  };
   readXlsxFile: { request: ReadXlsxFileRequest; answer: XlsxFileAnswer };
 }
 

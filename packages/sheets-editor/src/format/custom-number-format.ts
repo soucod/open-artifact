@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { UNREADABLE_PATTERN_REFUSALS, sampleValueOfFormatKind, choiceOfPattern, EMPTY_SHOWN_UNDER_PATTERN } from './number-format-choices.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { activeAnchorCell, isSameSelection } from '../selection/model.ts';
@@ -20,37 +19,72 @@ import { dayMonthOrderOf } from '../import/import-basics.ts';
 import { DEFAULT_TIME_OF_DAY_PATTERN } from '../model/workbook.ts';
 import { ADDRESS_LIKE_PATTERN } from '../formulas/from-words/ask-agent.ts';
 import { cleanTextForAgent } from '../agent/prompt-text.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function whyPatternRefused(refusal?: Dynamic) {
+import type { AnswerHold, CustomNumberFormat, PageState } from '../state/initial-state.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { PageEvent } from '../state/event-reducer.ts';
+import type { WorkbookReads } from '../model/workbook.ts';
+import type { CustomFormatProblem } from '../i18n/format-labels.ts';
+import type { Edit, NumberFormat, ValueIn } from '@open-artifact/sheets-core';
+/** Where a custom pattern is typed: the custom format dialog, or the search field of the list of number formats. */
+export type CustomPatternTypedIn = 'dialog' | 'list';
+/** What a typed custom pattern reads as. */
+export type CustomPatternReading =
+  | { kind: 'nothingTyped' }
+  | { kind: 'refused'; why: CustomFormatProblem }
+  | { kind: 'numberFormat'; numberFormat: NumberFormat; example: string | null };
+/** Why an ask of the agent for a number format gave no pattern. */
+export type WhyAgentCameToNothing = 'notAvailable' | 'callFailed' | 'noFormat';
+/**
+ * Where the agent stands with a custom pattern: asked to write it from the typed words, wrote it, came to nothing,
+ * had its pattern typed on, or was waved off.
+ */
+export type CustomFormatAgent =
+  | { kind: 'asked'; askId: number }
+  | { kind: 'wrote'; words: string }
+  | { kind: 'cameToNothing'; why: WhyAgentCameToNothing; isOfAskInList?: true }
+  | { kind: 'typedOn' }
+  | { kind: 'wavedOff' };
+/** How a custom pattern is being typed. */
+export interface HowPatternIsTyped {
+  hasHeldTextOfOthers: boolean;
+  typedIn: CustomPatternTypedIn;
+}
+/** How the agent's reply to an ask for a number format came out. */
+export type NumberFormatReply =
+  | { kind: 'notToBeHad' }
+  | { kind: 'stopped' }
+  | { kind: 'failed'; isRateLimited?: true }
+  | { kind: 'answered'; answer: unknown; isMended?: true };
+export function whyPatternRefused(refusal: string): CustomFormatProblem {
   if (refusal === 'characterNeedsQuotes') return 'textNeedsQuotationMarks';
   if (refusal === 'numberFormatNotPrintedYet') return 'notPrintedYet';
   return UNREADABLE_PATTERN_REFUSALS.has(refusal) ? 'unreadable' : 'notJudged';
 }
-export function readTypedPattern(state: PageState, sheet?: Dynamic, typed?: Dynamic) {
+export function readTypedPattern(state: PageState, reads: WorkbookReads, typed: string): CustomPatternReading {
   if (typed === '')
     return {
       kind: 'nothingTyped',
     };
-  let activeValue = cellValueOf(sheet.cellOnShowIn(activeAnchorCell(state, sheet)));
-  let read = sheet.patternRead(
+  let activeValue = cellValueOf(reads.cellOnShowIn(activeAnchorCell(state, reads)));
+  let patternRead = reads.patternRead(
     isGeneralPattern(typed) ? DEFAULT_CELL_FORMAT.numberFormat.pattern : typed,
-    (formatKind?: Dynamic) => (activeValue?.kind === 'number' ? activeValue.value : sampleValueOfFormatKind(formatKind)),
+    (formatKind) => (activeValue?.kind === 'number' ? activeValue.value : sampleValueOfFormatKind(formatKind)),
   );
-  if (read === null)
+  if (patternRead === null)
     return {
       kind: 'refused',
       why: 'notJudged',
     };
-  if (read.kind === 'refused')
+  if (patternRead.kind === 'refused')
     return {
       kind: 'refused',
-      why: whyPatternRefused(read.refusal),
+      why: whyPatternRefused(patternRead.refusal),
     };
-  let { numberFormat: numberFormat, shown: shown } = read;
+  let { numberFormat, shown } = patternRead;
   if (shown.kind === 'text')
     return {
       kind: 'numberFormat',
-      numberFormat: numberFormat,
+      numberFormat,
       example: shown.text,
     };
   return shown.reason === 'notPrintedYet'
@@ -60,20 +94,20 @@ export function readTypedPattern(state: PageState, sheet?: Dynamic, typed?: Dyna
       }
     : {
         kind: 'numberFormat',
-        numberFormat: numberFormat,
+        numberFormat,
         example: null,
       };
 }
-export function nextAnswerHold(agent?: Dynamic, hold?: Dynamic, typedIn?: Dynamic) {
+export function nextAnswerHold(agent: CustomFormatAgent | null, hold: AnswerHold | null, typedIn: CustomPatternTypedIn): AnswerHold | null {
   if (agent?.kind === 'asked') return hold?.answerId === agent.askId ? hold : newAwaitedHold(agent.askId);
   if (!(agent?.kind === 'wrote' || (agent?.kind === 'cameToNothing' && (agent.why === 'callFailed' || typedIn === 'list')))) return null;
   return hold?.stands === 'seen' ? hold : asLandedHold(hold ?? newAwaitedHold(0));
 }
-export function sharedCustomPatternOf({ formatOfSelection: formatOfSelection }: Dynamic) {
+export function sharedCustomPatternOf({ formatOfSelection }: Pick<PageState, 'formatOfSelection'>): string | null {
   let pattern = formatOfSelection.shared.numberFormat?.pattern;
   return pattern === undefined || pattern === DEFAULT_CELL_FORMAT.numberFormat.pattern ? null : pattern;
 }
-export function listAskOfPattern({ customNumberFormat: customNumberFormat }: Dynamic, pattern?: Dynamic) {
+export function listAskOfPattern({ customNumberFormat }: Pick<PageState, 'customNumberFormat'>, pattern: string): CustomFormatAgent | null {
   if (customNumberFormat?.typedIn !== 'list' || customNumberFormat.pattern.trim() !== pattern) return null;
   return customNumberFormat.agent?.kind === 'cameToNothing' && customNumberFormat.agent.why === 'noFormat'
     ? {
@@ -82,7 +116,7 @@ export function listAskOfPattern({ customNumberFormat: customNumberFormat }: Dyn
       }
     : null;
 }
-export function openCustomFormatDialog(state?: Dynamic, sheet?: Dynamic, pattern: Dynamic = null) {
+export function openCustomFormatDialog(state: PageState, reads: WorkbookReads, pattern: string | null = null) {
   let opened = {
     ...state,
     pickForWorkbook: null,
@@ -94,7 +128,7 @@ export function openCustomFormatDialog(state?: Dynamic, sheet?: Dynamic, pattern
       withNoEffects(
         withCustomPatternTyped(
           opened,
-          sheet,
+          reads,
           sanitizeCellText(pattern),
           {
             hasHeldTextOfOthers: false,
@@ -110,7 +144,7 @@ export function openCustomFormatDialog(state?: Dynamic, sheet?: Dynamic, pattern
     withNoEffects(
       withCustomPatternTyped(
         opened,
-        sheet,
+        reads,
         sharedPattern ?? '',
         {
           hasHeldTextOfOthers: hasShared,
@@ -126,26 +160,26 @@ export function openCustomFormatDialog(state?: Dynamic, sheet?: Dynamic, pattern
   );
 }
 export function keepsTypedOn(
-  { pattern: pattern, agent: agent, hasHeldTextOfOthers: hasHeldTextOfOthers }: Dynamic,
-  typed?: Dynamic,
-  isOfUndoOrRedo?: Dynamic,
-) {
+  { pattern, agent, hasHeldTextOfOthers }: CustomNumberFormat,
+  typed: string,
+  isOfUndoOrRedo: boolean,
+): boolean {
   if (isOfUndoOrRedo) return hasHeldTextOfOthers;
   let startsAnew = typed.length <= 1 || (pattern[0] !== typed[0] && pattern.at(-1) !== typed.at(-1));
   return (agent?.kind === 'wrote' || agent?.kind === 'typedOn') && !startsAnew;
 }
-export function typeCustomPattern(state: PageState, sheet?: Dynamic, typed?: Dynamic, isOfUndoOrRedo?: Dynamic) {
+export function typeCustomPattern(state: PageState, reads: WorkbookReads, typed: string, isOfUndoOrRedo: boolean): PageTransition {
   let customNumberFormat = state.customNumberFormat;
   if (customNumberFormat === null) return withNoEffects(state);
   let cleanTyped = sanitizeCellText(typed);
-  let agentMark = keepsTypedOn(customNumberFormat, cleanTyped, isOfUndoOrRedo)
+  let agentMark: CustomFormatAgent | null = keepsTypedOn(customNumberFormat, cleanTyped, isOfUndoOrRedo)
     ? {
         kind: 'typedOn',
       }
     : null;
-  return withNoEffects(withCustomPatternTyped(state, sheet, cleanTyped, customNumberFormat, agentMark));
+  return withNoEffects(withCustomPatternTyped(state, reads, cleanTyped, customNumberFormat, agentMark));
 }
-export function typeCustomPatternInList(state: PageState, sheet?: Dynamic, typed?: Dynamic) {
+export function typeCustomPatternInList(state: PageState, reads: WorkbookReads, typed: string) {
   let clipped = typed.slice(0, MAX_TYPED_PATTERN_LENGTH).replace(/[\uD800-\uDBFF]$/, '');
   let customNumberFormat = state.customNumberFormat;
   if (customNumberFormat?.typedIn === 'dialog' || state.contextBarMenu !== 'numberFormat') return withNoEffects(state);
@@ -157,22 +191,22 @@ export function typeCustomPatternInList(state: PageState, sheet?: Dynamic, typed
   if (customNumberFormat === null)
     return checkAgentForFormulas(
       withNoEffects(
-        withCustomPatternTyped(state, sheet, sanitizeCellText(clipped), {
+        withCustomPatternTyped(state, reads, sanitizeCellText(clipped), {
           hasHeldTextOfOthers: false,
           typedIn: 'list',
         }),
       ),
     );
   let withWords =
-    customNumberFormat.agent?.kind === 'wrote' ? withCustomPatternTyped(state, sheet, customNumberFormat.agent.words, customNumberFormat) : state;
-  return typeCustomPattern(withWords, sheet, clipped, false);
+    customNumberFormat.agent?.kind === 'wrote' ? withCustomPatternTyped(state, reads, customNumberFormat.agent.words, customNumberFormat) : state;
+  return typeCustomPattern(withWords, reads, clipped, false);
 }
-export function customPatternListText({ customNumberFormat: customNumberFormat }: Dynamic) {
+export function customPatternListText({ customNumberFormat }: Pick<PageState, 'customNumberFormat'>): string {
   if (customNumberFormat?.typedIn !== 'list') return '';
   return customNumberFormat.agent?.kind === 'wrote' ? customNumberFormat.agent.words : customNumberFormat.pattern;
 }
-export function closeListCustomFormat(before?: Dynamic, step?: Dynamic, action?: Dynamic) {
-  let { customNumberFormat: customNumberFormat, contextBarMenu: contextBarMenu } = step.state;
+export function closeListCustomFormat(before: PageState, step: PageTransition, event: PageEvent): PageTransition {
+  let { customNumberFormat, contextBarMenu } = step.state;
   if (contextBarMenu !== 'numberFormat')
     return customNumberFormat?.typedIn !== 'list'
       ? step
@@ -185,7 +219,7 @@ export function closeListCustomFormat(before?: Dynamic, step?: Dynamic, action?:
         });
   return customNumberFormat === null &&
     before.customNumberFormat?.typedIn === 'list' &&
-    (action.kind === 'editAnswered' || action.kind === 'customNumberFormatEntered')
+    (event.kind === 'editAnswered' || event.kind === 'customNumberFormatEntered')
     ? {
         ...step,
         state: {
@@ -195,9 +229,9 @@ export function closeListCustomFormat(before?: Dynamic, step?: Dynamic, action?:
       }
     : step;
 }
-export function canAskAgentForFormat({ customNumberFormat: customNumberFormat, formulaFromWords: formulaFromWords }: Dynamic) {
+export function canAskAgentForFormat({ customNumberFormat, formulaFromWords }: Pick<PageState, 'customNumberFormat' | 'formulaFromWords'>): boolean {
   if (customNumberFormat === null || formulaFromWords.agent !== 'available') return false;
-  let { pattern: pattern, reading: reading, agent: agent } = customNumberFormat;
+  let { pattern, reading, agent } = customNumberFormat;
   return (
     (agent === null || (agent.kind === 'cameToNothing' && agent.why === 'callFailed')) &&
     pattern.length <= MAX_PATTERN_LENGTH_FOR_AGENT &&
@@ -206,12 +240,12 @@ export function canAskAgentForFormat({ customNumberFormat: customNumberFormat, f
     looksLikeWordsNotPattern(pattern)
   );
 }
-export function askAgentForNumberFormat(state: PageState, sheet?: Dynamic) {
-  let { customNumberFormat: customNumberFormat, formulaFromWords: formulaFromWords } = state;
+export function askAgentForNumberFormat(state: PageState, reads: WorkbookReads): PageTransition {
+  let { customNumberFormat, formulaFromWords } = state;
   if (customNumberFormat === null) return withNoEffects(state);
   let askId = formulaFromWords.askCount + 1;
   let sharedPattern = sharedCustomPatternOf(state);
-  let isSharedReadable = sharedPattern !== null && readTypedPattern(state, sheet, sharedPattern).kind === 'numberFormat';
+  let isSharedReadable = sharedPattern !== null && readTypedPattern(state, reads, sharedPattern).kind === 'numberFormat';
   return {
     state: {
       ...withAgentOfCustomFormat(
@@ -222,7 +256,7 @@ export function askAgentForNumberFormat(state: PageState, sheet?: Dynamic) {
         },
         {
           kind: 'asked',
-          askId: askId,
+          askId,
         },
       ),
       formulaFromWords: {
@@ -233,14 +267,14 @@ export function askAgentForNumberFormat(state: PageState, sheet?: Dynamic) {
     effects: [
       {
         kind: 'askAgentForANumberFormat',
-        askId: askId,
+        askId,
         asked: numberFormatFromWordsRequest(customNumberFormat.pattern.trim(), isSharedReadable ? sharedPattern : null, {
-          orderOfDayAndMonth: dayMonthOrderOf(sheet),
-          signsOfNumbers: sheet.signsOfNumbers,
-          currencySign: currencySignPlacement(sheet.locale),
-          clock: sheet.patternOfATimeOfDay === DEFAULT_TIME_OF_DAY_PATTERN ? 'twelveHours' : 'twentyFourHours',
+          orderOfDayAndMonth: dayMonthOrderOf(reads),
+          signsOfNumbers: reads.signsOfNumbers,
+          currencySign: currencySignPlacement(reads.locale),
+          clock: reads.patternOfATimeOfDay === DEFAULT_TIME_OF_DAY_PATTERN ? 'twelveHours' : 'twentyFourHours',
           ownDate: ownDatePatternOf(
-            sheet.shownWithRoomForAll(
+            reads.shownWithRoomForAll(
               {
                 kind: 'number',
                 value: SAMPLE_DATE_SERIAL,
@@ -253,24 +287,24 @@ export function askAgentForNumberFormat(state: PageState, sheet?: Dynamic) {
     ],
   };
 }
-export function patternShowsOddText(sheet?: Dynamic, pattern?: Dynamic) {
+export function patternShowsOddText(reads: WorkbookReads, pattern: string): boolean {
   let testNumbers = [...pattern.matchAll(CONDITION_NUMBER_PATTERN)]
-    .map(([, digits]: Dynamic) => Number(digits))
-    .flatMap((number?: Dynamic) => [number - 1, number, number + 1, number * 2, number / 2])
-    .filter((number?: Dynamic) => Number.isFinite(number))
+    .map(([, digits]) => Number(digits))
+    .flatMap((number) => [number - 1, number, number + 1, number * 2, number / 2])
+    .filter((number) => Number.isFinite(number))
     .map(
-      (number?: Dynamic) => ({
+      (number): ValueIn => ({
         kind: 'number',
         value: number,
       }),
     );
   return [
     pattern,
-    ...[...PATTERN_TEST_VALUES, ...testNumbers].map((testValue?: Dynamic) => sheet.shownWithRoomForAll(testValue, pattern)),
-  ].some((shown?: Dynamic) => shown !== null && ADDRESS_LIKE_PATTERN.test(shown));
+    ...[...PATTERN_TEST_VALUES, ...testNumbers].map((testValue) => reads.shownWithRoomForAll(testValue, pattern)),
+  ].some((shown) => shown !== null && ADDRESS_LIKE_PATTERN.test(shown));
 }
-export function patternEchoesWords(sheet?: Dynamic, pattern?: Dynamic, words?: Dynamic) {
-  let shownHuge = sheet.shownWithRoomForAll(
+export function patternEchoesWords(reads: WorkbookReads, pattern: string, words: string): boolean {
+  let shownHuge = reads.shownWithRoomForAll(
     {
       kind: 'number',
       value: 1000000000000000000000000000000,
@@ -279,13 +313,13 @@ export function patternEchoesWords(sheet?: Dynamic, pattern?: Dynamic, words?: D
   );
   return shownHuge !== null && normalizedWords(shownHuge) === normalizedWords(cleanTextForAgent(words));
 }
-export function takeNumberFormatAnswer(state: PageState, sheet?: Dynamic, askId?: Dynamic, reply?: Dynamic) {
-  let { customNumberFormat: customNumberFormat, formulaFromWords: formulaFromWords } = state;
+export function takeNumberFormatAnswer(state: PageState, reads: WorkbookReads, askId: number, reply: NumberFormatReply): PageState {
+  let { customNumberFormat, formulaFromWords } = state;
   if (customNumberFormat?.agent?.kind !== 'asked' || customNumberFormat.agent.askId !== askId) return state;
-  let cameToNothing = (why?: Dynamic) =>
+  let cameToNothing = (why: WhyAgentCameToNothing) =>
     withAgentOfCustomFormat(state, customNumberFormat, {
       kind: 'cameToNothing',
-      why: why,
+      why,
     });
   switch (reply.kind) {
     case 'notToBeHad':
@@ -303,20 +337,20 @@ export function takeNumberFormatAnswer(state: PageState, sheet?: Dynamic, askId?
     case 'answered': {
       let pattern = readPatternAnswer(reply.answer);
       if (pattern === null) return cameToNothing('noFormat');
-      let wrote = {
+      let wrote: CustomFormatAgent = {
         kind: 'wrote',
         words: customNumberFormat.pattern,
       };
-      let withPattern = withCustomPatternTyped(state, sheet, pattern, customNumberFormat, wrote);
+      let withPattern = withCustomPatternTyped(state, reads, pattern, customNumberFormat, wrote);
       return withPattern.customNumberFormat?.reading.kind === 'numberFormat' &&
-        !patternShowsOddText(sheet, pattern) &&
-        !patternEchoesWords(sheet, pattern, customNumberFormat.pattern)
+        !patternShowsOddText(reads, pattern) &&
+        !patternEchoesWords(reads, pattern, customNumberFormat.pattern)
         ? withPattern
         : cameToNothing('noFormat');
     }
   }
 }
-export function leaveCustomFormat(state: PageState, sheet?: Dynamic) {
+export function leaveCustomFormat(state: PageState, reads: WorkbookReads) {
   let customNumberFormat = state.customNumberFormat;
   if (customNumberFormat === null) return state;
   if (canAskAgentForFormat(state) && customNumberFormat.typedIn === 'list') return state;
@@ -331,13 +365,13 @@ export function leaveCustomFormat(state: PageState, sheet?: Dynamic) {
         });
   let isNothingOfDialog = customNumberFormat.agent?.kind === 'cameToNothing' && !customNumberFormat.agent.isOfAskInList;
   if (customNumberFormat.agent?.kind === 'asked' || isNothingOfDialog) return withAgentOfCustomFormat(state, customNumberFormat, null);
-  if (customNumberFormat.agent?.kind === 'wrote') return withCustomPatternTyped(state, sheet, customNumberFormat.agent.words, customNumberFormat);
+  if (customNumberFormat.agent?.kind === 'wrote') return withCustomPatternTyped(state, reads, customNumberFormat.agent.words, customNumberFormat);
   return {
     ...state,
     customNumberFormat: null,
   };
 }
-export function withStopAskingEffect(before?: Dynamic, step?: Dynamic) {
+export function withStopAskingEffect(before: PageState, step: PageTransition): PageTransition {
   let agent = before.customNumberFormat?.agent;
   return agent?.kind !== 'asked' || step.state.customNumberFormat?.agent === agent
     ? step
@@ -351,9 +385,9 @@ export function withStopAskingEffect(before?: Dynamic, step?: Dynamic) {
         ],
       };
 }
-export function formatOfCustomPattern({ reading: reading }: Dynamic, sheet?: Dynamic) {
+export function formatOfCustomPattern({ reading }: CustomNumberFormat, reads: WorkbookReads) {
   if (reading.kind !== 'numberFormat') return null;
-  let choice = choiceOfPattern(reading.numberFormat.pattern, sheet);
+  let choice = choiceOfPattern(reading.numberFormat.pattern, reads);
   return choice === null
     ? {
         customNumberFormat: reading.numberFormat,
@@ -362,27 +396,28 @@ export function formatOfCustomPattern({ reading: reading }: Dynamic, sheet?: Dyn
         numberFormatChoice: choice,
       };
 }
-export function afterFormatApplied(customNumberFormat?: Dynamic, numberFormat?: Dynamic, refusal?: Dynamic) {
-  if (customNumberFormat === null || !isCustomPatternApplied(customNumberFormat, numberFormat)) return customNumberFormat;
+export function afterFormatApplied(customNumberFormat: CustomNumberFormat | null, edit: Edit, refusal: string | null): CustomNumberFormat | null {
+  if (customNumberFormat === null || !isCustomPatternApplied(customNumberFormat, edit)) return customNumberFormat;
   if (refusal !== 'numberFormatNotPrintedYet') return null;
-  let reading = {
+  let reading: CustomPatternReading = {
     kind: 'refused',
     why: whyPatternRefused(refusal),
   };
-  let { hold: hold, ...rest } = withPatternReading(customNumberFormat, reading);
+  let { hold, ...rest } = withPatternReading(customNumberFormat, reading);
   let isNewHold = hold !== null && hold !== customNumberFormat.hold;
   return {
     ...rest,
+    // A new hold is never null.
     hold: isNewHold
       ? {
-          ...hold,
-          actsHeld: hold.actsHeld + 1,
+          ...hold!,
+          actsHeld: hold!.actsHeld + 1,
         }
       : hold,
     isRefusalTold: true,
   };
 }
-export function rereadCustomPattern(before: Dynamic, state: PageState, sheet?: Dynamic) {
+export function rereadCustomPattern(before: PageState, state: PageState, reads: WorkbookReads): PageState {
   let customNumberFormat = state.customNumberFormat;
   if (customNumberFormat === null || customNumberFormat !== before.customNumberFormat) return state;
   if (!isSameSelection(before, state))
@@ -391,7 +426,7 @@ export function rereadCustomPattern(before: Dynamic, state: PageState, sheet?: D
       customNumberFormat: null,
     };
   if (state.workbookChangeCount === before.workbookChangeCount && state.formulasWorkedOutCount === before.formulasWorkedOutCount) return state;
-  let reading = readTypedPattern(state, sheet, patternToRead(customNumberFormat));
+  let reading = readTypedPattern(state, reads, patternToRead(customNumberFormat));
   return customNumberFormat.reading.kind === 'refused' && reading.kind === 'numberFormat'
     ? state
     : {
@@ -399,45 +434,45 @@ export function rereadCustomPattern(before: Dynamic, state: PageState, sheet?: D
         customNumberFormat: withPatternReading(customNumberFormat, reading),
       };
 }
-export const patternToRead = ({ pattern: pattern, typedIn: typedIn, agent: agent }: Dynamic) =>
+export const patternToRead = ({ pattern, typedIn, agent }: Pick<CustomNumberFormat, 'pattern' | 'typedIn' | 'agent'>): string =>
   typedIn === 'list' && agent?.kind !== 'wrote' ? pattern.trim() : pattern;
 export const withCustomPatternTyped = (
   state: PageState,
-  sheet: Dynamic,
-  pattern: Dynamic,
-  { hasHeldTextOfOthers: hasHeldTextOfOthers, typedIn: typedIn }: Dynamic,
-  agent: Dynamic = null,
+  reads: WorkbookReads,
+  pattern: string,
+  { hasHeldTextOfOthers, typedIn }: HowPatternIsTyped,
+  agent: CustomFormatAgent | null = null,
 ) => ({
   ...state,
   customNumberFormat: {
-    pattern: pattern,
+    pattern,
     reading: readTypedPattern(
       state,
-      sheet,
+      reads,
       patternToRead({
-        pattern: pattern,
-        typedIn: typedIn,
-        agent: agent,
+        pattern,
+        typedIn,
+        agent,
       }),
     ),
     isRefusalTold: false,
-    agent: agent,
+    agent,
     hold: nextAnswerHold(agent, state.customNumberFormat?.hold ?? null, typedIn),
     hasHeldTextOfOthers: hasHeldTextOfOthers || (agent?.kind === 'wrote' && typedIn === 'dialog'),
-    typedIn: typedIn,
+    typedIn,
     shownUnderPattern: EMPTY_SHOWN_UNDER_PATTERN,
   },
 });
 export const MAX_TYPED_PATTERN_LENGTH = 300;
-export const withAgentOfCustomFormat = (state?: Dynamic, customNumberFormat?: Dynamic, agent?: Dynamic) => ({
+export const withAgentOfCustomFormat = (state: PageState, customNumberFormat: CustomNumberFormat, agent: CustomFormatAgent | null) => ({
   ...state,
   customNumberFormat: {
     ...customNumberFormat,
-    agent: agent,
+    agent,
     hold: nextAnswerHold(agent, customNumberFormat.hold, customNumberFormat.typedIn),
   },
 });
-export const PATTERN_TEST_VALUES = [
+export const PATTERN_TEST_VALUES: ValueIn[] = [
   {
     kind: 'number',
     value: 1234.5,
@@ -472,17 +507,17 @@ export const PATTERN_TEST_VALUES = [
   },
 ];
 export const CONDITION_NUMBER_PATTERN = /\[(?:<=|>=|<>|[<>=])\s*([-+]?[\d.]+(?:e[-+]?\d+)?)\s*\]/gi;
-export const normalizedWords = (words?: Dynamic) => words.replaceAll(/\s+/gu, ' ').trim().toLowerCase();
-export const withRefusalTold = (customNumberFormat?: Dynamic) =>
+export const normalizedWords = (words: string): string => words.replaceAll(/\s+/gu, ' ').trim().toLowerCase();
+export const withRefusalTold = (customNumberFormat: CustomNumberFormat): CustomNumberFormat =>
   customNumberFormat.reading.kind === 'refused'
     ? {
         ...customNumberFormat,
         isRefusalTold: true,
       }
     : customNumberFormat;
-export const withPatternReading = (customNumberFormat?: Dynamic, reading?: Dynamic) => ({
+export const withPatternReading = (customNumberFormat: CustomNumberFormat, reading: CustomPatternReading) => ({
   ...customNumberFormat,
-  reading: reading,
+  reading,
   hold:
     customNumberFormat.hold !== null &&
     customNumberFormat.hold.stands !== 'awaited' &&
@@ -494,7 +529,7 @@ export const withPatternReading = (customNumberFormat?: Dynamic, reading?: Dynam
         }
       : customNumberFormat.hold,
 });
-export const isCustomPatternApplied = (customNumberFormat?: Dynamic, change?: Dynamic) =>
+export const isCustomPatternApplied = (customNumberFormat: CustomNumberFormat, edit: Edit): boolean =>
   customNumberFormat.reading.kind === 'numberFormat' &&
-  change.kind === 'formatCells' &&
-  change.format.numberFormat?.pattern === customNumberFormat.reading.numberFormat.pattern;
+  edit.kind === 'formatCells' &&
+  edit.format.numberFormat?.pattern === customNumberFormat.reading.numberFormat.pattern;

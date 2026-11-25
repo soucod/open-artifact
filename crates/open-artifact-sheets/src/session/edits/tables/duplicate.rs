@@ -18,16 +18,17 @@ use super::{sheet, CopiedWidgetNode, Made, PlacedViews, Refused};
 use crate::formula::{Reference, StoredFormula};
 use crate::ids::{Axis, Bases, IdRun, LineId};
 use crate::session::place::Place;
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{self, Leaf};
 use crate::workbook::layout::{
-    id_key, CellIds, ColumnsToSize, EndsOfGroup, Group, GroupPatch, GroupToSet, IdKey, RangeIds, RowsToSize,
+    CellIds, ColumnsToSize, EndsOfGroup, Group, GroupPatch, GroupToSet, IdKey, RangeIds, RowsToSize,
     SheetSettings, SheetToSet,
 };
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
 use crate::workbook::objects::{
     CellCondition, CellTable, CellTableToSet, ConditionalFormatPatch, ConditionalFormatToSet,
-    DropdownOption, DropdownToSet, Embed, InputOfAWidget, NumberOperand, Placement, PlacementToSet, RangeOnASheet,
-    RowsOfACellTable, ShownByAPlacement, TestedCell, View, ViewElement, ViewToSet,
+    DropdownOption, DropdownToSet, NamedViewToSet, NumberOperand, Placement, PlacementToSet,
+    RowsOfACellTable, ShownByAPlacement, TestedCell, View, ViewToSet,
 };
 use crate::workbook::{Input, Sheet, Workbook};
 
@@ -50,7 +51,7 @@ fn cut(name: &str, room: usize) -> String {
 /// The name a copy gets: the name asked for without its control characters and the space around it, cut to the
 /// longest a name may be; when another sheet has that, it with the first of " 2", " 3", … no sheet has, cut to
 /// make room for it. Nothing left of the name asked for gives none.
-pub(super) fn copy_name(workbook: &Workbook, asked: &str) -> Option<String> {
+pub(in crate::session::edits) fn copy_name(workbook: &Workbook, asked: &str) -> Option<String> {
     let name = cut(asked.chars().filter(|c| !c.is_control()).collect::<String>().trim(), LONGEST_SHEET_NAME);
     if name.is_empty() {
         return None;
@@ -133,51 +134,53 @@ fn copied_views(
     code: &str,
     new_id: &str,
     cell: &dyn Fn(&CellIds) -> CellIds,
-) -> Result<(Vec<ViewToSet>, Vec<PlacementToSet>), Refused> {
+) -> Result<(Vec<ViewToSet>, Vec<PlacementToSet>, Option<String>), Refused> {
     let copies: HashMap<&str, &str> = nodes.iter().map(|n| (n.source.as_str(), n.copy.as_str())).collect();
     let mut shown: HashSet<String> = workbook
         .views
         .values()
-        .flat_map(|(_, v)| v.elements.iter().map(|ViewElement::Widget { embed, .. }| embed.reference.clone()))
+        .flat_map(|(_, v)| v.elements.iter().map(|element| element.parts().1.reference.clone()))
         .collect();
     let (mut views, mut placements, mut n) = (Vec::new(), Vec::new(), 0);
-    for (k, (_, p)) in s.placements.values().enumerate() {
-        let Some((_, view)) = workbook.views.get(&id_key(p.shows.view_id())) else { continue };
+    let mut interactive = None;
+    let shown_by = s.placements.values().map(|(_, placement)| (placement.shows.view_id(), Some(placement)))
+        .chain(s.interactive.as_deref().map(|id| (id, None)));
+    for (k, (id, placement)) in shown_by.enumerate() {
+        let Some((_, view)) = workbook.views.get(id) else { continue };
         let mut elements = Vec::new();
-        for ViewElement::Widget { embed, inputs, .. } in &view.elements {
+        for original in &view.elements {
+            let mut element = original.clone();
+            let (element_id, embed, inputs) = element.parts_mut();
             let copy = *copies.get(embed.reference.as_str()).ok_or(Refused::Because("widgetNodeNotCopied"))?;
             if !shown.insert(copy.to_owned()) {
                 return Err(Refused::Because("widgetNodeOfAnotherView"));
             }
-            let inputs = inputs
-                .iter()
-                .map(|i| {
-                    let range = if i.range.sheet_id == s.id {
-                        RangeOnASheet {
-                            sheet_id: new_id.to_owned(),
-                            top_left: cell(&i.range.top_left),
-                            bottom_right: cell(&i.range.bottom_right),
-                        }
-                    } else {
-                        i.range.clone()
-                    };
-                    InputOfAWidget { name: i.name.clone(), range }
-                })
-                .collect();
-            let embed = Embed { reference: copy.to_owned(), caption: embed.caption.clone() };
-            elements.push(ViewElement::Widget { element_id: format!("vel_{code}.{n}"), embed, inputs });
+            if placement.is_some() {
+                for input in inputs.iter_mut().filter(|input| input.range.sheet_id == s.id) {
+                    input.range.sheet_id = new_id.to_owned();
+                    input.range.top_left = cell(&input.range.top_left);
+                    input.range.bottom_right = cell(&input.range.bottom_right);
+                }
+            }
+            embed.reference = copy.to_owned();
+            *element_id = format!("vel_{code}.{n}");
+            elements.push(element);
             n += 1;
         }
         let view_id = format!("viw_{code}.{k}");
         views.push(ViewToSet { view_id: view_id.clone(), view: Some(View { name: view.name.clone(), elements }) });
-        let placement = Placement {
-            shows: ShownByAPlacement::View { view_id },
-            top_left: cell(&p.top_left),
-            offset_from_anchor_cell: p.offset_from_anchor_cell.clone(),
-            width_in_pixels: p.width_in_pixels,
-            height_in_pixels: p.height_in_pixels,
-        };
-        placements.push(PlacementToSet { placement_id: format!("plc_{code}.{k}"), placement: Some(placement) });
+        if let Some(p) = placement {
+            let placement = Placement {
+                shows: ShownByAPlacement::View { view_id },
+                top_left: cell(&p.top_left),
+                offset_from_anchor_cell: p.offset_from_anchor_cell.clone(),
+                width_in_pixels: p.width_in_pixels,
+                height_in_pixels: p.height_in_pixels,
+            };
+            placements.push(PlacementToSet { placement_id: format!("plc_{code}.{k}"), placement: Some(placement) });
+        } else {
+            interactive = Some(view_id);
+        }
     }
     for v in views.iter().filter_map(|v| v.view.as_ref()) {
         match v.elements.len() {
@@ -196,7 +199,7 @@ fn copied_views(
             return Err(Refused::Because("offsetOfPlacementNotAllowed"));
         }
     }
-    Ok((views, placements))
+    Ok((views, placements, interactive))
 }
 
 /// Groups as an edit may leave them, looked at from the top (the outer of two that start together first): each
@@ -286,11 +289,12 @@ pub(super) fn duplicate(
     let cell = |c: &CellIds| CellIds { r: rows.id(bases, &c.r), c: columns.id(bases, &c.c) };
     let range = |r: &RangeIds| RangeIds { top_left: cell(&r.top_left), bottom_right: cell(&r.bottom_right) };
     let sheet_id_of = |id: &str| if id == sheet_id { new_id.clone() } else { id.to_owned() };
-    let (views, placements) = match placed_views {
+    let (views, placements, interactive) = match placed_views {
         Some(PlacedViews::Copied { copied_widget_nodes }) => {
             copied_views(workbook, s, copied_widget_nodes, code, &new_id, &cell)?
         }
-        _ => (Vec::new(), Vec::new()),
+        _ if s.interactive.is_some() => return Err(Refused::Because("widgetNodeNotCopied")),
+        _ => (Vec::new(), Vec::new(), None),
     };
     let copy_name = copy_name(workbook, name).ok_or(Refused::Because("sheetNameNotAllowed"))?;
 
@@ -432,6 +436,7 @@ pub(super) fn duplicate(
             last_frozen_row: frozen_row.map(|r| Some(rows.line(r))),
             last_frozen_column: frozen_column.map(|c| Some(columns.line(c))),
             are_gridlines_hidden: s.are_gridlines_hidden.then_some(true),
+            interactive: None,
         };
         ops.push(Op::SetSheetSettings { sheets: vec![SheetToSet { sheet_id: new_id.clone(), settings }] });
     }
@@ -503,7 +508,7 @@ pub(super) fn duplicate(
     };
     let deleted_rows = deleted(s.rows.every_line(), &|l| s.rows.is_deleted(l));
     if !deleted_rows.is_empty() {
-        ops.push(Op::DeleteRows { sheet_id: new_id.clone(), rows: runs(&rows.base, deleted_rows.into_iter()) });
+        ops.push(Op::DeleteRows { sheet_id: new_id.clone(), rows: crate::ids::listed_runs::RowRuns::written(runs(&rows.base, deleted_rows.into_iter())) });
     }
     let deleted_columns = deleted(s.columns.every_line(), &|l| s.columns.is_deleted(l));
     if !deleted_columns.is_empty() {
@@ -522,6 +527,17 @@ pub(super) fn duplicate(
 
     // The cell tables the sheet shows, each numbered by its place among all the sheet holds.
     let shown: Vec<_> = s.cell_tables.values().enumerate().filter(|(_, (_, t))| is_shown(bases, s, t)).collect();
+    let named_views = s.named_views.values().enumerate().map(|(n, (_, view))| {
+        let mut view = view.clone();
+        if let Some((table, _)) = shown.iter().find(|(_, (id, _))| *id == view.cell_table_id) {
+            view.cell_table_id = format!("ctb_{code}.{table}");
+        }
+        view.move_columns(|id| Some(columns.id(bases, id)));
+        NamedViewToSet { named_view_id: format!("nvw_{code}.{n}"), named_view: Some(view) }
+    }).collect::<Vec<_>>();
+    if !named_views.is_empty() {
+        ops.push(Op::SetNamedViews { sheet_id: new_id.clone(), named_views });
+    }
     if !shown.is_empty() {
         let rows_of = |r: &RowsOfACellTable| RowsOfACellTable {
             first_row: rows.id(bases, &r.first_row),
@@ -606,11 +622,17 @@ pub(super) fn duplicate(
         .collect();
     cells.sort_by(|a, b| (&a.r, &a.c).cmp(&(&b.r, &b.c)));
     if !cells.is_empty() {
-        ops.push(Op::SetCells { sheet_id: new_id.clone(), cells, listed: false });
+        ops.push(Op::SetCells { sheet_id: new_id.clone(), cells, form: CellForm::Auto });
     }
     if !views.is_empty() {
         ops.push(Op::SetViews { views });
+    }
+    if !placements.is_empty() {
         ops.push(Op::SetPlacements { sheet_id: new_id.clone(), placements });
+    }
+    if let Some(interactive) = interactive {
+        let settings = SheetSettings { interactive: Some(Some(interactive)), ..SheetSettings::default() };
+        ops.push(Op::SetSheetSettings { sheets: vec![SheetToSet { sheet_id: new_id.clone(), settings }] });
     }
     check_copy(bases, s)?;
     Ok(Made { ops, place: Some(Place::sheet(&new_id)) })

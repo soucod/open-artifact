@@ -351,6 +351,8 @@ export interface CalculationContext {
   input(id: string): {
     status: 'ok' | 'loading' | 'missing' | 'error' | 'connect' | 'declined';
     rows: unknown[];
+    /** What a source holds when it isn't rows. */
+    value?: unknown;
   };
   stateOf(id: string): unknown[];
   post(report: CalculationReport): void;

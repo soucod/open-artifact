@@ -62,6 +62,8 @@ export interface Shadow {
   y: number;
   blur: number;
   color: CssColor;
+  /** Size of the shadow against the shape's, about its centre (1 = the same). */
+  scale?: { x: number; y: number };
 }
 
 /** A run of text with one format, or a line break. */
@@ -92,8 +94,11 @@ export interface Paragraph {
   lineHeight?: number;
   spaceBefore?: number;
   spaceAfter?: number;
-  /** A number bullet's scheme (`arabicPeriod` unless set: `alphaLcPeriod`, `romanLcPeriod`). */
-  bullet?: { type: 'char'; char: string } | { type: 'number'; start: number; scheme?: string };
+  /**
+   * The item's marker. A number's scheme is `arabicPeriod` unless set (`alphaLcPeriod`, `romanLcPeriod`…);
+   * `ownFont` draws a character in the text's font; `color` paints the marker apart from the text.
+   */
+  bullet?: ({ type: 'char'; char: string; ownFont?: boolean } | { type: 'number'; start: number; scheme?: string }) & { color?: CssColor };
   /** Left margin of the text in px (bullets hang into it). */
   marginLeft?: number;
   /** How far the bullet hangs left of the text, px (default: all of `marginLeft`; nested items hang one level's padding). */
@@ -105,6 +110,21 @@ export interface Paragraph {
   endFont?: string;
 }
 
+/**
+ * Paragraph spacing for paragraphs in one block flow (a list and its nested
+ * lists): CSS collapses the margin under one paragraph with the margin over
+ * the next, PowerPoint adds them, so the second keeps only what is beyond the
+ * first. Changes the paragraphs in place and returns them.
+ */
+export function collapseGaps<P extends Pick<Paragraph, 'spaceBefore' | 'spaceAfter'>>(paragraphs: P[]): P[] {
+  for (let i = 1; i < paragraphs.length; i++) {
+    const after = paragraphs[i - 1]!.spaceAfter ?? 0;
+    const p = paragraphs[i]!;
+    if (after > 0 && p.spaceBefore !== undefined) p.spaceBefore = Math.max(0, p.spaceBefore - after) || undefined;
+  }
+  return paragraphs;
+}
+
 /** The text of a shape or table cell. */
 export interface TextBody {
   paragraphs: Paragraph[];
@@ -113,6 +133,45 @@ export interface TextBody {
   anchor?: 't' | 'ctr' | 'b';
   /** Wrap within the box (default true). */
   wrap?: boolean;
+}
+
+/**
+ * The body with the space above its first paragraph and below its last moved
+ * into the insets: space that sits inside the box, which PowerPoint would not
+ * keep at the edges of a text box.
+ */
+export function edgeSpaceAsInset(body: TextBody): TextBody {
+  const paragraphs = body.paragraphs.map((p) => ({ ...p }));
+  const first = paragraphs[0];
+  const last = paragraphs[paragraphs.length - 1];
+  const t = first?.spaceBefore ?? 0;
+  const b = last?.spaceAfter ?? 0;
+  if (first) first.spaceBefore = undefined;
+  if (last) last.spaceAfter = undefined;
+  return { ...body, paragraphs, inset: { ...body.inset, t: body.inset.t + t, b: body.inset.b + b } };
+}
+
+/** PowerPoint's single line spacing, as a multiple of the font size. */
+export const SINGLE_SPACING = 1.15;
+
+/**
+ * A text box of one line taller than single spacing, with that line set at
+ * single spacing and the rest of its height split evenly above and below.
+ * PowerPoint puts a tall line's extra height above the text where CSS splits
+ * it around it; the box must have room for the line and its insets.
+ */
+export function centerSingleLine(body: TextBody, height: number): TextBody {
+  const [only] = body.paragraphs;
+  if (!only || body.paragraphs.length !== 1 || !only.lineHeight || only.runs.some((run) => run.lineBreak)) return body;
+  const size = Math.max(only.endSize, ...only.runs.map((run) => run.size));
+  const single = Math.round(size * SINGLE_SPACING * 100) / 100;
+  const extra = only.lineHeight - single;
+  if (extra <= 0.5 || body.inset.t + body.inset.b + only.lineHeight > height + 1) return body;
+  return {
+    ...body,
+    paragraphs: [{ ...only, lineHeight: single }],
+    inset: { ...body.inset, t: body.inset.t + extra / 2, b: body.inset.b + extra / 2 },
+  };
 }
 
 export type Geometry =
@@ -146,6 +205,10 @@ export interface PictureElement {
   crop?: { l: number; t: number; r: number; b: number };
   /** Rounded corners, px. */
   radius?: number;
+  /** Cut to an ellipse (a 50% corner radius). */
+  oval?: boolean;
+  /** Cut to this closed outline instead, points in px relative to the box. */
+  outline?: readonly (readonly [number, number])[];
   line?: Line;
   shadow?: Shadow;
   /** Opacity 0–1. */
@@ -286,11 +349,12 @@ export function lineXml(line: Line | undefined, tag = 'a:ln'): string {
 }
 
 /** An `a:effectLst` with one outer shadow. */
-function shadowXml(shadow: Shadow | undefined): string {
+export function shadowXml(shadow: Shadow | undefined): string {
   if (!shadow) return '';
   const distance = Math.hypot(shadow.x, shadow.y);
   const direction = ((((Math.atan2(shadow.y, shadow.x) * 180) / Math.PI) % 360) + 360) % 360;
-  return `<a:effectLst><a:outerShdw blurRad="${emu(shadow.blur)}" dist="${emu(distance)}" dir="${Math.round(direction * 60000)}" algn="ctr" rotWithShape="0">${srgb(shadow.color)}</a:outerShdw></a:effectLst>`;
+  const scale = shadow.scale ? ` sx="${Math.round(shadow.scale.x * 100000)}" sy="${Math.round(shadow.scale.y * 100000)}"` : '';
+  return `<a:effectLst><a:outerShdw blurRad="${emu(shadow.blur)}" dist="${emu(distance)}" dir="${Math.round(direction * 60000)}"${scale} algn="ctr" rotWithShape="0">${srgb(shadow.color)}</a:outerShdw></a:effectLst>`;
 }
 
 /** An `a:xfrm`. */
@@ -378,9 +442,13 @@ function paragraphXml(paragraph: Paragraph, rels: Rels): string {
   if (paragraph.lineHeight) props += `<a:lnSpc><a:spcPts val="${Math.round(paragraph.lineHeight * SZ_PER_PX)}"/></a:lnSpc>`;
   if (paragraph.spaceBefore) props += `<a:spcBef><a:spcPts val="${Math.round(paragraph.spaceBefore * SZ_PER_PX)}"/></a:spcBef>`;
   if (paragraph.spaceAfter) props += `<a:spcAft><a:spcPts val="${Math.round(paragraph.spaceAfter * SZ_PER_PX)}"/></a:spcAft>`;
-  if (paragraph.bullet?.type === 'char') props += `<a:buFont typeface="Arial"/><a:buChar char="${xml(paragraph.bullet.char)}"/>`;
-  else if (paragraph.bullet?.type === 'number') props += `<a:buFont typeface="+mj-lt"/><a:buAutoNum type="${paragraph.bullet.scheme ?? 'arabicPeriod'}"${paragraph.bullet.start > 1 ? ` startAt="${paragraph.bullet.start}"` : ''}/>`;
-  else props += '<a:buNone/>';
+  const bullet = paragraph.bullet;
+  if (bullet?.color) props += `<a:buClr>${srgb(bullet.color)}</a:buClr>`;
+  if (bullet?.type === 'char') props += `${bullet.ownFont ? '<a:buFontTx/>' : '<a:buFont typeface="Arial"/>'}<a:buChar char="${xml(bullet.char)}"/>`;
+  else if (bullet?.type === 'number') {
+    const start = Math.min(32767, Math.max(1, Math.round(bullet.start)));
+    props += `<a:buFont typeface="+mj-lt"/><a:buAutoNum type="${bullet.scheme ?? 'arabicPeriod'}"${start > 1 ? ` startAt="${start}"` : ''}/>`;
+  } else props += '<a:buNone/>';
   const pPr = `<a:pPr${attrs.length ? ` ${attrs.join(' ')}` : ''}>${props}</a:pPr>`;
   const runs = paragraph.runs
     .map((run) => {
@@ -434,7 +502,7 @@ function pictureXml(picture: PictureElement, writer: SlideWriter): string {
   const src = crop
     ? `<a:srcRect l="${Math.round(crop.l * 100000)}" t="${Math.round(crop.t * 100000)}" r="${Math.round(crop.r * 100000)}" b="${Math.round(crop.b * 100000)}"/>`
     : '';
-  const geometry: Geometry = picture.radius && picture.radius > 0 ? { preset: 'roundRect', radius: picture.radius } : { preset: 'rect' };
+  const geometry: Geometry = picture.outline ? { path: picture.outline, closed: true } : picture.oval ? { preset: 'ellipse' } : picture.radius && picture.radius > 0 ? { preset: 'roundRect', radius: picture.radius } : { preset: 'rect' };
   return (
     `<p:pic><p:nvPicPr>${nvProps(id, picture.name, picture.description)}<p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
     `<p:blipFill><a:blip r:embed="${rel}">${alpha}</a:blip>${src}<a:stretch><a:fillRect/></a:stretch></p:blipFill>` +

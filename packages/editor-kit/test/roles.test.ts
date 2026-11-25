@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readOnlyLabel, roleAbilities } from '../src/roles.ts';
-import { artifactPath, projectPath, sessionSlot } from '../src/session.ts';
+import { artifactPath, hostAbilities, mayExportHere, projectPath, sessionSlot } from '../src/session.ts';
 
 describe('roleAbilities', () => {
   it('gives each role what the host accepts from it', () => {
@@ -36,5 +36,18 @@ describe('session helpers', () => {
     assert.equal(artifactPath('a/b.json'), 'project/a/b.json');
     assert.equal(projectPath('project/a/b.json'), 'a/b.json');
     assert.equal(projectPath('comments.json'), null);
+  });
+});
+
+describe('a host that saves in the browser', () => {
+  it('takes every role\'s files, and lets anyone start an owner-only export (it refuses a viewer itself)', () => {
+    assert.equal(hostAbilities('viewer', null).canSaveToHost, false);
+    assert.equal(hostAbilities('editor', {}).canSaveToHost, false);
+    assert.equal(hostAbilities('viewer', { browser: true }).canSaveToHost, true);
+    assert.equal(hostAbilities('viewer', { browser: true }).canEdit, false);
+    assert.equal(hostAbilities('owner', null).canSaveToHost, true);
+    assert.equal(mayExportHere('owner', null), true);
+    assert.equal(mayExportHere('editor', null), false);
+    assert.equal(mayExportHere('commenter', { browser: true }), true);
   });
 });

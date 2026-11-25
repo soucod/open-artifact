@@ -18,7 +18,7 @@ use crate::session::place::Place;
 use crate::ids::{split_id, IdRun, LineId};
 use crate::workbook::layout::{written, CellIds, RangeIds};
 use crate::workbook::load::Op;
-use crate::workbook::objects::{CellCondition, Color, Effect, Embed, InputOfAWidget, OffsetOfAPlacement, ViewElement};
+use crate::workbook::objects::{CellCondition, Color, Effect, Embed, InputOfAWidget, OffsetOfAPlacement};
 use crate::workbook::{Input, Sheet, Workbook};
 
 pub(crate) mod conditional_formats;
@@ -217,7 +217,7 @@ pub fn make(workbook: &Workbook, edit: Edit, context: &Context) -> Result<Made, 
         }
     }?;
     if !made.ops.is_empty() {
-        check(&made.ops)?;
+        check(workbook, &made.ops)?;
     }
     Ok(made)
 }
@@ -308,7 +308,7 @@ fn ids_named(op: &Op) -> Vec<(&str, &'static str)> {
             .iter()
             .flat_map(|v| {
                 let elements = v.view.iter().flat_map(|v| &v.elements);
-                let elements = elements.map(|ViewElement::Widget { element_id, .. }| (element_id.as_str(), "vel"));
+                let elements = elements.map(|element| (element.parts().0, "vel"));
                 std::iter::once((v.view_id.as_str(), "viw")).chain(elements)
             })
             .collect(),
@@ -318,7 +318,7 @@ fn ids_named(op: &Op) -> Vec<(&str, &'static str)> {
 
 /// The operations of an edit checked before they are applied: the ids they name, then what they set
 /// against the limits.
-fn check(ops: &[Op]) -> Result<(), Refused> {
+fn check(workbook: &Workbook, ops: &[Op]) -> Result<(), Refused> {
     if !ops.iter().flat_map(ids_named).all(|(id, prefix)| is_well_formed(id, prefix)) {
         return Err(Refused::Because("idNotWellFormed"));
     }
@@ -349,6 +349,11 @@ fn check(ops: &[Op]) -> Result<(), Refused> {
                     if offset.is_some_and(|o| o.x_in_pixels.max(o.y_in_pixels) > LARGEST_OFFSET_OF_A_PLACEMENT) {
                         return Err(Refused::Because("offsetOfPlacementNotAllowed"));
                     }
+                    // A placement an edit moves, sizes or makes may not show an interactive: those
+                    // fill a sheet of their own.
+                    if shows_an_interactive(workbook, ops, p.shows.view_id()) {
+                        return Err(Refused::Because("viewIsAnInteractive"));
+                    }
                 }
             }
             Op::SetViews { views } => {
@@ -360,6 +365,18 @@ fn check(ops: &[Op]) -> Result<(), Refused> {
         }
     }
     Ok(())
+}
+
+/// Whether the view is an interactive: as the operations set it, or else as the workbook holds it.
+fn shows_an_interactive(workbook: &Workbook, ops: &[Op], view_id: &str) -> bool {
+    let set = ops.iter().rev().find_map(|op| match op {
+        Op::SetViews { views } => views.iter().find(|v| v.view_id == view_id).map(|v| v.view.as_ref()),
+        _ => None,
+    });
+    match set {
+        Some(view) => view.is_some_and(|view| view.is_interactive()),
+        None => workbook.views.get(view_id).is_some_and(|(_, view)| view.is_interactive()),
+    }
 }
 
 /// A conditional format's tests against the limits: not too many, each condition within them.

@@ -3,12 +3,12 @@ import type { WorkbookReads } from './workbook.ts';
 import type { CellArea } from '../selection/model.ts';
 import { areaAsSeen } from './a1-references.ts';
 export function areaOfReference(reads: WorkbookReads, reference: Reference): CellArea | null {
-  let { sheetId: sheetId } = reference;
+  let { sheetId } = reference;
   let sheet = reads.listSheets().find((summary) => summary.sheetId === sheetId);
   if (sheet === undefined) return null;
   let ownRowOrder = sheet.ownRowOrder;
   let rowOf = ({ r: rowId }: RowPoint | CellPoint): number | null => (ownRowOrder === null ? reads.rowIndexOf(sheetId, rowId) : ownRowOrder.stored.indexOf(rowId));
-  let columnOf = ({ c: c }: ColumnPoint | CellPoint): number | null => reads.columnIndexOf(sheetId, c);
+  let columnOf = ({ c }: ColumnPoint | CellPoint): number | null => reads.columnIndexOf(sheetId, c);
   let rows: (number | null)[];
   let columns: (number | null)[];
   switch (reference.kind) {

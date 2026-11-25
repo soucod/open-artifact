@@ -21,6 +21,7 @@ import {
   isTimerRunning,
   linkKindLabel,
   linkTitle,
+  showsTextPlaceholder,
   stickerLabel,
   tableColumnIds,
   tableRowIds,
@@ -29,6 +30,7 @@ import {
   timerRemainingMs,
   type ArrowEnd,
   type BoardElement,
+  type ElementId,
   type ElementMeasures,
   type ElementsById,
 } from '@open-artifact/whiteboard-core';
@@ -130,6 +132,7 @@ export function describeElement(element: BoardElement, byId: ElementsById, measu
     case 'note':
     case 'shape':
     case 'text': {
+      if (showsTextPlaceholder(element)) return `${kind}, empty, hint ${quoteSpokenText(element.placeholder) ?? ''}`;
       const quote = quoteSpokenText(element.text, element);
       return quote ? `${kind}, ${quote}` : kind;
     }
@@ -169,6 +172,16 @@ export function describeElement(element: BoardElement, byId: ElementsById, measu
     case 'stroke':
       return kind;
   }
+}
+
+/** Whether a placeholder is longer than its spoken quote (so the whole hint is given as a description). */
+export function placeholderNeedsDescription(placeholder: string): boolean {
+  return [...placeholder.replace(/\s+/g, ' ').trim()].length > SPOKEN_QUOTE_MAX;
+}
+
+/** The DOM id of the node holding a text's whole placeholder. */
+export function placeholderHintId(id: ElementId): string {
+  return `wb-${id}-hint`;
 }
 
 /** The label of the action that edits an element's text. */

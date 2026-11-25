@@ -37,6 +37,35 @@ export interface SyncChangeEvent {
   changes: Record<string, Record<string, unknown> | null>;
   /** Who made the change, when the host knows. */
   author?: string;
+  /** The change's place in the store's order, when it keeps one ({@link SyncOrder}). */
+  epoch?: string;
+  seq?: number;
+  /**
+   * The event stream (re)started: changes up to `seq` were sent before it.
+   * Without an order, or when neither the events heard nor the listings
+   * reach `seq`, some may have been missed: the engine reads everything again.
+   */
+  resync?: boolean;
+}
+
+/**
+ * Where a store's documents stand: `seq` counts its change events since
+ * `epoch` began. Events arrive in `seq` order; write answers and listings
+ * may arrive before or after events about older or newer changes.
+ */
+export interface SyncOrder {
+  epoch: string;
+  seq: number;
+}
+
+/** A write's answer: the store's order after it and each written document as stored (`null`: absent). */
+export interface SyncReceipt extends SyncOrder {
+  documents: Record<string, Record<string, unknown> | null>;
+}
+
+/** One collection's documents and, when the store keeps an order, where it stood when they were read. */
+export interface SyncListing extends Partial<SyncOrder> {
+  documents: SyncDocument[];
 }
 
 /**
@@ -48,8 +77,10 @@ export interface SyncTransport {
   get(path: string): Promise<Record<string, unknown> | null>;
   /** Every document of one collection. */
   list(collection: string): Promise<SyncDocument[]>;
-  /** Applies a batch in order, all or nothing. */
-  write(writes: SyncWrite[]): Promise<void>;
+  /** {@link list} with the store's order at the read, when it keeps one (preferred over `list`). */
+  listing?(collection: string): Promise<SyncListing>;
+  /** Applies a batch in order, all or nothing; resolves with a {@link SyncReceipt} when the store keeps an order. */
+  write(writes: SyncWrite[]): Promise<SyncReceipt | void>;
   /** Subscribes to changes made by anyone else; returns an unsubscribe function. */
   onChange(listener: (event: SyncChangeEvent) => void): () => void;
 }

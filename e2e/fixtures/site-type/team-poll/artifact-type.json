@@ -1,0 +1,14 @@
+{
+  "slug": "team-poll",
+  "uid": "0f6a3c1e-5b2d-4e8f-9a17-3c2b1d0e4f56",
+  "name": "Team poll",
+  "title": "Team poll",
+  "description": "A synthetic poll type for the e2e tests: people vote on the page, an editor sets the question.",
+  "artifactTitle": "Untitled poll",
+  "version": "1.0.0",
+  "skill": "SKILL.md",
+  "intents": ["team-poll"],
+  "when": "The e2e tests ask for a team poll.",
+  "engines": { "openArtifact": ">=1" },
+  "openArtifact": { "store": "db" }
+}

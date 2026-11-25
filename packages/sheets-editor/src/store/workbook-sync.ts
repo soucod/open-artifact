@@ -19,7 +19,6 @@ import type {
   SendEditStep,
   SheetChanges,
   SheetId,
-  ColumnId,
   StepGivenUpAnswer,
   StopReason,
   StreamedEdit,
@@ -35,7 +34,15 @@ import type {
 import { createOwnRowOrderSession } from '../tables/own-row-order.ts';
 import { createPagedLoader } from './paged-load.ts';
 import { errorKindOf, type ErrorKind } from '../model/refusals.ts';
-import { createCoreUtilities, createWorkbookReader, readTableAtCell, readTablesOfSheetFromCore, readXlsxFile, type CoreRead } from '../engine/core-reads.ts';
+import {
+  createCoreUtilities,
+  createWorkbookReader,
+  readTableAtCell,
+  readTablesOfSheetFromCore,
+  readXlsxFile,
+  type CoreRead,
+  type WorkbookReader,
+} from '../engine/core-reads.ts';
 import { rememberLatestCausesOfError, editsOfQueued } from '../engine/cause-of-error-cache.ts';
 import { resolvePlaceArea } from '../agent/changes-by-agent.ts';
 import type { SessionAnswers, SheetsUtilities } from '../engine/wasm-bindings.ts';
@@ -77,7 +84,8 @@ export interface RestOfAct {
   shownToThePerson?: TextThatNoCellShows[];
   editsBefore?: { edit: Edit; isPointedAt: boolean }[];
   editsThatGoAlong?: Edit[];
-  makesRoomForNumbersIn?: ColumnId[];
+  /** The sheet whose columns are widened to show the numbers the edit gives a format. */
+  makesRoomForNumbersIn?: SheetId;
 }
 
 /** Set when the edits of one act went to the server as more than one. */
@@ -92,7 +100,8 @@ export interface EditQueuedOutcome extends SentAsSeveralEdits {
   placeChanged: PlaceAreaChanged | null;
   placesChangedBefore?: PlaceAreaChanged[];
   editsThatWentAlong?: WentAlong[];
-  step: string;
+  /** The step the edit made, to undo it by; left out of an outcome the page makes up for an edit it never sent. */
+  step?: string;
 }
 /** How the workbook answered an edit the page queued. */
 export type EditOutcome = EditRefusedOutcome | NothingToChangeAnswer | OtherAnswerToAnEdit | EditQueuedOutcome;
@@ -152,6 +161,8 @@ export interface SyncedWorkbookOptions {
 /** A workbook in step with the server: its reads, its edits and where saving stands. */
 export interface SyncedWorkbook {
   reads(): WorkbookReads;
+  /** Some rows (some columns of them) read into a workbook of their own; `null` when they cannot be read. */
+  readsWithCellsIn: WorkbookReader['readWithCellsIn'];
   queueEdit(edit: Edit, restOfAct?: RestOfAct): EditOutcome;
   refusalOfEveryEdit(): RefusalOfEveryEdit | null;
   undoOrRedo(which: 'undo' | 'redo'): UndoOrRedoOutcome;
@@ -204,10 +215,10 @@ interface SyncStateAsRead extends SyncState {
 export function mergeChangedSheetLists(changedSheets: readonly SheetChanges[]): SheetChanges[] {
   let bySheet = new Map<SheetId, { cells: Map<string, CellAt>; isLayoutChanged: boolean; areFormatsGivenChanged: boolean }>();
   for (let {
-    sheetId: sheetId,
-    cells: cells,
-    isLayoutChanged: isLayoutChanged,
-    areFormatsGivenChanged: areFormatsGivenChanged,
+    sheetId,
+    cells,
+    isLayoutChanged,
+    areFormatsGivenChanged,
   } of changedSheets) {
     let merged = bySheet.get(sheetId) ?? {
       cells: new Map<string, CellAt>(),
@@ -220,11 +231,11 @@ export function mergeChangedSheetLists(changedSheets: readonly SheetChanges[]): 
     bySheet.set(sheetId, merged);
   }
   return [...bySheet].map(
-    ([sheetId, { cells: cells, isLayoutChanged: isLayoutChanged, areFormatsGivenChanged: areFormatsGivenChanged }]) => {
+    ([sheetId, { cells, isLayoutChanged, areFormatsGivenChanged }]) => {
       let changed: SheetChanges = {
-        sheetId: sheetId,
+        sheetId,
         cells: [...cells.values()],
-        isLayoutChanged: isLayoutChanged,
+        isLayoutChanged,
       };
       if (areFormatsGivenChanged) changed.areFormatsGivenChanged = true;
       return changed;
@@ -233,7 +244,7 @@ export function mergeChangedSheetLists(changedSheets: readonly SheetChanges[]): 
 }
 export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<SyncedWorkbook | null> {
   let core: CoreInOwnRowOrder = createOwnRowOrderSession(await host.newCore());
-  let { utilities: utilities } = host;
+  let { utilities } = host;
   let nextStep: NextStep = null;
   let isLoaded = false;
   let unacknowledgedCount = 0;
@@ -381,6 +392,9 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
       filteredRows: unlessBroken(coreUtilities.filteredRows),
       valuesOfFilteredColumn: unlessBroken(coreUtilities.valuesOfFilteredColumn),
       rowsInSortedOrder: unlessBroken(coreUtilities.rowsInSortedOrder),
+      tablesOfSheet: unlessBroken(coreUtilities.tablesOfSheet),
+      pivotTableAt: unlessBroken(coreUtilities.pivotTableAt),
+      valuesToFilterPivotTableBy: unlessBroken(coreUtilities.valuesToFilterPivotTableBy),
       causeOfError: rememberLatestCausesOfError((cell: CellId, cellNow: string) => {
         if (isBroken) return 'neverToCome';
         if (areFormulasLeft) return 'yetToCome';
@@ -406,10 +420,10 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
   }
   function takeSyncState(syncState: SyncState) {
     nextStep = syncState.nextStep;
-    ({ isLoaded: isLoaded } = syncState);
+    ({ isLoaded } = syncState);
     unacknowledgedCount = syncState.unacknowledgedCount;
     unconfirmedCount = syncState.unconfirmedCount;
-    ({ confirmedRevision: confirmedRevision } = syncState);
+    ({ confirmedRevision } = syncState);
     reportRevisionHeld();
     if (syncState.changes.kind === 'inSheets') {
       pendingChanges.isTimeZoneChanged ||= syncState.changes.isTimeZoneChanged === true;
@@ -420,7 +434,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (syncState.fault !== undefined) host.reportFault(syncState.fault);
   }
   function readPendingChanges() {
-    let { isEverything: isEverything, listed: listed, views: views, isTimeZoneChanged: isTimeZoneChanged } = pendingChanges;
+    let { isEverything, listed, views, isTimeZoneChanged } = pendingChanges;
     pendingChanges = noChangesYet();
     let isAnyListed = listed.length > 0 || views.size > 0 || isTimeZoneChanged;
     if (isEverything) reads = readEverything();
@@ -478,7 +492,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (syncState.droppedOpIds.length > 0 && syncState.droppedEditsWereNoSteps !== true)
       callSyncListeners(droppedListeners, {
         isPartKept: syncState.isAStepCutShort === true,
-        why: why,
+        why,
       });
     takeNextStep();
     if (isLoaded) resolveLoaded?.(true);
@@ -514,7 +528,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
   };
   let waitBeforeNextStep = async (delayMs: number, isForBusyStore: boolean): Promise<void> => {
     let wait = {
-      isForBusyStore: isForBusyStore,
+      isForBusyStore,
     };
     pendingWait = wait;
     await host.wait(delayMs);
@@ -539,26 +553,26 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     takeNextStep();
   }
   async function sendEdit(step: SendEditStep): Promise<void> {
-    let { opId: opId, actionId = null, recordedEdit: recordedEdit } = step;
+    let { opId, actionId = null, recordedEdit } = step;
     pagedLoader.drop();
     if (refusedForNowSends.opId !== opId)
       refusedForNowSends = {
-        opId: opId,
+        opId,
         count: 0,
       };
     let isLastSend = refusedForNowSends.count + 1 >= (isRefusedForNow ? 1 : MAX_SENDS_WHEN_REFUSED_FOR_NOW);
     isStoreCallOpen = true;
     let outcome = await host.store.save({
       editId: opId,
-      actionId: actionId,
-      recordedEdit: recordedEdit,
-      isLastSend: isLastSend,
+      actionId,
+      recordedEdit,
+      isLastSend,
     });
     isStoreCallOpen = false;
     isLastSendNotSent = outcome.kind === 'notSent';
     if (unansweredSaves.opId !== opId)
       unansweredSaves = {
-        opId: opId,
+        opId,
         count: 0,
       };
     if (outcome.kind === 'mayNotHaveArrived' && !outcome.wasAnswered) {
@@ -588,7 +602,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
       return applyRequest(
         {
           kind: 'receiveSendOutcome',
-          opId: opId,
+          opId,
           outcome: {
             kind: 'refused',
           },
@@ -598,11 +612,11 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     }
     applyRequest({
       kind: 'receiveSendOutcome',
-      opId: opId,
-      outcome: outcome,
+      opId,
+      outcome,
     });
   }
-  async function fetchLoadPage({ from: from }: { from: number }): Promise<void> {
+  async function fetchLoadPage({ from }: { from: number }): Promise<void> {
     if (!isLoaded && from === 0 && retryCount === 0) firstLoadStartCount += 1;
     if (firstLoadStartCount > MAX_FIRST_LOAD_RESTARTS) {
       host.reportFault(FIRST_LOAD_RESTARTED_TOO_OFTEN);
@@ -630,12 +644,12 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     applyRequest(
       {
         kind: 'receiveLoadPage',
-        from: from,
+        from,
         ...page,
       },
       null,
       {
-        revisionBefore: revisionBefore,
+        revisionBefore,
       },
     );
   }
@@ -690,7 +704,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (refusal !== null)
       return {
         kind: 'refused',
-        refusal: refusal,
+        refusal,
       };
     let request = {
       opId: host.newEditId(),
@@ -700,10 +714,10 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
       }),
     };
     let {
-      shownToThePerson: shownToThePerson,
-      editsBefore: editsBefore,
-      editsThatGoAlong: editsThatGoAlong,
-      makesRoomForNumbersIn: makesRoomForNumbersIn,
+      shownToThePerson,
+      editsBefore,
+      editsThatGoAlong,
+      makesRoomForNumbersIn,
     } = restOfAct;
     let unconfirmedBefore = unconfirmedCount;
     let answer = callCore(
@@ -711,7 +725,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
         core.answer({
           kind: 'queueEdit',
           ...request,
-          edit: edit,
+          edit,
           shownToThePerson: shownToThePerson ?? [],
           ...(editsBefore !== undefined && {
             editsBefore: editsBefore.map(
@@ -731,7 +745,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
             ),
           }),
           ...(makesRoomForNumbersIn !== undefined && {
-            makesRoomForNumbersIn: makesRoomForNumbersIn,
+            makesRoomForNumbersIn,
           }),
         }),
     );
@@ -744,7 +758,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (answer.kind === 'refused' || answer.kind === 'nothingToChange' || answer.kind === 'toBeShownFirst') return answer;
     if (answer.kind !== 'editQueued') throw (stop(), Error(`sheets-core answered an edit with ${(answer as { kind: string }).kind}`));
     let editCount = editsOfQueued({
-      edit: edit,
+      edit,
       ...restOfAct,
     }).length;
     let note = sentAsSeveralEditsNote(answer.syncState, unconfirmedBefore, editCount);
@@ -767,7 +781,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (refusal !== null)
       return {
         kind: 'refused',
-        refusal: refusal,
+        refusal,
       };
     let requestKind: 'queueNextUndo' | 'queueNextRedo' = which === 'undo' ? 'queueNextUndo' : 'queueNextRedo';
     let unconfirmedBefore = unconfirmedCount;
@@ -786,7 +800,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (answer.kind !== 'editQueued') throw (stop(), Error(`sheets-core answered ${requestKind} with ${(answer as { kind: string }).kind}`));
     let note = sentAsSeveralEditsNote(answer.syncState, unconfirmedBefore);
     applySyncState(answer.syncState);
-    let { placeChanged: placeChanged, placesChangedBefore: placesChangedBefore, stepReversed: stepReversed } = answer;
+    let { placeChanged, placesChangedBefore, stepReversed } = answer;
     return {
       kind: 'made',
       changed: resolvePlaceArea(placeChanged, reads),
@@ -794,7 +808,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
         changedBefore: resolvePlaceAreas(placesChangedBefore),
       }),
       ...(stepReversed !== undefined && {
-        stepReversed: stepReversed,
+        stepReversed,
       }),
       ...note,
     };
@@ -804,14 +818,14 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     if (refusal !== null)
       return {
         kind: 'refused',
-        refusal: refusal,
+        refusal,
       };
     let answer = callCore(
       () =>
         core.answer({
           kind: 'queueEditsThatTakeBack',
           opId: host.newEditId(),
-          builtOnRevision: builtOnRevision,
+          builtOnRevision,
           edits: [...edits],
         }),
     );
@@ -857,7 +871,7 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
     revisionPollFailures = 0;
     applyRequest({
       kind: 'receiveServerRevision',
-      revision: revision,
+      revision,
     });
   }
   async function keepPollingRevision(): Promise<void> {
@@ -879,34 +893,38 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
   keepPollingRevision();
   return {
     reads: () => reads,
-    queueEdit: queueEdit,
-    refusalOfEveryEdit: refusalOfEveryEdit,
-    undoOrRedo: undoOrRedo,
-    queueEditsThatTakeBack: queueEditsThatTakeBack,
+    readsWithCellsIn: unlessBroken(workbookReader.readWithCellsIn),
+    queueEdit,
+    refusalOfEveryEdit,
+    undoOrRedo,
+    queueEditsThatTakeBack,
     seeRowsInOwnOrder(sheetId: SheetId, rows: readonly IdRun[] | null) {
       if (isBroken) return;
       callCore(() => core.seeRowsInOwnOrder(sheetId, rows));
       if (reads.linesOf(sheetId) === null) return;
       pendingChanges.listed.push({
-        sheetId: sheetId,
+        sheetId,
         cells: [],
         isLayoutChanged: true,
         areFormatsGivenChanged: true,
       });
       notifyChanged(readPendingChanges(), false);
     },
-    tableAt: unlessBroken((cell: CellId) => readTableAtCell(core, cell)),
+    tableAt: unlessBroken((cell: CellId) => {
+      let read = readTableAtCell(core, cell);
+      return read === 'nowhere' ? null : read;
+    }),
     tablesOf: unlessBroken((sheetId: SheetId) => readTablesOfSheetFromCore(core, sheetId)),
     xlsxFile: unlessBroken((request: Omit<ReadXlsxFileRequest, 'kind'>) => readXlsxFile(core, request)),
     onChanged: syncListenerAdder(changeListeners),
-    saving: saving,
+    saving,
     hasUnsavedEdits: () => unacknowledgedCount > 0 || saving() === 'stoppedOutOfDateWithUnsavedEdits',
     unsavedEditCount: () => unacknowledgedCount,
     onSavingChanged: syncListenerAdder(savingListeners),
     areFormulasLeft: () => areFormulasLeft,
     onFormulasLeftChanged: syncListenerAdder(formulasLeftListeners),
     workOutFormulasLeft: () => workOutFormulas('allThatAreLeft'),
-    revisionHeld: revisionHeld,
+    revisionHeld,
     onEditsDropped: syncListenerAdder(droppedListeners),
     onEditsOfOthersMade: syncListenerAdder(editsOfOthersListeners),
     onLoaded: syncListenerAdder(loadedListeners),
@@ -914,15 +932,15 @@ export async function openSyncedWorkbook(host: SyncedWorkbookOptions): Promise<S
       noteStoreContact();
       applyRequest({
         kind: 'receiveStreamedEdit',
-        revision: revision,
-        applied: applied,
+        revision,
+        applied,
       });
     },
     storeRevisionReported(revision: number) {
       noteStoreContact();
       applyRequest({
         kind: 'receiveServerRevision',
-        revision: revision,
+        revision,
       });
     },
     timeTold(clockReading: ClockReading) {
@@ -999,7 +1017,7 @@ export const noChangesYet = (): PendingChanges => ({
   isTimeZoneChanged: false,
 });
 export const sentAsSeveralEditsNote = (
-  { unconfirmedCount: unconfirmedCount, confirmedOpIds: confirmedOpIds, droppedOpIds: droppedOpIds }: Pick<SyncState, 'unconfirmedCount' | 'confirmedOpIds' | 'droppedOpIds'>,
+  { unconfirmedCount, confirmedOpIds, droppedOpIds }: Pick<SyncState, 'unconfirmedCount' | 'confirmedOpIds' | 'droppedOpIds'>,
   unconfirmedBefore: number,
   editCount = 1,
 ): SentAsSeveralEdits =>

@@ -1,6 +1,17 @@
-import type { Dynamic } from '../dynamic.ts';
 import { isSameJson, importTextAt, optionsLimitedToColumns, doOptionsDiffer } from './column-readings.ts';
-export function applyByHandChange(byHand?: Dynamic, change?: Dynamic) {
+import type { ImportLineChoice } from './column-readings.ts';
+import type {
+  ImportByHand,
+  ImportChangeStood,
+  ImportColumnByHand,
+  ImportColumnPlan,
+  ImportFile,
+  ImportPlan,
+  ImportQuestion,
+  ImportReadingWords,
+} from '../state/initial-state.ts';
+import type { ImportChangeByHand, ImportReading } from '../state/event-reducer.ts';
+export function applyByHandChange(byHand: ImportByHand, change: ImportChangeByHand): ImportByHand {
   switch (change.kind) {
     case 'sheetName':
       return {
@@ -23,7 +34,7 @@ export function applyByHandChange(byHand?: Dynamic, change?: Dynamic) {
         },
       };
     case 'column': {
-      let { kind: kind, columnIndex: columnIndex, ...columnChange } = change;
+      let { kind, columnIndex, ...columnChange } = change;
       let column = {
         ...byHand.columns[columnIndex],
         ...columnChange,
@@ -38,74 +49,74 @@ export function applyByHandChange(byHand?: Dynamic, change?: Dynamic) {
     }
   }
 }
-export function questionOptionOfReading(questions?: Dynamic, columnIndex?: Dynamic, reading?: Dynamic) {
+export function questionOptionOfReading(questions: ImportQuestion[], columnIndex: number, reading: ImportReading) {
   let readings = [
     {
-      columnIndex: columnIndex,
-      reading: reading,
+      columnIndex,
+      reading,
     },
   ];
-  for (let { id: questionId, options: options } of questions as Dynamic) {
-    let optionIndex = options.findIndex(({ readings: readings2 }: Dynamic) => isSameJson(readings2, readings));
+  for (let { id: questionId, options } of questions) {
+    let optionIndex = options.findIndex(({ readings: optionReadings }) => isSameJson(optionReadings, readings));
     if (optionIndex >= 0)
       return {
-        questionId: questionId,
-        optionIndex: optionIndex,
+        questionId,
+        optionIndex,
       };
   }
   return null;
 }
-export function wordIndexesIn(text?: Dynamic, word?: Dynamic) {
-  let indexes: Dynamic = [];
+export function wordIndexesIn(text: string, word: string) {
+  let indexes: number[] = [];
   if (word === '') return indexes;
-  for (let index: Dynamic = text.indexOf(word); index >= 0; index = text.indexOf(word, index + 1)) {
+  for (let index = text.indexOf(word); index >= 0; index = text.indexOf(word, index + 1)) {
     let end = index + word.length;
     let isPlural = word.length >= 3 && text[end] === 's';
     if (!isWordCharacterOfNote(text[index - 1]) && !isWordCharacterOfNote(text[isPlural ? end + 1 : end])) indexes.push(index);
   }
   return indexes;
 }
-export function withoutTrailingParenthesis(name?: Dynamic) {
+export function withoutTrailingParenthesis(name: string) {
   let openIndex = name.endsWith(')') ? name.lastIndexOf('(') : -1;
   return openIndex < 0 ? name : name.slice(0, openIndex).trimEnd();
 }
-export function columnsNamedInNote(note?: Dynamic, columns?: Dynamic) {
-  let columnsByName = new (Map as Dynamic)();
-  let lowerNames = columns.map(({ name: name }: Dynamic) => name.toLowerCase());
-  lowerNames.forEach((name?: Dynamic, columnIndex?: Dynamic) => {
+export function columnsNamedInNote(note: string, columns: Pick<ImportColumnPlan, 'name'>[]) {
+  let columnsByName = new Map<string, number[]>();
+  let lowerNames = columns.map(({ name }) => name.toLowerCase());
+  lowerNames.forEach((name, columnIndex) => {
     columnsByName.set(name, [...(columnsByName.get(name) ?? []), columnIndex]);
   });
-  lowerNames.forEach((name?: Dynamic, columnIndex?: Dynamic) => {
+  lowerNames.forEach((name, columnIndex) => {
     let shortName = withoutTrailingParenthesis(name);
     if (lowerNames.includes(shortName)) return;
     columnsByName.set(shortName, [...(columnsByName.get(shortName) ?? []), columnIndex]);
   });
-  let lowerNote: Dynamic = note.toLowerCase();
-  let namedColumns = new (Set as Dynamic)();
-  let longestFirst = [...columnsByName].toSorted(([a]: Dynamic, [b2]: Dynamic) => b2.length - a.length);
-  for (let [value, value2] of longestFirst as Dynamic)
-    for (let value3 of wordIndexesIn(lowerNote, value) as Dynamic) {
-      for (let value4 of value2 as Dynamic) namedColumns.add(value4);
-      lowerNote = lowerNote.slice(0, value3) + ' '.repeat(value.length) + lowerNote.slice(value3 + value.length);
+  let lowerNote = note.toLowerCase();
+  let namedColumns = new Set<number>();
+  let longestFirst = [...columnsByName].toSorted(([name], [otherName]) => otherName.length - name.length);
+  for (let [name, columnIndexes] of longestFirst)
+    for (let wordIndex of wordIndexesIn(lowerNote, name)) {
+      for (let columnIndex of columnIndexes) namedColumns.add(columnIndex);
+      lowerNote = lowerNote.slice(0, wordIndex) + ' '.repeat(name.length) + lowerNote.slice(wordIndex + name.length);
     }
-  return [...namedColumns].toSorted((input?: Dynamic, options?: Dynamic) => input - options);
+  return [...namedColumns].toSorted((columnIndex, otherIndex) => columnIndex - otherIndex);
 }
 export function changesByHand(
-  plan: Dynamic,
-  { sheetName: sheetName, headings: headings, lines: lines, columns: columns }: Dynamic,
-  previousPlan: Dynamic = null,
-) {
+  plan: ImportPlan,
+  { sheetName, headings, lines, columns }: ImportByHand,
+  previousPlan: ImportPlan | null = null,
+): ImportChangeStood[] {
   let headerLine = headings === null ? plan.headerLine : headings.line;
   return [
     ...(headings !== null && headings.line !== plan.headerLine
       ? [
           {
             kind: 'headings',
-          },
+          } satisfies ImportChangeStood,
         ]
       : []),
     ...Object.entries(lines).flatMap(
-      ([line, isLeftOut]: Dynamic) =>
+      ([line, isLeftOut]): ImportChangeStood[] =>
         Number(line) <= (headerLine ?? 0) || isLeftOut === plan.linesLeftOut.includes(Number(line))
           ? []
           : [
@@ -119,10 +130,10 @@ export function changesByHand(
       ? [
           {
             kind: 'sheetName',
-          },
+          } satisfies ImportChangeStood,
         ]
       : []),
-    ...Object.entries(columns).flatMap(([columnIndex, { name: name, reading: reading }]: Dynamic) => {
+    ...Object.entries(columns).flatMap(([columnIndex, { name, reading }]): ImportChangeStood[] => {
       let planColumn = plan.columns[Number(columnIndex)];
       return (reading !== undefined && !isSameJson(reading, planColumn?.reading)) ||
         (name !== undefined && ![name, previousPlan?.columns[Number(columnIndex)]?.name].includes(planColumn?.name))
@@ -136,39 +147,39 @@ export function changesByHand(
     }),
   ];
 }
-export function notesStillTrue(plan?: Dynamic, byHand?: Dynamic) {
+export function notesStillTrue(plan: ImportPlan, byHand: ImportByHand) {
   let changes = changesByHand(plan, byHand);
-  let isColumnTouched = (columnIndex?: Dynamic) =>
+  let isColumnTouched = (columnIndex: number) =>
     byHand.columns[columnIndex]?.isLeftOut === true ||
-    changes.some((input?: Dynamic) => input.kind === 'column' && input.columnIndex === columnIndex);
-  let isAboutTouchedLine = (note?: Dynamic) => {
-    let numbers = new (Set as Dynamic)((note.match(/(?<![\d.,:/$€£¥-])\d+(?![.,:/]?\d|%)/g) ?? []).map(Number));
-    return changes.some((input?: Dynamic) => input.kind === 'line' && plan.linesLeftOut.includes(input.line) && numbers.has(input.line));
+    changes.some((change) => change.kind === 'column' && change.columnIndex === columnIndex);
+  let isAboutTouchedLine = (note: string) => {
+    let numbers = new Set((note.match(/(?<![\d.,:/$€£¥-])\d+(?![.,:/]?\d|%)/g) ?? []).map(Number));
+    return changes.some((change) => change.kind === 'line' && plan.linesLeftOut.includes(change.line) && numbers.has(change.line));
   };
-  return plan.notes.filter((note?: Dynamic) => !columnsNamedInNote(note, plan.columns).some(isColumnTouched) && !isAboutTouchedLine(note));
+  return plan.notes.filter((note) => !columnsNamedInNote(note, plan.columns).some(isColumnTouched) && !isAboutTouchedLine(note));
 }
-export function byHandAfterNewPlan(byHand?: Dynamic, plans?: Dynamic, newPlan?: Dynamic) {
-  let isUnlikeAll = (value4?: Dynamic, valueOf?: Dynamic) =>
-    [value4, ...plans.map(valueOf)].every((other?: Dynamic) => !isSameJson(valueOf(newPlan), other));
-  let { sheetName: value, headings: value2, columns: value3 } = byHand;
+export function byHandAfterNewPlan(byHand: ImportByHand, plans: ImportPlan[], newPlan: ImportPlan): ImportByHand {
+  let isUnlikeAll = <Value>(byHandValue: Value, valueOf: (plan: ImportPlan) => Value) =>
+    [byHandValue, ...plans.map(valueOf)].every((other) => !isSameJson(valueOf(newPlan), other));
+  let { sheetName, headings, columns } = byHand;
   return {
     ...byHand,
-    sheetName: value !== null && isUnlikeAll(value, (input?: Dynamic) => input.sheetName) ? null : value,
-    headings: value2 !== null && isUnlikeAll(value2.line, (input?: Dynamic) => input.headerLine) ? null : value2,
+    sheetName: sheetName !== null && isUnlikeAll(sheetName, (plan) => plan.sheetName) ? null : sheetName,
+    headings: headings !== null && isUnlikeAll(headings.line, (plan) => plan.headerLine) ? null : headings,
     columns: Object.fromEntries(
-      Object.entries(value3).flatMap(([columnIndex, { name: name, reading: reading, isLeftOut: isLeftOut }]: Dynamic) => {
+      Object.entries(columns).flatMap(([columnIndex, { name, reading, isLeftOut }]): [string, ImportColumnByHand][] => {
         let index = Number(columnIndex);
         let kept = {
           ...(name !== undefined &&
-            !isUnlikeAll(name, (input?: Dynamic) => input.columns[index]?.name) && {
-              name: name,
+            !isUnlikeAll<string | undefined>(name, (plan) => plan.columns[index]?.name) && {
+              name,
             }),
           ...(reading !== undefined &&
-            !isUnlikeAll(reading, (input?: Dynamic) => input.columns[index]?.reading) && {
-              reading: reading,
+            !isUnlikeAll<ImportReading | undefined>(reading, (plan) => plan.columns[index]?.reading) && {
+              reading,
             }),
           ...(isLeftOut !== undefined && {
-            isLeftOut: isLeftOut,
+            isLeftOut,
           }),
         };
         return Object.keys(kept).length === 0 ? [] : [[columnIndex, kept]];
@@ -176,34 +187,39 @@ export function byHandAfterNewPlan(byHand?: Dynamic, plans?: Dynamic, newPlan?: 
     ),
   };
 }
-export function linesWithByHand(plan?: Dynamic, byHand?: Dynamic, file?: Dynamic) {
+export function linesWithByHand(plan: ImportLineChoice, byHand: Pick<ImportByHand, 'headings' | 'lines'>, file: Pick<ImportFile, 'lines'>): ImportLineChoice {
   let headerLine = byHand.headings === null ? plan.headerLine : byHand.headings.line;
   let linesAboveHeader =
-    headerLine === null ? file.lines.slice(0, (plan.headerLine ?? 1) - 1).map((line?: Dynamic, index?: Dynamic) => index + 1) : [];
-  let leftOut = new (Set as Dynamic)([...linesAboveHeader, ...plan.linesLeftOut]);
-  for (let [value, value2] of Object.entries(byHand.lines) as Dynamic)
-    if (value2) leftOut.add(Number(value));
-    else leftOut.delete(Number(value));
-  let linesLeftOut = [...leftOut].filter((input?: Dynamic) => input > (headerLine ?? 0));
-  linesLeftOut.sort((input?: Dynamic, options?: Dynamic) => input - options);
+    headerLine === null ? file.lines.slice(0, (plan.headerLine ?? 1) - 1).map((_, index) => index + 1) : [];
+  let leftOut = new Set([...linesAboveHeader, ...plan.linesLeftOut]);
+  for (let [line, isLeftOut] of Object.entries(byHand.lines))
+    if (isLeftOut) leftOut.add(Number(line));
+    else leftOut.delete(Number(line));
+  let linesLeftOut = [...leftOut].filter((line) => line > (headerLine ?? 0));
+  linesLeftOut.sort((line, otherLine) => line - otherLine);
   return {
-    headerLine: headerLine,
-    linesLeftOut: linesLeftOut,
+    headerLine,
+    linesLeftOut,
   };
 }
-export function planWithByHand(plan?: Dynamic, byHand?: Dynamic, file?: Dynamic, blankColumns?: Dynamic) {
-  let { headerLine: headerLine, linesLeftOut: linesLeftOut } = linesWithByHand(plan, byHand, file);
-  let headingAt = (columnIndex?: Dynamic) => {
+export function planWithByHand(
+  plan: ImportPlan,
+  byHand: ImportByHand,
+  file: ImportFile,
+  defaultNames: ImportReadingWords['names'],
+): ImportPlan {
+  let { headerLine, linesLeftOut } = linesWithByHand(plan, byHand, file);
+  let headingAt = (columnIndex: number) => {
     let heading = headerLine === null ? '' : importTextAt(file, headerLine, columnIndex).trim();
-    return heading === '' ? (blankColumns.columns[columnIndex] ?? '') : heading;
+    return heading === '' ? (defaultNames.columns[columnIndex] ?? '') : heading;
   };
   return {
     ...plan,
     sheetName: byHand.sheetName ?? plan.sheetName,
-    headerLine: headerLine,
-    linesLeftOut: linesLeftOut,
+    headerLine,
+    linesLeftOut,
     columns: plan.columns.map(
-      (column?: Dynamic, columnIndex?: Dynamic) => ({
+      (column, columnIndex) => ({
         name: byHand.columns[columnIndex]?.name ?? (headerLine === plan.headerLine ? column.name : headingAt(columnIndex)),
         reading: byHand.columns[columnIndex]?.reading ?? column.reading,
       }),
@@ -213,34 +229,34 @@ export function planWithByHand(plan?: Dynamic, byHand?: Dynamic, file?: Dynamic,
     summary: summaryStillTrue(plan, byHand),
   };
 }
-export const NOTHING_BY_HAND = {
+export const NOTHING_BY_HAND: ImportByHand = {
   sheetName: null,
   headings: null,
   lines: {},
   columns: {},
 };
-export const withoutReadingsByHand = (byHand?: Dynamic, columnIndexes?: Dynamic) => ({
+export const withoutReadingsByHand = (byHand: ImportByHand, columnIndexes: number[]): ImportByHand => ({
   ...byHand,
   columns: Object.fromEntries(
-    Object.entries(byHand.columns).map(([columnIndex, column]: Dynamic) => {
-      let { reading: reading, ...withoutReading } = column;
+    Object.entries(byHand.columns).map(([columnIndex, column]): [string, ImportColumnByHand] => {
+      let { reading, ...withoutReading } = column;
       return [columnIndex, columnIndexes.includes(Number(columnIndex)) ? withoutReading : column];
     }),
   ),
 });
-export const isWordCharacterOfNote = (character?: Dynamic) => character !== undefined && /[\p{L}\p{N}]/u.test(character);
-export const summaryStillTrue = (plan?: Dynamic, byHand?: Dynamic) =>
-  changesByHand(plan, byHand).some(({ kind: kind }: Dynamic) => kind === 'headings') ? null : (plan.summary ?? null);
-export const columnsLeftOutByHand = ({ columns: columns }: Dynamic) =>
-  Object.entries(columns).flatMap(([columnIndex, { isLeftOut: isLeftOut }]: Dynamic) => (isLeftOut === true ? [Number(columnIndex)] : []));
-export const questionsLeftByHand = ({ columns: columns }: Dynamic, questions?: Dynamic) =>
-  questions.flatMap((question?: Dynamic) => {
-    let options = optionsLimitedToColumns(question, (columnIndex?: Dynamic) => columns[columnIndex]?.reading === undefined);
+export const isWordCharacterOfNote = (character: string | undefined) => character !== undefined && /[\p{L}\p{N}]/u.test(character);
+export const summaryStillTrue = (plan: ImportPlan, byHand: ImportByHand) =>
+  changesByHand(plan, byHand).some(({ kind }) => kind === 'headings') ? null : (plan.summary ?? null);
+export const columnsLeftOutByHand = ({ columns }: Pick<ImportByHand, 'columns'>) =>
+  Object.entries(columns).flatMap(([columnIndex, { isLeftOut }]) => (isLeftOut === true ? [Number(columnIndex)] : []));
+export const questionsLeftByHand = ({ columns }: Pick<ImportByHand, 'columns'>, questions: ImportQuestion[]) =>
+  questions.flatMap((question) => {
+    let options = optionsLimitedToColumns(question, (columnIndex) => columns[columnIndex]?.reading === undefined);
     return doOptionsDiffer(options)
       ? [
           {
             ...question,
-            options: options,
+            options,
           },
         ]
       : [];

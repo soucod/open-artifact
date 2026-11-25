@@ -1,7 +1,7 @@
 /**
  * The tool bar at the foot of the board and its trays.
  *
- * Left to right: Select, Hand, then (for editors) Text, Section, Sticky,
+ * Left to right: Select, Hand, then (for editors) Text, Section, Note,
  * Draw, Shapes, Stickers; the standalone comment toggle; and pinned at the right end,
  * past a divider, the "Ask <agent>" pill. A viewer gets Select and Hand only.
  *
@@ -56,7 +56,7 @@ export function BoardFoot() {
   const trayDraw = canEdit && DRAW_TOOLS.includes(tool);
   const trayShapes = canEdit && shapesButtonTools(touch).includes(tool);
   return (
-    <div className="wb-foot" data-wb-chrome="">
+    <div className="wb-foot" data-wb-chrome="" data-wb-region="toolbar">
       <TipGroup>
         {trayDraw ? <DrawTray /> : null}
         {trayShapes ? <ShapesTray touch={touch} /> : null}
@@ -121,7 +121,7 @@ function BoardToolbar({ touch }: { touch: boolean }) {
             />
           )}
           <ToolButton
-            label="Sticky"
+            label="Note"
             tip="Sticky note"
             icon={<TOOL_ICONS.note aria-hidden="true" />}
             shortcut={toolShortcutKey('note', keysOn)}

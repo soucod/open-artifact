@@ -129,21 +129,22 @@ pub fn copy(
         .views
         .values()
         .flat_map(|(_, v)| &v.elements)
-        .map(|ViewElement::Widget { embed, .. }| embed.reference.as_str())
+        .map(|element| element.parts().1.reference.as_str())
         .collect();
     let mut elements = Vec::with_capacity(view.elements.len());
-    for (k, ViewElement::Widget { embed, inputs, .. }) in view.elements.iter().enumerate() {
+    for (k, element) in view.elements.iter().enumerate() {
+        let (_, embed, _) = element.parts();
         let Some(copy) = copies.iter().find(|c| c.source == embed.reference) else {
             return Err(Refused::Because("widgetNodeNotCopied"));
         };
         if shown.contains(copy.copy.as_str()) {
             return Err(Refused::Because("widgetNodeOfAnotherView"));
         }
-        elements.push(ViewElement::Widget {
-            element_id: format!("vel_{code}.{k}"),
-            embed: Embed { reference: copy.copy.clone(), caption: embed.caption.clone() },
-            inputs: inputs.clone(),
-        });
+        let mut element = element.clone();
+        let (element_id, embed, _) = element.parts_mut();
+        *element_id = format!("vel_{code}.{k}");
+        embed.reference.clone_from(&copy.copy);
+        elements.push(element);
     }
     let new_view = format!("viw_{code}.0");
     let placement = Placement {
@@ -178,7 +179,7 @@ fn nodes_shown<'a>(workbook: &'a Workbook, but: Option<&str>) -> HashSet<&'a str
         .values()
         .filter(|(id, _)| Some(id.as_str()) != but)
         .flat_map(|(_, v)| &v.elements)
-        .map(|ViewElement::Widget { embed, .. }| embed.reference.as_str())
+        .map(|element| element.parts().1.reference.as_str())
         .collect()
 }
 
@@ -252,7 +253,7 @@ pub fn replace_widget_node(
     let placement = placement_of(sheet, &placement_id)?;
     let view_id = placement.shows.view_id();
     let Some((_, view)) = workbook.views.get(view_id) else { return Err(Refused::Because("unknownView")) };
-    let shows = |node: &str| view.elements.iter().any(|ViewElement::Widget { embed, .. }| embed.reference == node);
+    let shows = |node: &str| view.elements.iter().any(|element| element.parts().1.reference == node);
     // A node the view shows already is nothing to change (a new name too), unless another view shows it as well (as
     // a workbook may) or the view would not take the new name.
     let of_another_view = || nodes_shown(workbook, Some(view_id)).contains(new_node.as_str());
@@ -272,7 +273,8 @@ pub fn replace_widget_node(
         return Err(Refused::Because("widgetNodeOfAnotherView"));
     }
     let mut view = view.clone();
-    for ViewElement::Widget { embed, .. } in &mut view.elements {
+    for element in &mut view.elements {
+        let (_, embed, _) = element.parts_mut();
         if embed.reference == old_node {
             embed.reference = new_node.clone();
         }
@@ -301,7 +303,8 @@ pub(super) fn check_view(view: &View) -> Result<(), Refused> {
     if view.elements.len() > MOST_ELEMENTS_IN_A_VIEW {
         return Err(Refused::Because("tooManyElementsInView"));
     }
-    for ViewElement::Widget { embed, inputs, .. } in &view.elements {
+    for element in &view.elements {
+        let (_, embed, inputs) = element.parts();
         if embed.caption.chars().count() > LONGEST_CAPTION_IN_A_VIEW {
             return Err(Refused::Because("captionInViewTooLong"));
         }
@@ -309,7 +312,7 @@ pub(super) fn check_view(view: &View) -> Result<(), Refused> {
             return Err(Refused::Because("tooManyInputsOfElement"));
         }
     }
-    let captions = view.elements.iter().map(|ViewElement::Widget { embed, .. }| embed.caption.as_str());
+    let captions = view.elements.iter().map(|element| element.parts().1.caption.as_str());
     if std::iter::once(view.name.as_str()).chain(captions).any(|t| t.chars().any(char::is_control)) {
         return Err(Refused::Because("textOfViewHoldsControlCharacter"));
     }

@@ -74,14 +74,14 @@ export function cellTextInsets(
   };
 }
 export function textLineMiddleY(rowHeight: number, fontSize: number, verticalAlign: VerticalAlignment, density: CellDensity, extraUnder: number): number {
-  let { over: over, under: under } = cellTextInsets(rowHeight, fontSize, density, 'left', extraUnder);
+  let { over, under } = cellTextInsets(rowHeight, fontSize, density, 'left', extraUnder);
   let halfLine = firstLineHeight(fontSize) / 2;
   let top = over + halfLine;
   let bottom = rowHeight - GRIDLINE_THICKNESS - under - halfLine;
   if (verticalAlign === 'center') return (top + bottom) / 2;
   return verticalAlign === 'top' ? top : bottom;
 }
-export function textOverflowAtSides({ left: left, right: right }: Pick<TextInsets, 'left' | 'right'>, align: TextAlignment): TextOverflow {
+export function textOverflowAtSides({ left, right }: Pick<TextInsets, 'left' | 'right'>, align: TextAlignment): TextOverflow {
   let overflow = left - (right - TEXT_OVERFLOW_GRIDLINE);
   return align === 'right'
     ? {
@@ -101,7 +101,7 @@ export function rowHeightRuns(rowCount: number, runs: readonly RowSizing[], dens
       sizeRuns.push({
         firstIndex: from,
         count: to - from,
-        sizeInPixels: sizeInPixels,
+        sizeInPixels,
       });
   };
   let tallIndex = 0;
@@ -119,10 +119,10 @@ export function rowHeightRuns(rowCount: number, runs: readonly RowSizing[], dens
   };
   let nextIndex = 0;
   for (let {
-    firstIndex: firstIndex,
-    count: count,
-    heightInPixels: heightInPixels,
-    largestFontSizeInPoints: largestFontSizeInPoints,
+    firstIndex,
+    count,
+    heightInPixels,
+    largestFontSizeInPoints,
   } of runs) {
     addRuns(nextIndex, firstIndex, defaultHeight);
     addRuns(firstIndex, firstIndex + count, heightInPixels ?? oneLineRowHeight(largestFontSizeInPoints, density));
@@ -138,7 +138,7 @@ export const listIndentOfLevel = (level: number | null, fontSize: number): numbe
 export const LIST_LINE_GAP = 3;
 export const listLineGaps = (count: number): number => (count - 1) * LIST_LINE_GAP;
 export const listIndentOfLines = (lines: readonly { list: ListLine }[], fontSize: number): number =>
-  lines.filter(({ list: list }) => list.kind !== 'none').length * LIST_INDENT_PER_LEVEL * fontPointsToPixels(fontSize);
+  lines.filter(({ list }) => list.kind !== 'none').length * LIST_INDENT_PER_LEVEL * fontPointsToPixels(fontSize);
 export const lineCountWithListGaps = (lineCount: number, listLineCount: number, fontSize: number): number =>
   lineCount + listLineGaps(listLineCount) / nextLineHeight(fontSize);
 export const cellPaddingBeside = (density: CellDensity): number => CELL_PADDING_BY_DENSITY[density].beside;
@@ -149,7 +149,7 @@ export const cellMarkSpacing = (density: CellDensity): { after: number; intoWord
 });
 export const compactOneLineRowHeight = (fontSize: number): number => oneLineRowHeight(fontSize, 'compact');
 export const MAX_CHIP_BEYOND_LINE = 4;
-export const chipBeyondLine = ({ over: over }: Pick<TextInsets, 'over'>): number => clampBetween(2 * (over - 3), 0, MAX_CHIP_BEYOND_LINE);
+export const chipBeyondLine = ({ over }: Pick<TextInsets, 'over'>): number => clampBetween(2 * (over - 3), 0, MAX_CHIP_BEYOND_LINE);
 export const editorTextInsets = (rowHeight: number, fontSize: number, density: CellDensity, extraUnder: number = 0): TextInsets => ({
   ...cellTextInsets(rowHeight, fontSize, density, 'left', extraUnder),
   right: CELL_PADDING_BY_DENSITY.compact.beside,
@@ -158,7 +158,7 @@ export const ZOOMED_EDITOR_MARGIN = 6;
 export const ZOOMED_EDITOR_MARGIN_ACROSS = 4;
 export const ZOOMED_EDITOR_EXTRA = 6;
 export const MIN_PHONE_EDITOR_FONT_PX = 17;
-export const phoneEditorScale = ({ isOnPhone: isOnPhone, zoom: zoom }: Pick<PageState, 'isOnPhone' | 'zoom'>, fontSize: number): number =>
+export const phoneEditorScale = ({ isOnPhone, zoom }: Pick<PageState, 'isOnPhone' | 'zoom'>, fontSize: number): number =>
   isOnPhone ? Math.max(1, MIN_PHONE_EDITOR_FONT_PX / (fontPointsToPixels(fontSize) * zoom)) : 1;
 export const zoomedEditorMargin = (scale: number, axis: EditorAxis): number =>
   scale === 1 ? 0 : axis === 'along' ? ZOOMED_EDITOR_MARGIN : ZOOMED_EDITOR_MARGIN_ACROSS / scale;
@@ -170,7 +170,7 @@ export const zoomedEditorExtent = (length: number, below: number): { length: num
   length: length + below + ZOOMED_EDITOR_EXTRA,
   around: ZOOMED_EDITOR_MARGIN_ACROSS,
 });
-export const placeZoomedEditor = ({ ofCell: ofCell, size: size, scale: scale }: ZoomedEditorSpan, [min, max]: readonly [number, number], axis: EditorAxis): number => {
+export const placeZoomedEditor = ({ ofCell, size, scale }: ZoomedEditorSpan, [min, max]: readonly [number, number], axis: EditorAxis): number => {
   let length = (size + 2 * zoomedEditorMargin(scale, axis)) * scale + ZOOMED_EDITOR_EXTRA;
   let offset = zoomedEditorOffset(scale, axis);
   return Math.max(min, Math.min(ofCell - offset, max - length)) + offset;

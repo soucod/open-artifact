@@ -23,6 +23,7 @@ import { judgeComment, replyWakes } from './judge.ts';
 import { AGENT_KEY, mentionsIn } from './mentions.ts';
 import { CommentOutbox, type OutboxEntry, type OutboxItem, indexedDbOutboxStore, isNetworkError, outboxText } from './outbox.ts';
 import { rangesOf } from './plugin.ts';
+import { showRefused } from './refused.ts';
 import {
   type Composer,
   NEW_THREAD,
@@ -260,8 +261,7 @@ const outboxHandlers = {
   scope: outboxScope,
   send: sendKept,
   refused: (entry: OutboxEntry, error: unknown) => {
-    const text = outboxText(entry);
-    toast.add({ title: 'A comment that waited to be sent could not be saved', description: `“${text.length > 80 ? `${text.slice(0, 79)}…` : text}”: ${error instanceof Error ? error.message : String(error)}` });
+    showRefused(`A ${entry.kind === 'create' ? 'comment' : 'reply'} that waited to be sent could not be saved`, outboxText(entry), entry.kind === 'create' ? 'comment' : 'reply', error);
   },
 };
 
@@ -322,7 +322,8 @@ export async function createThread(text: string, composer: Composer | null = use
       if (useCommentUi.getState().composer === composer) setCommentUi({ composer: null });
       return true;
     }
-    failed('The comment could not be saved')(error);
+    if (isNetworkError(error)) failed('The comment could not be saved')(error);
+    else showRefused('The comment could not be saved', text.trim(), 'comment', error);
     return false;
   }
 }
@@ -370,7 +371,8 @@ export async function reply(threadId: string, text: string, send?: boolean): Pro
       });
       return true;
     }
-    failed('The reply could not be saved')(error);
+    if (isNetworkError(error)) failed('The reply could not be saved')(error);
+    else showRefused('The reply could not be saved', text.trim(), 'reply', error);
     return false;
   }
 }

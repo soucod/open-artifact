@@ -26,17 +26,15 @@
  * the server's port, for every artifact this server shares.
  */
 
-import { DOC_API } from '@open-artifact/runtime/doc-api';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import type { ShareRequest, ShareRole, ShareView } from '@open-artifact/protocol';
 import type { Role, Viewer } from '@open-artifact/runtime/capabilities';
-import { API } from '@open-artifact/runtime/http-api';
-import { SHEET_API } from '@open-artifact/runtime/sheet-api';
+import { ASK_AGENT_ROUTES, isOwnerOnlyRoute, roleMay, type RoleOptions } from '@open-artifact/runtime/roles';
 import { LanNetwork, SHARING_FILE, isTailnet, lanAddresses } from '@open-artifact/server-sdk/lan';
-import { HttpError, readBody, send } from './http.ts';
+import { HttpError, isFramedNavigation, readBody, send, sendFrameDenied } from './http.ts';
 
 export { SHARING_FILE };
 
@@ -258,31 +256,19 @@ export class SharingFile {
 /* What a role may do                                                         */
 /* -------------------------------------------------------------------------- */
 
-/** Page routes a commenter may write: the comment threads (not sending them to the agent). */
-const COMMENT_WRITES = new Set<string>([API.commentsCreate, API.commentsReply, API.commentsEdit, API.commentsReact, API.commentsResolve, API.commentsMove]);
-/** Page routes that change the artifact. */
-const EDIT_WRITES = new Set<string>([API.publish, API.assets, API.dbWrite, API.commentsRemove, API.roomEmit, API.historyRestore, API.historyDismiss, DOC_API.restore, DOC_API.importFile, SHEET_API.send]);
-/** Page routes that answer with a POST: everyone's, as reads are (a Sheet's widget refuses a write by role itself). */
-const POSTED_READS = new Set<string>([SHEET_API.read, SHEET_API.widget, DOC_API.session, DOC_API.read, DOC_API.history, DOC_API.version, DOC_API.call]);
-/** Page routes that act on this computer or reach the agent: the owner's alone. */
-const OWNER_WRITES = new Set<string>([API.agentSend, API.commentsSend, API.downloads, API.mcpCall, SHEET_API.importFile]);
-
-/** Whether the role may make a write call to a page route (reads are everyone's). */
-export function roleMay(role: Role, route: string): boolean {
-  if (role === 'owner') return true;
-  if (route === API.presence || POSTED_READS.has(route)) return true;
-  if (OWNER_WRITES.has(route)) return false;
-  if (COMMENT_WRITES.has(route)) return role !== 'viewer';
-  if (EDIT_WRITES.has(route)) return role === 'editor';
-  // A route this list does not know: the owner's, to be safe.
-  return false;
-}
+/** The role table lives in `@open-artifact/runtime/roles` (a cloud host decides with it too); re-exported here. */
+export { roleMay, type RoleOptions };
 
 /** Throws `not_writer` (403) when the role may not make this call. */
-export function assertRoleMay(viewer: Viewer, route: string, method: string): void {
+export function assertRoleMay(viewer: Viewer, route: string, method: string, options: RoleOptions = {}): void {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
-  if (roleMay(viewer.role, route)) return;
-  const what = OWNER_WRITES.has(route) ? 'Only the owner, on the computer that shares it, can do this.' : `A ${viewer.role} cannot do this.`;
+  if (roleMay(viewer.role, route, options)) return;
+  const what =
+    viewer.role === 'editor' && ASK_AGENT_ROUTES.has(route)
+      ? 'The owner does not let editors ask their agent.'
+      : isOwnerOnlyRoute(route)
+        ? 'Only the owner, on the computer that shares it, can do this.'
+        : `A ${viewer.role} cannot do this.`;
   throw new HttpError(403, 'not_writer', what);
 }
 
@@ -598,10 +584,15 @@ export class LanSharing {
       .end();
   }
 
-  /** A request nobody may make: a page for a browser's navigation, JSON for anything else. */
-  denied(req: IncomingMessage, res: ServerResponse): void {
+  /**
+   * A request nobody may make: a page for a browser's navigation, JSON for anything else. An artifact's page
+   * (`page`) loading in a frame tells the Shell framing it instead (`frame_denied`), which a static page cannot;
+   * `ancestors` is who may frame that answer (none: anyone).
+   */
+  denied(req: IncomingMessage, res: ServerResponse, page = false, ancestors?: string): void {
     req.resume();
     const w = words(req);
+    if (page && isFramedNavigation(req)) return sendFrameDenied(res, 403, 'not_granted', w.noAccessTitle, w.noAccess, ancestors);
     const navigation = (req.method === 'GET' || req.method === 'HEAD') && /\btext\/html\b/.test(String(req.headers.accept ?? ''));
     if (!navigation) throw new HttpError(403, 'not_granted', 'This artifact is not shared with you.');
     sendPage(res, 403, w.noAccessTitle, `<h1>${esc(w.noAccessTitle)}</h1><p>${esc(w.noAccess)}</p>`);

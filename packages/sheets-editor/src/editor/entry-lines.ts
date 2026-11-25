@@ -1,9 +1,17 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ListLine } from '@open-artifact/sheets-core';
 import { levelInList } from '../model/cell-values.ts';
 import { isFormulaText } from '../chips/dropdown-pane-edits.ts';
 import { hasRoomForText } from '../grid/cell-metrics.ts';
-import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function lineCountOfEntry(text: Dynamic, font: Dynamic, width: Dynamic, workbook: ReadsWithTextMeasurer, lists?: Dynamic) {
+import type { FontToMeasure, ReadsWithTextMeasurer } from '../state/controller.ts';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { CaretSpan } from '../keys/key-acts.ts';
+export function lineCountOfEntry(
+  text: string,
+  font: FontToMeasure,
+  width: number,
+  workbook: ReadsWithTextMeasurer,
+  lists?: readonly ListLine[],
+): number {
   let measured = text.endsWith(`
 `)
     ? `${text}.`
@@ -11,7 +19,7 @@ export function lineCountOfEntry(text: Dynamic, font: Dynamic, width: Dynamic, w
   let [lineCount = 1] = workbook.lineCountsOfWrappedTexts([
     {
       text: measured,
-      font: font,
+      font,
       widthInPixels: width,
       isStillTyped: true,
       ...(lists !== undefined && {
@@ -24,10 +32,10 @@ export function lineCountOfEntry(text: Dynamic, font: Dynamic, width: Dynamic, w
   ]);
   return lineCount;
 }
-export const withLineBreakAt = (text: Dynamic, { start: start, end: end }: Dynamic) => ({
+export const withLineBreakAt = (text: string, { start, end }: CaretSpan): { text: string; caretAt: number } => ({
   text: `${text.slice(0, start)}
 ${text.slice(end)}`,
   caretAt: start + 1,
 });
-export const wrapsWithinWidth = (width: Dynamic, { alignment: alignment, font: font }: Dynamic) =>
-  alignment.wrap && hasRoomForText(width, font.size);
+export const wrapsWithinWidth = (width: number, { alignment, font }: Pick<WholeCellFormat, 'alignment' | 'font'>): boolean =>
+  alignment.wrap === true && hasRoomForText(width, font.size);

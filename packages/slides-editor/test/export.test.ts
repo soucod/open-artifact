@@ -1,21 +1,25 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import zlib from 'node:zlib';
-import { emptySlide, type Slide } from '@open-artifact/slides-core';
+import { clipPathPoints, emptySlide, parseClipPath, type Slide } from '@open-artifact/slides-core';
 import {
+  cornerRadii,
   cornerRadius,
   objectContentRect,
+  officeShadow,
   parseAngle,
   parseBoxShadow,
   parseColor,
   parseLinearGradient,
+  pictureOutline,
+  polygonOutline,
   pptxFont,
   splitTop,
 } from '../src/services/export/css.ts';
 import { exportFileName, fileBase, formatBytes, slideFileName } from '../src/services/export/files.ts';
 import { deckText } from '../src/services/export/fonts.ts';
 import { ExportNotes, paginate, slideList, wrapLines } from '../src/services/export/notes.ts';
-import { fillXml, geometryXml, lineXml, pptxEntries, writePptx, xml, type PptxDeck } from '../src/services/export/ooxml.ts';
+import { centerSingleLine, collapseGaps, edgeSpaceAsInset, fillXml, geometryXml, lineXml, pptxEntries, shadowXml, writePptx, xml, type Paragraph, type PptxDeck, type TextBody } from '../src/services/export/ooxml.ts';
 
 const text = (data: Uint8Array | string): string => (typeof data === 'string' ? data : new TextDecoder().decode(data));
 
@@ -57,6 +61,16 @@ describe('css readers', () => {
     assert.equal(parseLinearGradient('linear-gradient(red, blue), url(x.png)'), null);
   });
 
+  it('shrinks a shadow with a negative spread instead of dropping the spread', () => {
+    const shadow = (spread: number) => ({ x: 0, y: 4, blur: 10, spread, color: { hex: '000000', alpha: 0.2 } });
+    assert.deepEqual(officeShadow(shadow(0), { w: 200, h: 100 }), { x: 0, y: 4, blur: 10 });
+    assert.deepEqual(officeShadow(shadow(-10), { w: 200, h: 100 }), { x: 0, y: 4, blur: 10, scale: { x: 0.9, y: 0.8 } });
+    // A shadow pulled in past the middle of the box shows nothing.
+    assert.equal(officeShadow(shadow(-50), { w: 200, h: 100 }), null);
+    // A growing shadow keeps the shape's size (the export notes say so).
+    assert.deepEqual(officeShadow(shadow(6), { w: 200, h: 100 }), { x: 0, y: 4, blur: 10 });
+  });
+
   it('places pictures and radii', () => {
     assert.equal(cornerRadius('50%', 200, 100), 50);
     assert.equal(cornerRadius('12px 8px', 200, 100), 12);
@@ -65,11 +79,63 @@ describe('css readers', () => {
     assert.deepEqual(objectContentRect('contain', 'left top', { x: 0, y: 0, w: 100, h: 100 }, { w: 200, h: 100 }), { x: 0, y: 0, w: 100, h: 50 });
   });
 
+  it('reads corner radii per axis and shrinks them where they would overlap', () => {
+    const all = (value: string): [string, string, string, string] => [value, value, value, value];
+    assert.deepEqual(cornerRadii(all('50%'), 200, 100), Array(4).fill({ x: 100, y: 50 }));
+    assert.deepEqual(cornerRadii(all('12px 6px'), 200, 100), Array(4).fill({ x: 12, y: 6 }));
+    assert.deepEqual(cornerRadii(['80px', '80px', '0px', '0px'], 100, 100), [{ x: 50, y: 50 }, { x: 50, y: 50 }, { x: 0, y: 0 }, { x: 0, y: 0 }]);
+  });
+
+  it('cuts a letterboxed picture only where it reaches into a rounded corner', () => {
+    const frame = { x: 0, y: 0, w: 100, h: 100 };
+    const radii = (r: number) => Array(4).fill({ x: r, y: r });
+    // A 2:1 picture contained in a square sits 25px from the top and bottom.
+    const picture = { x: 0, y: 25, w: 100, h: 50 };
+    // The corners curve within 20px of each edge: the picture stays a plain rectangle.
+    assert.equal(pictureOutline(picture, frame, radii(20)), undefined);
+    assert.equal(pictureOutline({ x: 20, y: 20, w: 60, h: 60 }, frame, radii(50)), undefined);
+    // A 40px radius reaches 15px into the picture at its left and right edges.
+    const outline = pictureOutline(picture, frame, radii(40))!;
+    assert.ok(outline.length > 4);
+    for (const [x, y] of outline) assert.ok(x >= -1e-6 && x <= 100 + 1e-6 && y >= -1e-6 && y <= 50 + 1e-6, `${x},${y} stays on the picture`);
+    assert.ok(outline.some(([x, y]) => Math.abs(x) < 1e-6 && Math.abs(y - 15) < 0.01));
+    assert.ok(outline.some(([x, y]) => Math.abs(x) < 1e-6 && Math.abs(y - 35) < 0.01));
+    assert.ok(!outline.some(([x, y]) => x < 1 && y < 1), 'the top-left corner is cut');
+    // A circle around a square picture: only the picture's corners go.
+    const round = pictureOutline({ x: 0, y: 20, w: 100, h: 60 }, frame, radii(50))!;
+    assert.ok(round.some(([x, y]) => Math.abs(y) < 1e-6 && x > 5 && x < 95), 'the top edge keeps its middle');
+  });
+
   it('names fonts for PowerPoint', () => {
     assert.equal(pptxFont('"Inter", system-ui, sans-serif', 'current'), 'Inter');
     assert.equal(pptxFont('system-ui, sans-serif', 'current'), 'Arial');
     assert.equal(pptxFont('"Playfair Display", serif', 'basic'), 'Georgia');
     assert.equal(pptxFont('"JetBrains Mono", monospace', 'basic'), 'Courier New');
+  });
+
+  it('cuts a polygon to a picture’s visible region', () => {
+    const mask: [number, number][] = [[0, 0], [84.88, 0], [100, 15.12], [100, 100], [0, 100]];
+    const outline = polygonOutline(mask, { x: 0, y: 5, w: 100, h: 80 });
+    assert.ok(outline);
+    assert.ok(outline.some(([x, y]) => Math.abs(x - 89.88) < 1e-6 && y === 0));
+    assert.ok(outline.some(([x, y]) => x === 100 && Math.abs(y - 10.12) < 1e-6));
+    assert.equal(polygonOutline([[0, 0], [100, 100], [0, 100], [100, 0]], { x: 0, y: 0, w: 100, h: 100 }), null);
+    assert.deepEqual(polygonOutline(mask, { x: 150, y: 100, w: 20, h: 20 }), []);
+  });
+
+  it('keeps percentage and concave polygons as native shape outlines', () => {
+    for (const css of [
+      'polygon(50% 0, 100% 100%, 0 100%)',
+      'polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%)',
+      'polygon(0 25%, 65% 25%, 65% 0, 100% 50%, 65% 100%, 65% 75%, 0 75%)',
+    ]) {
+      const parsed = parseClipPath(css);
+      assert.ok(parsed.ok && parsed.value);
+      const points = clipPathPoints(parsed.value, 400, 200);
+      const outline = polygonOutline(points, { x: 0, y: 0, w: 400, h: 200 });
+      assert.deepEqual(outline, points);
+      assert.match(geometryXml({ path: outline!, closed: true }, { x: 0, y: 0, w: 400, h: 200 }), /<a:custGeom>[^]*<a:close\/>/);
+    }
   });
 });
 
@@ -87,6 +153,8 @@ describe('ooxml', () => {
     assert.match(geometryXml({ preset: 'roundRect', radius: 25 }, { x: 0, y: 0, w: 200, h: 100 }), /fmla="val 25000"/);
     assert.match(geometryXml({ preset: 'roundRect', radius: 500 }, { x: 0, y: 0, w: 200, h: 100 }), /fmla="val 50000"/);
     assert.match(geometryXml({ path: [[0, 0], [10, 10]], closed: false }, { x: 0, y: 0, w: 10, h: 10 }), /fill="none"/);
+    assert.match(shadowXml({ x: 0, y: 4, blur: 10, color: { hex: '000000', alpha: 1 }, scale: { x: 0.9, y: 0.8 } }), /<a:outerShdw [^>]*sx="90000" sy="80000"/);
+    assert.doesNotMatch(shadowXml({ x: 0, y: 4, blur: 10, color: { hex: '000000', alpha: 1 } }), /sx=/);
   });
 
   const deck: PptxDeck = {
@@ -111,6 +179,8 @@ describe('ooxml', () => {
             },
           },
           { type: 'picture', name: 'Picture 1', box: { x: 0, y: 0, w: 100, h: 100 }, media: 'image1', crop: { l: 0.1, t: 0, r: 0.1, b: 0 } },
+          { type: 'picture', name: 'Picture 2', box: { x: 200, y: 0, w: 200, h: 100 }, media: 'image1', oval: true },
+          { type: 'picture', name: 'Picture 3', box: { x: 0, y: 200, w: 100, h: 50 }, media: 'image1', outline: [[3, 0], [97, 0], [100, 15], [100, 35], [97, 50], [3, 50], [0, 35], [0, 15]] },
           {
             type: 'table',
             name: 'Table 1',
@@ -154,6 +224,8 @@ describe('ooxml', () => {
     assert.match(slide1, /<a:t>Hello<\/a:t>/);
     assert.match(slide1, /<a:hlinkClick r:id="rId\d+"\/>/);
     assert.match(slide1, /<a:srcRect l="10000" t="0" r="10000" b="0"\/>/);
+    assert.match(slide1, /name="Picture 2"[^]*?<a:prstGeom prst="ellipse">/);
+    assert.match(slide1, /name="Picture 3"[^]*?<a:ext cx="635000" cy="317500"\/><\/a:xfrm><a:custGeom>[^]*?<a:moveTo><a:pt x="19050" y="0"\/><\/a:moveTo>[^]*?<a:close\/>/);
     assert.match(slide1, /<a:tbl>/);
     const rels1 = byName.get('ppt/slides/_rels/slide1.xml.rels')!;
     assert.match(rels1, /Target="https:\/\/example\.com" TargetMode="External"/);
@@ -171,6 +243,86 @@ describe('ooxml', () => {
         assert.ok(names.includes(resolved), `${name} → ${target}`);
       }
     }
+  });
+
+  it('collapses the margins between list paragraphs the way CSS does', () => {
+    const gaps = (list: Array<[number?, number?]>) => collapseGaps(list.map(([spaceBefore, spaceAfter]) => ({ spaceBefore, spaceAfter }))).map((p) => [p.spaceBefore, p.spaceAfter]);
+    // `li { margin: 8px 0 }`: 8px between items, not 16px.
+    assert.deepEqual(gaps([[8, 8], [8, 8], [8, 8]]), [[8, 8], [undefined, 8], [undefined, 8]]);
+    // The larger margin wins; only the part beyond the one before is added.
+    assert.deepEqual(gaps([[undefined, 4], [12, undefined], [undefined, 10], [6, undefined]]), [[undefined, 4], [8, undefined], [undefined, 10], [undefined, undefined]]);
+  });
+
+  it('moves the space above the first item and below the last into the insets', () => {
+    const body: TextBody = {
+      inset: { l: 0, t: 4, r: 0, b: 0 },
+      paragraphs: [
+        { runs: [{ text: 'a', size: 32 }], spaceBefore: 12, spaceAfter: 12, endSize: 32 },
+        { runs: [{ text: 'b', size: 32 }], spaceAfter: 12, endSize: 32 },
+      ],
+    };
+    const moved = edgeSpaceAsInset(body);
+    assert.deepEqual(moved.inset, { l: 0, t: 16, r: 0, b: 12 });
+    assert.deepEqual(moved.paragraphs.map((p) => [p.spaceBefore, p.spaceAfter]), [[undefined, 12], [undefined, undefined]]);
+    assert.equal(body.inset.t, 4, 'the body passed in stays as it was');
+  });
+
+  it('writes one tall line at single spacing with the rest of its height split above and below', () => {
+    const line = (lineHeight: number, size = 40): Paragraph => ({ runs: [{ text: 'Title', size }], lineHeight, endSize: size });
+    const body = (paragraphs: Paragraph[]): TextBody => ({ inset: { l: 0, t: 2, r: 0, b: 2 }, paragraphs });
+    // A 40px line 80px tall: 46px at single spacing, 17px more above and below.
+    const tall = centerSingleLine(body([line(80)]), 84);
+    assert.equal(tall.paragraphs[0]!.lineHeight, 46);
+    assert.deepEqual(tall.inset, { l: 0, t: 19, r: 0, b: 19 });
+    // Close to single spacing already, two paragraphs, a line break, or no room in the box: unchanged.
+    for (const [given, height] of [
+      [body([line(44)]), 48],
+      [body([line(80), line(80)]), 200],
+      [body([{ ...line(80), runs: [{ text: 'a', size: 40 }, { text: '', size: 40, lineBreak: true }, { text: 'b', size: 40 }] }]), 200],
+      [body([line(80)]), 60],
+    ] as const) {
+      assert.deepEqual(centerSingleLine(given, height), given);
+    }
+  });
+
+  it('writes list markers: kind, first number, text and colour', () => {
+    const paragraph = (bullet: NonNullable<Paragraph['bullet']>): Paragraph => ({ runs: [{ text: 'a', size: 32 }], bullet, marginLeft: 40, endSize: 32 });
+    const listDeck: PptxDeck = {
+      title: 'Lists',
+      created: new Date(Date.UTC(2026, 0, 1)),
+      media: [],
+      slides: [
+        {
+          elements: [
+            {
+              type: 'shape',
+              name: 'List 1',
+              box: { x: 0, y: 0, w: 800, h: 400 },
+              geometry: { preset: 'rect' },
+              fill: { type: 'none' },
+              textBox: true,
+              text: {
+                inset: { l: 0, t: 0, r: 0, b: 0 },
+                paragraphs: [
+                  paragraph({ type: 'number', start: 4, scheme: 'romanUcPeriod', color: { hex: 'CC0000', alpha: 1 } }),
+                  paragraph({ type: 'number', start: 1 }),
+                  paragraph({ type: 'char', char: '→', ownFont: true }),
+                  paragraph({ type: 'char', char: '•' }),
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const slide = text(pptxEntries(listDeck).find((entry) => entry.name === 'ppt/slides/slide1.xml')!.data);
+    const props = [...slide.matchAll(/<a:pPr[^>]*>(.*?)<\/a:pPr>/g)].map((m) => m[1]);
+    assert.deepEqual(props, [
+      '<a:buClr><a:srgbClr val="CC0000"/></a:buClr><a:buFont typeface="+mj-lt"/><a:buAutoNum type="romanUcPeriod" startAt="4"/>',
+      '<a:buFont typeface="+mj-lt"/><a:buAutoNum type="arabicPeriod"/>',
+      '<a:buFontTx/><a:buChar char="→"/>',
+      '<a:buFont typeface="Arial"/><a:buChar char="•"/>',
+    ]);
   });
 
   it('writes a deflated zip with [Content_Types].xml first', async () => {

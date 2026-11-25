@@ -1,12 +1,13 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Color, Hue } from '@open-artifact/sheets-core';
+import type { DropdownPreset } from '../i18n/chip-labels.ts';
 import { DROPDOWN_CHIP_SHADE } from './dropdown-colors.ts';
 import { NO_COLOR } from '../model/colors.ts';
-export const standardHue = (hue?: Dynamic) => ({
+export const standardHue = (hue: Hue): Color => ({
   kind: 'standard',
-  hue: hue,
+  hue,
   shade: DROPDOWN_CHIP_SHADE,
 });
-export const STATUS_OPTION_SET = {
+export const STATUS_OPTION_SET: DropdownPreset = {
   key: 'status',
   options: [
     {
@@ -27,7 +28,7 @@ export const STATUS_OPTION_SET = {
     },
   ],
 };
-export const DROPDOWN_OPTION_SETS = [
+export const DROPDOWN_OPTION_SETS: DropdownPreset[] = [
   STATUS_OPTION_SET,
   {
     key: 'priority',

@@ -19,7 +19,7 @@ import { iconStickerOf, svgToBase64DataUrl, type BoardElement } from '@open-arti
 import { emojiArtKey, notoEmojiArt, stickerEmoji } from '../lib/noto-emoji.ts';
 import { stickerIconComponent } from '../lib/sticker-icons.ts';
 import { iconStickerColor } from '../ui/StickerGlyph.tsx';
-import { drawnImageSrcForPen, type DrawnPen } from './drawn-svg.ts';
+import { drawnImageSrc, type DrawnPen } from './drawn-svg.ts';
 
 /** How long pictures may take to load before the export goes on without them, ms. */
 export const RASTER_IMAGE_LOAD_TIMEOUT_MS = 45_000;
@@ -240,9 +240,14 @@ export async function loadBoardFontsWithTimeout(timeoutMs = FONT_LOAD_TIMEOUT_MS
  * Loads everything a board picture draws besides the document: each image
  * element's source (drawings given `pen`), icon sticker art and the font.
  */
-export async function loadPictureAssets(elements: readonly BoardElement[], pen: DrawnPen, timeoutMs = RASTER_IMAGE_LOAD_TIMEOUT_MS): Promise<PictureAssets> {
+export async function loadPictureAssets(
+  elements: readonly BoardElement[],
+  pen: DrawnPen,
+  timeoutMs = RASTER_IMAGE_LOAD_TIMEOUT_MS,
+  looks: ReadonlyMap<string, string> = new Map(),
+): Promise<PictureAssets> {
   const imageSources = new Map<string, string>();
-  for (const element of elements) if (element.type === 'image') imageSources.set(element.id, drawnImageSrcForPen(element.src, pen));
+  for (const element of elements) if (element.type === 'image') imageSources.set(element.id, looks.get(element.id) ?? drawnImageSrc(element, pen));
   const objectUrls: string[] = [];
   const [{ loaded, tally }, icons] = await Promise.all([loadRasterImages(imageSources.values(), timeoutMs, objectUrls), loadStickerIcons(elements), loadBoardFontsWithTimeout()]);
   return {

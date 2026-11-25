@@ -1,7 +1,7 @@
 /**
- * The bar over a text selection. Writers get Edit with Agent, Comment and React (whichever the page offers), then the
- * formatting; readers and commenters only those actions. It hides for a picture or cells (their own bars draw),
- * while text is composed or a selection is being drawn, and while the link box or the agent's prompt is open.
+ * The bar over a text selection. Writers get Comment and React (whichever the page offers), then the formatting;
+ * readers and commenters only those actions. It hides for a picture or cells (their own bars draw), while text is
+ * composed or a selection is being drawn, and while the link box is open.
  */
 import { Card, ChromeDivider, ToolButton } from '@open-artifact/editor-kit/react';
 import type { EditorState } from 'prosemirror-state';
@@ -19,7 +19,7 @@ import { useLinkPop } from './links.ts';
 import { useLayerPlacement } from './use-placement.ts';
 import { useSelbarSignals } from './watch.ts';
 
-const ACTION_ORDER: readonly SelectionActionKey[] = ['editWithAgent', 'comment', 'react'];
+const ACTION_ORDER: readonly SelectionActionKey[] = ['comment', 'react'];
 
 function touchesListItem(state: EditorState): boolean {
   let found = false;
@@ -64,7 +64,6 @@ export function SelectionToolbar(): ReactNode {
   const state = useEditor(state => state.state);
   const focused = useEditor(state => state.focused);
   const writable = useDocs(state => state.writable);
-  const rewriting = useDocs(state => state.rewriting);
   const composing = useSelbarSignals(state => state.composing);
   const dragging = useSelbarSignals(state => state.dragging);
   const linkOpen = useLinkPop(state => state.pop !== null);
@@ -88,7 +87,7 @@ export function SelectionToolbar(): ReactNode {
   const held = menus.size > 0 || barFocused;
   const textSelected = selection instanceof TextSelection && !selection.empty && !selectedMedia(state) && !cellSelected(state);
   const inSight = view.editable ? focused || held : held || readerSelectionShown(view);
-  const visible = textSelected && inSight && !composing && !view.composing && !(dragging && !held) && !rewriting && !linkOpen;
+  const visible = textSelected && inSight && !composing && !view.composing && !(dragging && !held) && !linkOpen;
   if (!visible) return null;
   const offered = ACTION_ORDER.flatMap(key => {
     const action = actions[key];

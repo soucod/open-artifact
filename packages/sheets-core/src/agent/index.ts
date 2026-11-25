@@ -5,6 +5,7 @@
  */
 
 export * from './addresses.ts';
+export * from './cell-links.ts';
 export * from './cells.ts';
 export * from './chart-code.ts';
 export * from './chart-descriptions.ts';

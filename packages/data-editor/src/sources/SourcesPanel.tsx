@@ -23,14 +23,17 @@ import { SourceHeaderActions } from './parts.tsx';
 import { QueryEditorDialog } from './QueryEditorDialog.tsx';
 import { RefreshDataRow } from './RefreshDataMenu.tsx';
 import { SourceDetail } from './SourceDetail.tsx';
+import { useSourceStepFocus } from './focus.ts';
 import { SourceRow } from './SourceRow.tsx';
 import {
   CLOSE_LABEL,
   FILES_GROUP_NAME,
+  STORAGE_GROUP_NAME,
   NO_SOURCES_MESSAGE,
   SOURCES_LABEL,
   describeConnectorGroupLabel,
   describeFilesGroupLabel,
+  describeStorageGroupLabel,
   describeTransformsGroupLabel,
   TRANSFORMS_GROUP_NAME,
 } from './words.ts';
@@ -63,8 +66,8 @@ interface SourceGroupView {
 }
 
 function listGroups(datasets: readonly Dataset[]): SourceGroupView[] {
-  const { connectors, files, rest, calcs } = groupSourcesByConnector(datasets);
-  if (connectors.length === 0) return [{ key: 'all', name: '', label: '', rows: [...datasets] }];
+  const { connectors, files, stores, rest, calcs } = groupSourcesByConnector(datasets);
+  if (connectors.length === 0 && stores.length === 0) return [{ key: 'all', name: '', label: '', rows: [...datasets] }];
   const groups: SourceGroupView[] = connectors.map((group) => ({
     key: `connector:${group.connector}`,
     name: group.connector,
@@ -72,6 +75,8 @@ function listGroups(datasets: readonly Dataset[]): SourceGroupView[] {
     rows: group.rows,
   }));
   if (files.length > 0) groups.push({ key: 'files', name: FILES_GROUP_NAME, label: describeFilesGroupLabel(files.length), rows: files });
+  if (stores.length > 0)
+    groups.push({ key: 'storage', name: STORAGE_GROUP_NAME, label: describeStorageGroupLabel(stores.length), rows: stores });
   if (rest.length > 0) groups.push({ key: 'rest', name: '', label: '', rows: rest });
   if (calcs.length > 0) groups.push({ key: 'calcs', name: TRANSFORMS_GROUP_NAME, label: describeTransformsGroupLabel(calcs.length), rows: calcs });
   return groups;
@@ -123,6 +128,7 @@ export function SourcesPanel({ onAskWhy, usage, onClose }: SourcesPanelProps): R
   const selectedId = getTrailSource(trail);
   const selected = selectedId === null ? undefined : lookup(selectedId);
   const edited = editing === null ? undefined : lookup(editing);
+  const steps = useSourceStepFocus(selected?.id ?? null, selected === undefined ? null : selected.title || selected.id);
 
   useEffect(() => {
     engine?.select(selected?.id ?? null);
@@ -144,7 +150,7 @@ export function SourcesPanel({ onAskWhy, usage, onClose }: SourcesPanelProps): R
       <h2 className="m-0 flex-1 text-[13px] font-semibold text-fg">{SOURCES_LABEL}</h2>
     ) : (
       <>
-        <IconButton size="sm" label={getSourceBackLabel(trail, nameOf)} icon={<ArrowLeft className="size-4" />} onClick={back} />
+        <IconButton ref={steps.back} size="sm" label={getSourceBackLabel(trail, nameOf)} icon={<ArrowLeft className="size-4" />} onClick={back} />
         <span className="flex min-w-0 flex-1 items-center justify-end gap-1">
           <SourceHeaderActions ds={selected} run={runOf(selected.id)} now={now} onRefresh={refresh} />
         </span>
@@ -180,6 +186,7 @@ export function SourcesPanel({ onAskWhy, usage, onClose }: SourcesPanelProps): R
               onRefresh={refresh}
               onConnect={connect}
               {...(onAskWhy === undefined ? {} : { onAskWhy })}
+              onNoticeGone={steps.focusBack}
             />
           </div>
         ) : datasets.length === 0 ? (
@@ -196,6 +203,7 @@ export function SourcesPanel({ onAskWhy, usage, onClose }: SourcesPanelProps): R
                   unasked={!requested.includes(dataset.id)}
                   down={down}
                   canAskAgent={canAskAgent}
+                  rowRef={steps.row(dataset.id)}
                   onOpen={open}
                   onConnect={connect}
                   onRefresh={refresh}

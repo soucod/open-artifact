@@ -266,8 +266,8 @@ export interface ReadmeInput {
   resources: readonly string[];
   /** Uploads written under `assets/`. */
   assets: number;
-  /** Uploads that could not be read, with the files that use them. */
-  missing: readonly { ref: string; usedIn: readonly string[] }[];
+  /** Uploads that could not be read, with the files that use them and, when known, why. */
+  missing: readonly { ref: string; usedIn: readonly string[]; why?: string }[];
   /** Folders holding a copy of the runtime. */
   runtimes: readonly string[];
 }
@@ -298,7 +298,7 @@ export function exportReadme({ title, boards, resources, assets, missing, runtim
   lines.push('');
   if (missing.length) {
     lines.push('## Missing from this export', '', 'These uploaded files could not be included, so wherever the design uses them they do', 'not load. Exporting again may pick them up.', '');
-    for (const item of missing) lines.push(`- \`${item.ref}\` (used in ${item.usedIn.map((f) => `\`${f}\``).join(', ')})`);
+    for (const item of missing) lines.push(`- \`${item.ref}\` (used in ${item.usedIn.map((f) => `\`${f}\``).join(', ')})${item.why ? `: ${item.why}` : ''}`);
     lines.push('');
   }
   const open = boards.length > 1 ? 'index.html' : (boards[0]?.path ?? 'index.html');

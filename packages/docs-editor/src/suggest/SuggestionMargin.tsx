@@ -1,17 +1,22 @@
 /**
  * The suggestion cards right of the text, each level with its words and pushed down so none overlap; the looked-at
- * one (caret, pointer or card) sits level with its words. With a margin column drawn, the cards join it instead
- * (SuggestionColumnFeed); where there is neither, the looked-at card floats over the page (SuggestionFloat).
+ * one (caret, pointer or card) sits level with its words; those a folded heading hides are one card at that heading.
+ * With a margin column drawn, the cards join it instead (SuggestionColumnFeed); where there is neither, the looked-at
+ * card floats over the page (SuggestionFloat).
  */
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useDocs } from '../app/store.ts';
+import { headingPos } from '../editor/fold.ts';
 import { useEditor } from '../editor/format.ts';
 import { useMarginColumn } from '../margin/column.ts';
 import { stackCards } from '../margin/stack.ts';
+import { type FoldedGroup, foldedGroupId, shownWords } from './folded.ts';
+import { FoldedSuggestionsCard } from './FoldedSuggestionsCard.tsx';
 import { CARD_OFFSET, CARD_WIDTH, marginFits } from './layout.ts';
 import { useOpenSuggestions } from './model.ts';
 import { setSuggest, useSuggest } from './store.ts';
 import { SuggestionCardView } from './SuggestionCard.tsx';
+import { useFoldedSuggestions } from './use-folded.ts';
 
 interface Measured {
   left: number;
@@ -50,6 +55,9 @@ function BesideText(): ReactNode {
   const [measured, setMeasured] = useState<Measured | null>(null);
   const [heights, setHeights] = useState<ReadonlyMap<string, number>>(new Map());
   const observed = useRef(new Map<string, HTMLElement>());
+  const folded = useFoldedSuggestions(cards);
+  const foldedNow = useRef(folded);
+  foldedNow.current = folded;
 
   const measure = useCallback(() => {
     const page = view?.dom.closest('.doc-page');
@@ -60,15 +68,22 @@ function BesideText(): ReactNode {
     const room = marginFits(textBox.right, scroller.getBoundingClientRect().right);
     if (room !== useSuggest.getState().margin) setSuggest({ margin: room });
     const anchors = new Map<string, number>();
+    const hidden = new Set(foldedNow.current.flatMap(group => group.ids));
     for (const card of useOpenSuggestions.getState().cards) {
-      const element = view.dom.querySelector(`[data-suggest-id="${card.id}"]`);
+      if (hidden.has(card.id)) continue;
+      const element = shownWords(view.dom, card.id);
       if (element) anchors.set(card.id, element.getBoundingClientRect().top - pageBox.top);
+    }
+    for (const group of foldedNow.current) {
+      const at = headingPos(view.state.doc, group.heading);
+      const heading = at === null ? null : view.nodeDOM(at);
+      if (heading instanceof HTMLElement) anchors.set(foldedGroupId(group.heading), heading.getBoundingClientRect().top - pageBox.top);
     }
     const left = textBox.right - pageBox.left + CARD_OFFSET;
     setMeasured(before => (before && Math.round(before.left) === Math.round(left) && sameAnchors(before.anchors, anchors) ? before : { left, anchors }));
   }, [view]);
 
-  useLayoutEffect(measure, [measure, doc, cards]);
+  useLayoutEffect(measure, [measure, doc, cards, folded]);
 
   useEffect(() => {
     if (!view) return undefined;
@@ -108,7 +123,7 @@ function BesideText(): ReactNode {
             setHeights(before => {
               let next: Map<string, number> | null = null;
               for (const entry of entries) {
-                const id = (entry.target as HTMLElement).dataset.suggestCard;
+                const id = [...observed.current].find(([, element]) => element === entry.target)?.[0];
                 const height = (entry.target as HTMLElement).offsetHeight;
                 if (!id || before.get(id) === height) continue;
                 next ??= new Map(before);
@@ -120,11 +135,11 @@ function BesideText(): ReactNode {
     [],
   );
   useEffect(() => () => sizes?.disconnect(), [sizes]);
-  const refs = useRef(new Map<string, (element: HTMLDivElement | null) => void>());
+  const refs = useRef(new Map<string, (element: HTMLElement | null) => void>());
   const track = (id: string) => {
     let ref = refs.current.get(id);
     if (!ref) {
-      ref = (element: HTMLDivElement | null) => {
+      ref = (element: HTMLElement | null) => {
         const before = observed.current.get(id);
         if (before === element) return;
         if (before) sizes?.unobserve(before);
@@ -143,22 +158,31 @@ function BesideText(): ReactNode {
 
   const active = useStackFocus();
   const placed = useMemo(() => {
-    if (!measured) return [];
-    const items = cards.flatMap(card => {
-      const top = measured.anchors.get(card.id);
-      return top === undefined ? [] : [{ id: card.id, top, height: heights.get(card.id) ?? GUESS_HEIGHT }];
-    });
+    if (!measured) return { cards: [], groups: [] };
+    const sized = (id: string) => {
+      const top = measured.anchors.get(id);
+      return top === undefined ? [] : [{ id, top, height: heights.get(id) ?? GUESS_HEIGHT }];
+    };
+    const items = [...cards.flatMap(card => sized(card.id)), ...folded.flatMap(group => sized(foldedGroupId(group.heading)))];
     const tops = stackCards(items, active && measured.anchors.has(active) ? active : null);
-    return cards.flatMap((card, index) => {
-      const top = tops.get(card.id);
-      return top === undefined ? [] : [{ card, index, top }];
-    });
-  }, [cards, measured, heights, active]);
+    return {
+      cards: cards.flatMap((card, index) => {
+        const top = tops.get(card.id);
+        return top === undefined ? [] : [{ card, index, top }];
+      }),
+      groups: folded.flatMap((group): Array<{ group: FoldedGroup; id: string; top: number }> => {
+        const id = foldedGroupId(group.heading);
+        const top = tops.get(id);
+        return top === undefined ? [] : [{ group, id, top }];
+      }),
+    };
+  }, [cards, folded, measured, heights, active]);
 
-  if (!tab || !fits || !measured || !placed.length) return null;
+  if (!tab || !fits || !measured || !(placed.cards.length || placed.groups.length)) return null;
+  const at = (top: number) => ({ left: measured.left, top, width: CARD_WIDTH, transition: 'top 150ms ease-out' });
   return (
     <div className="pointer-events-none absolute inset-0 z-20" data-suggest-margin="">
-      {placed.map(({ card, index, top }) => (
+      {placed.cards.map(({ card, index, top }) => (
         <SuggestionCardView
           key={card.id}
           ref={track(card.id)}
@@ -168,8 +192,11 @@ function BesideText(): ReactNode {
           total={cards.length}
           selected={card.id === active}
           className="absolute"
-          style={{ left: measured.left, top, width: CARD_WIDTH, transition: 'top 150ms ease-out' }}
+          style={at(top)}
         />
+      ))}
+      {placed.groups.map(({ group, id, top }) => (
+        <FoldedSuggestionsCard key={id} ref={track(id)} group={group} className="absolute" style={at(top)} />
       ))}
     </div>
   );

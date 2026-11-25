@@ -1,57 +1,75 @@
-import type { Dynamic } from '../dynamic.ts';
 import { isSameSelection } from '../selection/model.ts';
 import { withNoEffects } from '../state/transitions.ts';
+import type { PageTransition } from '../state/transitions.ts';
 import { dropdownOptionsForImport, importPlanAsShown, destinationWithColumnsLeftOut, importDestinationOf, importPlacesLeft } from './import-flow.ts';
 import { tableImportRequest } from './places.ts';
 import { isImportPlanComing, importPlanSoFar, stopAwaitingImportPlan } from './import-review.ts';
 import { MAX_PREVIEW_COLUMNS } from './preview.ts';
 import { dataLineNumbers, importColumnTexts, readingFittingTexts, trueOrFalseTextOf } from './column-readings.ts';
+import type { ImportLineChoice } from './column-readings.ts';
 import { importedSheetLook } from './file-awaited.ts';
 import { isDefaultSheetName } from '../grid/layout.ts';
 import { queueEdit, IF_QUEUED_PLACE_CHANGED } from '../model/edit-effects.ts';
 import { importMarksToCome } from './marks-of-import.ts';
 import { changesByHand, columnsLeftOutByHand } from './by-hand.ts';
 import { blankColumnsOf } from './blank-columns.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { ColumnToImport, Edit, SheetId } from '@open-artifact/sheets-core';
+import type {
+  ImportOfAFile,
+  ImportPlan,
+  PageState,
+  TableImportedAsNewSheetOffer,
+  TableImportedIntoSheetOffer,
+} from '../state/initial-state.ts';
+import type { ImportReading, PageEvent, PlaceAreaChanged } from '../state/event-reducer.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function narrowImportedArea(edit: Dynamic, selection: Dynamic, reads: WorkbookReads) {
+import type { LinesAndColumnsUnfolded } from './import-picture.tsx';
+/** How much of a new sheet to come is drawn: the records drawn at most, and the lines and columns drawn or left out besides. */
+export interface ImportDrawing {
+  mostRecords: number;
+  linesDrawnAnyway: number[];
+  columnsOut: number[];
+}
+export type ImportAsNewSheetEdit = Extract<Edit, { kind: 'importTableAsNewSheet' }>;
+export type ImportTableEdit = Extract<Edit, { kind: 'importTableIntoSheet' }> | ImportAsNewSheetEdit;
+export function narrowImportedArea(edit: Edit, selection: PlaceAreaChanged | null, reads: WorkbookReads): PlaceAreaChanged | null {
   if (edit.kind !== 'importTableIntoSheet' || selection === null || selection.area === null) return selection;
   let columnIndexes = edit.table.columns.flatMap(
-    (column?: Dynamic) => (column === null ? [] : (reads.columnIndexOf(selection.sheetId, column.column) ?? [])),
+    (column) => (column === null ? [] : (reads.columnIndexOf(selection.sheetId, column.column) ?? [])),
   );
   if (columnIndexes.length === 0) return selection;
-  let firstColumnIndex = (Math.min as Dynamic)(...columnIndexes);
-  let lastColumnIndex = (Math.max as Dynamic)(...columnIndexes) - firstColumnIndex + 1;
-  let value = (input?: Dynamic) =>
+  let firstColumnIndex = Math.min(...columnIndexes);
+  let importedColumnCount = Math.max(...columnIndexes) - firstColumnIndex + 1;
+  let hasImportShownInRow = (rowIndex: number) =>
     reads
-      .columnIndexesOnShowIn(selection.sheetId, input)
-      .some((input2?: Dynamic) => input2 >= firstColumnIndex && input2 < firstColumnIndex + lastColumnIndex);
-  let { topRowIndex: topRowIndex } = selection.area;
-  let { rowCount: rowCount }: Dynamic = selection.area;
-  while (rowCount > 1 && !value(topRowIndex + rowCount - 1)) rowCount -= 1;
+      .columnIndexesOnShowIn(selection.sheetId, rowIndex)
+      .some((columnIndex) => columnIndex >= firstColumnIndex && columnIndex < firstColumnIndex + importedColumnCount);
+  let { topRowIndex } = selection.area;
+  let { rowCount } = selection.area;
+  while (rowCount > 1 && !hasImportShownInRow(topRowIndex + rowCount - 1)) rowCount -= 1;
   return {
     ...selection,
     area: {
       ...selection.area,
       leftColumnIndex: firstColumnIndex,
-      columnCount: lastColumnIndex,
-      rowCount: rowCount,
+      columnCount: importedColumnCount,
+      rowCount,
     },
   };
 }
-export function updateSelectionJustImported(state: PageState, stateBefore?: Dynamic, event?: Dynamic) {
+export function updateSelectionJustImported(stateBefore: PageState, stateAfter: PageState, event: PageEvent): PageState {
   let isEditQueued = event.kind === 'editAnswered' && event.outcome.kind === 'editQueued' && event.edit.kind === 'importTableAsNewSheet';
-  let isAnswered =
-    state.isSelectionJustImported &&
-    isSameSelection(state, stateBefore) &&
-    state.scrollTop === stateBefore.scrollTop &&
-    state.scrollLeft === stateBefore.scrollLeft;
-  let isOver = isEditQueued || isAnswered;
-  return isOver === stateBefore.isSelectionJustImported
-    ? stateBefore
+  let isSelectionUnmoved =
+    stateBefore.isSelectionJustImported &&
+    isSameSelection(stateBefore, stateAfter) &&
+    stateBefore.scrollTop === stateAfter.scrollTop &&
+    stateBefore.scrollLeft === stateAfter.scrollLeft;
+  let isJustImported = isEditQueued || isSelectionUnmoved;
+  return isJustImported === stateAfter.isSelectionJustImported
+    ? stateAfter
     : {
-        ...stateBefore,
-        isSelectionJustImported: isOver,
+        ...stateAfter,
+        isSelectionJustImported: isJustImported,
       };
 }
 export function discardImport(state: PageState) {
@@ -67,9 +85,9 @@ export function discardImport(state: PageState) {
       : state,
   );
 }
-export function escapeImport(state: PageState, isForced?: Dynamic) {
+export function escapeImport(state: PageState, isWishTyped: boolean) {
   let importOfAFile = state.importOfAFile;
-  return importOfAFile !== null && (isForced || hasImportWorkToLose(importOfAFile))
+  return importOfAFile !== null && (isWishTyped || hasImportWorkToLose(importOfAFile))
     ? withNoEffects({
         ...state,
         importOfAFile: {
@@ -93,7 +111,11 @@ export function keepImport(state: PageState) {
         },
   );
 }
-export function columnImportOfReading(reading: Dynamic, columnIndex: Dynamic, reads: WorkbookReads) {
+export function columnImportOfReading(
+  reading: ImportReading,
+  texts: string[],
+  reads: Pick<WorkbookReads, 'labelsOfADropdownColumn'>,
+): ColumnToImport {
   if (reading.kind === 'trueOrFalse')
     return {
       kind: 'asTyped',
@@ -101,9 +123,9 @@ export function columnImportOfReading(reading: Dynamic, columnIndex: Dynamic, re
   if (reading.kind !== 'dropdown')
     return {
       kind: 'read',
-      reading: reading,
+      reading,
     };
-  let [firstLabel, ...otherLabels] = dropdownOptionsForImport(reading, reads.labelsOfADropdownColumn(columnIndex) ?? []);
+  let [firstLabel, ...otherLabels] = dropdownOptionsForImport(reading, reads.labelsOfADropdownColumn(texts) ?? []);
   return firstLabel === undefined
     ? {
         kind: 'read',
@@ -116,8 +138,8 @@ export function columnImportOfReading(reading: Dynamic, columnIndex: Dynamic, re
         options: [firstLabel, ...otherLabels],
       };
 }
-export function importEditOfPlan(importOfAFile?: Dynamic, reads?: Dynamic, afterSheet?: Dynamic) {
-  let { table: table } = importOfAFile;
+export function importEditOfPlan(importOfAFile: ImportOfAFile, afterSheet: SheetId | null, reads: WorkbookReads): ImportTableEdit {
+  let { table } = importOfAFile;
   let plan = importPlanAsShown(importOfAFile);
   let destination = destinationWithColumnsLeftOut(importOfAFile);
   if (destination.kind === 'sheet')
@@ -125,83 +147,89 @@ export function importEditOfPlan(importOfAFile?: Dynamic, reads?: Dynamic, after
       kind: 'importTableIntoSheet',
       table: tableImportRequest(destination, table, plan),
     };
-  return newSheetImportEdit(importOfAFile, plan, reads, afterSheet, null);
+  return newSheetImportEdit(importOfAFile, plan, afterSheet, reads, null);
 }
 export function importPreviewOnGrid(
-  importOfAFile?: Dynamic,
-  afterSheet?: Dynamic,
-  mostRecords?: Dynamic,
-  drawnAnyway: Dynamic = NOTHING_DRAWN_ANYWAY,
-  columnsOut: Dynamic = null,
+  importOfAFile: ImportOfAFile,
+  reads: WorkbookReads,
+  mostRecords: number,
+  drawnAnyway: LinesAndColumnsUnfolded = NOTHING_DRAWN_ANYWAY,
+  columnsAsText: number | null = null,
 ) {
   if (importDestinationOf(importOfAFile).kind !== 'newSheet' && !isImportPlanComing(importOfAFile)) return null;
-  let plan = withColumnsAsTextFrom(withLinesDrawnAnyway(importPlanSoFar(importOfAFile).plan, drawnAnyway), columnsOut);
-  return newSheetImportEdit(importOfAFile, plan, null, afterSheet, {
-    mostRecords: mostRecords,
+  let plan = withColumnsAsTextFrom(withLinesDrawnAnyway(importPlanSoFar(importOfAFile).plan, drawnAnyway), columnsAsText);
+  return newSheetImportEdit(importOfAFile, plan, null, reads, {
+    mostRecords,
     linesDrawnAnyway: drawnAnyway.lines,
     columnsOut: importColumnsOutOfDrawing(importOfAFile, drawnAnyway),
   });
 }
-export function importColumnsOverLimit(importOfAFile?: Dynamic) {
-  let { plan: plan } = importPlanSoFar(importOfAFile);
-  let columnIndexes = new (Set as Dynamic)(importColumnsLeftOut(importOfAFile, plan));
+export function importColumnsOverLimit(importOfAFile: ImportOfAFile) {
+  let { plan } = importPlanSoFar(importOfAFile);
+  let columnIndexes = new Set(importColumnsLeftOut(importOfAFile, plan));
   return plan.columns.flatMap(
-    (column?: Dynamic, index?: Dynamic) => (index >= MAX_PREVIEW_COLUMNS && !columnIndexes.has(index) ? [index] : []),
+    (column, index) => (index >= MAX_PREVIEW_COLUMNS && !columnIndexes.has(index) ? [index] : []),
   );
 }
-export function importDrawnPositions(importOfAFile?: Dynamic, drawnAnyway?: Dynamic, mostRecords?: Dynamic) {
+export function importDrawnPositions(importOfAFile: ImportOfAFile, drawnAnyway: LinesAndColumnsUnfolded, mostRecords: number) {
   let lines = withLinesDrawnAnyway(importPlanSoFar(importOfAFile).plan, drawnAnyway);
   let dataLines = drawnAnyway.lines.length === 0 ? [] : dataLineNumbers(importOfAFile.table, lines);
-  let recordIndexes = recordIndexesToDraw(dataLines, mostRecords, drawnAnyway.lines).map((input?: Dynamic) => dataLines[input]);
+  let linesDrawn = recordIndexesToDraw(dataLines, mostRecords, drawnAnyway.lines).map((recordIndex) => dataLines[recordIndex]);
   let columnsOut = importColumnsOutOfDrawing(importOfAFile, drawnAnyway);
   return {
-    rowNumbers: drawnAnyway.lines.flatMap((line?: Dynamic) => {
-      let value = recordIndexes.indexOf(line);
-      return value < 0 ? [] : [value + 2];
+    rowNumbers: drawnAnyway.lines.flatMap((line) => {
+      let recordIndex = linesDrawn.indexOf(line);
+      return recordIndex < 0 ? [] : [recordIndex + 2];
     }),
     columnsDrawn: drawnAnyway.columns.map(
-      (column?: Dynamic) => column - columnsOut.filter((input?: Dynamic) => input < column).length,
+      (column) => column - columnsOut.filter((columnOut) => columnOut < column).length,
     ),
   };
 }
-export function importMergeKeyColumn(importOfAFile?: Dynamic) {
+export function importMergeKeyColumn(importOfAFile: Pick<ImportOfAFile, 'plan' | 'destinationChosen'>) {
   let destination = importDestinationOf(importOfAFile);
   return destination.kind === 'sheet' && destination.how.kind === 'mergeByKey' ? destination.how.keyColumnIndex : null;
 }
-export function newSheetImportEdit(importOfAFile: Dynamic, plan: Dynamic, afterSheet: Dynamic, reads: WorkbookReads, drawing?: Dynamic) {
-  let { table: table } = importOfAFile;
-  let dataLineNumbers2 = dataLineNumbers(table, plan);
-  let columns = plan.columns.map(({ reading: reading }: Dynamic, index?: Dynamic) => {
-    let importColumnTexts2 = importColumnTexts(table, dataLineNumbers2, index);
-    let readingFittingTexts2 = readingFittingTexts(reading, importColumnTexts2);
+export function newSheetImportEdit(
+  importOfAFile: ImportOfAFile,
+  plan: ImportPlan,
+  afterSheet: SheetId | null,
+  reads: WorkbookReads,
+  drawing: ImportDrawing | null,
+): ImportAsNewSheetEdit {
+  let { table } = importOfAFile;
+  let lineNumbers = dataLineNumbers(table, plan);
+  let columns = plan.columns.map(({ reading }, index) => {
+    let texts = importColumnTexts(table, lineNumbers, index);
+    let fittingReading = readingFittingTexts(reading, texts);
     return {
-      toImport: columnImportOfReading(readingFittingTexts2, importColumnTexts2, reads),
+      toImport: columnImportOfReading(fittingReading, texts, reads),
       texts:
-        readingFittingTexts2.kind === 'trueOrFalse'
-          ? importColumnTexts2.map((importColumnText?: Dynamic) => trueOrFalseTextOf(importColumnText) ?? '')
-          : importColumnTexts2,
+        fittingReading.kind === 'trueOrFalse'
+          ? texts.map((text) => trueOrFalseTextOf(text) ?? '')
+          : texts,
     };
   });
-  let columnsLeftOut = new (Set as Dynamic)(drawing?.columnsOut ?? importColumnsLeftOut(importOfAFile, plan));
-  let value =
+  let columnsLeftOut = new Set(drawing?.columnsOut ?? importColumnsLeftOut(importOfAFile, plan));
+  let recordsDrawn =
     drawing === null
-      ? dataLineNumbers2.map((dataLineNumber?: Dynamic, index?: Dynamic) => index)
-      : recordIndexesToDraw(dataLineNumbers2, drawing.mostRecords, drawing.linesDrawnAnyway);
-  let value2 = (input?: Dynamic) => input.filter((input2?: Dynamic, index?: Dynamic) => !columnsLeftOut.has(index));
-  let headerNames = value2(plan.columns).map(({ name: name }: Dynamic) => name);
+      ? lineNumbers.map((lineNumber, index) => index)
+      : recordIndexesToDraw(lineNumbers, drawing.mostRecords, drawing.linesDrawnAnyway);
+  let withoutColumnsLeftOut = <Item>(items: Item[]) => items.filter((item, index) => !columnsLeftOut.has(index));
+  let headerNames = withoutColumnsLeftOut(plan.columns).map(({ name }) => name);
   return {
     kind: 'importTableAsNewSheet',
-    afterSheet: afterSheet,
+    afterSheet,
     name: plan.sheetName,
-    rows: [headerNames, ...value.map((input?: Dynamic) => value2(columns).map(({ texts: texts }: Dynamic) => texts[input] ?? ''))],
+    rows: [headerNames, ...recordsDrawn.map((recordIndex) => withoutColumnsLeftOut(columns).map(({ texts }) => texts[recordIndex] ?? ''))],
     headerRows: 1,
-    columns: value2(columns).map(({ toImport: toImport }: Dynamic) => toImport),
+    columns: withoutColumnsLeftOut(columns).map(({ toImport }) => toImport),
     look: importedSheetLook(headerNames),
   };
 }
-export function importUndoOffer(importOfAFile?: Dynamic) {
+export function importUndoOffer(importOfAFile: ImportOfAFile): TableImportedAsNewSheetOffer | TableImportedIntoSheetOffer | null {
   let destination = importDestinationOf(importOfAFile);
-  let { intoSheet: intoSheet } = importOfAFile;
+  let { intoSheet } = importOfAFile;
   if (destination.kind === 'newSheet') {
     let plan = importPlanAsShown(importOfAFile);
     return {
@@ -212,22 +240,22 @@ export function importUndoOffer(importOfAFile?: Dynamic) {
     };
   }
   if (intoSheet?.kind !== 'changes') return null;
-  let place = importPlacesLeft(importOfAFile).find(({ table: table }: Dynamic) => table.sheetId === destination.sheetId);
-  let { isReplaced: isReplaced, addedCount: addedCount, changedCount: changedCount } = intoSheet;
+  let place = importPlacesLeft(importOfAFile).find(({ table }) => table.sheetId === destination.sheetId);
+  let { isReplaced, addedCount, changedCount } = intoSheet;
   return {
     kind: 'tableImportedIntoSheet',
     sheetName: place?.table.name ?? '',
-    isReplaced: isReplaced,
-    addedCount: addedCount,
-    changedCount: changedCount,
+    isReplaced,
+    addedCount,
+    changedCount,
     isSaved: false,
   };
 }
-export function isWorkbookOneUntouchedSheet(reads: WorkbookReads, stem?: Dynamic) {
+export function isWorkbookOneUntouchedSheet(reads: WorkbookReads, stem: string) {
   let [firstSheet, ...otherSheets] = reads.listSheets();
   return firstSheet !== undefined && otherSheets.length === 0 && reads.isSheetAsNew(firstSheet.sheetId) && isDefaultSheetName(firstSheet.name, stem);
 }
-export function confirmImport(state: PageState, reads: WorkbookReads, plansHeardCount?: Dynamic) {
+export function confirmImport(state: PageState, reads: WorkbookReads, plansHeardCount: number) {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null) return withNoEffects(state);
   if (isImportPlanComing(importOfAFile)) return withNoEffects(state);
@@ -236,8 +264,8 @@ export function confirmImport(state: PageState, reads: WorkbookReads, plansHeard
   if (importDestinationOf(importOfAFile).kind === 'sheet' && importOfAFile.intoSheet?.kind !== 'changes') return withNoEffects(state);
   if (importOfAFile.newSheet?.hasRoom === false) return withNoEffects(state);
   if (importRecordCount(importOfAFile) === 0) return withNoEffects(state);
-  let isOneUntouchedSheet = isWorkbookOneUntouchedSheet(reads, importOfAFile.words.stemOfNewSheetNames) ? null : state.sheetId;
-  let edit = importEditOfPlan(importOfAFile, isOneUntouchedSheet, reads);
+  let afterSheet = isWorkbookOneUntouchedSheet(reads, importOfAFile.words.stemOfNewSheetNames) ? null : state.sheetId;
+  let edit = importEditOfPlan(importOfAFile, afterSheet, reads);
   return withStopImportAskEffect(
     state,
     queueEdit(
@@ -257,7 +285,7 @@ export function confirmImport(state: PageState, reads: WorkbookReads, plansHeard
     ),
   );
 }
-export const withStopImportAskEffect = (state: PageState, transition?: Dynamic) =>
+export const withStopImportAskEffect = (state: PageState, transition: PageTransition): PageTransition =>
   state.importOfAFile?.agent.kind === 'isAsked'
     ? {
         ...transition,
@@ -278,20 +306,20 @@ export const closeImportOfAFile = (state: PageState) =>
       fileAwaited: null,
     }),
   );
-export const hasImportWorkToLose = (importOfAFile?: Dynamic) =>
+export const hasImportWorkToLose = (importOfAFile: ImportOfAFile) =>
   changesByHand(importOfAFile.plan, importOfAFile.byHand).length > 0 ||
-  Object.values(importOfAFile.byHand.columns).some(({ isLeftOut: isLeftOut }: Dynamic) => isLeftOut !== undefined) ||
+  Object.values(importOfAFile.byHand.columns).some(({ isLeftOut }) => isLeftOut !== undefined) ||
   Object.keys(importOfAFile.answers).length > 0 ||
   importOfAFile.destinationChosen !== null ||
   importOfAFile.plansOfAgent.length > 1 ||
   ((importOfAFile.agent.kind === 'isAsked' || importOfAFile.agent.kind === 'hasFailed') && importOfAFile.agent.wish !== null);
-export const withColumnsAsTextFrom = (plan?: Dynamic, columnsAsText?: Dynamic) =>
+export const withColumnsAsTextFrom = (plan: ImportPlan, columnsAsText: number | null): ImportPlan =>
   columnsAsText === null
     ? plan
     : {
         ...plan,
         columns: plan.columns.map(
-          (column?: Dynamic, index?: Dynamic) =>
+          (column, index) =>
             index < columnsAsText
               ? column
               : {
@@ -302,30 +330,30 @@ export const withColumnsAsTextFrom = (plan?: Dynamic, columnsAsText?: Dynamic) =
                 },
         ),
       };
-export const NOTHING_DRAWN_ANYWAY = {
+export const NOTHING_DRAWN_ANYWAY: LinesAndColumnsUnfolded = {
   lines: [],
   columns: [],
 };
-export const withLinesDrawnAnyway = (plan: Dynamic, { lines: lines }: Dynamic) =>
+export const withLinesDrawnAnyway = (plan: ImportPlan, { lines }: LinesAndColumnsUnfolded): ImportPlan =>
   lines.length === 0
     ? plan
     : {
         ...plan,
-        linesLeftOut: plan.linesLeftOut.filter((line?: Dynamic) => !lines.includes(line)),
+        linesLeftOut: plan.linesLeftOut.filter((line) => !lines.includes(line)),
       };
-export const importColumnsOutOfDrawing = (importOfAFile: Dynamic, { columns: columns }: Dynamic) =>
+export const importColumnsOutOfDrawing = (importOfAFile: ImportOfAFile, { columns }: LinesAndColumnsUnfolded) =>
   [...importColumnsLeftOut(importOfAFile, importPlanSoFar(importOfAFile).plan), ...importColumnsOverLimit(importOfAFile)]
-    .filter((input?: Dynamic) => !columns.includes(input))
-    .toSorted((input?: Dynamic, options?: Dynamic) => input - options);
-export const recordIndexesToDraw = (records?: Dynamic, mostRecords?: Dynamic, drawnAnyway?: Dynamic) =>
-  records.flatMap((record?: Dynamic, index?: Dynamic) => (index < mostRecords || drawnAnyway.includes(record) ? [index] : []));
-export const importColumnsLeftOut = (importOfAFile?: Dynamic, plan?: Dynamic) =>
-  [...new (Set as Dynamic)([...columnsLeftOutByHand(importOfAFile.byHand), ...blankColumnsLeftOutOnGrid(importOfAFile, plan)])].filter(
-    (input?: Dynamic) => input !== importMergeKeyColumn(importOfAFile),
+    .filter((columnIndex) => !columns.includes(columnIndex))
+    .toSorted((columnIndex, otherIndex) => columnIndex - otherIndex);
+export const recordIndexesToDraw = (records: number[], mostRecords: number, drawnAnyway: number[]) =>
+  records.flatMap((record, index) => (index < mostRecords || drawnAnyway.includes(record) ? [index] : []));
+export const importColumnsLeftOut = (importOfAFile: ImportOfAFile, plan: ImportLineChoice) =>
+  [...new Set([...columnsLeftOutByHand(importOfAFile.byHand), ...blankColumnsLeftOutOnGrid(importOfAFile, plan)])].filter(
+    (columnIndex) => columnIndex !== importMergeKeyColumn(importOfAFile),
   );
-export const blankColumnsLeftOutOnGrid = (importOfAFile?: Dynamic, plan?: Dynamic) =>
+export const blankColumnsLeftOutOnGrid = (importOfAFile: ImportOfAFile, plan: ImportLineChoice) =>
   importDestinationOf(importOfAFile).kind === 'newSheet'
-    ? blankColumnsOf(importOfAFile.table, plan).filter((input?: Dynamic) => importOfAFile.byHand.columns[input]?.isLeftOut !== false)
+    ? blankColumnsOf(importOfAFile.table, plan).filter((columnIndex) => importOfAFile.byHand.columns[columnIndex]?.isLeftOut !== false)
     : [];
-export const importRecordCount = (importOfAFile?: Dynamic) =>
+export const importRecordCount = (importOfAFile: ImportOfAFile) =>
   dataLineNumbers(importOfAFile.table, importPlanSoFar(importOfAFile).plan).length;

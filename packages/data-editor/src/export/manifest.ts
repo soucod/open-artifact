@@ -18,6 +18,7 @@ import { getDatasetUpdatedAt } from '../data/status.ts';
 export type ExportProvenance =
   | { kind: 'query'; connector: string; tool: string; arguments: Record<string, unknown>; inputs: string[] }
   | { kind: 'file'; file: string }
+  | { kind: 'store'; path: string }
   | { kind: 'calc' | 'unsupported' };
 
 export type ExportManifestSource = ExportProvenance & {
@@ -75,6 +76,7 @@ export function exportDatasetProvenance(dataset: Dataset): ExportProvenance {
   const source = dataset.source;
   if (source.kind === 'query') return queryProvenance(source);
   if (source.kind === 'file') return { kind: 'file', file: source.name };
+  if (source.kind === 'store') return { kind: 'store', path: source.path };
   return { kind: source.kind };
 }
 

@@ -1,10 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
-export function afterNextFrameOrTimeout(targetWindow?: Dynamic, callback?: Dynamic, timeoutMs: Dynamic = 100) {
-  let hasRun: Dynamic = false;
+export function afterNextFrameOrTimeout(targetWindow: Window, act: () => void, timeoutMs: number = 100): void {
+  let hasRun = false;
   let runOnce = () => {
     if (hasRun) return;
     hasRun = true;
-    callback();
+    act();
   };
   targetWindow.requestAnimationFrame(() => void targetWindow.setTimeout(runOnce));
   targetWindow.setTimeout(runOnce, timeoutMs);

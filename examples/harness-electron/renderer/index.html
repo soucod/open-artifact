@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://127.0.0.1:*" />
+    <title>Open Artifact example</title>
+    <style>
+      :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+      body { margin: 0; height: 100vh; display: flex; flex-direction: column; max-width: 420px; }
+      #log { flex: 1; overflow: auto; padding: 12px; white-space: pre-wrap; }
+      .notice { opacity: 0.7; font-style: italic; }
+      #cards { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 12px; }
+      #cards button { text-align: left; max-width: 180px; }
+      #cards img { width: 100%; display: block; }
+      form { display: flex; gap: 8px; padding: 12px; }
+      input { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <div id="log"></div>
+    <div id="cards"></div>
+    <form id="form">
+      <input id="input" list="commands" placeholder="make My first deck" autocomplete="off" />
+      <datalist id="commands"></datalist>
+      <button>Send</button>
+    </form>
+    <script src="chat.js"></script>
+  </body>
+</html>

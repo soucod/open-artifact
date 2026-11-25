@@ -10,10 +10,10 @@ A new Sheet (a new Sheets artifact, `open` on a new folder, or a first `update` 
 - `read` AND `update` ARE THIS TYPE'S COMMANDS: `open-artifact read <root> '<payload>'` and `open-artifact update <root> '<payload>'` standalone, where `<root>` is the Sheet's folder, and `Artifact {action: "call", url, name: "read", args: {payload}}` and `Artifact {action: "call", url, name: "update", args: {payload}}` under a host, `payload` the same JSON as an object. The topics write them short, as `read <root> '…'`. While the Sheet's page server runs they go through it, so every open page shows an update at once; with none running they work on the folder itself.
 - THE PAYLOAD IS JSON: standalone, inline in single quotes, or the path of a file that holds it, or `-` to read it from stdin. A payload with a `'` in it, such as the text `'02139`, goes in a file or on stdin: `update <root> - <<'EOF'`, the JSON, then `EOF`.
 - THE ANSWER is JSON on stdout: a read's value, or an update's `{"revision":…}`. A refusal is JSON on stderr, `{"detail":…,"data":{"refusal":…},"hint":…}`, and the command exits with 1.
-- A `read` TAKES A PAYLOAD OF ONE OF THE KINDS BELOW THAT START WITH `read`. There is no other. With no payload it is `readSheets`.
+- A `read` TAKES A PAYLOAD OF ONE OF THE KINDS IN THE FIRST GROUP BELOW: the six reads and `showGuide`, which shows the person a walkthrough and changes no cell (SKILL.md, "Showing the person around a Sheet"). There is no other. With no payload it is `readSheets`.
 - AN `update` TAKES ONE PAYLOAD, of exactly three keys: `"kind":"applyEdits"`, `"base"`, the `revision` that you last saw, and `"edits"`, a list of edits of the kinds below. An edit never goes by itself as the payload.
 - KINDS AND KEYS ARE EXACT. Any other kind, a key under another name (`range` for `ranges`, `values` for `rows`) and a key too many are each refused.
-- ONE UPDATE AT A TIME. Each needs the `revision` that the one before it returned, so of two sent side by side on one `base` the second is refused. Reads can go side by side. Send each call as its own: only a new chart takes a `batch` (charts.md).
+- ONE UPDATE AT A TIME. Each needs the `revision` that the one before it returned, so of two sent side by side on one `base` the second is refused. Reads can go side by side. Send each call as its own: only a new chart or a new interactive panel takes a `batch` (charts.md, interactives.md).
 
 Each line is a kind and the keys that go beside `"kind"`. A key takes a string unless the line says otherwise, `?` marks a key that may be left out, and `…` stands for what the topic on that edit spells out. A line gives an edit's shape alone: what the edit does, what it takes along and when it is refused are in its topic ("Where the rest is"), which comes before the first such edit.
 ```
@@ -22,6 +22,8 @@ readCells {sheet, range}
 readCellFormats {sheet, range}
 readConditionalFormats {sheet}
 readCharts {sheet}
+readInteractive {sheet}
+showGuide {guide: {stops: [{at, say}]}}
 
 writeCells {sheet, topLeft, rows: [[…]]}
 addSheet {name}
@@ -56,6 +58,7 @@ replaceConditionalFormats {sheet, inPlaceOf, rules: [{cells: [string], effect: �
 addChart {chart: {name, caption, widget, inputs: [{…}], sheet, topLeft, offsetFromAnchorCell?: {…}, widthInPixels: number, heightInPixels: number}}
 setChart {chartId, chart: {name, caption, widget, inputs: [{…}], sheet, topLeft, offsetFromAnchorCell?: {…}, widthInPixels: number, heightInPixels: number}}
 deleteChart {chartId}
+addInteractive {interactive: {sheet, name, caption, widget, inputs: [{…}], writable: [string]}}
 setTimeZone {timeZone: string|null}
 setLocale {locale}
 ```
@@ -65,7 +68,7 @@ setLocale {locale}
 
 ```
 read <root> '{"kind":"readSheets"}'
-  → {"revision":1,"sheets":[{"name":"Sheet1","rowCount":1000,"columnCount":26}],"locale":"en-US","you":null}
+  → {"revision":1,"sheets":[{"name":"Sheet1","linkFragment":"sheet-sht_k7m2q9rd4x.0","rowCount":1000,"columnCount":26}],"locale":"en-US","you":null}
 update <root> - <<'EOF'
 {"kind":"applyEdits","base":1,"edits":[
   {"kind":"renameSheet","sheet":"Sheet1","name":"Budget"},
@@ -76,7 +79,7 @@ EOF
 read <root> '{"kind":"readCells","sheet":"Budget","range":"A1:B4"}'
   → {"revision":2,"sheet":"Budget","range":"A1:B4","rows":{"1":["Item","Cost"],"2":["Rent",1200.0],"3":["Zip","'02139"],"4":["Total",{"formula":"=SUM(B2:B3)","value":1200.0}]}}
 ```
-1. `readSheets` gives each sheet's name, its size, and its `filledRange`, the smallest range that holds every filled cell (a blank sheet has none). A new Sheet has one blank sheet, `Sheet1`, to rename for what goes in it.
+1. `readSheets` gives each sheet's name, its `linkFragment` (what a link to its cells starts with, SKILL.md "Pointing at cells"), its size, and its `filledRange`, the smallest range that holds every filled cell (a blank sheet has none). A new Sheet has one blank sheet, `Sheet1`, to rename for what goes in it. While the Sheet's page server runs, the answer also has `frame`, whose `artifactUrl` is the address of the Sheet's page.
 2. `readCells` gives what the cells hold. `rows` is keyed by each row's number. Blank rows and columns at the end of a range are cut from `rows`, and `range` says what `rows` covers (`null`: all blank). One read answers at most 10,000 cells and about 190 KB, so a large `filledRange` is read some hundreds of rows at a time.
 3. ONE `applyEdits` HOLDS ALL THAT IS READY: names, cells, looks, sizes and dropdowns. For a table of more than a few rows, the name and the headers go first, in an update of their own (building.md). A freeze changes no cell: `lastFrozenRow` in `setSheetSettings`.
 4. A WRONG FORMULA IS NOT REFUSED: it comes to an error, which only a read shows, as `{"error":…}`.
@@ -106,7 +109,7 @@ read <root> '{"kind":"readCells","sheet":"Budget","range":"A1:B4"}'
 - A CELL HOLDS NO TIME ZONE. A `Z` or a `+02:00` at the end of a date with a time is dropped, and the clock stays as written: `"2026-03-15T14:30:00Z"` and `"2026-03-15T14:30:00-07:00"` are both 14:30 on March 15. Bring moments to one zone before you write them.
 - YOU WRITE NUMBERS, DATES AND FORMULAS THE US WAY IN EVERY LOCALE: a point before decimals, the month before the day, commas between thousands and between a formula's arguments. They read back the same way, and people see them in the signs of the Sheet's locale, which `readSheets` names. A person's `3/4/2027` is in the Sheet's order: April 3 if days come first. Only a `shown`, read and written, and text in a formula's quotation marks (functions.md) are in those signs: `"1.234,50"` for 1234.5 where decimals follow a comma.
 - `you`, in `readSheets`, is the person you act for, as a person cell ("put me as owner"), or `null`.
-- A READ ALSO LISTS WHAT LIES OVER ITS CELLS, each only if there is any. `readCells`: `mergedRanges` (only the first cell of one holds anything), `dropdowns`, `checkboxes` and `columnsTooNarrowForTheirNumbers`. A merged range is given whole, and the ranges of a dropdown and of checkboxes only as far as the range that was read. `readSheets`: `lastFrozenRow`, `lastFrozenColumn`, `areGridlinesHidden`, `rowGroups`, `columnGroups`, `cellTable`, `chartCount` (`readCharts` gives them) and `timeZone`. The topic on each says what to do with it.
+- A READ ALSO LISTS WHAT LIES OVER ITS CELLS, each only if there is any. `readCells`: `mergedRanges` (only the first cell of one holds anything), `dropdowns`, `checkboxes` and `columnsTooNarrowForTheirNumbers`. A merged range is given whole, and the ranges of a dropdown and of checkboxes only as far as the range that was read. `readSheets`: `lastFrozenRow`, `lastFrozenColumn`, `areGridlinesHidden`, `rowGroups`, `columnGroups`, `cellTable`, `chartCount` (`readCharts` gives them), `interactiveId` (the tab is an interactive panel, which `readInteractive` gives) and `timeZone`. The topic on each says what to do with it.
 - `"calculationTookTooLong":true` says that the formulas took too long to work out, so each formula's `value` is `{"error":"#TIMEOUT!"}` and spilled cells read as blank. Nothing is wrong with those formulas: do not rewrite them. A smaller range is no help: read once more, and if that times out too, tell the person.
 
 ### The rules of an update
@@ -149,6 +152,7 @@ Each topic is a file beside this one. A topic that you have read in this convers
 | inserting, moving, sorting, deleting, grouping and hiding rows and columns, and adding a row to a table that is there | `rows-and-columns.md` |
 | renaming, deleting, bringing back and moving sheets | `whole-sheets.md` |
 | charts | `charts.md` |
+| interactive panels: a tab of controls that read cells and write some of them | `interactives.md` |
 
 ### Limits
 

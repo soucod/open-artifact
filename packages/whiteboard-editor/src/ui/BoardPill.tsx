@@ -1,6 +1,7 @@
 /**
  * The pill at the top right of the board: save status (when the Shell does
- * not draw it), the board timer, the zoom menu and, for viewers, a lock.
+ * not draw it), the board timer, the zoom menu and, for viewers, a
+ * “Read-only” badge (“Comment only” for commenters) saying why.
  *
  * The zoom menu also holds the view options: follow someone, ask everyone
  * to follow you, single-key tool shortcuts and the timer chime.
@@ -38,25 +39,33 @@ export function BoardPill() {
   const lockLabel = readOnlyLabel(session?.viewer.role ?? 'viewer');
   return (
     <>
-      <Card role="toolbar" aria-label="Board view" className="wb-pill h-9 px-1">
+      <Card role="toolbar" aria-label="Board view" data-wb-region={corner ? 'document' : 'zoom'} className="wb-pill h-9 px-1">
         {readOnly ? null : <SaveStatus />}
         <BoardTimer />
         {corner ? null : <ZoomMenu readOnly={readOnly} />}
-        {lockLabel ? (
-          <Tip label={lockLabel === 'Comment only' ? 'Comment only: you can add and reply to comments, not change the board' : 'View only'}>
-            <span role="img" aria-label={lockLabel} className="flex h-7 items-center px-1.5 text-chrome-muted">
-              {lockLabel === 'Comment only' ? <MessageCircle className="size-3.5" aria-hidden="true" /> : <Lock className="size-3.5" aria-hidden="true" />}
-            </span>
-          </Tip>
-        ) : null}
+        {lockLabel && !corner ? <ReadOnlyBadge commenter={lockLabel === 'Comment only'} /> : null}
       </Card>
-      {corner && <CornerZoom readOnly={readOnly} />}
+      {corner && <CornerZoom readOnly={readOnly} badge={lockLabel ? <ReadOnlyBadge commenter={lockLabel === 'Comment only'} /> : null} />}
     </>
   );
 }
 
+/** What a viewer who cannot change the board sees in the bar: “Read-only” (or “Comment only”) and why. */
+function ReadOnlyBadge({ commenter }: { commenter: boolean }) {
+  const label = commenter ? 'Comment only' : 'Read-only';
+  const reason = commenter ? 'You can add and reply to comments, but not change the board.' : 'You can view this board, but not change it.';
+  return (
+    <Tip label={reason}>
+      <span role="status" aria-label={`${label}: ${reason}`} data-wb-read-only="" className="flex h-7 items-center gap-1 px-1.5 text-[12px] text-chrome-muted">
+        {commenter ? <MessageCircle className="size-3.5" aria-hidden="true" /> : <Lock className="size-3.5" aria-hidden="true" />}
+        {label}
+      </span>
+    </Tip>
+  );
+}
+
 /** When the shell supplies document controls, keep zoom at the foot, clear of the active tool tray. */
-function CornerZoom({ readOnly }: { readOnly: boolean }) {
+function CornerZoom({ readOnly, badge }: { readOnly: boolean; badge: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const zoom = ref.current;
@@ -74,16 +83,16 @@ function CornerZoom({ readOnly }: { readOnly: boolean }) {
     place();
     return () => observer.disconnect();
   }, []);
-  return <Card ref={ref} role="toolbar" aria-label="Board zoom" className="wb-corner-zoom">
+  return <Card ref={ref} role="toolbar" aria-label="Board zoom" data-wb-region="zoom" className="wb-corner-zoom">
     <ZoomMenu readOnly={readOnly} corner />
+    {badge}
   </Card>;
 }
 
 /** "54% ⌄": the zoom readout and its menu. */
 function ZoomMenu({ readOnly, corner = false }: { readOnly: boolean; corner?: boolean }) {
   const zoom = useCamera((state) => state.camera.zoom);
-  const compact = useCamera((state) => state.compact);
-  const range = zoomRange({ compact });
+  const range = zoomRange();
   const hasSelection = useSelection((state) => state.ids.length > 0);
   const empty = useBoard((state) => state.board.content.elements.length === 0);
   const canUndo = useHistory((state) => state.canUndo);
@@ -99,7 +108,7 @@ function ZoomMenu({ readOnly, corner = false }: { readOnly: boolean; corner?: bo
     <ChromeMenu
       side={corner ? 'top' : 'bottom'}
       align="end"
-      tip={{ label: 'Zoom and view' }}
+      tip={{ label: <ZoomTip mod={mod} keysOn={keysOn} /> }}
       trigger={
         <ChromeButton className="pl-2 pr-1.5 tabular-nums" aria-label={`Zoom ${percent}`}>
           <span className="grid">
@@ -121,7 +130,12 @@ function ZoomMenu({ readOnly, corner = false }: { readOnly: boolean; corner?: bo
       <ChromeMenuItem shortcut={`${mod}0`} disabled={empty} onSelect={fitBoard}>
         Fit the board
       </ChromeMenuItem>
-      <ChromeMenuItem shortcut={keysOn ? '⇧2' : undefined} disabled={!hasSelection} onSelect={fitSelection}>
+      <ChromeMenuItem
+        shortcut={keysOn ? '⇧2' : undefined}
+        disabled={!hasSelection}
+        description={hasSelection ? undefined : 'Select something to zoom to it.'}
+        onSelect={fitSelection}
+      >
         Zoom to selection
       </ChromeMenuItem>
       <ChromeMenuSeparator />
@@ -161,6 +175,26 @@ function ZoomMenu({ readOnly, corner = false }: { readOnly: boolean; corner?: bo
         </>
       ) : null}
     </ChromeMenu>
+  );
+}
+
+/** The zoom readout's tooltip: what it opens, and the zoom keys. */
+function ZoomTip({ mod, keysOn }: { mod: string; keysOn: boolean }) {
+  const rows: [string, string][] = [
+    ['Fit the board', keysOn ? `${mod}0 or ⇧1` : `${mod}0`],
+    ...(keysOn ? [['Zoom to selection', '⇧2'] as [string, string]] : []),
+    ['Zoom in / out', `${mod}+ / ${mod}−`],
+  ];
+  return (
+    <span className="grid gap-0.5">
+      <span>Zoom and view</span>
+      {rows.map(([label, keys]) => (
+        <span key={label} className="flex justify-between gap-3 text-tip-fg/70">
+          <span>{label}</span>
+          <span>{keys}</span>
+        </span>
+      ))}
+    </span>
   );
 }
 

@@ -1,16 +1,26 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellPoint, ColumnId, Reference, RowId, SheetId } from '@open-artifact/sheets-core';
 import { holdsOneNumber, isYearCell, isSumWithFormulaCell, figuresOfSelection, insertFigureFormula } from '../selection/figures.ts';
 import { selectedArea, selectionAreaAndKind, activeAnchorCell } from '../selection/model.ts';
 import { hasOtherRanges } from '../selection/several-ranges.ts';
 import { isSelectionMoreThanActiveCell, startEntryEditing } from '../editor/start-entry.ts';
 import { withNoEffects } from '../state/transitions.ts';
+import type { PageTransition } from '../state/transitions.ts';
 import { wholeAreaToA1AsStored } from '../model/a1-references.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function lineIdsOfReference(reference?: Dynamic, along?: Dynamic) {
-  let lineIdOf = ({ r: r2, c: c }: Dynamic) => (along === 'column' ? c : r2);
+import type { CellArea, CellPosition } from '../selection/model.ts';
+/** Which way a sum runs: along a row (numbers on the left) or a column (numbers above). */
+export type SumAlong = 'row' | 'column';
+/** The numbers a sum in a cell would add up, and which way they lie from it. */
+export interface AutoSumRun {
+  numbers: CellArea;
+  along: SumAlong;
+}
+/** The ids of the lines (rows, or columns) a reference starts and ends at along `along`; `null` when it covers whole lines the other way. */
+export function lineIdsOfReference(reference: Reference, along: SumAlong): (RowId | ColumnId)[] | null {
+  let lineIdOf = ({ r, c }: CellPoint) => (along === 'column' ? c : r);
   switch (reference.kind) {
     case 'cell':
       return [lineIdOf(reference.cell)];
@@ -22,37 +32,37 @@ export function lineIdsOfReference(reference?: Dynamic, along?: Dynamic) {
       return along === 'row' ? [reference.top.r, reference.bottom.r] : null;
   }
 }
-export function isSumOfOwnLine(workbook: WorkbookReads, sheetId?: Dynamic, position?: Dynamic, along?: Dynamic) {
+export function isSumOfOwnLine(workbook: WorkbookReads, sheetId: SheetId, position: CellPosition, along: SumAlong): boolean {
   let cellId = workbook.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
   let input = cellId === null ? undefined : workbook.cellOf(cellId)?.input;
   if (cellId === null || input?.kind !== 'formula') return false;
-  let { textBetweenReferences: textBetweenReferences, references: references } = input.formula;
+  let { textBetweenReferences, references } = input.formula;
   if (!SUM_FORMULA_START_PATTERN.test(textBetweenReferences[0] ?? '')) return false;
   let lineId = along === 'column' ? cellId.columnId : cellId.rowId;
   return references.some(
-    (reference?: Dynamic) =>
-      reference.sheetId === sheetId && lineIdsOfReference(reference, along)?.every((id?: Dynamic) => id === lineId) === true,
+    (reference) =>
+      reference.sheetId === sheetId && lineIdsOfReference(reference, along)?.every((id) => id === lineId) === true,
   );
 }
 export function numbersToSumBefore(
   workbook: WorkbookReads,
-  sheetId: Dynamic,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic,
-  along?: Dynamic,
-) {
-  let positionBack = (steps?: Dynamic) =>
+  sheetId: SheetId,
+  { rowIndex, columnIndex }: CellPosition,
+  along: SumAlong,
+): CellArea | null {
+  let positionBack = (steps: number): CellPosition =>
     along === 'column'
       ? {
           rowIndex: rowIndex - steps,
-          columnIndex: columnIndex,
+          columnIndex,
         }
       : {
-          rowIndex: rowIndex,
+          rowIndex,
           columnIndex: columnIndex - steps,
         };
-  let isNumberToSum = (position?: Dynamic) =>
+  let isNumberToSum = (position: CellPosition) =>
     holdsOneNumber(workbook, sheetId, position) && !isSumOfOwnLine(workbook, sheetId, position, along);
-  let count: Dynamic = 0;
+  let count = 0;
   while (isNumberToSum(positionBack(count + 1))) count += 1;
   let beyond = positionBack(count + 1);
   let beyondCellId = workbook.cellIdAt(sheetId, beyond.rowIndex, beyond.columnIndex);
@@ -69,8 +79,8 @@ export function numbersToSumBefore(
     columnCount: along === 'row' ? summedCount : 1,
   };
 }
-export function autoSumRunAt(workbook: WorkbookReads, sheetId?: Dynamic, position?: Dynamic) {
-  let above = {
+export function autoSumRunAt(workbook: WorkbookReads, sheetId: SheetId, position: CellPosition): AutoSumRun | null {
+  let above: CellPosition = {
     ...position,
     rowIndex: position.rowIndex - 1,
   };
@@ -80,15 +90,15 @@ export function autoSumRunAt(workbook: WorkbookReads, sheetId?: Dynamic, positio
   return numbers === null
     ? null
     : {
-        numbers: numbers,
+        numbers,
         along: isAlongColumn ? 'column' : 'row',
       };
 }
-export function isAutoSumForSelectedCells(state: PageState, workbook: WorkbookReads, { numbers: numbers, along: along }: Dynamic) {
+export function isAutoSumForSelectedCells(state: PageState, workbook: WorkbookReads, { numbers, along }: AutoSumRun): boolean {
   let selected = selectedArea(state, workbook);
   let isCellsSelected = !hasOtherRanges(state) && selectionAreaAndKind(state, workbook)?.kind === 'cells';
   if (selected === null || !isCellsSelected || !isSelectionMoreThanActiveCell(state, workbook)) return false;
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = selected;
+  let { topRowIndex, leftColumnIndex, rowCount, columnCount } = selected;
   if ((along === 'column' ? rowCount : columnCount) > 1) return false;
   return (
     workbook.cellsOnShowIn(state.sheetId, selected).length === 0 &&
@@ -97,7 +107,7 @@ export function isAutoSumForSelectedCells(state: PageState, workbook: WorkbookRe
       {
         length: rowCount * columnCount,
       },
-      (_unused: Dynamic, offset: Dynamic) =>
+      (_unused, offset) =>
         along === 'column'
           ? {
               rowIndex: topRowIndex,
@@ -107,7 +117,7 @@ export function isAutoSumForSelectedCells(state: PageState, workbook: WorkbookRe
               rowIndex: topRowIndex + offset,
               columnIndex: leftColumnIndex,
             },
-    ).every((position?: Dynamic) => {
+    ).every((position) => {
       let cellId = workbook.cellIdAt(state.sheetId, position.rowIndex, position.columnIndex);
       let isPlainCell = cellId !== null && workbook.formatOf(cellId).cellControl.kind === 'none';
       let run = autoSumRunAt(workbook, state.sheetId, position);
@@ -115,7 +125,7 @@ export function isAutoSumForSelectedCells(state: PageState, workbook: WorkbookRe
     })
   );
 }
-export function insertAutoSum(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function insertAutoSum(state: PageState, workbook: ReadsWithTextMeasurer): PageTransition {
   if (isSumWithFormulaCell(figuresOfSelection(state, workbook))) return insertFigureFormula(state, workbook, 'sum');
   let cellId = activeAnchorCell(state, workbook);
   let position = workbook.positionOfCell(cellId);

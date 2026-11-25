@@ -21,7 +21,11 @@ export const NOTE_MESSAGES = {
   magic: 'Magic Move transitions became fades',
   builds: 'Build animations were left out: everything shows from the start',
   rotatedTable: 'Rotated tables were placed upright',
+  listReversed: 'Lists that count down were numbered upward (PowerPoint numbering only counts up)',
+  listStart: 'Lists that start below 1 were numbered from 1',
+  listInside: 'List markers set inside the text were hung in the margin',
   backgroundPicture: 'Backgrounds PowerPoint cannot draw (pictures, patterns, radial or see-through gradients) became pictures',
+  polygonPicture: 'Some clipped elements became pictures because their clipping could not be exported as editable geometry',
   textGradient: 'Gradient-filled text took the gradient\u2019s first color (PowerPoint text here takes one color)',
   shadowInset: 'Inner shadows were left out (PowerPoint shapes carry outer shadows only)',
   shadowLayers: 'Only the first of several shadows on a shape was kept',
@@ -47,8 +51,10 @@ export const FAMILY_NOTE_MESSAGES = {
   fontBudget: 'Not embedded because they would make the file too large',
   fontBudgetAfter: 'Not embedded because there was no room left after the fonts used by more of the text',
   fontFetch: 'Not embedded because their files could not be downloaded',
+  fontSlow: 'Not embedded because their files took too long to download; exporting again may carry them',
   fontPartial: 'Embedded for one script only: characters of other scripts show in a substitute font',
   fontStyles: 'Embedded without some of their bold or italic styles',
+  fontLate: 'Had not finished loading when the slides were drawn, so some of their text may show in a fallback font; exporting again may help',
 } as const;
 
 export type FamilyNoteKind = keyof typeof FAMILY_NOTE_MESSAGES;
@@ -96,7 +102,11 @@ export class ExportNotes {
     return this.kinds.has(kind);
   }
 
-  /** The notes as sentences: slide notes in the order of {@link NOTE_MESSAGES}, then font notes, then the rest. */
+  /**
+   * The notes as sentences: slide notes in the order of {@link NOTE_MESSAGES},
+   * then font notes, then the rest. A family already named by another font
+   * note is left out of `fontLate`: that note says more.
+   */
   list(): string[] {
     const out: string[] = [];
     for (const kind of Object.keys(NOTE_MESSAGES) as NoteKind[]) {
@@ -106,8 +116,9 @@ export class ExportNotes {
       const where = unique.length === 0 ? '' : ` (${unique.length === 1 ? 'slide' : 'slides'} ${slideList(unique)})`;
       out.push(`${NOTE_MESSAGES[kind]}${where}.`);
     }
+    const named = new Set([...this.families].flatMap(([kind, names]) => (kind === 'fontLate' ? [] : names)));
     for (const kind of Object.keys(FAMILY_NOTE_MESSAGES) as FamilyNoteKind[]) {
-      const names = this.families.get(kind);
+      const names = kind === 'fontLate' ? this.families.get(kind)?.filter((name) => !named.has(name)) : this.families.get(kind);
       if (!names?.length) continue;
       out.push(`${nameList(names)}: ${FAMILY_NOTE_MESSAGES[kind].charAt(0).toLowerCase()}${FAMILY_NOTE_MESSAGES[kind].slice(1)}.`);
     }

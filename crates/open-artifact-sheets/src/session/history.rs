@@ -20,7 +20,7 @@
 //!   tables, views: each by what it sets; lines inserted may hold the cells, formats, sizes, groups and conditional
 //!   formats later ones put there), and what a later one deleted (a sheet, rows, columns) is looked at as it was then.
 //!   Taking back is refused (`changedSince`) when its reverse would leave lines in the way of others or a group
-//!   nested too deep (since 11-15 a sheet may be left several cell tables).
+//!   nested too deep.
 //! - An edit the server refuses, or one dropped because it no longer applies, empties the history; a load does not.
 //! - An op id is in use while an edit of the queue or of the history has it (or it is the action of a queued one).
 
@@ -86,6 +86,23 @@ pub fn holds(workbook: &Workbook, op: &Op) -> bool {
                     })
                 })
         }
+        // The rows are in the order it put them in.
+        Op::ReorderRows { sheet_id, rows, .. } => {
+            let Some(i) = workbook.sheet_index(sheet_id) else { return false };
+            let axis = &workbook.sheets[i].rows;
+            let lines: Option<Vec<LineId>> = rows
+                .ids
+                .iter()
+                .flat_map(|b| b.runs.iter().flat_map(move |&(f, c)| (f..f.saturating_add(c)).map(move |n| (b, n))))
+                .map(|(b, n)| Some(LineId { base: workbook.bases.find(&b.base)?, n }))
+                .collect();
+            let Some(lines) = lines.filter(|l| l.iter().all(|&r| axis.contains(r))) else { return false };
+            let mut in_order = lines.clone();
+            in_order.sort_by_key(|&l| axis.position(l));
+            let index: hashbrown::HashMap<LineId, usize> = lines.iter().enumerate().map(|(k, &l)| (l, k)).collect();
+            let order: Vec<usize> = in_order.iter().map(|l| index[l]).collect();
+            crate::workbook::reorder::encode(&order) == rows.order
+        }
         Op::MergeCells { sheet_id, ranges } | Op::UnmergeCells { sheet_id, ranges } => {
             let merges = matches!(op, Op::MergeCells { .. });
             workbook
@@ -101,6 +118,7 @@ pub fn holds(workbook: &Workbook, op: &Op) -> bool {
             kept(sheet.last_frozen_row, &s.last_frozen_row)
                 && kept(sheet.last_frozen_column, &s.last_frozen_column)
                 && s.are_gridlines_hidden.is_none_or(|h| h == sheet.are_gridlines_hidden)
+                && s.interactive.as_ref().is_none_or(|view| *view == sheet.interactive)
         }),
         // A table not shown (its footer not under its header) is not there to take back.
         Op::SetCellTables { sheet_id, cell_tables } => {
@@ -248,6 +266,7 @@ fn sets_alike(op: &Op, other: &Op) -> bool {
         | Op::SetDropdowns { sheet_id, .. }
         | Op::SetConditionalFormats { sheet_id, .. }
         | Op::SetPlacements { sheet_id, .. }
+        | Op::SetNamedViews { sheet_id, .. }
         | Op::SetCellTables { sheet_id, .. } => Some(Some(sheet_id.clone())),
         Op::SetViews { .. } => Some(None),
         _ => None,
@@ -307,7 +326,7 @@ fn left_to_hold<'a>(workbook: &Workbook, op: &'a Op, later: &[Op]) -> Option<Cow
     let any_later = |is: &dyn Fn(&Op) -> bool| later.iter().any(is);
     let kept = || Some(Cow::Borrowed(op));
     match op {
-        Op::SetCells { sheet_id, cells, listed } => {
+        Op::SetCells { sheet_id, cells, form } => {
             let again = cells_set(workbook, sheet_id, later);
             let at = |cell: &CellToSet| Some((workbook.bases.parse(&cell.r)?, workbook.bases.parse(&cell.c)?));
             let left: Vec<CellToSet> =
@@ -315,12 +334,17 @@ fn left_to_hold<'a>(workbook: &Workbook, op: &'a Op, later: &[Op]) -> Option<Cow
             match left.len() {
                 0 => None,
                 n if n == cells.len() => kept(),
-                _ => Some(Cow::Owned(Op::SetCells { sheet_id: sheet_id.clone(), cells: left, listed: *listed })),
+                _ => Some(Cow::Owned(Op::SetCells { sheet_id: sheet_id.clone(), cells: left, form: *form })),
             }
         }
         Op::MoveSheets { .. } if any_later(&|l| matches!(l, Op::MoveSheets { .. })) => None,
         Op::MoveRows { sheet_id, .. }
             if any_later(&|l| matches!(l, Op::MoveRows { sheet_id: s, .. } if s == sheet_id)) =>
+        {
+            None
+        }
+        Op::ReorderRows { sheet_id, .. }
+            if any_later(&|l| matches!(l, Op::ReorderRows { sheet_id: s, .. } if s == sheet_id)) =>
         {
             None
         }
@@ -361,6 +385,9 @@ fn left_to_hold<'a>(workbook: &Workbook, op: &'a Op, later: &[Op]) -> Option<Cow
                     }
                     if set_later(&set.sheet_id, |s| s.are_gridlines_hidden.is_some()) {
                         settings.are_gridlines_hidden = None;
+                    }
+                    if set_later(&set.sheet_id, |s| s.interactive.is_some()) {
+                        settings.interactive = None;
                     }
                     SheetToSet { sheet_id: set.sheet_id.clone(), settings }
                 })
@@ -501,6 +528,7 @@ fn same_set(op: &Op, workbook: &Workbook, again: &Workbook) -> bool {
         | Op::SetDropdowns { sheet_id, .. }
         | Op::SetConditionalFormats { sheet_id, .. }
         | Op::SetPlacements { sheet_id, .. }
+        | Op::SetNamedViews { sheet_id, .. }
         | Op::SetCellTables { sheet_id, .. } => sheet_id,
         Op::SetViews { .. } => return workbook.views == again.views,
         _ => return false,
@@ -528,6 +556,7 @@ fn same_set(op: &Op, workbook: &Workbook, again: &Workbook) -> bool {
         Op::SetDropdowns { .. } => was.dropdowns == is.dropdowns,
         Op::SetConditionalFormats { .. } => was.conditional_formats == is.conditional_formats,
         Op::SetPlacements { .. } => was.placements == is.placements,
+        Op::SetNamedViews { .. } => was.named_views == is.named_views,
         _ => was.cell_tables == is.cell_tables,
     }
 }
@@ -779,12 +808,15 @@ pub struct Part {
 }
 
 /// Which of the edits of a step made of several a part is of (`Step::roles`): the edit asked for, an edit before it
-/// (pointed at or not), or one that went along with it, by its index among the step's edits.
+/// (pointed at or not), or one that went along with it, by its index among the step's edits; or the widths the edit
+/// asked for made room with (`makesRoomForNumbersIn`), which change no place told as the step is taken back or made
+/// again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Asked,
     Before { index: usize, is_pointed_at: bool },
     Along(usize),
+    Room,
 }
 
 /// A step of the page's history: one edit, or the edits one action made (taking edits back, or a step taken back

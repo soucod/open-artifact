@@ -26,6 +26,9 @@ const slot = sessionSlot<Session>();
 /** The session; throws before {@link startSession} resolved. */
 export const session = slot.session;
 
+/** The session, or `null` before it started. */
+export const maybeSession = slot.maybeSession;
+
 /** Connects to the host. Rejects when the artifact capability is unavailable. */
 export async function startSession(): Promise<Session> {
   const { caps, viewer, abilities, shell } = await connectHost(['artifact', 'assets', 'agent', 'room', 'downloads']);

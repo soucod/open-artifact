@@ -3,7 +3,7 @@
  * selected, otherwise paste, select all and the slide's own commands.
  */
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   BringToFront,
   ClipboardPaste,
@@ -22,6 +22,7 @@ import {
 import { isTextual, nodeAt, rotationOf, samePath, type NodePath, type TableNode } from '@open-artifact/slides-core';
 import { MenuItem, MenuSeparator, toast } from '@open-artifact/ui';
 import { useView } from '../../state/view.ts';
+import { tableTarget } from '../../lib/table-target.ts';
 import { hasMemory, pasteFromMemory } from '../../services/clipboard.ts';
 import { replaceImage, pickFiles } from '../../services/assets.ts';
 import { canComment, elementAnchor, requestAnchoredComment } from '../../services/comments.ts';
@@ -183,11 +184,15 @@ export function StageMenuItems(): ReactNode {
 
 /**
  * Rows and columns of a selected table: around the cell being typed in, or
- * at the end (adding) and the last one (removing) otherwise.
+ * at the end (adding) and the last one (removing) otherwise. The table and
+ * cell are taken as the menu opens; the commands check them when chosen.
  */
 function TableMenuItems({ table, path }: { table: TableNode; path: NodePath }): ReactNode {
-  const edit = useView.getState().textEdit;
-  const cell = edit?.cell && samePath(edit.path, path) ? edit.cell : null;
+  const [opened] = useState(() => {
+    const { textEdit: edit, current } = useView.getState();
+    return tableTarget(current ?? '', path, table, edit?.cell && samePath(edit.path, path) ? edit.cell : undefined);
+  });
+  const cell = opened.cell ?? null;
   const addRow = tableAddRefusal(table, 'row');
   const addColumn = tableAddRefusal(table, 'column');
   const removeRow = tableRemoveRefusal(table, 'row');
@@ -196,37 +201,37 @@ function TableMenuItems({ table, path }: { table: TableNode; path: NodePath }): 
     <>
       {cell ? (
         <>
-          <MenuItem disabled={addRow !== null} onSelect={() => editTable(path, 'addRow', cell[0])}>
+          <MenuItem disabled={addRow !== null} onSelect={() => editTable(opened.path, 'addRow', cell[0], opened)}>
             Insert row above
           </MenuItem>
-          <MenuItem disabled={addRow !== null} onSelect={() => editTable(path, 'addRow', cell[0] + 1)}>
+          <MenuItem disabled={addRow !== null} onSelect={() => editTable(opened.path, 'addRow', cell[0] + 1, opened)}>
             Insert row below
           </MenuItem>
-          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(path, 'addColumn', cell[1])}>
+          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(opened.path, 'addColumn', cell[1], opened)}>
             Insert column left
           </MenuItem>
-          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(path, 'addColumn', cell[1] + 1)}>
+          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(opened.path, 'addColumn', cell[1] + 1, opened)}>
             Insert column right
           </MenuItem>
-          <MenuItem disabled={removeRow !== null} onSelect={() => editTable(path, 'removeRow', cell[0])}>
+          <MenuItem disabled={removeRow !== null} onSelect={() => editTable(opened.path, 'removeRow', cell[0], opened)}>
             Delete row
           </MenuItem>
-          <MenuItem disabled={removeColumn !== null} onSelect={() => editTable(path, 'removeColumn', cell[1])}>
+          <MenuItem disabled={removeColumn !== null} onSelect={() => editTable(opened.path, 'removeColumn', cell[1], opened)}>
             Delete column
           </MenuItem>
         </>
       ) : (
         <>
-          <MenuItem disabled={addRow !== null} onSelect={() => editTable(path, 'addRow')}>
+          <MenuItem disabled={addRow !== null} onSelect={() => editTable(opened.path, 'addRow', undefined, opened)}>
             Add a row
           </MenuItem>
-          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(path, 'addColumn')}>
+          <MenuItem disabled={addColumn !== null} onSelect={() => editTable(opened.path, 'addColumn', undefined, opened)}>
             Add a column
           </MenuItem>
-          <MenuItem disabled={removeRow !== null} onSelect={() => editTable(path, 'removeRow')}>
+          <MenuItem disabled={removeRow !== null} onSelect={() => editTable(opened.path, 'removeRow', undefined, opened)}>
             Remove the last row
           </MenuItem>
-          <MenuItem disabled={removeColumn !== null} onSelect={() => editTable(path, 'removeColumn')}>
+          <MenuItem disabled={removeColumn !== null} onSelect={() => editTable(opened.path, 'removeColumn', undefined, opened)}>
             Remove the last column
           </MenuItem>
         </>

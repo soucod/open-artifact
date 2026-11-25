@@ -9,6 +9,7 @@ import {
   editTextActionLabel,
   flattenSpokenText,
   formatItemCount,
+  placeholderNeedsDescription,
   quoteSpokenText,
   whiteboardRegionLabel,
 } from '../src/elements/describe.ts';
@@ -69,5 +70,20 @@ describe('boardListItemProps', () => {
   it('adds the position when known', () => {
     assert.deepEqual(boardListItemProps('Note', 2, 5), { role: 'listitem', 'aria-label': 'Note, 2 of 5', 'aria-posinset': 2, 'aria-setsize': 5 });
     assert.deepEqual(boardListItemProps('Note'), { role: 'listitem', 'aria-label': 'Note' });
+  });
+});
+
+describe('texts showing a placeholder', () => {
+  it('are spoken as empty, with the hint quoted', () => {
+    const hinted: TextElement = { ...text, text: ' ', size: 'large', placeholder: 'First idea' };
+    assert.equal(describeElement(hinted, byId), 'Large text, empty, hint “First idea”');
+    assert.equal(placeholderNeedsDescription('First idea'), false);
+  });
+
+  it('cut a long hint to 40 characters and give the whole of it as a description', () => {
+    const long = 'Write the first thing that comes to mind about the launch';
+    const spoken = describeElement({ ...text, text: '', size: 'body', placeholder: long }, byId);
+    assert.match(spoken, /^Text, empty, hint “.{37}…”$/u);
+    assert.equal(placeholderNeedsDescription(long), true);
   });
 });

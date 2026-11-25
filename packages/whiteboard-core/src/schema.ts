@@ -72,6 +72,8 @@ export const MAX_LINK_HREF_CHARS = 512;
 export const MAX_LINK_TITLE_CHARS = 120;
 /** Longest image link (`href`). */
 export const MAX_IMAGE_HREF_CHARS = 2048;
+/** Longest text placeholder. */
+export const MAX_PLACEHOLDER_CHARS = 200;
 
 /** Element ids: 1–40 characters of the db path alphabet, not only dots. */
 export const ELEMENT_ID_PATTERN = /^(?!\.{1,40}$)[A-Za-z0-9_.~:@+-]{1,40}$/;
@@ -198,6 +200,12 @@ export const LINK_KIND_LABELS: Readonly<Record<LinkKind, string>> = {
   web: 'Web page',
 };
 
+/** Looks an SVG drawing can be drawn in (`style`). */
+export const DRAWING_STYLES = ['watercolor', 'comic', 'draft', 'paper', 'blueprint', 'marker', 'plain'] as const;
+export type DrawingStyle = (typeof DRAWING_STYLES)[number];
+/** A `style` value the format keeps: a lowercase slug, so a look added later survives older peers. */
+export const DRAWING_STYLE_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
+
 /** Default size of a link card. */
 export const LINK_CARD_SIZE = { w: 320, h: 56 } as const;
 
@@ -300,6 +308,8 @@ export interface TextElement extends ElementBase, Authorship {
   /** Wrap width; the text does not wrap without it. */
   wrap?: number;
   textAlign?: TextAlign;
+  /** Shown while the text is empty; one plain line. */
+  placeholder?: string;
 }
 
 /** A freehand stroke. */
@@ -361,6 +371,8 @@ export interface ImageElement extends ElementBase, BoxGeometry {
   video?: string;
   /** A web link the image opens. */
   href?: string;
+  /** How an SVG drawing is drawn; only SVG drawings carry it. */
+  style?: string;
   by?: ElementAuthor;
 }
 
@@ -432,6 +444,15 @@ export interface TableColumn {
 /** One row of a table: its sort key and its cells by column id. */
 export type TableRow = { at?: number } & { [columnId: string]: string | number | undefined };
 
+/** Cell backgrounds of a table: `{ [rowId]: { [columnId]: color } }`. */
+export type TableFills = Record<string, Record<string, FillColor>>;
+
+/** Heat maps of a table: a color per column and per row, tinting its numbers by value. */
+export interface TableHeat {
+  cols?: Record<string, FillColor>;
+  rows?: Record<string, FillColor>;
+}
+
 /** A table. Rows and columns are keyed so concurrent edits merge. */
 export interface TableElement extends ElementBase, Authorship, TextStyle {
   type: 'table';
@@ -443,6 +464,8 @@ export interface TableElement extends ElementBase, Authorship, TextStyle {
   head: boolean;
   /** Header fill. */
   color: FillColor;
+  fills?: TableFills;
+  heat?: TableHeat;
 }
 
 /** Every element. */

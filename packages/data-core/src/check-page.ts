@@ -46,7 +46,7 @@ interface PageScript {
 }
 
 const VOID_TAGS: ReadonlySet<string> = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
-const DROPPED_TAGS: ReadonlySet<string> = new Set(['meta', 'base', 'form', 'iframe', 'frame', 'frameset', 'object', 'embed', 'portal', 'fencedframe']);
+const DROPPED_TAGS: ReadonlySet<string> = new Set(['meta', 'base', 'iframe', 'frame', 'frameset', 'object', 'embed', 'portal', 'fencedframe']);
 const SCRIPT_TYPES: ReadonlySet<string> = new Set(['', 'text/javascript', 'application/javascript']);
 const FIGURE_PATTERN = /(?<![\w.#-])(?:[$€£¥]\s?\d[\d,.]*|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s?%|\d+\.\d+|\d{3,})(?![\w.-])/;
 const YEAR_OR_DATE_PATTERN = /^(?:19|20)\d{2}$|\d{4}-\d{2}/;
@@ -199,7 +199,7 @@ export function checkDashboardPage(
   const oneWriter = page.elements.some(isOneWriterMeta);
   for (const element of page.elements) {
     if (DROPPED_TAGS.has(element.tag) && !isOneWriterMeta(element))
-      report(PAGE_DOC, 'warning', `<${element.tag}> is dropped${element.tag === 'form' ? ' with everything in it' : ''}.`, element.line);
+      report(PAGE_DOC, 'warning', `<${element.tag}> is dropped.`, element.line);
     const priority = element.attrs['data-fetchpriority'];
     if (priority !== undefined && !['high', 'low'].includes(priority.trim().toLowerCase()))
       report(PAGE_DOC, 'warning', `data-fetchpriority="${priority}" reads as auto; it is high or low.`, element.line);

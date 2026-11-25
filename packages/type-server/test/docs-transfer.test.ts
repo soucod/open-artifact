@@ -201,3 +201,30 @@ describe('doc import', () => {
     for (const part of ['Field notes', 'bold', 'Risks', 'first', 'apples']) assert.ok(markdown.includes(part), `${part} in ${markdown}`);
   });
 });
+
+describe('a long web link in every export', () => {
+  const href = `https://atlas.example.org/trip?legs=${'n12e7-'.repeat(900)}#day-four`;
+  let root: string;
+  let store: DocStore;
+  before(() => ({ root, store } = makeDoc(`# Route\n\nThe [whole route](${href}) in one link.\n`)));
+  after(() => rmSync(root, { recursive: true, force: true }));
+
+  it('is over 5,000 bytes to begin with', () => {
+    assert.ok(Buffer.byteLength(href) > 5000);
+  });
+
+  it('keeps the full address in markdown, the print page and Word', async () => {
+    const markdown = (await exportDocFile(store, person, { format: 'markdown' })).bytes.toString('utf8');
+    assert.ok(markdown.includes(`[whole route](${href})`), 'markdown');
+    const html = (await exportDocFile(store, person, { format: 'html' })).bytes.toString('utf8');
+    assert.ok(html.includes(`<a href="${href}">whole route</a>`), 'print page');
+    const zip = unzip((await exportDocFile(store, person, { format: 'docx' })).bytes);
+    const rels = zip.get('word/_rels/document.xml.rels')!.toString('utf8');
+    assert.ok(rels.includes(`Target="${href}"`), 'Word');
+  });
+
+  it('keeps the full address in a PDF', { skip: findChrome() ? false : 'no Chrome here (set OPEN_ARTIFACT_CHROME)', timeout: 120_000 }, async () => {
+    const pdf = (await exportDocFile(store, person, { format: 'pdf' })).bytes.toString('latin1');
+    assert.ok(pdf.includes(href), 'the link annotation holds the whole address');
+  });
+});

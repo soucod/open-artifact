@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { isFormulaCell } from '../model/workbook.ts';
 import { isCheckboxCell } from '../chips/checkboxes.ts';
 import { activeAnchorCell, isSameCell } from '../selection/model.ts';
@@ -7,33 +6,41 @@ import { cellValueOf } from '../model/cell-values.ts';
 import { timeOfDayFraction, timesTypedAs, timesFrom, shownTimeIn, secondsOfTime, timeTypedAs, shownTimeFor } from '../chips/time-of-day.ts';
 import { withEntryText } from './text-looks.ts';
 import { isDropdownListOutOfPlace } from '../chips/dropdown-sync.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { PageState, TimeOfDay, TimeRow } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellFoundBy } from '../grid/geometry.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function isTimeCell(reads: WorkbookReads, cell?: Dynamic) {
-  let { numberFormat: numberFormat, cellControl: cellControl } = reads.formatOf(cell);
+/** The row of the time list a key or the pointer is on, and the row chosen, each by its time in seconds. */
+export interface TimeListFocus {
+  pointedAt: number | null;
+  highlighted: number | null;
+}
+/** How the time list is moved through: picks the row to go to from the row in focus (`null` for none) and the count of rows. */
+export type TimeListStep = (focusIndex: number | null, rowCount: number) => number | null;
+export function isTimeCell(reads: WorkbookReads, cell: CellId): boolean {
+  let { numberFormat, cellControl } = reads.formatOf(cell);
   return numberFormat.kind === 'time' && cellControl.kind !== 'dropdown' && !isFormulaCell(reads, cell) && !isCheckboxCell(reads, cell);
 }
-export function typedTimeText(state: PageState, reads: WorkbookReads) {
-  let { mode: mode } = state;
+export function typedTimeText(state: PageState, reads: WorkbookReads): string | null {
+  let { mode } = state;
   if (mode.kind !== 'editing' || !isTimeCell(reads, activeAnchorCell(state, reads))) return null;
   return mode.text === mode.textAtStart && (mode.isTypedOverCell !== true || mode.text === '') ? null : cleanEnteredCellText(mode.text);
 }
-export function timeInCell(reads: WorkbookReads, cell?: Dynamic) {
+export function timeInCell(reads: WorkbookReads, cell: CellId) {
   let value = cellValueOf(reads.cellOf(cell));
   return value?.kind === 'number' ? timeOfDayFraction(value.value) : null;
 }
-export function timesForTyped({ mode: mode }: Dynamic, typed?: Dynamic, most?: Dynamic) {
+export function timesForTyped({ mode }: Pick<PageState, 'mode'>, typed: string, most: number): TimeOfDay[] {
   if (mode.kind !== 'editing' || mode.isTypedOverCell === true) return timesTypedAs(typed, most);
   let halfOfDayAtStart = / (AM|PM)$/.exec(mode.textAtStart)?.[1];
   if (halfOfDayAtStart === undefined) return timesTypedAs(typed, most);
-  let isInSameHalf = ({ hour: hour }: Dynamic) => hour >= 12 === (halfOfDayAtStart === 'PM');
+  let isInSameHalf = ({ hour }: TimeOfDay) => hour >= 12 === (halfOfDayAtStart === 'PM');
   let times = timesTypedAs(typed, 1 / 0);
-  let timesInOtherHalf = times.filter((time?: Dynamic) => !isInSameHalf(time));
+  let timesInOtherHalf = times.filter((time) => !isInSameHalf(time));
   return [...times.filter(isInSameHalf), ...timesInOtherHalf].slice(0, most);
 }
-export function timeListRows(state: PageState, reads: WorkbookReads) {
-  let { mode: mode } = state;
+export function timeListRows(state: PageState, reads: WorkbookReads): TimeRow[] {
+  let { mode } = state;
   let cell = activeAnchorCell(state, reads);
   if (mode.kind !== 'editing' || mode.typingIn !== 'cell' || !isTimeCell(reads, cell)) return [];
   let typed = typedTimeText(state, reads);
@@ -41,18 +48,18 @@ export function timeListRows(state: PageState, reads: WorkbookReads) {
     typed === null
       ? timesFrom(timeInCell(reads, cell)?.time ?? DEFAULT_LIST_TIME, TIME_LIST_STEP_MINUTES, TIME_LIST_ROWS)
       : timesForTyped(state, typed, TIME_LIST_ROWS);
-  let { pattern: pattern } = reads.formatOf(cell).numberFormat;
+  let { pattern } = reads.formatOf(cell).numberFormat;
   let rows = times.map(
-    (time?: Dynamic) => ({
-      time: time,
+    (time) => ({
+      time,
       shown: shownTimeIn(reads, time, pattern),
     }),
   );
   return rows.filter(
-    ({ shown: shown }: Dynamic, index?: Dynamic) => rows.findIndex((row?: Dynamic) => row.shown === shown) === index,
+    ({ shown }, index) => rows.findIndex((row) => row.shown === shown) === index,
   );
 }
-export function openTimeList(state: PageState, reads: WorkbookReads) {
+export function openTimeList(state: PageState, reads: WorkbookReads): PageState {
   let rows = timeListRows(state, reads);
   let [firstRow] = rows;
   if (firstRow === undefined)
@@ -71,18 +78,18 @@ export function openTimeList(state: PageState, reads: WorkbookReads) {
     ...state,
     timeList: {
       cellId: cell,
-      rows: rows,
-      highlighted: highlighted,
+      rows,
+      highlighted,
       isChosen: false,
       pointedAt: null,
     },
   };
 }
-export function moveInTimeList(state: PageState, how?: Dynamic, stepTo?: Dynamic) {
-  let { timeList: timeList } = state;
+export function moveInTimeList(state: PageState, how: 'chosen' | 'pointedAt', stepTo: TimeListStep): PageState {
+  let { timeList } = state;
   if (timeList === null) return state;
-  let { rows: rows } = timeList;
-  let focusIndex = rows.findIndex(({ time: time }: Dynamic) => secondsOfTime(time) === timeListFocusOf(timeList));
+  let { rows } = timeList;
+  let focusIndex = rows.findIndex(({ time }) => secondsOfTime(time) === timeListFocusOf(timeList));
   let row = rows[stepTo(focusIndex === -1 ? null : focusIndex, rows.length) ?? -1];
   if (row === undefined) return state;
   let timeKey = secondsOfTime(row.time);
@@ -102,8 +109,8 @@ export function moveInTimeList(state: PageState, how?: Dynamic, stepTo?: Dynamic
           },
   };
 }
-export function takeTimeFromList(state: PageState, reads: WorkbookReads, how?: Dynamic) {
-  let { mode: mode, timeList: timeList } = state;
+export function takeTimeFromList(state: PageState, reads: WorkbookReads, how: CellFoundBy): PageState {
+  let { mode, timeList } = state;
   let stateShut =
     timeList === null
       ? state
@@ -114,7 +121,7 @@ export function takeTimeFromList(state: PageState, reads: WorkbookReads, how?: D
   if (mode.kind !== 'editing') return stateShut;
   let chosenKey = timeList?.isChosen === true ? timeList.highlighted : null;
   let takenKey = (how === 'key' ? timeList?.pointedAt : null) ?? chosenKey;
-  let takenRow = timeList?.rows.find(({ time: time2 }: Dynamic) => secondsOfTime(time2) === takenKey);
+  let takenRow = timeList?.rows.find(({ time: rowTime }) => secondsOfTime(rowTime) === takenKey);
   let typed = typedTimeText(state, reads);
   let cell = activeAnchorCell(state, reads);
   let timeAtStart =
@@ -122,20 +129,20 @@ export function takeTimeFromList(state: PageState, reads: WorkbookReads, how?: D
   let typedTime = typed === null || isDigitsOnly(typed) ? null : (timesForTyped(state, typed, 1)[0] ?? null);
   let time = takenRow?.time ?? (typed === null ? timeAtStart : typedTime);
   if (time === null && timeAtStart === null) return stateShut;
-  let { pattern: pattern } = reads.formatOf(cell).numberFormat;
-  let shownTimeOf = (time2?: Dynamic) => (time2 === null ? null : shownTimeFor(reads, time2, pattern));
+  let { pattern } = reads.formatOf(cell).numberFormat;
+  let shownTimeOf = (timeToShow: TimeOfDay | null) => (timeToShow === null ? null : shownTimeFor(reads, timeToShow, pattern));
   let text = shownTimeOf(time) ?? mode.text;
   let textAtStart = shownTimeOf(timeAtStart) ?? mode.textAtStart;
   return {
     ...stateShut,
     mode: {
       ...withEntryText(mode, text),
-      textAtStart: textAtStart,
+      textAtStart,
     },
   };
 }
-export function keepTimeListInStep(stateBefore: Dynamic, state: PageState, reads: ReadsWithTextMeasurer) {
-  let { timeList: timeList } = state;
+export function keepTimeListInStep(stateBefore: PageState, state: PageState, reads: ReadsWithTextMeasurer): PageState {
+  let { timeList } = state;
   if (timeList === null) return state;
   let isOnSameCell = stateBefore.timeList !== null && isSameCell(stateBefore.timeList.cellId, timeList.cellId);
   let isOnlyScrolled =
@@ -159,14 +166,14 @@ export function keepTimeListInStep(stateBefore: Dynamic, state: PageState, reads
       ...state,
       timeList: null,
     };
-  if (rows.length === timeList.rows.length && rows.every((row?: Dynamic, index?: Dynamic) => isSameTimeRow(row, timeList.rows[index])))
+  if (rows.length === timeList.rows.length && rows.every((row, index) => isSameTimeRow(row, timeList.rows[index])))
     return state;
-  return timeList.isChosen && rows.some(({ time: time }: Dynamic) => secondsOfTime(time) === timeList.highlighted)
+  return timeList.isChosen && rows.some(({ time }) => secondsOfTime(time) === timeList.highlighted)
     ? {
         ...state,
         timeList: {
           ...timeList,
-          rows: rows,
+          rows,
           pointedAt: null,
         },
       }
@@ -174,12 +181,12 @@ export function keepTimeListInStep(stateBefore: Dynamic, state: PageState, reads
 }
 export const TIME_LIST_ROWS = 5;
 export const TIME_LIST_STEP_MINUTES = 30;
-export const DEFAULT_LIST_TIME = {
+export const DEFAULT_LIST_TIME: TimeOfDay = {
   hour: 9,
   minute: 0,
   second: 0,
 };
-export const timeListFocusOf = ({ pointedAt: pointedAt, highlighted: highlighted }: Dynamic) => pointedAt ?? highlighted;
-export const isDigitsOnly = (text?: Dynamic) => /^\d+$/u.test(text.trim());
-export const isSameTimeRow = (row?: Dynamic, otherRow?: Dynamic) =>
+export const timeListFocusOf = ({ pointedAt, highlighted }: TimeListFocus): number | null => pointedAt ?? highlighted;
+export const isDigitsOnly = (text: string): boolean => /^\d+$/u.test(text.trim());
+export const isSameTimeRow = (row: TimeRow, otherRow: TimeRow): boolean =>
   row.shown === otherRow?.shown && secondsOfTime(row.time) === secondsOfTime(otherRow.time);

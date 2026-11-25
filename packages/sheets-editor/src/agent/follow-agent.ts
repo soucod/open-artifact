@@ -1,21 +1,40 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
 import { layoutOfView, findSheetById } from '../grid/layout.ts';
+import type { LayoutView } from '../grid/layout.ts';
 import { heightCoveredByStickyHeaders } from '../grid/sticky-headers.ts';
 import { scrollToShowCell, clampScroll } from '../grid/geometry.ts';
+import type { GridScroll } from '../grid/geometry.ts';
 import { cachedSelectedArea } from '../presence/selections.ts';
 import { revealAreaInCollapsedGroups } from '../grid/outline-groups.ts';
 import { unhideAreaIfAllFiltered } from '../tables/filtered-rows.ts';
 import { scrollToPlacedView } from '../charts/placed-views.ts';
 import { showSheet } from '../state/sheet-tabs.ts';
 import { changesSpanWholeLines } from './changes-by-agent.ts';
+import type { CellsOfChange } from './changes-by-agent.ts';
 import { unionOfAreas, isSameSelection } from '../selection/model.ts';
+import type { CellArea } from '../selection/model.ts';
 import { shownLineAtOrAfter } from '../model/line-sizes.ts';
 import { pointDoneCardAtSheet, isAgentWorkingOnBlank, isChangeNotYetCounted } from './turn-of-agent.ts';
 import { isNothingOpen, isEffectAnEdit } from '../state/edit-refusals.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type {
+  CellsChanged,
+  CellsChangedInSheet,
+  GoneTo,
+  PageState,
+  RunOfAgentGoneTo,
+  SheetShownForDone,
+} from '../state/initial-state.ts';
+import type { PlacementOnGrid, WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function scrollAreaIntoView(state: PageState, reads: ReadsWithTextMeasurer, area?: Dynamic) {
+import type { AgentActivityChanged, ChangeArrivedFromAgent, PageContext, PageEvent } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+/** A change to bring into view: its cells, the groups of them that lie apart, and the chart it placed. */
+export interface ChangeToShow extends CellsChangedInSheet {
+  chart?: PlacementOnGrid;
+}
+/** A change whose cells may also lie in other sheets. */
+type ChangeOverSheets = CellsOfChange & Pick<ChangeArrivedFromAgent, 'inOtherSheets'>;
+export function scrollAreaIntoView(state: PageState, reads: ReadsWithTextMeasurer, area: CellArea): PageState {
   let layout = layoutOfView(state, reads);
   let frozenView = {
     gridWidth: state.gridWidth - SCROLLBAR_ROOM / state.zoom,
@@ -35,14 +54,14 @@ export function scrollAreaIntoView(state: PageState, reads: ReadsWithTextMeasure
     rowIndex: area.topRowIndex + area.rowCount - 1,
     columnIndex: area.leftColumnIndex + area.columnCount - 1,
   };
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = [bottomRight, view, topLeft].reduce(
-    (input?: Dynamic, options?: Dynamic) => {
-      let heightCoveredByStickyHeaders2 = heightCoveredByStickyHeaders(state, reads, options, layout);
+  let { scrollLeft, scrollTop } = [bottomRight, view, topLeft].reduce<GridScroll>(
+    (scroll, cell) => {
+      let heightCovered = heightCoveredByStickyHeaders(state, reads, cell, layout);
       return scrollToShowCell(
-        input,
+        scroll,
         {
-          ...options,
-          heightCovered: heightCoveredByStickyHeaders2,
+          ...cell,
+          heightCovered,
         },
         layout,
         frozenView,
@@ -60,74 +79,83 @@ export function scrollAreaIntoView(state: PageState, reads: ReadsWithTextMeasure
     ...clampScroll(scrolled, layout, state),
   };
 }
-export function showChangeByAgent(state: PageState, reads: ReadsWithTextMeasurer, change?: Dynamic) {
-  let { sheetId: sheetId } = change.cells.activeCell;
-  let sheet = findSheetById(reads, sheetId)?.name;
-  let areas = [change.cells, ...(change.groupsApart ?? []).slice(-1)].map((input?: Dynamic) => cachedSelectedArea(input, reads));
-  if (areas[0] === null || sheet === undefined) return state;
-  let { chart: chart } = change;
-  let showOnSheet = (input?: Dynamic) => {
-    let value2 = areas.reduce(
-      (input2?: Dynamic, options?: Dynamic) =>
-        options === null
-          ? input2
-          : scrollAreaIntoView(revealAreaInCollapsedGroups(unhideAreaIfAllFiltered(input2, reads, options), reads, options), reads, options),
-      input,
+export function showChangeByAgent(state: PageState, reads: ReadsWithTextMeasurer, change: ChangeToShow): PageState {
+  let { sheetId } = change.cells.activeCell;
+  let sheetName = findSheetById(reads, sheetId)?.name;
+  let areas = [change.cells, ...(change.groupsApart ?? []).slice(-1)].map((cells) => cachedSelectedArea(cells, reads));
+  if (areas[0] === null || sheetName === undefined) return state;
+  let { chart } = change;
+  let showOnSheet = (onSheet: PageState) => {
+    let shown = areas.reduce<PageState>(
+      (view, area) =>
+        area === null
+          ? view
+          : scrollAreaIntoView(revealAreaInCollapsedGroups(unhideAreaIfAllFiltered(view, reads, area), reads, area), reads, area),
+      onSheet,
     );
-    return chart === undefined ? value2 : scrollToPlacedView(value2, reads, chart);
+    return chart === undefined ? shown : scrollToPlacedView(shown, reads, chart);
   };
   if (sheetId === state.sheetId) return showOnSheet(state);
-  let value = showSheet(state, reads, sheetId);
-  if (value === state) return state;
-  let lastDone = {
+  let withSheetShown = showSheet(state, reads, sheetId);
+  if (withSheetShown === state) return state;
+  let lastDone: SheetShownForDone = {
     what: 'sheetShownToFollow',
-    name: sheet,
+    name: sheetName,
   };
   return showOnSheet({
-    ...value,
+    ...withSheetShown,
     notice: state.notice,
-    lastDone: lastDone,
+    lastDone,
   });
 }
-export function mergeChangedAreas(areas: Dynamic, area: Dynamic, reads: WorkbookReads, isAppended: Dynamic = false) {
-  return area
-    .flatMap((input?: Dynamic) => [input, ...(input.inOtherSheets ?? [])])
-    .reduce((input: Dynamic, { cells: cells }: Dynamic) => {
-      let { sheetId: sheetId } = cells.activeCell;
-      let cachedSelectedArea2 = cachedSelectedArea(cells, reads);
+export function mergeChangedAreas(
+  areas: CellsChanged[],
+  changes: ChangeOverSheets[],
+  reads: WorkbookReads,
+  isAppended: boolean = false,
+): CellsChanged[] {
+  return changes
+    .flatMap((change) => [change, ...(change.inOtherSheets ?? [])])
+    .reduce((merged, { cells }) => {
+      let { sheetId } = cells.activeCell;
+      const changedArea = cachedSelectedArea(cells, reads);
       if (
-        cachedSelectedArea2 === null ||
+        changedArea === null ||
         (!isAppended &&
           changesSpanWholeLines(
             [
               {
-                cells: cells,
+                cells,
               },
             ],
             reads,
           ))
       )
-        return input;
-      let match = input.find(isOnSheet(sheetId));
-      let value = match === undefined ? null : cachedSelectedArea(match, reads);
-      let value2 = value === null ? cachedSelectedArea2 : unionOfAreas(value, cachedSelectedArea2);
-      let value3 = reads.cellIdAt(sheetId, value2.topRowIndex, value2.leftColumnIndex);
-      let value4 = reads.cellIdAt(sheetId, value2.topRowIndex + value2.rowCount - 1, value2.leftColumnIndex + value2.columnCount - 1);
-      return value3 === null || value4 === null
-        ? input
+        return merged;
+      let onSameSheet = merged.find(isOnSheet(sheetId));
+      let areaOnSameSheet = onSameSheet === undefined ? null : cachedSelectedArea(onSameSheet, reads);
+      let joinedArea = areaOnSameSheet === null ? changedArea : unionOfAreas(areaOnSameSheet, changedArea);
+      let topLeftCell = reads.cellIdAt(sheetId, joinedArea.topRowIndex, joinedArea.leftColumnIndex);
+      let bottomRightCell = reads.cellIdAt(
+        sheetId,
+        joinedArea.topRowIndex + joinedArea.rowCount - 1,
+        joinedArea.leftColumnIndex + joinedArea.columnCount - 1,
+      );
+      return topLeftCell === null || bottomRightCell === null
+        ? merged
         : [
-            ...input.filter((input2?: Dynamic) => input2 !== match),
+            ...merged.filter((cellsOfSheet) => cellsOfSheet !== onSameSheet),
             {
-              activeCell: value3,
-              selectionCorner: value4,
+              activeCell: topLeftCell,
+              selectionCorner: bottomRightCell,
             },
           ];
     }, areas);
 }
-export function isChangeInView(state: Dynamic, reads: ReadsWithTextMeasurer, cells?: Dynamic) {
+export function isChangeInView(state: LayoutView, reads: ReadsWithTextMeasurer, cells: CellsChanged): boolean {
   let area = cachedSelectedArea(cells, reads);
   if (area === null) return false;
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(
+  let { rowEdges, columnEdges } = layoutOfView(
     {
       ...state,
       sheetId: cells.activeCell.sheetId,
@@ -139,42 +167,46 @@ export function isChangeInView(state: Dynamic, reads: ReadsWithTextMeasurer, cel
     shownLineAtOrAfter(columnEdges, area.leftColumnIndex) < area.leftColumnIndex + area.columnCount
   );
 }
-export function changesInView(state: PageState, reads: ReadsWithTextMeasurer, changes?: Dynamic) {
-  let value = (input?: Dynamic) => isOnSheet(state.sheetId)(input) && isChangeInView(state, reads, input);
-  return [changes, ...(changes.inOtherSheets ?? [])].flatMap(({ cells: cells, groupsApart = [] }: Dynamic) => {
-    let value2 = groupsApart.length === 0 ? [cells] : groupsApart;
-    let matches = value2.filter(value);
-    let { chart: chart } = cells === changes.cells ? changes : {};
-    return matches.length === value2.length
+export function changesInView(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  changes: ChangeToShow & Pick<ChangeArrivedFromAgent, 'inOtherSheets'>,
+): ChangeToShow[] {
+  let isShownHere = (cells: CellsChanged) => isOnSheet(state.sheetId)(cells) && isChangeInView(state, reads, cells);
+  return [changes, ...(changes.inOtherSheets ?? [])].flatMap(({ cells, groupsApart = [] }) => {
+    let groups = groupsApart.length === 0 ? [cells] : groupsApart;
+    let groupsShown = groups.filter(isShownHere);
+    let { chart }: Pick<ChangeToShow, 'chart'> = cells === changes.cells ? changes : {};
+    return groupsShown.length === groups.length
       ? [
           {
-            cells: cells,
-            groupsApart: groupsApart,
+            cells,
+            groupsApart,
             ...(chart !== undefined && {
-              chart: chart,
+              chart,
             }),
           },
         ]
-      : matches.map(
-          (match?: Dynamic) => ({
-            cells: match,
+      : groupsShown.map(
+          (group) => ({
+            cells: group,
           }),
         );
   });
 }
 export function nextRunOfAgentGoneTo(
-  run: Dynamic,
+  run: RunOfAgentGoneTo | null,
   reads: WorkbookReads,
-  { revision: revision, inRunSince: inRunSince = revision }: Dynamic,
-  { cells: cells, chart: chart }: Dynamic,
-) {
+  { revision, inRunSince = revision }: Pick<ChangeArrivedFromAgent, 'revision' | 'inRunSince'>,
+  { cells, chart }: ChangeToShow,
+): RunOfAgentGoneTo {
   let runArea =
     run?.since === inRunSince && isOnSheet(cells.activeCell.sheetId)(run.cells) && chart === undefined ? cachedSelectedArea(run.cells, reads) : null;
   let area = cachedSelectedArea(cells, reads);
   if (run === null || runArea === null || area === null)
     return {
       since: inRunSince,
-      cells: cells,
+      cells,
     };
   let isRowsApart =
     area.topRowIndex > runArea.topRowIndex + runArea.rowCount + 1 || runArea.topRowIndex > area.topRowIndex + area.rowCount + 1;
@@ -187,7 +219,7 @@ export function nextRunOfAgentGoneTo(
           [run.cells],
           [
             {
-              cells: cells,
+              cells,
             },
           ],
           reads,
@@ -198,61 +230,70 @@ export function nextRunOfAgentGoneTo(
     cells: merged,
   };
 }
-export function changeToShowFirst(state: PageState, reads: ReadsWithTextMeasurer) {
+export function changeToShowFirst(state: PageState, reads: ReadsWithTextMeasurer): CellsChanged | undefined {
   let {
-    changedSinceRest: changedSinceRest,
-    changedOffShowSinceRest: changedOffShowSinceRest,
-    followsOnOneSheet: followsOnOneSheet,
-    sheetId: sheetId,
+    changedSinceRest,
+    changedOffShowSinceRest,
+    followsOnOneSheet,
+    sheetId,
   } = state;
   if (followsOnOneSheet === 'no')
-    return reads.listSheets().flatMap(({ sheetId: sheetId2 }: Dynamic) => changedSinceRest.filter(isOnSheet(sheetId2)))[0];
+    return reads.listSheets().flatMap(({ sheetId: sheetIdInOrder }) => changedSinceRest.filter(isOnSheet(sheetIdInOrder)))[0];
   if (changedOffShowSinceRest === null) return changedSinceRest.find(isOnSheet(sheetId));
-  let sizeOf = (cells?: Dynamic) => {
+  let sizeOf = (cells: CellsChanged) => {
     let area = cachedSelectedArea(cells, reads);
     return area === null ? 0 : area.rowCount * area.columnCount;
   };
   return changedOffShowSinceRest
-    .filter((cells?: Dynamic) => isChangeInView(state, reads, cells))
-    .reduce(
-      (largest?: Dynamic, cells?: Dynamic) => (largest === undefined || sizeOf(cells) >= sizeOf(largest) ? cells : largest),
+    .filter((cells) => isChangeInView(state, reads, cells))
+    .reduce<CellsChanged | undefined>(
+      (largest, cells) => (largest === undefined || sizeOf(cells) >= sizeOf(largest) ? cells : largest),
       undefined,
     );
 }
-export function chartGoneToAtSelection({ chartGoneToSinceRest: chartGoneToSinceRest }: Dynamic, workbook: WorkbookReads, cells?: Dynamic) {
+export function chartGoneToAtSelection(
+  { chartGoneToSinceRest }: Pick<PageState, 'chartGoneToSinceRest'>,
+  workbook: WorkbookReads,
+  cells: CellsChanged,
+): PlacementOnGrid | undefined {
   if (chartGoneToSinceRest === null) return;
   let placement = workbook
     .placementsIn(cells.activeCell.sheetId)
-    .find(({ placementId: placementId }: Dynamic) => placementId === chartGoneToSinceRest);
+    .find(({ placementId }) => placementId === chartGoneToSinceRest);
   let area = cachedSelectedArea(cells, workbook);
   return area?.rowCount === 1 && area.columnCount === 1 && area.topRowIndex === placement?.rowIndex && area.leftColumnIndex === placement.columnIndex
     ? placement
     : undefined;
 }
-export function changeToShowAtRest(state: PageState, reads: ReadsWithTextMeasurer, lastGoneTo?: Dynamic) {
+export function changeToShowAtRest(state: PageState, reads: ReadsWithTextMeasurer, lastGoneTo: GoneTo | null): ChangeToShow | undefined {
   if (lastGoneTo === null) {
     let cells = changeToShowFirst(state, reads);
     let chart = cells === undefined ? undefined : chartGoneToAtSelection(state, reads, cells);
     return cells === undefined
       ? undefined
       : {
-          cells: cells,
+          cells,
           ...(chart !== undefined && {
-            chart: chart,
+            chart,
           }),
         };
   }
-  let { cells: cells, chart: chartId } = lastGoneTo;
-  let placement = reads.placementsIn(cells.activeCell.sheetId).find((input?: Dynamic) => input.placementId === chartId);
+  let { cells, chart: chartId } = lastGoneTo;
+  let placement = reads.placementsIn(cells.activeCell.sheetId).find((placed) => placed.placementId === chartId);
   return changesInView(state, reads, {
-    cells: cells,
+    cells,
     ...(placement !== undefined && {
       chart: placement,
     }),
   }).at(-1);
 }
-export function showChangesAtAgentRest(state: PageState, workbook: ReadsWithTextMeasurer, target?: Dynamic, isFirstShow?: Dynamic) {
-  let restState = {
+export function showChangesAtAgentRest(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  target: ChangeToShow | undefined,
+  isFirstShow: boolean,
+): PageState {
+  let restState: PageState = {
     ...followStateAtRest(state),
     changedOffShowSinceRest: [],
   };
@@ -260,16 +301,16 @@ export function showChangesAtAgentRest(state: PageState, workbook: ReadsWithText
   let shownBefore = (
     isFirstShow && state.followsOnOneSheet === 'no' && cachedSelectedArea(target.cells, workbook) !== null ? state.changedSinceRest : []
   )
-    .filter((cells?: Dynamic) => isChangeInView(state, workbook, cells))
-    .reduce(
-      (shown?: Dynamic, cells?: Dynamic) =>
+    .filter((cells) => isChangeInView(state, workbook, cells))
+    .reduce<PageState>(
+      (shown, cells) =>
         showChangeByAgent(shown, workbook, {
-          cells: cells,
+          cells,
         }),
       restState,
     );
   let shown = showChangeByAgent(shownBefore, workbook, target);
-  let withDoneKept =
+  let withDoneKept: PageState =
     shown.sheetId === state.sheetId
       ? {
           ...shown,
@@ -278,9 +319,9 @@ export function showChangesAtAgentRest(state: PageState, workbook: ReadsWithText
       : shown;
   return pointDoneCardAtSheet(withDoneKept, workbook);
 }
-export function stepFollowAgent(before?: Dynamic, step?: Dynamic, event?: Dynamic, context?: Dynamic) {
+export function stepFollowAgent(before: PageState, step: PageTransition, event: PageEvent, context: PageContext): PageState {
   let { reads: workbook } = context;
-  let state =
+  let state: PageState =
     (before.shownByAgent?.place ?? null) === null
       ? step.state
       : {
@@ -288,21 +329,21 @@ export function stepFollowAgent(before?: Dynamic, step?: Dynamic, event?: Dynami
           isFirstBuild: step.state.isFirstBuild && workbook.isEveryCellBlank,
         };
   if (state.isAgentWorking && !before.isAgentWorking) {
-    let isAsSpreadsheetOpens = event.kind === 'agentActivityChanged' && event.isAsSpreadsheetOpens === true;
+    const isAsSpreadsheetOpens = event.kind === 'agentActivityChanged' && event.isAsSpreadsheetOpens === true;
     let mayEdit = context.refusalOfEveryEdit === null;
     let startsFollowing =
       (((before.isFollowingAgent && before.followsOnOneSheet === 'no') || isAsSpreadsheetOpens) && mayEdit) || isAgentWorkingOnBlank(state, context);
-    let followsOnOneSheet = !startsFollowing && mayEdit && event.kind === 'agentActivityChanged' && event.isPersonAtWorkInPage !== true;
+    let isToFollowOnOneSheet = !startsFollowing && mayEdit && event.kind === 'agentActivityChanged' && event.isPersonAtWorkInPage !== true;
     let isFree = isViewFreeToFollow(state);
     let followsOnOneSheetBefore = before.isFollowingAgent ? before.followsOnOneSheet : 'yetToMove';
-    let followingState = {
+    let followingState: PageState = {
       ...state,
-      isFollowingAgent: (startsFollowing || followsOnOneSheet) && isFree,
-      followsOnOneSheet: followsOnOneSheet && isFree ? followsOnOneSheetBefore : 'no',
+      isFollowingAgent: (startsFollowing || isToFollowOnOneSheet) && isFree,
+      followsOnOneSheet: isToFollowOnOneSheet && isFree ? followsOnOneSheetBefore : 'no',
     };
     if (before.isFollowingAgent) return followingState;
     let changesSoFar = isAsSpreadsheetOpens
-      ? state.changesByAgent.flatMap((change?: Dynamic) => [...change.joinedWith, change])
+      ? state.changesByAgent.flatMap((change) => [...change.joinedWith, change])
       : [];
     let areasOfNewSheet = isAsSpreadsheetOpens && event.isSheetJustMade === true ? wholeSheetsAsChanges(workbook) : [];
     let [changed, heldAsSheetOpened] = [
@@ -329,25 +370,31 @@ export function stepFollowAgent(before?: Dynamic, step?: Dynamic, event?: Dynami
     let isPersonAtWork = event.isPersonAtWorkInPage === true;
     let lastGoneTo = before.isFirstBuild ? null : state.lastGoneTo;
     let target = isPersonAtWork ? undefined : changeToShowAtRest(state, workbook, lastGoneTo);
-    return showChangesAtAgentRest(state, workbook, target, lastGoneTo === null);
+    let shown = showChangesAtAgentRest(state, workbook, target, lastGoneTo === null);
+    return state.saidOfAgent === before.saidOfAgent && shown.saidOfAgent !== before.saidOfAgent
+      ? {
+          ...shown,
+          saidOfAgent: before.saidOfAgent,
+        }
+      : shown;
   }
   if (event.kind !== 'changesByAgentChanged') return state;
   let isOnOneSheet = state.isFollowingAgent && state.followsOnOneSheet !== 'no';
-  let isFollowed = ({ cells: cells, isOfViewer: isOfViewer, isOfLayoutAlone: isOfLayoutAlone }: Dynamic) =>
+  let isFollowed = ({ cells, isOfViewer, isOfLayoutAlone }: ChangeArrivedFromAgent) =>
     ((state.isAgentWorking && !isOnOneSheet) || isOfViewer === true) &&
     isOfLayoutAlone !== true &&
     (isOnOneSheet || event.isPersonAtWorkInPage !== true || cells.activeCell.sheetId === state.sheetId);
-  let changes = event.changes.filter((change?: Dynamic) => isChangeNotYetCounted(before)(change) && isFollowed(change));
-  let followedChanges = isOnOneSheet ? changes.flatMap((change?: Dynamic) => changesInView(state, workbook, change)) : changes;
+  let changes = event.changes.filter((change) => isChangeNotYetCounted(before)(change) && isFollowed(change));
+  let followedChanges: ChangeToShow[] = isOnOneSheet ? changes.flatMap((change) => changesInView(state, workbook, change)) : changes;
   let lastChange = followedChanges.at(-1);
   if (lastChange === undefined) {
-    let { changedOffShowSinceRest: changedOffShowSinceRest } = state;
+    let { changedOffShowSinceRest } = state;
     if (changedOffShowSinceRest === null || !state.isAgentWorking || changes.length === 0) return state;
     let offShow = mergeChangedAreas(changedOffShowSinceRest, changes, workbook).filter(
-      (cells?: Dynamic) => !isOnSheet(state.sheetId)(cells),
+      (cells) => !isOnSheet(state.sheetId)(cells),
     );
     let chartGoneTo =
-      changes.findLast(({ cells: cells, chart: chart }: Dynamic) => chart !== undefined && !isOnSheet(state.sheetId)(cells))?.chart
+      changes.findLast(({ cells, chart }) => chart !== undefined && !isOnSheet(state.sheetId)(cells))?.chart
         ?.placementId ?? state.chartGoneToSinceRest;
     return {
       ...state,
@@ -357,83 +404,87 @@ export function stepFollowAgent(before?: Dynamic, step?: Dynamic, event?: Dynami
   }
   let changedSinceRest = mergeChangedAreas(state.changedSinceRest, followedChanges, workbook);
   let chartGoneTo =
-    followedChanges.findLast(({ chart: chart }: Dynamic) => chart !== undefined)?.chart?.placementId ?? state.chartGoneToSinceRest;
-  let nextState = {
+    followedChanges.findLast(({ chart }) => chart !== undefined)?.chart?.placementId ?? state.chartGoneToSinceRest;
+  let nextState: PageState = {
     ...state,
     ...changesSinceRestState(true, changedSinceRest, state.heldAsSheetOpened, workbook),
     changedOffShowSinceRest: null,
     chartGoneToSinceRest: chartGoneTo,
   };
-  let runOfAgentGoneTo = changes.reduce((run?: Dynamic, change?: Dynamic) => {
+  let runOfAgentGoneTo = changes.reduce<RunOfAgentGoneTo | null>((run, change) => {
     let inView = (isOnOneSheet ? changesInView(state, workbook, change) : [change]).at(-1);
     return inView === undefined ? run : nextRunOfAgentGoneTo(run, workbook, change, inView);
   }, state.runOfAgentGoneTo);
-  let shownChange =
+  let shownChange: ChangeToShow =
     runOfAgentGoneTo === null || runOfAgentGoneTo.cells === lastChange.cells
       ? lastChange
       : {
           cells: runOfAgentGoneTo.cells,
         };
-  let lastGoneTo = {
+  let lastGoneTo: GoneTo = {
     cells: shownChange.groupsApart?.at(-1) ?? shownChange.cells,
     chart: shownChange.chart?.placementId ?? null,
   };
-  let followingState = {
+  let followingState: PageState = {
     ...nextState,
-    runOfAgentGoneTo: runOfAgentGoneTo,
-    lastGoneTo: lastGoneTo,
+    runOfAgentGoneTo,
+    lastGoneTo,
     isFollowingAgent: true,
   };
   return showChangeByAgent(followingState, workbook, shownChange);
 }
 export const FLOATING_FOOT_HEIGHT = 146;
 export const SCROLLBAR_ROOM = 24;
-export const snapPastFrozenLines = (start?: Dynamic, length?: Dynamic, frozenEnd?: Dynamic) =>
+export const snapPastFrozenLines = (start: number, length: number, frozenEnd: number): number =>
   start < frozenEnd && start + length > frozenEnd ? frozenEnd : start;
 export const isOnSheet =
-  (sheetId?: Dynamic) =>
-  ({ activeCell: activeCell }: Dynamic) =>
+  (sheetId: SheetId) =>
+  ({ activeCell }: Pick<CellsChanged, 'activeCell'>): boolean =>
     activeCell.sheetId === sheetId;
-export const wholeSheetsAsChanges = (reads: WorkbookReads) =>
-  reads.listSheets().flatMap(({ sheetId: sheetId, rowCount: rowCount, columnCount: columnCount }: Dynamic) => {
-    let state = {
+export const wholeSheetsAsChanges = (reads: WorkbookReads): CellsOfChange[] =>
+  reads.listSheets().flatMap(({ sheetId, rowCount, columnCount }) => {
+    let wholeSheet = {
       topRowIndex: 0,
       leftColumnIndex: 0,
-      rowCount: rowCount,
-      columnCount: columnCount,
+      rowCount,
+      columnCount,
     };
-    let value = reads.areaOnShowIn(sheetId, state);
-    if (value === null) return [];
-    let value2 = reads.cellIdAt(sheetId, value.topRowIndex, value.leftColumnIndex);
-    let value3 = reads.cellIdAt(sheetId, value.topRowIndex + value.rowCount - 1, value.leftColumnIndex + value.columnCount - 1);
-    return value2 === null || value3 === null
+    let areaOnShow = reads.areaOnShowIn(sheetId, wholeSheet);
+    if (areaOnShow === null) return [];
+    let topLeftCell = reads.cellIdAt(sheetId, areaOnShow.topRowIndex, areaOnShow.leftColumnIndex);
+    let bottomRightCell = reads.cellIdAt(
+      sheetId,
+      areaOnShow.topRowIndex + areaOnShow.rowCount - 1,
+      areaOnShow.leftColumnIndex + areaOnShow.columnCount - 1,
+    );
+    return topLeftCell === null || bottomRightCell === null
       ? []
       : [
           {
             cells: {
-              activeCell: value2,
-              selectionCorner: value3,
+              activeCell: topLeftCell,
+              selectionCorner: bottomRightCell,
             },
           },
         ];
   });
 export const changesSinceRestState = (
-  isFollowing: Dynamic,
-  changedSinceRest: Dynamic,
-  heldAsSheetOpened: Dynamic,
+  isFollowing: boolean,
+  changedSinceRest: CellsChanged[],
+  heldAsSheetOpened: CellsChanged[],
   reads: WorkbookReads,
-) =>
+): Pick<PageState, 'changedSinceRest' | 'heldAsSheetOpened'> =>
   !isFollowing
     ? {
-        changedSinceRest: changedSinceRest,
-        heldAsSheetOpened: heldAsSheetOpened,
+        changedSinceRest,
+        heldAsSheetOpened,
       }
     : {
         changedSinceRest: mergeChangedAreas(
           changedSinceRest,
           heldAsSheetOpened.map(
-            (input?: Dynamic) => ({
-              cells: input,
+            (cells) => ({
+              cells,
             }),
           ),
           reads,
@@ -442,14 +493,14 @@ export const changesSinceRestState = (
         heldAsSheetOpened: [],
       };
 export const nextIsFirstBuild = (
-  { isFirstBuild: isFirstBuild }: Dynamic,
-  activity: Dynamic,
-  { isEveryCellBlank: isEveryCellBlank }: Dynamic,
-) =>
+  { isFirstBuild }: Pick<PageState, 'isFirstBuild'>,
+  activity: Pick<AgentActivityChanged, 'isWorking' | 'isAsSpreadsheetOpens' | 'isSheetJustMade'>,
+  { isEveryCellBlank }: Pick<WorkbookReads, 'isEveryCellBlank'>,
+): boolean =>
   activity.isWorking
     ? isFirstBuild || isEveryCellBlank || (activity.isAsSpreadsheetOpens === true && activity.isSheetJustMade === true)
     : isFirstBuild && isEveryCellBlank;
-export const followStateAtRest = (state?: Dynamic) => ({
+export const followStateAtRest = (state: PageState): PageState => ({
   ...state,
   changedSinceRest: [],
   heldAsSheetOpened: [],
@@ -464,7 +515,7 @@ export const isViewFreeToFollow = (state: PageState) =>
   state.caretAtEnd === null &&
   state.ownFilterList === null &&
   isNothingOpen(state);
-export const doesPersonTakeViewBack = (before: Dynamic, { state: state, effects: effects }: Dynamic, event?: Dynamic) =>
+export const doesPersonTakeViewBack = (before: PageState, { state, effects }: PageTransition, event: PageEvent): boolean =>
   event.kind === 'viewTakenBack' ||
   event.kind === 'wheelTurned' ||
   event.kind === 'rowsPutOutOfViewByOwnFilters' ||
@@ -473,6 +524,7 @@ export const doesPersonTakeViewBack = (before: Dynamic, { state: state, effects:
   event.kind === 'ownFilterLineRemoved' ||
   event.kind === 'ownFilterListSortChosen' ||
   event.kind === 'ownSortRemoved' ||
+  event.kind === 'namedViewPicked' ||
   event.kind === 'ownFiltersCleared' ||
   event.kind === 'ownFiltersRefreshed' ||
   event.kind === 'ownFilterListActedIn' ||

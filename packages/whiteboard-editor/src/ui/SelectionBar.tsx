@@ -10,11 +10,12 @@
  * being typed into, gets the text bar, groups split by dividers:
  *
  *   [kind] | size, (text color), bold, italic, link | bullets, alignment |
- *   fill, border, lock | open link, (delete), More actions
+ *   fill, (cell color), border, lock | open link, (delete), More actions
  *
- * (kind for shapes and texts only, text color for texts only; while typing
- * there is no lock, and the format buttons of `FormatBar.tsx` act on the
- * typed selection rather than the whole text). Anything else gets:
+ * (kind for shapes and texts only, text color for texts only, cell color
+ * and heat maps for a table cell; while typing there is no lock, and the
+ * format buttons of `FormatBar.tsx` act on the typed selection rather than
+ * the whole text). Anything else gets:
  *
  *   [video] | [kind] | size, text color, alignment |
  *   fill, arrow start, border / line / ink, arrow end, crop, picture link,
@@ -30,8 +31,8 @@
  * bar, the keyboard and the context menu refuse and announce alike.
  */
 
-import { AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignLeft, AlignCenter, AlignRight, AlignStartHorizontal, AlignStartVertical, ArrowUpRight, CircleDot, Crop, Ellipsis, Link2, Lock, Minus, MoveLeft, MoveRight, Shapes, Trash2, Type } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { AlignCenterHorizontal, AlignCenterVertical, AlignEndHorizontal, AlignEndVertical, AlignLeft, AlignCenter, AlignRight, AlignStartHorizontal, AlignStartVertical, ArrowUpRight, Check, CircleDot, Crop, Ellipsis, Link2, Lock, Minus, MoveLeft, MoveRight, Shapes, Trash2, Type } from 'lucide-react';
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import {
   INK_COLOR_NAMES,
   NOTE_COLORS,
@@ -46,6 +47,9 @@ import {
   elementBoundsWithTitle,
   isElementLocked,
   selectionChromeFor,
+  showsTextPlaceholder,
+  tableCellFill,
+  tableFillPaint,
   themedInkColor,
   unionBounds,
   withoutLockedIds,
@@ -60,6 +64,8 @@ import {
   type FillColor,
   type ImageElement,
   type InkColor,
+  type TableAxis,
+  type TableElement,
   type TextAlign,
   type TextSize,
 } from '@open-artifact/whiteboard-core';
@@ -67,6 +73,8 @@ import { surfaceRef } from '../canvas/BoardSurface.tsx';
 import { openBoardLink, linkDisplayUrl } from '../elements/links.ts';
 import { isRichTextItem, type RichTextItem } from '../elements/mark-across.ts';
 import { boardToScreen } from '../lib/camera.ts';
+import { barKeyTarget } from '../lib/toolbar-keys.ts';
+import { TABLE_HEAT_LABELS, heatColorFor, heatRampGradient, takesRowHeat } from '../lib/table-heat.ts';
 import { ALIGN_SHORTCUT_LETTERS, BASIC_SHAPE_KINDS, MORE_SHAPE_KINDS, isApplePlatform, type AlignEdge } from '../lib/tools.ts';
 import { blockKindOf, isKindChangeable, type BlockKind } from '../selection/kind-change.ts';
 import { useContextMenu } from '../selection/menu-store.ts';
@@ -92,10 +100,12 @@ import {
   toggleLockSelection,
 } from '../services/actions.ts';
 import { ALIGN_ACTION_LABELS, LOCKED_MESSAGE, TEXT_ALIGN_LABELS, announce, colorUpdatedMessage, refuse } from '../services/announce.ts';
+import { pickTableHeatColor, setTableCellFill, toggleTableLineHeat } from '../services/table-edits.ts';
 import { useBoard } from '../state/board.ts';
 import { useCamera } from '../state/camera.ts';
 import { useMeasures } from '../state/measures.ts';
 import { useSelection } from '../state/selection.ts';
+import { useTableHeat } from '../state/table-heat.ts';
 import { useColorScheme } from '../state/theme.ts';
 import { effectiveTool, useTool } from '../state/tool.ts';
 import { Card, ChromeButton, ChromeDivider, ChromeMenu, ChromeMenuItem, ChromePopover, SwatchRow, TipGroup, ToolButton, type ChromeSide, type Swatch } from './chrome.tsx';
@@ -157,6 +167,22 @@ export function placeSelectionBar(
   let y = clampBetween(below ? belowTop : aboveTop, EDGE_PX, view.height - bar.height - EDGE_PX);
   y = clampBetween(y, aboveTop, belowTop);
   return { x, y, below };
+}
+
+/**
+ * ← / → and Home / End move focus along the bar's own buttons, past
+ * disabled ones; not from a field in the bar or from a menu it opened.
+ */
+function moveAlongBar(event: ReactKeyboardEvent<HTMLDivElement>): void {
+  const bar = event.currentTarget;
+  const target = event.target;
+  if (event.defaultPrevented || !(target instanceof HTMLButtonElement) || !bar.contains(target)) return;
+  const controls = [...bar.querySelectorAll<HTMLButtonElement>('button')].filter((control) => control.getClientRects().length > 0);
+  const enabled = controls.map((control) => !control.disabled && control.getAttribute('aria-disabled') !== 'true');
+  const next = barKeyTarget({ key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode }, controls.indexOf(target), enabled);
+  if (next === undefined) return;
+  event.preventDefault();
+  controls[next]!.focus();
 }
 
 /** The selection's box on the board: every item's rotated bounds, a section's title band and an arrow's route. */
@@ -685,6 +711,77 @@ function FillButton({ fill, side }: SideProps & { fill: NonNullable<BarModel['fi
   );
 }
 
+/** A heat map toggle of the cell's column or row: a ramp of the color it has or would take, and a check while it is on. */
+function HeatToggle({ table, axis, line }: { table: TableElement; axis: TableAxis; line: string }) {
+  const scheme = useColorScheme();
+  const lastPicked = useTableHeat((state) => state.lastPicked);
+  const on = table.heat?.[axis]?.[line] !== undefined;
+  return (
+    <ChromeButton pressed={on} className="w-full justify-start gap-2 px-2" onClick={() => toggleTableLineHeat(table.id, axis, line)}>
+      <span aria-hidden="true" className="h-3 w-6 shrink-0 rounded-[3px] ring-1 ring-inset ring-black/10 dark:ring-white/15" style={{ background: heatRampGradient(heatColorFor(table, axis, line, lastPicked), scheme) }} />
+      <span className="flex-1 text-left">{TABLE_HEAT_LABELS.toggle(axis)}</span>
+      <span aria-hidden="true" className="flex size-4 items-center justify-center">{on ? <Check className="size-4" strokeWidth={2.25} /> : null}</span>
+    </ChromeButton>
+  );
+}
+
+/**
+ * Cell color, for the table cell being typed into: its fill (None clears
+ * it; the header row takes none), heat map toggles for its column and row
+ * (no row heat map on the header row), and the color of a heat map that
+ * covers it.
+ */
+function CellColorButton({ table, row, col, side }: SideProps & { table: TableElement; row: string; col: string }) {
+  const [open, setOpen] = useState(false);
+  const scheme = useColorScheme();
+  const fill = tableCellFill(table, row, col);
+  const rowHeat = takesRowHeat(table, row);
+  const heatAxis: TableAxis | undefined = table.heat?.cols?.[col] !== undefined ? 'cols' : rowHeat && table.heat?.rows?.[row] !== undefined ? 'rows' : undefined;
+  const heatLine = heatAxis === 'cols' ? col : row;
+  const fillSwatches = useMemo<Swatch[]>(() => [{ name: NONE, value: NONE_SWATCH, label: 'None' }, ...FILL_SWATCHES], []);
+  return (
+    <ChromePopover
+      open={open}
+      onOpenChange={setOpen}
+      side={side}
+      label="Cell color"
+      className="flex flex-col gap-1 p-1.5"
+      trigger={<ToolButton label="Cell color" tipSide={side} icon={<ColorChip paint={fill === '' ? undefined : tableFillPaint(fill, scheme).fill} none={fill === ''} />} />}
+    >
+      {rowHeat ? (
+        <SwatchRow
+          label="Cell color"
+          swatches={fillSwatches}
+          current={fill === '' ? NONE : fill}
+          onPick={(name) => {
+            setOpen(false);
+            setTableCellFill(table.id, [{ row, col }], name === NONE ? '' : (name as FillColor));
+          }}
+          size={18}
+          className="max-w-[min(420px,calc(100vw-48px))] overflow-x-auto"
+        />
+      ) : null}
+      <div role="group" aria-label="Heat map" className="flex flex-col">
+        <HeatToggle table={table} axis="cols" line={col} />
+        {rowHeat ? <HeatToggle table={table} axis="rows" line={row} /> : null}
+      </div>
+      {heatAxis !== undefined ? (
+        <>
+          <div className="px-1 pt-1 text-[12px] leading-4 text-chrome-muted">Heat map color</div>
+          <SwatchRow
+            label="Heat map color"
+            swatches={FILL_SWATCHES}
+            current={table.heat?.[heatAxis]?.[heatLine]}
+            onPick={(name) => pickTableHeatColor(table.id, heatAxis, heatLine, name as FillColor)}
+            size={18}
+            className="max-w-[min(420px,calc(100vw-48px))] overflow-x-auto"
+          />
+        </>
+      ) : null}
+    </ChromePopover>
+  );
+}
+
 /** Drawing ink, for a selection of drawings (with whatever else takes a line color). */
 function InkButton({ stroke, side }: SideProps & { stroke: StrokeModel }) {
   const scheme = useColorScheme();
@@ -827,13 +924,17 @@ function PictureLinkButton({ image, side }: SideProps & { image: ImageElement })
   );
 }
 
-/** Align items (two or more): the six edges, in two rows. */
+/**
+ * Align items (two or more): the six edges, in two rows. A refused trigger
+ * stays focusable (`aria-disabled`), so closing the popover still hands
+ * focus back to it and its tooltip can say why.
+ */
 function AlignItemsPopover({ side, refused }: SideProps & { refused: string | undefined }) {
   const [open, setOpen] = useState(false);
   return (
     <ChromePopover
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={(next) => setOpen(next && refused === undefined)}
       side={side}
       label="Align items"
       className="p-1.5"
@@ -843,7 +944,8 @@ function AlignItemsPopover({ side, refused }: SideProps & { refused: string | un
           tip={refused === undefined ? 'Align items' : `Align items. ${refused}`}
           tipSide={side}
           icon={<AlignStartVertical aria-hidden="true" />}
-          disabled={refused !== undefined}
+          aria-disabled={refused !== undefined || undefined}
+          className="aria-disabled:opacity-40"
         />
       }
     >
@@ -907,9 +1009,16 @@ export function SelectionBar(): ReactNode {
 
   const selected = useMemo(() => ids.flatMap((id) => byId.get(id) ?? []), [ids, byId]);
   const idle = selected.length > 0 && cropping === null && marquee === null && transform === null;
+  // Typing into a text that showed only its placeholder starts without the bar.
+  const bare = useMemo(() => {
+    if (editing?.kind !== 'element' || editing.formatted === true) return false;
+    const element = useBoard.getState().byId.get(editing.id);
+    return element !== undefined && showsTextPlaceholder(element);
+  }, [editing]);
   // While text is typed in place, the bar becomes the typing bar (format controls).
   const typing =
     idle &&
+    !bare &&
     editing !== null &&
     editing.kind !== 'arrow-label' &&
     selected.length === 1 &&
@@ -970,6 +1079,9 @@ export function SelectionBar(): ReactNode {
   const textColorControl = model.textColor ? <TextColorButton key="text-color" current={model.textColor.current} side={side} /> : null;
   const alignControl = model.text ? <TextAlignMenu key="align" current={model.text.align} side={side} /> : null;
   const fillControl = model.fill ? <FillButton key="fill" fill={model.fill} side={side} /> : null;
+  const cellTable = cell && editing?.kind === 'cell' && selected[0]?.type === 'table' ? selected[0] : undefined;
+  const cellColorControl =
+    cellTable !== undefined && editing?.kind === 'cell' ? <CellColorButton key="cell-color" table={cellTable} row={editing.row} col={editing.col} side={side} /> : null;
   const strokeControl = model.stroke ? (
     model.stroke.kind === 'ink' ? <InkButton key="stroke" stroke={model.stroke} side={side} /> : <LineStylePopover key="stroke" stroke={model.stroke} side={side} />
   ) : null;
@@ -1035,7 +1147,7 @@ export function SelectionBar(): ReactNode {
     content = (
       <FormatBar side={side} cell={cell} {...(typing ? {} : { whole: model.textItem })}>
         {({ marks, bullets }) =>
-          withDividers([[kindControl], [sizeControl, textColorControl, ...marks], [bullets, alignControl], [fillControl, strokeControl, lockControl], actions])
+          withDividers([[kindControl], [sizeControl, textColorControl, ...marks], [bullets, alignControl], [fillControl, cellColorControl, strokeControl, lockControl], actions])
         }
       </FormatBar>
     );
@@ -1080,9 +1192,11 @@ export function SelectionBar(): ReactNode {
         role="toolbar"
         aria-label="Selection actions"
         data-wb-bar="selection"
+        data-wb-region="selection"
         {...(typing ? { 'data-wb-format-bar': '' } : {})}
         className="fixed z-[30] max-w-[calc(100vw-16px)] overflow-x-auto p-1.5"
         style={style}
+        onKeyDown={moveAlongBar}
       >
         {content}
       </Card>

@@ -1,7 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
 import { IMPORT_MARKS_SHOWN_MS } from './marks-of-import.ts';
-export function useMarksOfImportExpiry(store?: Dynamic, marksOfImport?: Dynamic) {
+import type { SheetController } from '../state/controller.ts';
+import type { MarksOfImport } from '../state/initial-state.ts';
+export function useMarksOfImportExpiry(store: Pick<SheetController, 'dispatch'>, marksOfImport: MarksOfImport | null) {
   React.useEffect(() => {
     if (marksOfImport === null) return;
     let timer = setTimeout(

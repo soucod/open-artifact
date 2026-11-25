@@ -1,4 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellConditionKind, ColumnId, FormatOfACondition, KindOfAColumn } from '@open-artifact/sheets-core';
+import type { TableHolds } from '../state/initial-state.ts';
+import type { TypedWord } from './tokens.ts';
+import type { ColumnTest, RuleWordsSituation, TestsNotRead } from './rule-tests.ts';
+import type { FormatPart, RuleWordsNotRead } from './rule-formats.ts';
 import { wordsMatchAt, plainWordsOf, splitIntoWords } from './tokens.ts';
 import { columnNamedAt, isColumnOfFewValues } from './column-names.ts';
 import { measureOfColumn } from './column-holds.ts';
@@ -62,28 +66,63 @@ import {
   DATE_CONDITION_WORDS,
 } from './vocabulary.ts';
 import { RULE_WORD_REWRITES, UNCHECKED_RULE_WORDS } from './rule-tests-values.ts';
-export function readColorScaleRule(words: Dynamic, holds: Dynamic, { selected: selected }: Dynamic) {
-  let start: Dynamic = 0;
+/** A column named in words, and the words that name it (`from` up to `to`). */
+export interface ColumnNamedIn {
+  c: ColumnId;
+  from: number;
+  to: number;
+}
+/** Tests read for a rule, with the column the rule colors where the words say which. */
+export type TestsForRule =
+  | {
+      kind: 'read';
+      allOf: ColumnTest[];
+      c?: ColumnId;
+      /** The column to color was named apart from the tests. */
+      isPaintNamed?: true;
+      /** The tests were read as about the selected columns. */
+      isAboutSelected?: true;
+    }
+  | TestsNotRead;
+/** What a rule read from words does: color a scale, or format the cells that pass every test (in a look given or not). */
+export type RuleSaid = { kind: 'colorScale' } | { kind: 'formatWhere'; allOf: ColumnTest[]; format: FormatOfACondition | null };
+/** A rule read from words: the column it is about, whether it colors whole rows, and what it does. */
+export interface RuleRead {
+  kind: 'read';
+  c: ColumnId;
+  isForRows: boolean;
+  /** The rule covers the selected columns. */
+  isAboutSelected: boolean;
+  rule: RuleSaid;
+}
+/** What the words of a rule were read as. */
+export type RuleWordsRead = RuleRead | RuleWordsNotRead;
+export function readColorScaleRule(
+  words: readonly TypedWord[],
+  holds: TableHolds,
+  { selected }: Pick<RuleWordsSituation, 'selected'>,
+): RuleRead | null {
+  let start = 0;
   while (SCALE_LEAD_WORDS.has(words[start]?.plain ?? '')) start += 1;
-  let scalePhraseLength = (at?: Dynamic) =>
-    COLOR_SCALE_PHRASES.find((phrase?: Dynamic) => wordsMatchAt(words, at, phrase))?.length ?? 0;
-  let columnNamedFrom = (at?: Dynamic) => columnNamedAt(holds, words, at, true);
-  let colorScaleRule = (c?: Dynamic, isAboutSelected?: Dynamic) => {
-    let column = holds.columns.find((column2?: Dynamic) => column2.c === c);
+  let scalePhraseLength = (at: number): number =>
+    COLOR_SCALE_PHRASES.find((phrase) => wordsMatchAt(words, at, phrase))?.length ?? 0;
+  let columnNamedFrom = (at: number) => columnNamedAt(holds, words, at, true);
+  let colorScaleRule = (c: ColumnId, isAboutSelected: boolean): RuleRead | null => {
+    let column = holds.columns.find((eachColumn) => eachColumn.c === c);
     return column === undefined || measureOfColumn(column) === null || hasNumbersAsText(column) || isRankLikeColumn(column)
       ? null
       : {
           kind: 'read',
           c: column.c,
           isForRows: false,
-          isAboutSelected: isAboutSelected,
+          isAboutSelected,
           rule: {
             kind: 'colorScale',
           },
         };
   };
   if (scalePhraseLength(start) > 0) {
-    let at: Dynamic = start + scalePhraseLength(start);
+    let at = start + scalePhraseLength(start);
     if (at === words.length) return selected.length === 1 ? colorScaleRule(selected[0] ?? null, true) : null;
     if (SCALE_PREPOSITIONS.has(words[at]?.plain ?? '')) at += 1;
     if (words[at]?.plain === 'the') at += 1;
@@ -97,16 +136,16 @@ export function readColorScaleRule(words: Dynamic, holds: Dynamic, { selected: s
     ? colorScaleRule(firstNamed.column.c, false)
     : null;
 }
-export function valueWordsOfTable(holds?: Dynamic) {
+export function valueWordsOfTable(holds: TableHolds): Map<string, string[][]> {
   let cached = valueWordsCache.get(holds);
   if (cached !== undefined) return cached;
   let wordLists = holds.columns.flatMap(
-    (column?: Dynamic) => [
-      ...(isShortEnoughToRead(column.name ?? '') ? plainWordsOf(column.name ?? '') : []).map((word?: Dynamic) => [word]),
+    (column) => [
+      ...(isShortEnoughToRead(column.name ?? '') ? plainWordsOf(column.name ?? '') : []).map((word) => [word]),
       ...(isColumnOfFewValues(column)
         ? [
             ...column.values.flatMap(
-              ({ value: value, userIds: userIds }: Dynamic) =>
+              ({ value, userIds }) =>
                 value?.kind !== 'text' ? [] : [value.value, ...(userIds.length > 0 ? plainWordsOf(value.value).slice(0, 1) : [])],
             ),
             ...(column.optionsOfDropdown ?? []),
@@ -116,9 +155,9 @@ export function valueWordsOfTable(holds?: Dynamic) {
         : []),
     ],
   );
-  let byWord = new (Map as Dynamic)();
-  for (let wordList of wordLists as Dynamic)
-    for (let word of new (Set as Dynamic)(wordList) as Dynamic) {
+  let byWord = new Map<string, string[][]>();
+  for (let wordList of wordLists)
+    for (let word of new Set<string>(wordList)) {
       let lists = byWord.get(word);
       if (lists === undefined) byWord.set(word, [wordList]);
       else lists.push(wordList);
@@ -126,9 +165,9 @@ export function valueWordsOfTable(holds?: Dynamic) {
   valueWordsCache.set(holds, byWord);
   return byWord;
 }
-export function columnsNamedIn(words?: Dynamic, holds?: Dynamic) {
-  let named: Dynamic = [];
-  for (let at: Dynamic = 0; at < words.length; ) {
+export function columnsNamedIn(words: readonly TypedWord[], holds: TableHolds): ColumnNamedIn[] {
+  let named: ColumnNamedIn[] = [];
+  for (let at = 0; at < words.length; ) {
     let found = isUnquotedWord(words[at]) ? columnNamedAt(holds, words, at, true) : null;
     if (found !== null)
       named.push({
@@ -140,31 +179,37 @@ export function columnsNamedIn(words?: Dynamic, holds?: Dynamic) {
   }
   return named;
 }
-export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynamic, situation?: Dynamic, takesSelectionAsIs?: Dynamic) {
+export function readTestsForRule(
+  typed: string,
+  holds: TableHolds,
+  viewerId: string | null,
+  situation: RuleWordsSituation,
+  takesSelectionAsIs: boolean,
+): TestsForRule {
   let words = splitIntoWords(typed);
   let columnsNamed = columnsNamedIn(words, holds);
   let [firstNamed] = columnsNamed;
   let isNameThenWhere = firstNamed !== undefined && firstNamed.from === 0 && RELATIVE_PRONOUNS.has(words[firstNamed.to]?.plain ?? '');
   let read = readWordsAsTests(typed, holds, viewerId, situation);
   if (isNameThenWhere) {
-    let restRead =
+    const readAfterPronoun =
       firstNamed.to + 1 >= words.length
         ? null
         : readWordsAsTests(rewriteWords(words, firstNamed.to + 1, words.length, NO_WORD_REWRITES, /\s$/.test(typed)), holds, viewerId, situation);
     if (
-      restRead?.kind === 'read' &&
-      columnsNamed.slice(1).every(({ c: c }: Dynamic) => restRead.allOf.flatMap(columnsOfConditionClause).includes(c))
+      readAfterPronoun?.kind === 'read' &&
+      columnsNamed.slice(1).every(({ c }) => readAfterPronoun.allOf.flatMap(columnsOfConditionClause).includes(c))
     )
       return {
-        ...restRead,
+        ...readAfterPronoun,
         c: firstNamed.c,
         isPaintNamed: true,
       };
   }
   if (read.kind === 'read') {
-    let restRead = new (Set as Dynamic)(read.allOf.flatMap(columnsOfConditionClause));
-    let other = columnsNamed.filter(({ c: c2 }: Dynamic) => !restRead.has(c2));
-    let [onlyUntested, ...moreUntested] = other;
+    let testedCs = new Set<ColumnId>(read.allOf.flatMap(columnsOfConditionClause));
+    let untested = columnsNamed.filter(({ c: namedC }) => !testedCs.has(namedC));
+    let [onlyUntested, ...moreUntested] = untested;
     let isFirstColumnAtEnd =
       onlyUntested !== undefined &&
       moreUntested.length === 0 &&
@@ -172,7 +217,7 @@ export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dy
       onlyUntested.to === words.length &&
       onlyUntested.from > 0 &&
       !SCALE_PREPOSITIONS.has(words[onlyUntested.from - 1]?.plain ?? '');
-    if (other.length > 0 && !isFirstColumnAtEnd)
+    if (untested.length > 0 && !isFirstColumnAtEnd)
       return {
         kind: 'notRead',
         isOnItsWay: false,
@@ -183,12 +228,12 @@ export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dy
         c: onlyUntested.c,
         isPaintNamed: true,
       };
-    let clauseOfNamed = read.allOf.find(({ c: c2 }: Dynamic) => columnsNamed.some((named?: Dynamic) => named.c === c2));
-    let { c: c } = clauseOfNamed ?? read.allOf[0];
+    let clauseOfNamed = read.allOf.find(({ c: testedC }) => columnsNamed.some((named) => named.c === testedC));
+    let { c } = clauseOfNamed ?? read.allOf[0];
     if (!situation.areSeveralCellsSelected || columnsNamed.length > 0)
       return {
         ...read,
-        c: c,
+        c,
       };
     if (!situation.selected.includes(c))
       return {
@@ -198,7 +243,7 @@ export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dy
     return [1, holds.columns.length].includes(situation.selected.length) || takesSelectionAsIs
       ? {
           ...read,
-          c: c,
+          c,
         }
       : {
           kind: 'notRead',
@@ -207,49 +252,49 @@ export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dy
   }
   let [onlyNamed, ...moreNamed] = columnsNamed;
   if (onlyNamed !== undefined && moreNamed.length === 0 && onlyNamed.from > 0 && onlyNamed.to === words.length) {
-    let restRead = ['in', 'of', 'for', 'on'].includes(words[onlyNamed.from - 1]?.plain ?? '') ? onlyNamed.from - 1 : onlyNamed.from;
-    let other = readWordsAsTests(
-      rewriteWords(words, onlyNamed.from, onlyNamed.to, NO_WORD_REWRITES, true) + rewriteWords(words, 0, restRead, NO_WORD_REWRITES, true),
+    let wordsBeforeEnd = ['in', 'of', 'for', 'on'].includes(words[onlyNamed.from - 1]?.plain ?? '') ? onlyNamed.from - 1 : onlyNamed.from;
+    let readNameFirst = readWordsAsTests(
+      rewriteWords(words, onlyNamed.from, onlyNamed.to, NO_WORD_REWRITES, true) + rewriteWords(words, 0, wordsBeforeEnd, NO_WORD_REWRITES, true),
       holds,
       viewerId,
       situation,
     );
-    if (other.kind === 'read' && other.allOf.every(({ c: c }: Dynamic) => c === onlyNamed.c))
+    if (readNameFirst.kind === 'read' && readNameFirst.allOf.every(({ c }) => c === onlyNamed.c))
       return {
-        ...other,
+        ...readNameFirst,
         c: onlyNamed.c,
       };
   }
   if (columnsNamed.length > 0 || situation.selected.length > MOST_SELECTED_COLUMNS) return read;
   if (!isUnplaceableStart(read.firstNotPlaced ?? '')) return read;
-  let readWithName = (c?: Dynamic) => {
-    let name = holds.columns.find((column?: Dynamic) => column.c === c)?.name ?? null;
-    let read2 =
+  let readWithName = (c: ColumnId): ColumnTest[] => {
+    let name = holds.columns.find((column) => column.c === c)?.name ?? null;
+    let readOfName =
       name === null || name.length > MOST_CHARACTERS_OF_WORDS ? null : readWordsAsTests(name + ' ' + typed, holds, viewerId, situation);
-    return read2?.kind === 'read' && read2.allOf[0].c === c ? read2.allOf : [];
+    return readOfName?.kind === 'read' && readOfName.allOf[0].c === c ? readOfName.allOf : [];
   };
   let readsOfSelected = situation.selected
     .map(readWithName)
-    .map((clauses?: Dynamic) => (clauses.length === 1 || situation.selected.length === 1 ? clauses : []));
+    .map((clauses) => (clauses.length === 1 || situation.selected.length === 1 ? clauses : []));
   let [[firstClause, ...moreClauses] = [], ...otherReads] = readsOfSelected;
-  let selectedKinds = new (Set as Dynamic)(
-    situation.selected.map((c?: Dynamic) => holds.columns.find((column?: Dynamic) => column.c === c)?.kind),
+  let selectedKinds = new Set<KindOfAColumn | undefined>(
+    situation.selected.map((c) => holds.columns.find((column) => column.c === c)?.kind),
   );
   let saysLateWithSeveralDates =
-    words.some(({ plain: plain }: Dynamic) => LATE_WORDS.has(plain)) &&
-    holds.columns.filter(({ kind: kind }: Dynamic) => kind === 'date').length > 1;
+    words.some(({ plain }) => LATE_WORDS.has(plain)) &&
+    holds.columns.filter(({ kind }) => kind === 'date').length > 1;
   let valueStandsElsewhere =
     firstClause?.condition.kind === 'textIs' &&
     !situation.areSeveralCellsSelected &&
     holds.columns.some(
-      (column?: Dynamic) =>
+      (column) =>
         column.c !== firstClause.c && 'text' in firstClause.condition && columnHasText(column, firstClause.condition.text),
     );
   return firstClause !== undefined &&
     !saysLateWithSeveralDates &&
     !valueStandsElsewhere &&
     selectedKinds.size === 1 &&
-    otherReads.every(([clause]: Dynamic) => clause !== undefined && isSameAsJson(clause.condition, firstClause.condition)) &&
+    otherReads.every(([clause]) => clause !== undefined && isSameAsJson(clause.condition, firstClause.condition)) &&
     (situation.areSeveralCellsSelected || !CELL_TEST_KINDS.has(firstClause.condition.kind))
     ? {
         kind: 'read',
@@ -259,68 +304,68 @@ export function readTestsForRule(typed?: Dynamic, holds?: Dynamic, viewerId?: Dy
       }
     : read;
 }
-export function wordsWithDateNamed(typed?: Dynamic, holds?: Dynamic, situation?: Dynamic) {
+export function wordsWithDateNamed(typed: string, holds: TableHolds, situation: RuleWordsSituation): string | null {
   let words = splitIntoWords(typed);
-  let nameSaysDate = (c?: Dynamic) =>
-    plainWordsOf(holds.columns.find((column?: Dynamic) => column.c === c)?.name ?? '').some(
-      (word?: Dynamic) => word.startsWith('date'),
+  let nameSaysDate = (c: ColumnId): boolean =>
+    plainWordsOf(holds.columns.find((column) => column.c === c)?.name ?? '').some(
+      (word) => word.startsWith('date'),
     );
   let columnsNamed = columnsNamedIn(words, holds).filter(
-    ({ c: c, from: from, to: to }: Dynamic) => to - from > 1 || !dateWordPattern.test(words[from]?.plain ?? '') || nameSaysDate(c),
+    ({ c, from, to }) => to - from > 1 || !dateWordPattern.test(words[from]?.plain ?? '') || nameSaysDate(c),
   );
   let saysColumnLetter = words.some(
-    (word?: Dynamic, index?: Dynamic) =>
+    (word, index) =>
       (word.plain === 'column' || word.plain === 'col') && situation.columnLettered(words[index + 1]?.plain ?? '') !== null,
   );
   let dateWord = words.find(
-    (word?: Dynamic, index?: Dynamic) =>
+    (word, index) =>
       isUnquotedWord(word) &&
       dateWordPattern.test(word.plain) &&
       !isAfterTextTest(words, index) &&
-      !columnsNamed.some(({ from: from, to: to }: Dynamic) => from <= index && index < to),
+      !columnsNamed.some(({ from, to }) => from <= index && index < to),
   );
-  let selectedDateColumn = holds.columns.find(
-    ({ c: c, kind: kind }: Dynamic) => kind === 'date' && situation.selected.length === 1 && situation.selected[0] === c,
+  const selectedDateColumn = holds.columns.find(
+    ({ c, kind }) => kind === 'date' && situation.selected.length === 1 && situation.selected[0] === c,
   );
   if (dateWord !== undefined && selectedDateColumn === undefined && columnsNamed.length === 0 && !saysColumnLetter) return null;
-  if (dateWord === undefined || selectedDateColumn === undefined || columnsNamed.some(({ c: c }: Dynamic) => c !== selectedDateColumn.c))
+  if (dateWord === undefined || selectedDateColumn === undefined || columnsNamed.some(({ c }) => c !== selectedDateColumn.c))
     return typed;
   let isNamedAlready = selectedDateColumn.c === onlySelectedColumn(situation) || columnsNamed.length > 0;
-  let rewrites = new (Map as Dynamic)([[dateWord, isNamedAlready ? '' : (selectedDateColumn.name ?? '')]]);
+  let rewrites = new Map<TypedWord, string>([[dateWord, isNamedAlready ? '' : (selectedDateColumn.name ?? '')]]);
   return rewriteWords(words, 0, words.length, rewrites, /\s$/.test(typed));
 }
-export function isColorPartOfValue(words: Dynamic, clause: Dynamic, { columns: columns }: Dynamic) {
-  let hueWords = words.filter(({ plain: plain }: Dynamic) => HUE_WORDS.has(plain));
+export function isColorPartOfValue(words: readonly TypedWord[], clause: ColumnTest | undefined, { columns }: TableHolds): boolean {
+  let hueWords = words.filter(({ plain }) => HUE_WORDS.has(plain));
   if (hueWords.length === 0 || clause === undefined || !TEXT_TEST_KINDS.has(clause.condition.kind)) return false;
   let text = 'text' in clause.condition ? clause.condition.text : '';
   return (
     SHADE_WORDS.has(plainWordsOf(text).at(-1) ?? '') ||
     columns.some(
-      ({ c: c, values: values }: Dynamic) =>
+      ({ c, values }) =>
         c === clause.c &&
         values.some(
-          ({ value: value }: Dynamic) =>
+          ({ value }) =>
             value?.kind === 'text' &&
             isShortEnoughToRead(value.value) &&
-            hueWords.some(({ plain: plain }: Dynamic) => plainTextOfWords(value.value).includes(plainTextOfWords(text) + ' ' + plain)),
+            hueWords.some(({ plain }) => plainTextOfWords(value.value).includes(plainTextOfWords(text) + ' ' + plain)),
         ),
     )
   );
 }
-export function readRuleFromWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynamic, situation?: Dynamic) {
+export function readRuleFromWords(typed: string, holds: TableHolds, viewerId: string | null, situation: RuleWordsSituation): RuleWordsRead {
   let read = readRuleWords(typed, holds, viewerId, situation);
   let withDateNamed = wordsWithDateNamed(typed, holds, situation);
   let wordsRead = read.kind === 'read' ? typed : (withDateNamed ?? typed);
   let readOfWords = wordsRead === typed ? read : readRuleWords(wordsRead, holds, viewerId, situation);
   if (readOfWords.kind === 'notRead') return read;
-  let testedCs = readOfWords.rule.kind === 'formatWhere' ? readOfWords.rule.allOf.map(({ c: c }: Dynamic) => c) : [readOfWords.c];
-  if (withDateNamed === null && holds.columns.some(({ c: c, kind: kind }: Dynamic) => kind === 'date' && testedCs.includes(c)))
+  let testedCs = readOfWords.rule.kind === 'formatWhere' ? readOfWords.rule.allOf.map(({ c }) => c) : [readOfWords.c];
+  if (withDateNamed === null && holds.columns.some(({ c, kind }) => kind === 'date' && testedCs.includes(c)))
     return FORMAT_PARTS_NOT_READ;
   let words = splitIntoWords(wordsRead);
-  let textWithout = (dropped?: Dynamic) =>
-    words.map((word?: Dynamic) => word.gap + (word === dropped ? ' ' : word.said)).join('') + (words.at(-1)?.tail ?? '');
+  let textWithout = (dropped: TypedWord): string =>
+    words.map((word) => word.gap + (word === dropped ? ' ' : word.said)).join('') + (words.at(-1)?.tail ?? '');
   return words.some(
-    (word?: Dynamic) =>
+    (word) =>
       isUnquotedWord(word) &&
       RECORD_KIND_NOUNS.has(word.plain) &&
       columnNamedAt(holds, words, word.at, true) === null &&
@@ -329,9 +374,9 @@ export function readRuleFromWords(typed?: Dynamic, holds?: Dynamic, viewerId?: D
     ? FORMAT_PARTS_NOT_READ
     : readOfWords;
 }
-export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynamic, situation?: Dynamic) {
+export function readRuleWords(typed: string, holds: TableHolds, viewerId: string | null, situation: RuleWordsSituation): RuleWordsRead {
   if (typed.length > MOST_CHARACTERS_OF_WORDS) return FORMAT_PARTS_NOT_READ;
-  let countOf = (mark?: Dynamic) => typed.split(mark).length - 1;
+  let countOf = (mark: string): number => typed.split(mark).length - 1;
   if (countOf('"') % 2 === 1 || countOf('“') !== countOf('”'))
     return {
       kind: 'notRead',
@@ -339,58 +384,58 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
     };
   if (
     [foreignNumberPattern, crossMarkPattern, leaveOutPattern, thousandsRangePattern, monthYearPattern].some(
-      (pattern?: Dynamic) => pattern.test(typed),
+      (pattern) => pattern.test(typed),
     )
   )
     return FORMAT_PARTS_NOT_READ;
   let words = splitIntoWords(expandThousands(typed, situation));
-  let isInColumnNameAt = (at?: Dynamic, words2?: Dynamic) =>
-    columnsNamedIn(words2, holds).some(
-      ({ c: c, from: from, to: to }: Dynamic) =>
+  let isInColumnNameAt = (at: number, amongWords: readonly TypedWord[]): boolean =>
+    columnsNamedIn(amongWords, holds).some(
+      ({ c, from, to }) =>
         from <= at &&
         at < to &&
         (to - from > 1 ||
-          (!FORMAT_WORDS.has(words2[at]?.plain ?? '') &&
-            !STATE_WORDS.has(words2[at]?.plain ?? '') &&
+          (!FORMAT_WORDS.has(amongWords[at]?.plain ?? '') &&
+            !STATE_WORDS.has(amongWords[at]?.plain ?? '') &&
             (!situation.areSeveralCellsSelected || onlySelectedColumn(situation) === c) &&
-            !WORDS_AFTER_DATE_NAME.has(words2[to]?.plain ?? '') &&
-            [NUMBER_CONDITION_WORDS, IS_ARE_WORDS].some((wordSet?: Dynamic) => wordSet.has(words2[to]?.plain ?? '')))),
+            !WORDS_AFTER_DATE_NAME.has(amongWords[to]?.plain ?? '') &&
+            [NUMBER_CONDITION_WORDS, IS_ARE_WORDS].some((wordSet) => wordSet.has(amongWords[to]?.plain ?? '')))),
     );
   if (
     words.some(
-      (word?: Dynamic, at?: Dynamic) =>
+      (word, at) =>
         isUnquotedWord(word) && (FILTER_VERBS.has(word.plain) || VAGUE_NOUNS.has(word.plain)) && !isInColumnNameAt(at, words),
     )
   )
     return FORMAT_PARTS_NOT_READ;
-  let isValueTextAt = (word?: Dynamic, at?: Dynamic, words2?: Dynamic) => {
-    let nameEnd = words2[at - 1]?.plain === 'not' ? at - 2 : at - 1;
+  let isValueTextAt = (word: TypedWord, at: number, amongWords: readonly TypedWord[]): boolean => {
+    let nameEnd = amongWords[at - 1]?.plain === 'not' ? at - 2 : at - 1;
     return (
       !STATE_WORDS.has(word.plain) &&
-      IS_ARE_WORDS.has(words2[nameEnd]?.plain ?? '') &&
-      columnsNamedIn(words2, holds).some(
-        ({ c: c, to: to }: Dynamic) =>
+      IS_ARE_WORDS.has(amongWords[nameEnd]?.plain ?? '') &&
+      columnsNamedIn(amongWords, holds).some(
+        ({ c, to }) =>
           to === nameEnd &&
           holds.columns.some(
-            (column?: Dynamic) =>
+            (column) =>
               column.c === c &&
-              column.values.some(({ value: value }: Dynamic) => value?.kind === 'text' && isSameTextIgnoringCase(value.value, word.plain)),
+              column.values.some(({ value }) => value?.kind === 'text' && isSameTextIgnoringCase(value.value, word.plain)),
           ),
       )
     );
   };
-  let isKnownValueWord = (word?: Dynamic, at?: Dynamic, words2?: Dynamic) =>
+  let isKnownValueWord = (word: TypedWord, at: number, amongWords: readonly TypedWord[]): boolean =>
     isUnquotedWord(word) &&
     RULE_KNOWN_WORDS.has(word.plain) &&
-    !isValueTextAt(word, at, words2) &&
-    !isInColumnNameAt(at, words2) &&
-    (!STARTS_ENDS_WORDS.has(word.plain) || isTextTestAt(words2, at)) &&
+    !isValueTextAt(word, at, amongWords) &&
+    !isInColumnNameAt(at, amongWords) &&
+    (!STARTS_ENDS_WORDS.has(word.plain) || isTextTestAt(amongWords, at)) &&
     wordForms(word.plain)
-      .flatMap((form?: Dynamic) => valueWordsOfTable(holds).get(form) ?? [])
+      .flatMap((form) => valueWordsOfTable(holds).get(form) ?? [])
       .some(
-        (valueWords?: Dynamic) =>
+        (valueWords) =>
           valueWords.every(
-            (valueWord?: Dynamic) => words2.some(({ plain: plain }: Dynamic) => wordForms(plain).includes(valueWord)),
+            (valueWord) => amongWords.some(({ plain }) => wordForms(plain).includes(valueWord)),
           ),
       );
   if (words.some(isKnownValueWord)) return FORMAT_PARTS_NOT_READ;
@@ -400,7 +445,7 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
   if (rewrittenWords.some(isKnownValueWord)) return FORMAT_PARTS_NOT_READ;
   let plainWords = rewrittenWords.filter(isUnquotedWord);
   if (
-    plainWords.some((word?: Dynamic) => {
+    plainWords.some((word) => {
       if (!NO_WITHOUT_WORDS.has(word.plain)) return false;
       let named = columnAfterWord(holds, rewrittenWords, word);
       return named === null || IS_ARE_WORDS.has(rewrittenWords[named.end]?.plain ?? '');
@@ -409,37 +454,37 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
     return FORMAT_PARTS_NOT_READ;
   let colorScale = plainWords.length < rewrittenWords.length ? null : readColorScaleRule(rewrittenWords, holds, situation);
   if (colorScale !== null) return colorScale;
-  let wordsOf = (nouns?: Dynamic) =>
-    plainWords.filter((word?: Dynamic) => nouns.has(word.plain) && !isInColumnNameAt(word.at, rewrittenWords));
+  let wordsOf = (nouns: ReadonlySet<string>): TypedWord[] =>
+    plainWords.filter((word) => nouns.has(word.plain) && !isInColumnNameAt(word.at, rewrittenWords));
   let [rowWords, cellWords] = [wordsOf(ROW_NOUNS), wordsOf(CELL_NOUNS)];
   if (rowWords.length > 0 && cellWords.length > 0) return FORMAT_PARTS_NOT_READ;
-  let dropped = new (Map as Dynamic)(
+  let dropped = new Map<TypedWord, string>(
     [
       ...cellWords,
       ...rowWords.flatMap(
-        ({ at: at }: Dynamic) =>
-          rewrittenWords.slice(Math.max(at - 1, 0), at).filter((word?: Dynamic) => WHOLE_WORDS.has(word.plain)),
+        ({ at }) =>
+          rewrittenWords.slice(Math.max(at - 1, 0), at).filter((word) => WHOLE_WORDS.has(word.plain)),
       ),
-    ].map((word?: Dynamic) => [word, ' ']),
+    ].map((word): [TypedWord, string] => [word, ' ']),
   );
-  let ruleWords = rewrittenWords.filter((word?: Dynamic) => !dropped.has(word) && !rowWords.includes(word));
+  let ruleWords = rewrittenWords.filter((word) => !dropped.has(word) && !rowWords.includes(word));
   let endsWithSpace = /\s$/.test(typed);
-  let readings = new (Map as Dynamic)();
-  let testsByText = new (Map as Dynamic)();
-  let isOnItsWay: Dynamic = false;
+  let readings = new Map<string, RuleRead>();
+  let testsByText = new Map<string, TestsForRule>();
+  let isOnItsWay = false;
   let [starts, ends, middles] = [formatPartsAtStart(ruleWords), formatPartsAtEnd(ruleWords), formatPartsInMiddle(ruleWords)];
   if (starts.length * ends.length * middles.length > MOST_RULE_READINGS) return FORMAT_PARTS_NOT_READ;
-  for (let start of starts as Dynamic)
-    for (let end of ends as Dynamic)
-      for (let middle of middles as Dynamic) {
+  for (let start of starts)
+    for (let end of ends)
+      for (let middle of middles) {
         if (start.from >= end.to) continue;
         let [middleFirst, middleLast] = [middle.words[0], middle.words.at(-1)];
-        let indexOf = (word?: Dynamic) => ruleWords.indexOf(word);
+        let indexOf = (word: TypedWord): number => ruleWords.indexOf(word);
         if (middleFirst !== undefined && middleLast !== undefined && (indexOf(middleFirst) <= start.from || indexOf(middleLast) >= end.to - 1))
           continue;
-        let saysFill = ruleWords.slice(0, start.from).some((word?: Dynamic) => word.plain === 'fill');
+        let saysFill = ruleWords.slice(0, start.from).some((word) => word.plain === 'fill');
         let parts = [...start.parts, ...middle.parts, ...end.parts].map(
-          (part?: Dynamic) =>
+          (part): FormatPart =>
             saysFill && part.kind === 'tint'
               ? {
                   kind: 'fill',
@@ -451,8 +496,8 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
         if (parts.length > 0 && format === null) continue;
         let [firstWord, lastWord] = [ruleWords[start.from], ruleWords[end.to - 1]];
         if (firstWord === undefined || lastWord === undefined) continue;
-        if (parts.length === 0 && plainWords.some((word?: Dynamic) => word.plain === SHOW_WORD)) continue;
-        let rewrites = new (Map as Dynamic)([...dropped, ...middle.words.map((word?: Dynamic) => [word, ' '])]);
+        if (parts.length === 0 && plainWords.some((word) => word.plain === SHOW_WORD)) continue;
+        let rewrites = new Map<TypedWord, string>([...dropped, ...middle.words.map((word): [TypedWord, string] => [word, ' '])]);
         let testText = rewriteWords(
           rewrittenWords,
           firstWord.at,
@@ -468,7 +513,7 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
         }
         if (isColorPartOfValue(ruleWords.slice(end.to), tests.allOf.at(-1), holds)) return FORMAT_PARTS_NOT_READ;
         if (rowWords.length > 0 && tests.isPaintNamed === true) continue;
-        let reading = {
+        let reading: RuleRead = {
           kind: 'read',
           c: tests.c ?? tests.allOf[0].c,
           isForRows: rowWords.length > 0,
@@ -476,7 +521,7 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
           rule: {
             kind: 'formatWhere',
             allOf: tests.allOf,
-            format: format,
+            format,
           },
         };
         readings.set(JSON.stringify(reading), reading);
@@ -489,90 +534,90 @@ export function readRuleWords(typed?: Dynamic, holds?: Dynamic, viewerId?: Dynam
     };
   let clauses = onlyReading.rule.kind === 'formatWhere' ? onlyReading.rule.allOf : [];
   return clauses.some(isBeforeTodayTest) &&
-    !words.some((word?: Dynamic, at?: Dynamic) => isUnquotedWord(word) && word.plain === 'today' && !isAfterTextTest(words, at)) &&
+    !words.some((word, at) => isUnquotedWord(word) && word.plain === 'today' && !isAfterTextTest(words, at)) &&
     hasStatusLikeColumns(holds) &&
-    !clauses.some((clause?: Dynamic) => testsNotDone(clause, holds))
+    !clauses.some((clause) => testsNotDone(clause, holds))
     ? FORMAT_PARTS_NOT_READ
     : onlyReading;
 }
 export const COLOR_SCALE_PHRASES = ['color scale', 'colour scale', 'color gradient', 'heat map', 'heatmap', 'gradient'].map(
-  (phrase?: Dynamic) => phrase.split(' '),
+  (phrase) => phrase.split(' '),
 );
-export const SCALE_LEAD_WORDS = new (Set as Dynamic)('add apply put make show a an the'.split(' '));
-export const SCALE_PREPOSITIONS = new (Set as Dynamic)('on of for to in over across'.split(' '));
-export const FILTER_VERBS = new (Set as Dynamic)(
+export const SCALE_LEAD_WORDS = new Set<string>('add apply put make show a an the'.split(' '));
+export const SCALE_PREPOSITIONS = new Set<string>('on of for to in over across'.split(' '));
+export const FILTER_VERBS = new Set<string>(
   'hide filter filtered only keep find list display see sort sorted order ordered remove delete clear except exclude excluding skip ignore omit'.split(
     ' ',
   ),
 );
 export const SHOW_WORD = 'show';
 export const monthOrWeekdayPattern = /^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon(?!th)|tue|wed|thu|fri|sat|sun)/;
-export const FORMAT_WORDS = new (Set as Dynamic)([
+export const FORMAT_WORDS = new Set<string>([
   ...HUE_WORDS.keys(),
-  ...FONT_STYLE_PHRASES.map(([phrase]: Dynamic) => phrase.replace(/ .*/, '')),
+  ...FONT_STYLE_PHRASES.map(([phrase]) => phrase.replace(/ .*/, '')),
   ...TEXT_COLOR_WORDS,
   ...FILL_WORDS,
   ...PALE_WORDS,
   ...FORMAT_VERBS,
-  ...FORMAT_VERB_PHRASES.map(([[firstWord = '']]: Dynamic) => firstWord),
+  ...FORMAT_VERB_PHRASES.map(([[firstWord = '']]) => firstWord),
 ]);
-export const RULE_KNOWN_WORDS = new (Set as Dynamic)([
+export const RULE_KNOWN_WORDS = new Set<string>([
   ...HUE_WORDS.keys(),
-  ...FONT_STYLE_PHRASES.flatMap(([phrase]: Dynamic) => phrase.split(' ')),
+  ...FONT_STYLE_PHRASES.flatMap(([phrase]) => phrase.split(' ')),
   ...TEXT_COLOR_WORDS,
   ...FILL_WORDS,
   ...PALE_WORDS,
   ...FORMAT_VERBS,
-  ...FORMAT_VERB_PHRASES.flatMap(([words]: Dynamic) => words),
-  ...FORMAT_LEAD_INS.flat().filter((word?: Dynamic) => word.length > 5),
+  ...FORMAT_VERB_PHRASES.flatMap(([words]) => words),
+  ...FORMAT_LEAD_INS.flat().filter((word) => word.length > 5),
   ...ROW_NOUNS,
   ...CELL_NOUNS,
   ...WHOLE_WORDS,
   ...[...NUMBER_CONDITION_WORDS, ...TEXT_TEST_WORDS].filter(
-    (word?: Dynamic) => /^\p{L}{3,}$/u.test(word) && !['than', 'from', 'with', 'not', 'does', 'more', 'and'].includes(word),
+    (word) => /^\p{L}{3,}$/u.test(word) && !['than', 'from', 'with', 'not', 'does', 'more', 'and'].includes(word),
   ),
   ...RULE_WORD_REWRITES.flatMap(
-    ([phraseWords]: Dynamic) => phraseWords.filter((word?: Dynamic) => word.length > 4 || word === 'zero' || word === 'past'),
+    ([phraseWords]) => phraseWords.filter((word) => word.length > 4 || word === 'zero' || word === 'past'),
   ),
   ...CHECKED_RULE_WORDS,
   ...UNCHECKED_RULE_WORDS,
   ...'blank blanks empty none nothing filled any anything overdue late past today tomorrow yesterday scale gradient heatmap heat'.split(' '),
   ...'max min maximum minimum average mean median unique weekend weekends weekday weekdays people person everyone staff'.split(' '),
-  ...[...DATE_CONDITION_WORDS].filter((word?: Dynamic) => monthOrWeekdayPattern.test(word)),
+  ...[...DATE_CONDITION_WORDS].filter((word) => monthOrWeekdayPattern.test(word)),
 ]);
-export const wordForms = (word?: Dynamic) => [word, word + 's', word.replace(/s$/, '')];
-export const isShortEnoughToRead = (words?: Dynamic) => words.length <= MOST_CHARACTERS_OF_WORDS;
-export const valueWordsCache = new (WeakMap as Dynamic)();
-export const namesAColumn = (text?: Dynamic, holds?: Dynamic) => columnsNamedIn(splitIntoWords(text), holds).length > 0;
+export const wordForms = (word: string): string[] => [word, word + 's', word.replace(/s$/, '')];
+export const isShortEnoughToRead = (text: string): boolean => text.length <= MOST_CHARACTERS_OF_WORDS;
+export const valueWordsCache = new WeakMap<TableHolds, Map<string, string[][]>>();
+export const namesAColumn = (text: string, holds: TableHolds): boolean => columnsNamedIn(splitIntoWords(text), holds).length > 0;
 export const MOST_SELECTED_COLUMNS = 24;
-export const LATE_WORDS = new (Set as Dynamic)(['overdue', 'late']);
-export const CELL_TEST_KINDS = new (Set as Dynamic)(['appearsMoreThanOnce', 'isAnError', 'isBlank', 'isNotBlank']);
-export const BLANK_FILLED_WORDS = new (Set as Dynamic)('blank blanks empty none nothing filled any anything'.split(' '));
-export const STATE_WORDS = new (Set as Dynamic)([
+export const LATE_WORDS = new Set<string>(['overdue', 'late']);
+export const CELL_TEST_KINDS = new Set<CellConditionKind>(['appearsMoreThanOnce', 'isAnError', 'isBlank', 'isNotBlank']);
+export const BLANK_FILLED_WORDS = new Set<string>('blank blanks empty none nothing filled any anything'.split(' '));
+export const STATE_WORDS = new Set<string>([
   ...BLANK_FILLED_WORDS,
   ...'missing checked ticked unchecked unticked overdue late past today tomorrow yesterday'.split(' '),
 ]);
-export const isUnplaceableStart = (text?: Dynamic) => {
+export const isUnplaceableStart = (text: string): boolean => {
   let [firstWord = ''] = plainWordsOf(text);
   return (
     !/^\p{L}/u.test(firstWord) ||
     [NUMBER_CONDITION_WORDS, DATE_CONDITION_WORDS, TEXT_TEST_WORDS, BLANK_FILLED_WORDS, IS_ARE_WORDS].some(
-      (wordSet?: Dynamic) => wordSet.has(firstWord),
+      (wordSet) => wordSet.has(firstWord),
     ) ||
     firstWord === 'not'
   );
 };
-export const columnsOfConditionClause = ({ c: c, condition: condition }: Dynamic) => [
+export const columnsOfConditionClause = ({ c, condition }: ColumnTest): ColumnId[] => [
   c,
-  ...operandsOfCondition(condition).flatMap((operand?: Dynamic) => (operand.kind === 'sameRowInColumn' ? [operand.c] : [])),
+  ...operandsOfCondition(condition).flatMap((operand) => (operand.kind === 'sameRowInColumn' ? [operand.c] : [])),
 ];
 export const thousandsSuffixPattern = /(?<![\p{L}\p{N}.,])(\d{1,6}(?:\.\d{1,3})?)k(?![\p{L}\p{N}])/giu;
-export const expandThousands = (typed: Dynamic, { signsOfNumbers: signsOfNumbers }: Dynamic) =>
+export const expandThousands = (typed: string, { signsOfNumbers }: Pick<RuleWordsSituation, 'signsOfNumbers'>): string =>
   /["“”]/.test(typed) ||
-  splitIntoWords(typed).some((word?: Dynamic, at?: Dynamic, words?: Dynamic) => isTextTestAt(words, at)) ||
+  splitIntoWords(typed).some((word, at, words) => isTextTestAt(words, at)) ||
   signsOfNumbers.decimalSign === 'comma'
     ? typed
-    : typed.replaceAll(thousandsSuffixPattern, (match?: Dynamic, thousands?: Dynamic) => String(Math.round(Number(thousands) * 1000)));
+    : typed.replaceAll(thousandsSuffixPattern, (match: string, thousands: string) => String(Math.round(Number(thousands) * 1000)));
 export const dateWordPattern = /^dates?$/i;
-export const WORDS_AFTER_DATE_NAME = new (Set as Dynamic)('and or to from no'.split(' '));
-export const SHADE_WORDS = new (Set as Dynamic)('light dark pale navy hot sky bright'.split(' '));
+export const WORDS_AFTER_DATE_NAME = new Set<string>('and or to from no'.split(' '));
+export const SHADE_WORDS = new Set<string>('light dark pale navy hot sky bright'.split(' '));

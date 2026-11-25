@@ -1,8 +1,8 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { commandsNameableFromWords, MAX_COMMANDS_NAMED } from '../commands-from-words.ts';
 import { toolLabelWithValue } from '../../tools/search-words.ts';
 import { sortMenuLabel, sortRangeLabel, sortSheetLabel } from '../../i18n/grid-action-labels.ts';
 import { commandActsOnCells } from './matching.ts';
+import type { CommandCost, CommandHome, MenuCommand, SearchableCommand } from './matching.ts';
 import { translateMessage } from '../../i18n/messages.ts';
 import { sheetMessages } from '../../i18n/sheet-messages.ts';
 import { CONDITIONAL_FORMATTING_WORDS } from '../../messages/conditional-format.ts';
@@ -10,83 +10,116 @@ import { autocompleteFunctionsHeading } from '../../messages/formula-autocomplet
 import { sheetWord } from '../../messages/sheet-command-words.ts';
 import { goToLabel } from '../go-to-commands.ts';
 import { customSortMessages } from '../../tables/sort-filter-labels.ts';
-export function commandHint({ actsOn: actsOn, home: home, cost: cost }: Dynamic, { activeCell: activeCell, cellCount: cellCount }: Dynamic) {
+/** Commands listed under one heading of the search menu (no heading when it is `null`). */
+export interface CommandsUnderHeading<Command> {
+  heading: string | null;
+  commands: Command[];
+}
+/** A group of found commands, as the search menu lists it. */
+export interface CommandGroup extends CommandsUnderHeading<MenuCommand> {
+  isOfWhatOpens: boolean;
+}
+/** Which commands a group of the search menu holds, and how it names them. */
+export interface CommandGroupRule {
+  heading: () => string;
+  holds: (command: SearchableCommand) => boolean;
+  /** The name of the tool, taken off the labels of the commands in the group. */
+  toolInNames?: () => string;
+  isOfWhatOpens?: boolean;
+}
+/** Where the hint of a command shows: the active cell's address, and how many cells are selected. */
+export interface CommandHintPlace {
+  activeCell: string | null;
+  cellCount: number;
+}
+export function commandHint(
+  { actsOn, home, cost }: Pick<MenuCommand, 'actsOn' | 'home' | 'cost'>,
+  { activeCell, cellCount }: CommandHintPlace,
+) {
   let costHint = cost === undefined ? null : commandCostHint(cost);
   if (costHint !== null) return costHint;
   if (actsOn === 'activeCell') return activeCell !== null && cellCount > 1 ? inCellHint(activeCell) : null;
   return actsOn === 'opens' && home !== undefined ? (COMMAND_HOME_HINTS[home]?.() ?? null) : null;
 }
-export function commandsNamedByAgent(commands?: Dynamic, namedIds?: Dynamic) {
-  let offeredIds = new (Set as Dynamic)(
-    commandsNameableFromWords(commandsOfferedToAgent(commands), 'all').map(({ id: id }: Dynamic) => id),
+export function commandsNamedByAgent<Command extends SearchableCommand>(
+  commands: readonly Command[],
+  namedIds: readonly string[],
+) {
+  let offeredIds = new Set<string>(
+    commandsNameableFromWords(commandsOfferedToAgent(commands), 'all').map(({ id }: Pick<SearchableCommand, 'id'>) => id),
   );
-  let commandById = new (Map as Dynamic)(commands.map((input?: Dynamic) => [input.id, input]));
-  return [...new (Set as Dynamic)(namedIds.filter((input?: Dynamic) => typeof input === 'string' && offeredIds.has(input)))]
-    .flatMap((input?: Dynamic) => commandById.get(String(input)) ?? [])
+  let commandById = new Map<string, Command>(commands.map((command) => [command.id, command]));
+  return [...new Set(namedIds.filter((id) => typeof id === 'string' && offeredIds.has(id)))]
+    .flatMap((id) => commandById.get(String(id)) ?? [])
     .slice(0, MAX_COMMANDS_NAMED);
 }
-export function labelWithoutHeading(heading?: Dynamic, label?: Dynamic) {
+export function labelWithoutHeading(heading: string, label: string) {
   let [before = '', after = ''] = toolLabelWithValue(heading, '\x00').split('\x00');
   return label.length > before.length + after.length && label.startsWith(before) && label.endsWith(after)
     ? label.slice(before.length, label.length - after.length)
     : label;
 }
-export function headingOfCommand(input?: Dynamic) {
-  if (input.id === SORT_AND_FILTER_COMMAND_ID) return null;
-  if (isSortCommandUnderHeading(input)) return sortMenuLabel();
-  return HEADINGS_BY_COMMAND_PREFIX.find(([input2]: Dynamic) => input.id.startsWith(input2))?.[1]() ?? null;
+export function headingOfCommand(command: Pick<SearchableCommand, 'id' | 'label'>) {
+  if (command.id === SORT_AND_FILTER_COMMAND_ID) return null;
+  if (isSortCommandUnderHeading(command)) return sortMenuLabel();
+  return HEADINGS_BY_COMMAND_PREFIX.find(([prefix]) => command.id.startsWith(prefix))?.[1]() ?? null;
 }
-export function groupFoundCommands(commands?: Dynamic) {
-  let headingsOfCellCommands = new (Set as Dynamic)(commands.filter(commandActsOnCells).map(headingOfCommand));
-  let isOpenerUnderHeading = (input?: Dynamic) => isToolOpenerCommand(input) && headingsOfCellCommands.has(headingOfCommand(input));
-  let isGroupedByHeading = (input?: Dynamic) =>
-    commandActsOnCells(input) || UNDO_REDO_COMMAND_IDS.has(input.id) || isOpenerUnderHeading(input);
+export function groupFoundCommands(commands: readonly MenuCommand[]): CommandGroup[] {
+  let headingsOfCellCommands = new Set(commands.filter(commandActsOnCells).map(headingOfCommand));
+  let isOpenerUnderHeading = (command: MenuCommand) =>
+    isToolOpenerCommand(command) && headingsOfCellCommands.has(headingOfCommand(command));
+  let isGroupedByHeading = (command: MenuCommand) =>
+    commandActsOnCells(command) || UNDO_REDO_COMMAND_IDS.has(command.id) || isOpenerUnderHeading(command);
   let headedCommands = commands
     .filter(isGroupedByHeading)
-    .map((input?: Dynamic) => (isOpenerUnderHeading(input) ? withoutHome(input) : input));
-  let otherCommands = commands.filter((input?: Dynamic) => !isGroupedByHeading(input));
-  let groupIndexOf = (input?: Dynamic) => COMMAND_GROUPS.findIndex(({ holds: holds }: Dynamic) => holds(input));
-  let loneHeadingIds = new (Set as Dynamic)(
-    groupByHeading(new (Map as Dynamic)(), headedCommands).flatMap(
-      ({ heading: heading, commands: [first, ...rest] }: Dynamic) =>
+    .map((command): MenuCommand => (isOpenerUnderHeading(command) ? withoutHome(command) : command));
+  let otherCommands = commands.filter((command) => !isGroupedByHeading(command));
+  let groupIndexOf = (command: MenuCommand) => COMMAND_GROUPS.findIndex(({ holds }) => holds(command));
+  let loneHeadingIds = new Set(
+    groupByHeading(new Map<string | null, MenuCommand[]>(), headedCommands).flatMap(
+      ({ heading, commands: [first, ...rest] }) =>
         first !== undefined && rest.length === 0 && first.label === heading ? [first.id] : [],
     ),
   );
   let groups = [
-    ...groupByHeading(new (Map as Dynamic)(), headedCommands, ({ id: id }: Dynamic) => loneHeadingIds.has(id)).map(
-      ({ heading: heading, commands: commands2 }: Dynamic) => ({
-        heading: heading,
-        commands: commands2,
+    ...groupByHeading(new Map<string | null, MenuCommand[]>(), headedCommands, ({ id }) => loneHeadingIds.has(id)).map(
+      ({ heading, commands: commandsOfHeading }) => ({
+        heading,
+        commands: commandsOfHeading,
         isOfWhatOpens: false,
       }),
     ),
     ...COMMAND_GROUPS.map(
-      ({ heading: heading, toolInNames: toolInNames, isOfWhatOpens = false }: Dynamic, groupIndex?: Dynamic) => ({
+      ({ heading, toolInNames, isOfWhatOpens = false }, groupIndex) => ({
         heading: heading(),
         commands: otherCommands
-          .filter((input?: Dynamic) => groupIndexOf(input) === groupIndex)
-          .map((input?: Dynamic) => (toolInNames === undefined ? input : commandUnderHeading(toolInNames(), input))),
-        isOfWhatOpens: isOfWhatOpens,
+          .filter((command) => groupIndexOf(command) === groupIndex)
+          .map((command) => (toolInNames === undefined ? command : commandUnderHeading(toolInNames(), command))),
+        isOfWhatOpens,
       }),
-    ).filter(({ commands: commands2 }: Dynamic) => commands2.length > 0),
+    ).filter(({ commands: commandsOfGroup }) => commandsOfGroup.length > 0),
   ];
-  let firstEnabledId = commands.find(({ whyNot: whyNot }: Dynamic) => whyNot === null)?.id;
-  let holdsFirstEnabled = ({ commands: commands2 }: Dynamic) =>
-    commands2.some(({ id: id }: Dynamic) => id === firstEnabledId);
-  return [...groups.filter(holdsFirstEnabled), ...groups.filter((input?: Dynamic) => !holdsFirstEnabled(input))];
+  let firstEnabledId = commands.find(({ whyNot }) => whyNot === null)?.id;
+  let holdsFirstEnabled = ({ commands: commandsOfGroup }: CommandGroup) =>
+    commandsOfGroup.some(({ id }) => id === firstEnabledId);
+  return [...groups.filter(holdsFirstEnabled), ...groups.filter((group) => !holdsFirstEnabled(group))];
 }
-export function groupByHeading(groups?: Dynamic, commands?: Dynamic, keepsOwnLabel: Dynamic = () => false) {
-  for (let command of commands as Dynamic) {
+export function groupByHeading<Command extends Pick<SearchableCommand, 'id' | 'label'>>(
+  groups: Map<string | null, Command[]>,
+  commands: readonly Command[],
+  keepsOwnLabel: (command: Command) => boolean = () => false,
+): CommandsUnderHeading<Command>[] {
+  for (let command of commands) {
     let heading = keepsOwnLabel(command) ? null : headingOfCommand(command);
     let headed = heading === null ? command : commandUnderHeading(heading, command);
     groups.set(heading, [...(groups.get(heading) ?? []), headed]);
   }
   return [...groups]
-    .filter(([, items]: Dynamic) => items.length > 0)
+    .filter(([, items]) => items.length > 0)
     .map(
-      ([input, input2]: Dynamic) => ({
-        heading: input,
-        commands: input2,
+      ([heading, commandsOfHeading]) => ({
+        heading,
+        commands: commandsOfHeading,
       }),
     );
 }
@@ -137,17 +170,17 @@ export const commandGroupMessages = {
       id: '5ecYuw0syO',
     }),
 };
-export const inCellHint = (cell?: Dynamic) =>
+export const inCellHint = (cell: string) =>
   translateMessage(
     {
       defaultMessage: 'In {cell}',
       id: 'qMHePZOkA+',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const commandCostHint = (cost?: Dynamic) => {
+export const commandCostHint = (cost: CommandCost) => {
   switch (cost.kind) {
     case 'replaces':
       return translateMessage(
@@ -173,32 +206,32 @@ export const commandCostHint = (cost?: Dynamic) => {
       return null;
   }
 };
-export const COMMAND_HOME_HINTS = {
+export const COMMAND_HOME_HINTS: Record<CommandHome, (() => string) | null> = {
   toolbar: commandGroupMessages.toolbar,
   topBar: commandGroupMessages.topBar,
   sheetTab: commandGroupMessages.sheetTab,
   pane: null,
 };
-export const commandsOfferedToAgent = (commands?: Dynamic) =>
+export const commandsOfferedToAgent = (commands: readonly SearchableCommand[]) =>
   commands
-    .filter(({ whyNot: whyNot, isWeighty: isWeighty }: Dynamic) => whyNot === null && isWeighty !== true)
+    .filter(({ whyNot, isWeighty }) => whyNot === null && isWeighty !== true)
     .map(
-      ({ id: id, label: label }: Dynamic) => ({
-        id: id,
-        label: label,
+      ({ id, label }) => ({
+        id,
+        label,
       }),
     );
-export const HEADINGS_BY_COMMAND_PREFIX = [
+export const HEADINGS_BY_COMMAND_PREFIX: [prefix: string, heading: () => string][] = [
   ['bar.borders', sheetMessages.borders],
   ['bar.fillColor', sheetMessages.cellColor],
   ['bar.textColor', sheetMessages.textColor],
-  ['bar.numberFormat', sheetMessages.numberFormat],
-  ['bar.fewerDecimalPlaces', sheetMessages.numberFormat],
-  ['bar.moreDecimalPlaces', sheetMessages.numberFormat],
+  ['bar.numberFormat', sheetMessages.cellType],
+  ['bar.fewerDecimalPlaces', sheetMessages.cellType],
+  ['bar.moreDecimalPlaces', sheetMessages.cellType],
   ['bar.alignVertically', sheetMessages.alignVertically],
   ['bar.align', sheetMessages.align],
   ['bar.fontSize', sheetMessages.fontSize],
-  ['bar.insert.', sheetMessages.insert],
+  ['bar.insert.', sheetMessages.cellType],
   ['bar.sum.', sheetMessages.calculations],
   ['menu.freeze.', sheetMessages.freeze],
   ['menu.sortRange', sortRangeLabel],
@@ -221,18 +254,18 @@ export const HEADINGS_BY_COMMAND_PREFIX = [
   ['bar.wrapText', sheetMessages.formatting],
   ['function.', autocompleteFunctionsHeading],
 ];
-export const commandUnderHeading = (heading?: Dynamic, command?: Dynamic) => ({
+export const commandUnderHeading = <Command extends Pick<SearchableCommand, 'label'>>(heading: string, command: Command) => ({
   ...command,
   label: labelWithoutHeading(heading, command.label),
 });
-export const UNDO_REDO_COMMAND_IDS = new (Set as Dynamic)(['view.undo', 'view.redo']);
+export const UNDO_REDO_COMMAND_IDS = new Set(['view.undo', 'view.redo']);
 export const SHEETS_COMMAND_PREFIXES = ['sheet.add.', 'sheet.tab.', 'sheet.allSheets'];
-export const isSheetsCommand = ({ id: id }: Dynamic) =>
-  SHEETS_COMMAND_PREFIXES.some((input?: Dynamic) => id.startsWith(input));
-export const COMMAND_GROUPS = [
+export const isSheetsCommand = ({ id }: Pick<SearchableCommand, 'id'>) =>
+  SHEETS_COMMAND_PREFIXES.some((prefix) => id.startsWith(prefix));
+export const COMMAND_GROUPS: CommandGroupRule[] = [
   {
     heading: commandGroupMessages.thisSheet,
-    holds: (input?: Dynamic) => input.actsOn === 'sheet' && !isSheetsCommand(input),
+    holds: (command) => command.actsOn === 'sheet' && !isSheetsCommand(command),
   },
   {
     heading: commandGroupMessages.sheets,
@@ -241,37 +274,41 @@ export const COMMAND_GROUPS = [
   },
   {
     heading: goToLabel,
-    holds: ({ actsOn: actsOn }: Dynamic) => actsOn === 'goesTo',
+    holds: ({ actsOn }) => actsOn === 'goesTo',
     toolInNames: goToLabel,
   },
   {
     heading: commandGroupMessages.view,
-    holds: ({ actsOn: actsOn }: Dynamic) => actsOn === 'view',
+    holds: ({ actsOn }) => actsOn === 'view',
   },
   {
     heading: commandGroupMessages.wholeFile,
-    holds: ({ actsOn: actsOn }: Dynamic) => actsOn === 'file',
+    holds: ({ actsOn }) => actsOn === 'file',
   },
   {
     heading: commandGroupMessages.open,
-    holds: ({ actsOn: actsOn }: Dynamic) => actsOn === 'opens' || actsOn === 'handsOver',
+    holds: ({ actsOn }) => actsOn === 'opens' || actsOn === 'handsOver',
     isOfWhatOpens: true,
   },
 ];
-export const isSortCommandUnderHeading = ({ id: id, label: label }: Dynamic) =>
+export const isSortCommandUnderHeading = ({ id, label }: Pick<SearchableCommand, 'id' | 'label'>) =>
   (id.startsWith('menu.sort') && labelWithoutHeading(sortMenuLabel(), label) !== label) ||
   (id === 'menu.customSort.range' && label === customSortMessages.customSort());
 export const SORT_AND_FILTER_COMMAND_ID = 'menu.sortAndFilter';
-export const isToolOpenerCommand = ({ actsOn: actsOn, id: id }: Dynamic) =>
-  actsOn === 'opens' && HEADINGS_BY_COMMAND_PREFIX.some(([input]: Dynamic) => input === id);
-export const withoutHome = ({ home: home, ...input }: Dynamic) => input;
-export const commandsUnderHeading = (heading?: Dynamic, commands?: Dynamic) =>
+export const isToolOpenerCommand = ({ actsOn, id }: Pick<SearchableCommand, 'actsOn' | 'id'>) =>
+  actsOn === 'opens' && HEADINGS_BY_COMMAND_PREFIX.some(([prefix]) => prefix === id);
+export const withoutHome = <Command extends SearchableCommand>({ home, ...command }: Command) => command;
+export const commandsUnderHeading = <Command extends Pick<SearchableCommand, 'label'>>(
+  heading: string,
+  commands: readonly Command[],
+) =>
   commands.length === 0
     ? []
     : [
         {
-          heading: heading,
-          commands: commands.map((input?: Dynamic) => commandUnderHeading(heading, input)),
+          heading,
+          commands: commands.map((command) => commandUnderHeading(heading, command)),
         },
       ];
-export const groupCommandsByHeading = (input?: Dynamic) => groupByHeading(new (Map as Dynamic)([[null, []]]), input);
+export const groupCommandsByHeading = <Command extends Pick<SearchableCommand, 'id' | 'label'>>(commands: readonly Command[]) =>
+  groupByHeading(new Map<string | null, Command[]>([[null, []]]), commands);

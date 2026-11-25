@@ -191,6 +191,8 @@ export interface SharedLimits {
   largestOffsetOfAPlacementInPixels: number;
   mostCheckboxesOfOneInsert: number;
   mostEditsInAStep: number;
+  mostNamedViewsInASheet: number;
+  longestNameOfANamedViewInCharacters: number;
 }
 
 /** What chart code (SVG) may hold. */

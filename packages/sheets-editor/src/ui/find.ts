@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, SheetId } from '@open-artifact/sheets-core';
 import { lastAtOrBefore } from '../model/line-ids.ts';
 import { usersOfCell, cellValueOf } from '../model/cell-values.ts';
 import { profileOfUser } from '../chips/people-list.ts';
@@ -14,13 +14,59 @@ import { withoutOtherRanges } from '../selection/several-ranges.ts';
 import { withCalendarShut } from '../chips/calendar.ts';
 import { stripGroupSeparators, normalizeNoBreakSpaces } from '../format/number-signs.ts';
 import { isMenuHoldingField } from '../state/transitions.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { Find, FindHit, FindOptions, FindWithin, PageState } from '../state/initial-state.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function joinTouchingStretches(stretches?: Dynamic) {
-  stretches.sort((input?: Dynamic, options?: Dynamic) => input.firstIndex - options.firstIndex);
-  let joined: Dynamic = [];
-  for (let stretch of stretches as Dynamic) {
+import type { FindOptionsChanged } from '../state/event-reducer.ts';
+import type { PageView } from '../view/page-view.ts';
+import type { LineSpan } from '../model/line-ids.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { GridLayout } from '../grid/layout.ts';
+import type { ShownCell } from '../grid/formulas-shown.ts';
+import type { ProfileOfPerson } from '../chips/people-list.ts';
+/** The rows and columns a find looks in, as stretches of line indexes. */
+export interface FindStretches {
+  rows: LineSpan[];
+  columns: LineSpan[];
+}
+/** What a find looks for: its text and options, with the part of the sheet it looks in as stretches. */
+/** The find options a person changed, as the find bar hands them on. */
+export type FindOptionsChange = Omit<FindOptionsChanged, 'kind'>;
+export interface FindQuery extends Omit<FindOptions, 'within'> {
+  text: string;
+  within: FindStretches | null;
+}
+/** Where a cell is, in the order a find steps through cells. */
+export type FindPosition = Pick<FindHit, 'sheetIndex' | 'rowIndex' | 'columnIndex'>;
+/** The cells a find matched, as the find keeps them. */
+export type FoundHits = Pick<Find, 'hits' | 'isCapped' | 'ends' | 'editsSinceLooked'>;
+/** A row to look in, and the columns of it to look in, in the order a find steps. */
+export interface RowToFindIn {
+  sheetId: SheetId;
+  sheetIndex: number;
+  rowIndex: number;
+  columnIndexes: number[];
+  hasMerged: boolean;
+}
+/** The direction a find steps in: forward or back. */
+export type FindDirection = 1 | -1;
+/** What tells whether a modal is open. */
+type ModalPart =
+  | 'menu'
+  | 'customNumberFormat'
+  | 'pasteThatWaits'
+  | 'pickForWorkbook'
+  | 'importOfAFile'
+  | 'fileAwaited'
+  | 'isListOfKeysOpen'
+  | 'cellHistory'
+  | 'xlsxFileReady';
+/** The parts of the page state, or of the page's view of it, that tell whether a modal is open. */
+export type StateOfModals = Pick<PageState, ModalPart> | Pick<PageView, ModalPart>;
+export function joinTouchingStretches(stretches: LineSpan[]): LineSpan[] {
+  stretches.sort((one, other) => one.firstIndex - other.firstIndex);
+  let joined: LineSpan[] = [];
+  for (let stretch of stretches) {
     let last = joined[joined.length - 1];
     if (last !== undefined && last.firstIndex + last.count === stretch.firstIndex)
       joined[joined.length - 1] = {
@@ -31,19 +77,23 @@ export function joinTouchingStretches(stretches?: Dynamic) {
   }
   return joined;
 }
-export function stretchesOfFindWithin(workbook: WorkbookReads, sheetId: Dynamic, { rows: rows, columns: columns }: Dynamic) {
+export function stretchesOfFindWithin(
+  workbook: WorkbookReads,
+  sheetId: SheetId,
+  { rows, columns }: Pick<FindWithin, 'rows' | 'columns'>,
+): FindStretches {
   let lines = workbook.linesOf(sheetId);
   return {
-    rows: joinTouchingStretches(rows.flatMap((input?: Dynamic) => lines?.rows.stretchesOf(input) ?? [])),
-    columns: joinTouchingStretches(columns.flatMap((input?: Dynamic) => lines?.columns.stretchesOf(input) ?? [])),
+    rows: joinTouchingStretches(rows.flatMap((run) => lines?.rows.stretchesOf(run) ?? [])),
+    columns: joinTouchingStretches(columns.flatMap((run) => lines?.columns.stretchesOf(run) ?? [])),
   };
 }
-export function isIndexInStretches(stretches?: Dynamic, index?: Dynamic) {
-  let stretch = lastAtOrBefore(stretches, ({ firstIndex: firstIndex }: Dynamic) => firstIndex, index);
+export function isIndexInStretches(stretches: readonly LineSpan[], index: number): boolean {
+  let stretch = lastAtOrBefore(stretches, ({ firstIndex }) => firstIndex, index);
   if (stretch === undefined) return false;
   return index >= stretch.firstIndex && index < stretch.firstIndex + stretch.count;
 }
-export function spanOfStretches(stretches?: Dynamic) {
+export function spanOfStretches(stretches: readonly LineSpan[]): LineSpan | null {
   let [firstStretch, lastStretch] = [stretches[0], stretches[stretches.length - 1]];
   if (firstStretch === undefined || lastStretch === undefined) return null;
   return {
@@ -51,11 +101,12 @@ export function spanOfStretches(stretches?: Dynamic) {
     count: lastStretch.firstIndex + lastStretch.count - firstStretch.firstIndex,
   };
 }
-export function relocateFindArea(workbook: WorkbookReads, sheetId?: Dynamic, findWithin?: Dynamic) {
+/** The part of the sheet a find looks in, with its area moved to where its rows and columns are now. */
+export function relocateFindArea(workbook: WorkbookReads, sheetId: SheetId, findWithin: FindWithin): FindWithin | null {
   let stretches = stretchesOfFindWithin(workbook, sheetId, findWithin);
   let [rowSpan, columnSpan] = [spanOfStretches(stretches.rows), spanOfStretches(stretches.columns)];
   if (rowSpan === null || columnSpan === null) return null;
-  let area = {
+  let area: CellArea = {
     topRowIndex: rowSpan.firstIndex,
     leftColumnIndex: columnSpan.firstIndex,
     rowCount: rowSpan.count,
@@ -66,27 +117,35 @@ export function relocateFindArea(workbook: WorkbookReads, sheetId?: Dynamic, fin
     at: area,
   };
 }
-export function peopleNamesOfCell(cell?: Dynamic, profilesById?: Dynamic) {
-  let userIds = usersOfCell(cell);
-  if (userIds.length === 0) return null;
-  return joinPeopleNames(userIds.map((input?: Dynamic) => profileOfUser(profilesById, input).name));
+export function peopleNamesOfCell(
+  cell: ShownCell | null,
+  profilesById: ReadonlyMap<string, ProfileOfPerson>,
+): string | null {
+  let people = usersOfCell(cell);
+  if (people.length === 0) return null;
+  return joinPeopleNames(people.map((person) => profileOfUser(profilesById, person).name));
 }
-export function cellMatchesFind(cell?: Dynamic, query?: Dynamic, profilesById?: Dynamic, decimalSign?: Dynamic) {
+export function cellMatchesFind(
+  cell: ShownCell | null,
+  query: FindQuery,
+  profilesById: ReadonlyMap<string, ProfileOfPerson>,
+  decimalSign: DecimalSignName,
+): boolean {
   let text = peopleNamesOfCell(cell, profilesById) ?? shownCellText(cell, MAX_FIND_SHOWN_CHARACTERS, decimalSign).text;
   if (textMatchesFind(text, query)) return true;
   return cellValueOf(cell)?.kind === 'number' && numberTextMatchesFind(text, query, decimalSign);
 }
-export function textMatchesFind(text: Dynamic, { text: findText, matchesCase: matchesCase, isWholeCell: isWholeCell }: Dynamic) {
+export function textMatchesFind(text: string, { text: findText, matchesCase, isWholeCell }: Pick<FindQuery, 'text' | 'matchesCase' | 'isWholeCell'>): boolean {
   let [haystack, needle] = matchesCase ? [text, findText] : [text.toLowerCase(), findText.toLowerCase()];
   return isWholeCell ? haystack === needle : haystack.includes(needle);
 }
 export function isFindHit(
   state: PageState,
   workbook: WorkbookReads,
-  { cellId: cellId, rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic,
-  query?: Dynamic,
-) {
-  let { within: within } = query;
+  { cellId, rowIndex, columnIndex }: Pick<FindHit, 'cellId' | 'rowIndex' | 'columnIndex'>,
+  query: FindQuery,
+): boolean {
+  let { within } = query;
   if (within !== null && !(isIndexInStretches(within.rows, rowIndex) && isIndexInStretches(within.columns, columnIndex))) return false;
   let cell = shownCellOf(state, workbook, cellId);
   if (cellMatchesFind(cell, query, state.profilesById, workbook.decimalSign)) return true;
@@ -94,58 +153,63 @@ export function isFindHit(
   let cellWithFormulasShown = shownCellOf(STATE_WITH_FORMULAS_SHOWN, workbook, cellId);
   return cellWithFormulasShown !== cell && cellMatchesFind(cellWithFormulasShown, query, state.profilesById, workbook.decimalSign);
 }
-export function* rowsToFindIn(state: PageState, workbook: WorkbookReads, by?: Dynamic) {
+export function* rowsToFindIn(state: PageState, workbook: WorkbookReads, by: FindDirection): Generator<RowToFindIn, void, undefined> {
   let sheets = workbook.listSheets();
   let start = activeCellPositionOrOrigin(state, workbook);
   if (start.sheetIndex === -1) return;
   let sheetCount = state.find?.options.within === 'allSheets' ? sheets.length : 1;
-  for (let step: Dynamic = 0; step <= sheetCount; step += 1) {
+  for (let step = 0; step <= sheetCount; step += 1) {
     let sheetIndex = step === sheetCount ? start.sheetIndex : (start.sheetIndex + by * step + sheets.length) % sheets.length;
     let sheet = sheets[sheetIndex];
     if (sheet === undefined) return;
-    let { sheetId: sheetId, rowCount: rowCount, columnCount: columnCount } = sheet;
+    let { sheetId, rowCount, columnCount } = sheet;
     let wholeSheet = {
       topRowIndex: 0,
       leftColumnIndex: 0,
-      rowCount: rowCount,
-      columnCount: columnCount,
+      rowCount,
+      columnCount,
     };
     let hasMerged = workbook.mergedAreasIn(sheetId, wholeSheet).length > 0;
     let [firstRowIndex, lastRowIndex] = by === 1 ? [0, rowCount - 1] : [rowCount - 1, 0];
     let fromRowIndex = step === 0 ? start.rowIndex : firstRowIndex;
     let toRowIndex = step === sheetCount ? start.rowIndex : lastRowIndex;
-    for (let rowIndex: Dynamic = fromRowIndex; by * (toRowIndex - rowIndex) >= 0; rowIndex += by) {
+    for (let rowIndex = fromRowIndex; by * (toRowIndex - rowIndex) >= 0; rowIndex += by) {
       let columnIndexes = workbook.columnIndexesOnShowIn(sheetId, rowIndex);
       let isStartRow = sheetIndex === start.sheetIndex && rowIndex === start.rowIndex;
       let isFromStart = by === 1 ? step === 0 : step === sheetCount;
       let columnIndexesToFind = columnIndexes.filter(
-        (columnIndex?: Dynamic) => !isStartRow || (isFromStart ? columnIndex >= start.columnIndex : columnIndex < start.columnIndex),
+        (columnIndex) => !isStartRow || (isFromStart ? columnIndex >= start.columnIndex : columnIndex < start.columnIndex),
       );
       if (by === -1) columnIndexesToFind.reverse();
       yield {
-        sheetId: sheetId,
-        sheetIndex: sheetIndex,
-        rowIndex: rowIndex,
+        sheetId,
+        sheetIndex,
+        rowIndex,
         columnIndexes: columnIndexesToFind,
-        hasMerged: hasMerged,
+        hasMerged,
       };
     }
   }
 }
-export function collectFindHits(state: PageState, workbook: WorkbookReads, text: Dynamic, { by: by, most: most }: Dynamic) {
+export function collectFindHits(
+  state: PageState,
+  workbook: WorkbookReads,
+  text: string,
+  { by, most }: { by: FindDirection; most: number },
+): FindHit[] {
   let options = state.find?.options ?? DEFAULT_FIND_OPTIONS;
   let query = findQueryOf(
     {
-      text: text,
-      options: options,
+      text,
+      options,
     },
     workbook,
     state.sheetId,
   );
-  let hits: Dynamic = [];
-  for (let row of rowsToFindIn(state, workbook, by) as Dynamic) {
-    let { sheetId: sheetId, sheetIndex: sheetIndex, rowIndex: rowIndex, hasMerged: hasMerged } = row;
-    for (let columnIndex of row.columnIndexes as Dynamic) {
+  let hits: FindHit[] = [];
+  for (let row of rowsToFindIn(state, workbook, by)) {
+    let { sheetId, sheetIndex, rowIndex, hasMerged } = row;
+    for (let columnIndex of row.columnIndexes) {
       let cellId = workbook.cellIdAt(sheetId, rowIndex, columnIndex);
       if (
         cellId === null ||
@@ -153,9 +217,9 @@ export function collectFindHits(state: PageState, workbook: WorkbookReads, text:
           state,
           workbook,
           {
-            cellId: cellId,
-            rowIndex: rowIndex,
-            columnIndex: columnIndex,
+            cellId,
+            rowIndex,
+            columnIndex,
           },
           query,
         )
@@ -163,23 +227,23 @@ export function collectFindHits(state: PageState, workbook: WorkbookReads, text:
         continue;
       let mergedArea = hasMerged
         ? workbook.mergedAreaAt(sheetId, {
-            rowIndex: rowIndex,
-            columnIndex: columnIndex,
+            rowIndex,
+            columnIndex,
           })
         : null;
       if (mergedArea !== null && (mergedArea.topRowIndex !== rowIndex || mergedArea.leftColumnIndex !== columnIndex)) continue;
       hits.push({
-        cellId: cellId,
-        sheetIndex: sheetIndex,
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
+        cellId,
+        sheetIndex,
+        rowIndex,
+        columnIndex,
       });
       if (hits.length === most) return hits;
     }
   }
   return hits;
 }
-export function findHits(state: PageState, workbook: WorkbookReads, text?: Dynamic) {
+export function findHits(state: PageState, workbook: WorkbookReads, text: string): FoundHits {
   if (text === '') return NO_FIND_HITS;
   let found = collectFindHits(state, workbook, text, {
     by: 1,
@@ -191,19 +255,19 @@ export function findHits(state: PageState, workbook: WorkbookReads, text?: Dynam
   let ends =
     isCapped && first !== undefined && last !== undefined
       ? {
-          first: first,
-          last: last,
+          first,
+          last,
         }
       : null;
   hits.sort(compareFindPositions);
   return {
-    hits: hits,
-    isCapped: isCapped,
-    ends: ends,
+    hits,
+    isCapped,
+    ends,
     editsSinceLooked: 0,
   };
 }
-export function findHitsAroundActiveCell(state: PageState, workbook: WorkbookReads, text?: Dynamic) {
+export function findHitsAroundActiveCell(state: PageState, workbook: WorkbookReads, text: string): FoundHits {
   let after = collectFindHits(state, workbook, text, {
     by: 1,
     most: MAX_FIND_HITS / 2,
@@ -214,29 +278,29 @@ export function findHitsAroundActiveCell(state: PageState, workbook: WorkbookRea
   });
   let [first, last] = [before[before.length - 1], after[after.length - 1]];
   if (first === undefined || last === undefined) return NO_FIND_HITS;
-  if (after.some((input?: Dynamic) => compareFindPositions(input, first) === 0)) return findHits(state, workbook, text);
+  if (after.some((hit) => compareFindPositions(hit, first) === 0)) return findHits(state, workbook, text);
   let hits = [...before, ...after];
   hits.sort(compareFindPositions);
   return {
-    hits: hits,
+    hits,
     isCapped: true,
     ends: {
-      first: first,
-      last: last,
+      first,
+      last,
     },
     editsSinceLooked: 0,
   };
 }
-export function shortenFoundText(text?: Dynamic) {
+export function shortenFoundText(text: string): string {
   let words = text.trim().split(/\s+/);
-  let characters = Array.from<Dynamic>(words.slice(0, MAX_WORDS_IN_FOUND_TEXT).join(' '));
+  let characters = Array.from(words.slice(0, MAX_WORDS_IN_FOUND_TEXT).join(' '));
   return words.length > MAX_WORDS_IN_FOUND_TEXT || characters.length > MAX_CHARACTERS_IN_FOUND_TEXT
     ? `${characters.slice(0, MAX_CHARACTERS_IN_FOUND_TEXT).join('')}…`
     : words.join(' ');
 }
-export function roomNeededUnderFindBar(state: PageState, cellArea?: Dynamic, layout?: Dynamic) {
+export function roomNeededUnderFindBar(state: PageState, cellArea: CellArea, layout: GridLayout): number {
   if (state.find?.isReplaceShown === true) return 0;
-  let { across: across, down: down } = rangeSpansOnScreen(cellArea, state, layout, state);
+  let { across, down } = rangeSpansOnScreen(cellArea, state, layout, state);
   if (down.start < down.showFrom) return 0;
   let cellTop = COLUMN_HEADER_HEIGHT + down.start;
   let cellLeft = ROW_HEADER_WIDTH + Math.max(across.showFrom, across.start);
@@ -247,7 +311,7 @@ export function roomNeededUnderFindBar(state: PageState, cellArea?: Dynamic, lay
   let roomNeeded = (FIND_BAR_BOX.top + FIND_BAR_BOX.height + FIND_BAR_GAP) / state.zoom;
   return isUnderBar ? Math.max(0, roomNeeded - cellTop) : 0;
 }
-export function makeRoomForFindBar(state: PageState, workbook: ReadsWithTextMeasurer, find?: Dynamic) {
+export function makeRoomForFindBar(state: PageState, workbook: ReadsWithTextMeasurer, find: Find): PageState {
   let activeArea = mergedAreaOrCellOf(workbook, state.activeCell);
   if (activeArea === null)
     return {
@@ -269,7 +333,7 @@ export function makeRoomForFindBar(state: PageState, workbook: ReadsWithTextMeas
     },
   };
 }
-export function goToFindHit(state: PageState, workbook: ReadsWithTextMeasurer, hit?: Dynamic) {
+export function goToFindHit(state: PageState, workbook: ReadsWithTextMeasurer, hit: FindHit | undefined): PageState {
   if (state.mode.kind !== 'navigating' || isModalOpen(state) || state.dragging !== null || state.find === null) return state;
   if (hit === undefined)
     return {
@@ -279,7 +343,7 @@ export function goToFindHit(state: PageState, workbook: ReadsWithTextMeasurer, h
         roomAboveGrid: 0,
       },
     };
-  let { sheetId: sheetId } = hit.cellId;
+  let { sheetId } = hit.cellId;
   if (sheetId !== state.sheetId && state.sheetBeingRenamed !== null) return state;
   let shown = showSheet(state, workbook, sheetId);
   if (shown.sheetId !== sheetId) return state;
@@ -293,13 +357,13 @@ export function goToFindHit(state: PageState, workbook: ReadsWithTextMeasurer, h
   let lastDone = state.lastDone?.what === 'replaced' ? state.lastDone : shown.lastDone;
   let nextState = {
     ...shown,
-    find: find,
-    lastDone: lastDone,
+    find,
+    lastDone,
     notice: state.notice,
   };
   return makeRoomForFindBar(moveActiveCellTo(withoutOtherRanges(nextState), workbook, hit.cellId), workbook, find);
 }
-export function selectedAreaToFindIn(state: PageState, workbook: WorkbookReads) {
+export function selectedAreaToFindIn(state: PageState, workbook: WorkbookReads): CellArea | null {
   let area = selectedArea(state, workbook);
   if (area === null || area.rowCount * area.columnCount === 1) return null;
   let mergedArea = workbook.mergedAreaAt(state.sheetId, {
@@ -308,7 +372,7 @@ export function selectedAreaToFindIn(state: PageState, workbook: WorkbookReads) 
   });
   return mergedArea?.rowCount === area.rowCount && mergedArea.columnCount === area.columnCount ? null : area;
 }
-export function findWithinOfSelection(state: PageState, workbook: WorkbookReads) {
+export function findWithinOfSelection(state: PageState, workbook: WorkbookReads): FindWithin | null {
   let area = selectedAreaToFindIn(state, workbook);
   let lines = workbook.linesOf(state.sheetId);
   if (area === null || lines === null) return null;
@@ -324,7 +388,7 @@ export function findWithinOfSelection(state: PageState, workbook: WorkbookReads)
     at: area,
   };
 }
-export function openFind(state: PageState, workbook: WorkbookReads) {
+export function openFind(state: PageState, workbook: WorkbookReads): PageState {
   if (state.find !== null || isModalOpen(state)) return state;
   return {
     ...withCalendarShut(state),
@@ -339,7 +403,7 @@ export function openFind(state: PageState, workbook: WorkbookReads) {
     },
   };
 }
-export function showFindReplace(state: PageState, isShown: Dynamic, workbook: ReadsWithTextMeasurer) {
+export function showFindReplace(state: PageState, isShown: boolean, workbook: ReadsWithTextMeasurer): PageState {
   if (state.find === null || state.find.isReplaceShown === isShown) return state;
   let find = {
     ...state.find,
@@ -365,9 +429,13 @@ export function showFindReplace(state: PageState, isShown: Dynamic, workbook: Re
       );
   return indexOfActiveFindHit(nextState) === null || nextState.find === null ? nextState : makeRoomForFindBar(nextState, workbook, nextState.find);
 }
-export function changeFindText(state: PageState, { text: text, goesToCellFound: goesToCellFound }: Dynamic, workbook: ReadsWithTextMeasurer) {
+export function changeFindText(
+  state: PageState,
+  { text, goesToCellFound }: { text: string; goesToCellFound: boolean },
+  workbook: ReadsWithTextMeasurer,
+): PageState {
   if (state.find === null) return state;
-  let { find: find } = state;
+  let { find } = state;
   let activeCellPosition = activeCellPositionOrOrigin(state, workbook);
   let narrowsLastFind =
     find.text !== '' &&
@@ -377,7 +445,7 @@ export function changeFindText(state: PageState, { text: text, goesToCellFound: 
     (find.options.matchesCase ? text.startsWith(find.text) : text.toLowerCase().startsWith(find.text.toLowerCase()));
   let query = findQueryOf(
     {
-      text: text,
+      text,
       options: find.options,
     },
     workbook,
@@ -386,7 +454,7 @@ export function changeFindText(state: PageState, { text: text, goesToCellFound: 
   let found = narrowsLastFind
     ? {
         ...find,
-        hits: find.hits.filter((input?: Dynamic) => isFindHit(state, workbook, input, query)),
+        hits: find.hits.filter((hit) => isFindHit(state, workbook, hit, query)),
       }
     : findHits(state, workbook, text);
   let nextState = {
@@ -394,21 +462,21 @@ export function changeFindText(state: PageState, { text: text, goesToCellFound: 
     find: {
       ...find,
       ...found,
-      text: text,
+      text,
     },
   };
   if (!goesToCellFound) return nextState;
-  let hitsOnSheet = found.hits.filter(({ cellId: cellId }: Dynamic) => cellId.sheetId === state.sheetId);
+  let hitsOnSheet = found.hits.filter(({ cellId }) => cellId.sheetId === state.sheetId);
   return goToFindHit(
     nextState,
     workbook,
-    hitsOnSheet.find((input?: Dynamic) => compareFindPositions(input, activeCellPosition) >= 0) ?? hitsOnSheet[0],
+    hitsOnSheet.find((hit) => compareFindPositions(hit, activeCellPosition) >= 0) ?? hitsOnSheet[0],
   );
 }
-export function changeFindOptions(state: PageState, options: Dynamic, workbook: WorkbookReads) {
+export function changeFindOptions(state: PageState, optionsChanged: FindOptionsChange, workbook: WorkbookReads): PageState {
   if (state.find?.isReplaceShown !== true) return state;
-  let { within: within, ...otherOptions } = options;
-  let nextWithin =
+  let { within, ...otherOptions } = optionsChanged;
+  let nextWithin: FindOptions['within'] =
     within === undefined
       ? state.find.options.within
       : within === 'sheet'
@@ -416,7 +484,7 @@ export function changeFindOptions(state: PageState, options: Dynamic, workbook: 
         : within === 'allSheets'
           ? within
           : (findWithinOfSelection(state, workbook) ?? state.find.selectedAtFirst);
-  let nextOptions = {
+  let nextOptions: FindOptions = {
     ...state.find.options,
     ...otherOptions,
     within: nextWithin,
@@ -428,13 +496,13 @@ export function changeFindOptions(state: PageState, options: Dynamic, workbook: 
       find: {
         ...state.find,
         options: nextOptions,
-        selectedAtFirst: selectedAtFirst,
+        selectedAtFirst,
       },
     },
     workbook,
   );
 }
-export function refreshFindHits(state: PageState, workbook: WorkbookReads) {
+export function refreshFindHits(state: PageState, workbook: WorkbookReads): PageState {
   if (state.find === null) return state;
   return {
     ...state,
@@ -444,7 +512,7 @@ export function refreshFindHits(state: PageState, workbook: WorkbookReads) {
     },
   };
 }
-export function findHitsReadyToStep(state: PageState, step: Dynamic, workbook: WorkbookReads) {
+export function findHitsReadyToStep(state: PageState, step: number, workbook: WorkbookReads): PageState {
   let current = (state.find?.editsSinceLooked ?? 0) > 0 ? refreshFindHits(state, workbook) : state;
   let ends = current.find?.ends ?? null;
   if (current.find === null || ends === null) return current;
@@ -461,23 +529,24 @@ export function findHitsReadyToStep(state: PageState, step: Dynamic, workbook: W
     },
   };
 }
-export function stepFindHit(state: PageState, step: Dynamic, workbook: ReadsWithTextMeasurer) {
+export function stepFindHit(state: PageState, step: number, workbook: ReadsWithTextMeasurer): PageState {
   let current = findHitsReadyToStep(state, step, workbook);
   let hits = current.find?.hits ?? [];
   if (hits.length === 0) return goToFindHit(current, workbook, undefined);
   let activeHitIndex = indexOfActiveFindHit(current);
   if (activeHitIndex !== null) return goToFindHit(current, workbook, hits[(activeHitIndex + step + hits.length) % hits.length]);
   let activeCellPosition = activeCellPositionOrOrigin(current, workbook);
-  let nextHitIndex = hits.findIndex((input?: Dynamic) => compareFindPositions(input, activeCellPosition) >= 0);
+  let nextHitIndex = hits.findIndex((hit) => compareFindPositions(hit, activeCellPosition) >= 0);
   let hitIndex = step === 1 ? (nextHitIndex === -1 ? 0 : nextHitIndex) : (nextHitIndex === -1 ? hits.length : nextHitIndex) - 1;
   return goToFindHit(current, workbook, hits[(hitIndex + hits.length) % hits.length]);
 }
-export function settleFind(before: Dynamic, state: PageState, workbook: ReadsWithTextMeasurer, canEdit?: Dynamic) {
+/** Keeps the find in step with a change of the page: a new sheet, formulas shown or hidden, or edits. */
+export function settleFind(before: PageState, state: PageState, workbook: ReadsWithTextMeasurer, canEdit: boolean): PageState {
   if (state.find?.isReplaceShown === true && !canEdit) return showFindReplace(state, false, workbook);
   if (state.find === null || state.find !== before.find) return state;
   if (state.sheetId !== before.sheetId) {
     let isInAllSheets = state.find.options.within === 'allSheets';
-    let optionsOnNewSheet = isInAllSheets
+    let optionsOnNewSheet: FindOptions = isInAllSheets
       ? state.find.options
       : {
           ...state.find.options,
@@ -508,14 +577,14 @@ export function settleFind(before: Dynamic, state: PageState, workbook: ReadsWit
   }
   if (state.areFormulasShown !== before.areFormulasShown) return refreshFindHits(state, workbook);
   if (state.workbookChangeCount === before.workbookChangeCount && state.formulasWorkedOutCount === before.formulasWorkedOutCount) return state;
-  let { options: findOptions, selectedAtFirst: selectedAtFirst, editsSinceLooked: editsSinceLooked } = state.find;
+  let { options: findOptions, selectedAtFirst, editsSinceLooked } = state.find;
   let findWithin = findWithinOf(findOptions);
   let within = findWithin === null ? findOptions.within : (relocateFindArea(workbook, state.sheetId, findWithin) ?? findWithin);
   let nextFind = {
     ...state.find,
     options: {
       ...findOptions,
-      within: within,
+      within,
     },
     selectedAtFirst: selectedAtFirst === null ? null : relocateFindArea(workbook, state.sheetId, selectedAtFirst),
     editsSinceLooked: editsSinceLooked + 1,
@@ -526,35 +595,39 @@ export function settleFind(before: Dynamic, state: PageState, workbook: ReadsWit
   };
 }
 export const MAX_FIND_HITS = 1000;
-export const DEFAULT_FIND_OPTIONS = {
+export const DEFAULT_FIND_OPTIONS: FindOptions = {
   matchesCase: false,
   isWholeCell: false,
   isInFormulas: false,
   within: null,
 };
-export const findWithinOf = ({ within: within }: Dynamic) => (within === 'allSheets' ? null : within);
-export const findQueryOf = ({ text: text, options: options }: Dynamic, workbook: WorkbookReads, sheetId?: Dynamic) => {
+export const findWithinOf = ({ within }: Pick<FindOptions, 'within'>): FindWithin | null => (within === 'allSheets' ? null : within);
+export const findQueryOf = (
+  { text, options }: { text: string; options: FindOptions },
+  workbook: WorkbookReads,
+  sheetId: SheetId,
+): FindQuery => {
   let within = findWithinOf(options);
   return {
     ...options,
-    text: text,
+    text,
     within: within === null ? null : stretchesOfFindWithin(workbook, sheetId, within),
   };
 };
-export const NO_FIND_HITS = {
+export const NO_FIND_HITS: FoundHits = {
   hits: [],
   isCapped: false,
   ends: null,
   editsSinceLooked: 0,
 };
 export const MAX_FIND_SHOWN_CHARACTERS = 1000;
-export const joinPeopleNames = (names?: Dynamic) => names.join(', ');
-export const numberTextMatchesFind = (text?: Dynamic, query?: Dynamic, decimalSign?: Dynamic) =>
+export const joinPeopleNames = (names: readonly string[]): string => names.join(', ');
+export const numberTextMatchesFind = (text: string, query: FindQuery, decimalSign: DecimalSignName): boolean =>
   textMatchesFind(stripGroupSeparators(text, decimalSign), query) || textMatchesFind(normalizeNoBreakSpaces(text), query);
-export const STATE_WITH_FORMULAS_SHOWN = {
+export const STATE_WITH_FORMULAS_SHOWN: Pick<PageState, 'areFormulasShown'> = {
   areFormulasShown: true,
 };
-export const compareFindPositions = (one?: Dynamic, other?: Dynamic) =>
+export const compareFindPositions = (one: FindPosition, other: FindPosition): number =>
   one.sheetIndex !== other.sheetIndex
     ? one.sheetIndex - other.sheetIndex
     : one.rowIndex !== other.rowIndex
@@ -569,30 +642,30 @@ export const FIND_BAR_BOX = {
   height: 36,
 };
 export const FIND_BAR_GAP = 8;
-export const roomAboveGridForFind = ({ find: find, zoom: zoom }: Dynamic) =>
+export const roomAboveGridForFind = ({ find, zoom }: Pick<PageState, 'find' | 'zoom'>): number =>
   find === null || find.isReplaceShown ? 0 : Math.max(0, (FIND_BAR_BOX.top + FIND_BAR_BOX.height + FIND_BAR_GAP) / zoom - find.roomAboveGrid);
-export const activeCellPositionOrOrigin = ({ sheetId: sheetId, activeCell: activeCell }: Dynamic, workbook: WorkbookReads) => ({
+export const activeCellPositionOrOrigin = ({ sheetId, activeCell }: Pick<PageState, 'sheetId' | 'activeCell'>, workbook: WorkbookReads): FindPosition => ({
   ...(workbook.positionOfCell(activeCell) ?? {
     rowIndex: 0,
     columnIndex: 0,
   }),
-  sheetIndex: workbook.listSheets().findIndex((input?: Dynamic) => input.sheetId === sheetId),
+  sheetIndex: workbook.listSheets().findIndex((sheet) => sheet.sheetId === sheetId),
 });
-export const indexOfActiveFindHit = ({ find: find, activeCell: activeCell }: Dynamic) => {
-  let hitIndex = find === null ? -1 : find.hits.findIndex(({ cellId: cellId }: Dynamic) => isSameCell(cellId, activeCell));
+export const indexOfActiveFindHit = ({ find, activeCell }: Pick<PageState, 'find' | 'activeCell'>): number | null => {
+  let hitIndex = find === null ? -1 : find.hits.findIndex(({ cellId }) => isSameCell(cellId, activeCell));
   return hitIndex === -1 ? null : hitIndex;
 };
 export const isModalOpen = ({
-  menu: menu,
-  customNumberFormat: customNumberFormat,
-  pasteThatWaits: pasteThatWaits,
-  pickForWorkbook: pickForWorkbook,
-  importOfAFile: importOfAFile,
-  fileAwaited: fileAwaited,
-  isListOfKeysOpen: isListOfKeysOpen,
-  cellHistory: cellHistory,
-  xlsxFileReady: xlsxFileReady,
-}: Dynamic) =>
+  menu,
+  customNumberFormat,
+  pasteThatWaits,
+  pickForWorkbook,
+  importOfAFile,
+  fileAwaited,
+  isListOfKeysOpen,
+  cellHistory,
+  xlsxFileReady,
+}: StateOfModals): boolean =>
   isMenuHoldingField(menu) ||
   customNumberFormat?.typedIn === 'dialog' ||
   pasteThatWaits !== null ||
@@ -602,16 +675,16 @@ export const isModalOpen = ({
   isListOfKeysOpen ||
   cellHistory !== null ||
   xlsxFileReady !== null;
-export const isModalOpenBesidesCellHistory = (state?: Dynamic) =>
+export const isModalOpenBesidesCellHistory = (state: StateOfModals): boolean =>
   isModalOpen({
     ...state,
     cellHistory: null,
   });
-export const isModalOrVersionLookOpen = (state?: Dynamic) =>
+export const isModalOrVersionLookOpen = (state: StateOfModals & Pick<PageView, 'versionHistory'>): boolean =>
   isModalOpenBesidesCellHistory(state) || (state.versionHistory?.look ?? null) !== null;
-export const areaFindLooksIn = (state: PageState, workbook: WorkbookReads) =>
+export const areaFindLooksIn = (state: PageState, workbook: WorkbookReads): CellArea | null =>
   selectedAreaToFindIn(state, workbook) ?? state.find?.selectedAtFirst?.at ?? null;
-export const closeFind = (state?: Dynamic) => ({
+export const closeFind = (state: PageState): PageState => ({
   ...state,
   find: null,
 });

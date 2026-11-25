@@ -1,12 +1,25 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Comparison } from '@open-artifact/sheets-core';
 import { ruleTestSummary, ruleColumnWords, ruleColumnName } from '../messages/conditional-format.ts';
 import { translateMessage } from '../i18n/messages.ts';
 import { QUICK_FILTER_COUNT } from './own-filter-list.ts';
-export function describeValueFilterLine(filterLine?: Dynamic) {
+import { namedViewSortLeftOutLabel } from './named-view-messages.ts';
+import type { MessagePart } from '../i18n/messages.ts';
+import type { ConditionChoice, RuleColumn, RuleOperand, RuleTest } from '../messages/conditional-format.ts';
+import type { NoticeWithoutDetail, OwnFilterNotWorkedOutNotice, OwnSortIsOverNotice, ReadyFilterWhat } from '../state/initial-state.ts';
+import type { LinesInTheWayNotice } from '../state/edit-answers.ts';
+import type { DueDatePreset } from '../model/date-serials.ts';
+import type { RecordCountsOfFilter, SaidOfFilterItem } from './own-filters.ts';
+import type { ConditionJoin } from './filter-model.ts';
+import type { SortsFor } from './sort-pane.ts';
+/** A notice of the page's own sort: it is over, or it is in the way of an act. */
+/** What of the person's own view is being applied while the rows are worked out. */
+export type OwnViewShownAsApplied = 'sortAndFilter' | 'sort' | 'filter';
+export type OwnSortNotice = OwnSortIsOverNotice | (LinesInTheWayNotice & { kind: 'ownSortInTheWay' });
+export function describeValueFilterLine(filterLine: SaidOfFilterItem): MessagePart[] {
   if (filterLine.kind === 'test') return ruleTestSummary(filterLine.test);
-  let columnName = ruleColumnWords(filterLine.column);
-  let [first = null, second = null] = filterLine.values;
-  let [count, isShowOnly] = [filterLine.values.length, filterLine.kind === 'isOneOf'];
+  const columnName = ruleColumnWords(filterLine.column);
+  const [first = null, second = null] = filterLine.values;
+  const [count, isShowOnly] = [filterLine.values.length, filterLine.kind === 'isOneOf'];
   if (count === 2)
     return isShowOnly
       ? translateMessage(
@@ -39,7 +52,7 @@ export function describeValueFilterLine(filterLine?: Dynamic) {
         },
         {
           column: columnName,
-          count: count,
+          count,
         },
       )
     : translateMessage(
@@ -49,11 +62,11 @@ export function describeValueFilterLine(filterLine?: Dynamic) {
         },
         {
           column: columnName,
-          count: count,
+          count,
         },
       );
 }
-export function filterChoiceLabel(choice?: Dynamic, isOfDates?: Dynamic) {
+export function filterChoiceLabel(choice: ConditionChoice, isOfDates: boolean): string {
   switch (choice) {
     case 'isBlank':
       return translateMessage({
@@ -197,7 +210,7 @@ export function filterChoiceLabel(choice?: Dynamic, isOfDates?: Dynamic) {
           });
   }
 }
-export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynamic, value?: Dynamic) {
+export function comparisonWithValueText(comparison: Comparison, isOfDates: boolean, value: string): string {
   switch (comparison) {
     case 'lessThan':
       return isOfDates
@@ -207,7 +220,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'IcFvwiZl3i',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -216,7 +229,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'nXDVkzsWe4',
             },
             {
-              value: value,
+              value,
             },
           );
     case 'lessThanOrEqualTo':
@@ -227,7 +240,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'iOIwA90NnW',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -236,7 +249,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: '1tbUjWR1H6',
             },
             {
-              value: value,
+              value,
             },
           );
     case 'equalTo':
@@ -247,7 +260,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'cAfEYHB2be',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -256,7 +269,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'F+ycligLvh',
             },
             {
-              value: value,
+              value,
             },
           );
     case 'notEqualTo':
@@ -267,7 +280,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'PF1UadDHvu',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -276,7 +289,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: '2qEbVGNt3+',
             },
             {
-              value: value,
+              value,
             },
           );
     case 'greaterThanOrEqualTo':
@@ -287,7 +300,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'ULrAWt6huH',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -296,7 +309,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: '8YlNbN72Vk',
             },
             {
-              value: value,
+              value,
             },
           );
     case 'greaterThan':
@@ -307,7 +320,7 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'Gcu26iIpxR',
             },
             {
-              value: value,
+              value,
             },
           )
         : translateMessage(
@@ -316,12 +329,12 @@ export function comparisonWithValueText(comparison?: Dynamic, isOfDates?: Dynami
               id: 'UxLF1oXEdx',
             },
             {
-              value: value,
+              value,
             },
           );
   }
 }
-export function describeFilterCondition({ condition: condition, isOfDates: isOfDates }: Dynamic) {
+export function describeFilterCondition({ condition, isOfDates }: RuleTest): string {
   switch (condition.kind) {
     case 'textIs':
       return translateMessage(
@@ -420,7 +433,7 @@ export function describeFilterCondition({ condition: condition, isOfDates: isOfD
       return filterChoiceLabel(condition.value ? 'isChecked' : 'isNotChecked', isOfDates);
   }
 }
-export function datePresetLabel(preset?: Dynamic) {
+export function datePresetLabel(preset: DueDatePreset): string {
   switch (preset) {
     case 'thisWeek':
       return translateMessage({
@@ -444,7 +457,7 @@ export function datePresetLabel(preset?: Dynamic) {
       });
   }
 }
-export function readyFilterLabel(readyFilter?: Dynamic) {
+export function readyFilterLabel(readyFilter: Exclude<ReadyFilterWhat, 'mine' | 'allBut'>): string {
   switch (readyFilter) {
     case 'largest':
       return largestCountLabel(QUICK_FILTER_COUNT);
@@ -459,7 +472,8 @@ export function readyFilterLabel(readyFilter?: Dynamic) {
       return datePresetLabel(readyFilter);
   }
 }
-export function filterNoticeText(notice?: Dynamic) {
+/** Only the filter notices among `NoticeWithoutDetail` have words here; any other kind has none. */
+export function filterNoticeText(notice: NoticeWithoutDetail | OwnFilterNotWorkedOutNotice): string | undefined {
   switch (notice.kind) {
     case 'noTableToFilter':
       return translateMessage({
@@ -483,7 +497,7 @@ export function filterNoticeText(notice?: Dynamic) {
           });
   }
 }
-export function ownSortInTheWayText(act?: Dynamic) {
+export function ownSortInTheWayText(act: LinesInTheWayNotice['act']): string {
   switch (act) {
     case 'paste':
       return translateMessage({
@@ -494,6 +508,16 @@ export function ownSortInTheWayText(act?: Dynamic) {
       return translateMessage({
         defaultMessage: 'Nothing was filled, because only you see these rows in this order. Clear your sort first.',
         id: 'kTLLh6LwFf',
+      });
+    case 'pasteOfFormula':
+      return translateMessage({
+        defaultMessage: 'Nothing was pasted, because a formula refers to another row, and only you see these rows in this order. Clear your sort first.',
+        id: 'p7SIWZexml',
+      });
+    case 'fillOfFormula':
+      return translateMessage({
+        defaultMessage: 'Nothing was filled, because a formula refers to another row, and only you see these rows in this order. Clear your sort first.',
+        id: 'ncN21/iAx6',
       });
     case 'mergeCells':
       return translateMessage({
@@ -520,9 +544,13 @@ export function ownSortInTheWayText(act?: Dynamic) {
       });
   }
 }
-export function ownSortNoticeText(notice?: Dynamic) {
+export function ownSortNoticeText(notice: OwnSortNotice): string {
   if (notice.kind === 'ownSortInTheWay') return ownSortInTheWayText(notice.act);
   switch (notice.why) {
+    case 'leftOutOfNamedView':
+      return namedViewSortLeftOutLabel(false);
+    case 'leftOutOfNamedViewWithFilter':
+      return namedViewSortLeftOutLabel(true);
     case 'tableIsGone':
       return translateMessage({
         defaultMessage: 'The table you were sorting was deleted, so its sort was cleared.',
@@ -539,6 +567,22 @@ export function ownSortNoticeText(notice?: Dynamic) {
         id: '8vZY+7c7zY',
       });
   }
+}
+export function applyingOwnFilterLabel(sortsAndFilters: OwnViewShownAsApplied): string {
+  if (sortsAndFilters === 'sortAndFilter')
+    return translateMessage({
+      defaultMessage: 'Applying your sort and filter…',
+      id: 'VmJMQaCKpN',
+    });
+  if (sortsAndFilters === 'sort')
+    return translateMessage({
+      defaultMessage: 'Applying your sort…',
+      id: '2dd4GBb/2Q',
+    });
+  return translateMessage({
+    defaultMessage: 'Applying your filter…',
+    id: 'Dgj7mhNTBC',
+  });
 }
 export const filterMessages = {
   filter: () =>
@@ -702,7 +746,7 @@ export const filterMessages = {
       id: 'DwSxKnts9V',
     }),
 };
-export const showOnlyValueLabel = (text?: Dynamic) =>
+export const showOnlyValueLabel = (text: string): string =>
   text === ''
     ? translateMessage({
         defaultMessage: 'Show only blank cells',
@@ -714,10 +758,10 @@ export const showOnlyValueLabel = (text?: Dynamic) =>
           id: 'NKoXxrfvAw',
         },
         {
-          text: text,
+          text,
         },
       );
-export const leaveOutValueLabel = (text?: Dynamic) =>
+export const leaveOutValueLabel = (text: string): string =>
   text === ''
     ? translateMessage({
         defaultMessage: 'Leave out blank cells',
@@ -729,21 +773,21 @@ export const leaveOutValueLabel = (text?: Dynamic) =>
           id: 'JiDU6ItT2R',
         },
         {
-          text: text,
+          text,
         },
       );
-export const rowsInViewOfAllText = ({ inView: inView, all: all }: Dynamic) =>
+export const rowsInViewOfAllText = ({ inView, all }: RecordCountsOfFilter): string =>
   translateMessage(
     {
       defaultMessage: '{all, plural, one {{inView, number} of # row} other {{inView, number} of # rows}}',
       id: 'xLHGIfj9Q/',
     },
     {
-      inView: inView,
-      all: all,
+      inView,
+      all,
     },
   );
-export const filterValueInSentence = (text?: Dynamic) =>
+export const filterValueInSentence = (text: string | null): MessagePart[] =>
   text === null
     ? [filterMessages.blankInASentence()]
     : [
@@ -751,9 +795,9 @@ export const filterValueInSentence = (text?: Dynamic) =>
           setApart: text,
         },
       ];
-export const describeFilterLineAlternatives = ([first, ...others]: Dynamic) =>
+export const describeFilterLineAlternatives = ([first, ...others]: readonly SaidOfFilterItem[]): MessagePart[] =>
   others.reduce(
-    (sentence?: Dynamic, next?: Dynamic) =>
+    (sentence, next) =>
       translateMessage(
         {
           defaultMessage: '{first} or {second}',
@@ -766,17 +810,17 @@ export const describeFilterLineAlternatives = ([first, ...others]: Dynamic) =>
       ),
     describeValueFilterLine(first),
   );
-export const removeFilterLineLabel = (line?: Dynamic) =>
+export const removeFilterLineLabel = (line: string): string =>
   translateMessage(
     {
       defaultMessage: 'Remove “{line}”',
       id: 'GOaQ5GA4+U',
     },
     {
-      line: line,
+      line,
     },
   );
-export const searchOrFilterColumnLabel = (column?: Dynamic) =>
+export const searchOrFilterColumnLabel = (column: RuleColumn): string =>
   translateMessage(
     {
       defaultMessage: 'Search or filter {column}',
@@ -786,28 +830,28 @@ export const searchOrFilterColumnLabel = (column?: Dynamic) =>
       column: ruleColumnName(column),
     },
   );
-export const shownOperandText = (operand?: Dynamic) => (operand.kind === 'shown' ? operand.text : '');
-export const changeConditionLabel = (condition?: Dynamic) =>
+export const shownOperandText = (operand: RuleOperand): string => (operand.kind === 'shown' ? operand.text : '');
+export const changeConditionLabel = (condition: string): string =>
   translateMessage(
     {
       defaultMessage: 'Change condition: {condition}',
       id: '1KqqsodDf6',
     },
     {
-      condition: condition,
+      condition,
     },
   );
-export const wholeNumberRangeHint = (most?: Dynamic) =>
+export const wholeNumberRangeHint = (most: number): string =>
   translateMessage(
     {
       defaultMessage: 'Enter a whole number from 1 to {most, number}.',
       id: 'VgncZvmgCb',
     },
     {
-      most: most,
+      most,
     },
   );
-export const conditionJoinHint = (join?: Dynamic) =>
+export const conditionJoinHint = (join: ConditionJoin): string =>
   join === 'and'
     ? translateMessage({
         defaultMessage: 'And: rows must meet both conditions. Press to change to “or”.',
@@ -817,27 +861,27 @@ export const conditionJoinHint = (join?: Dynamic) =>
         defaultMessage: 'Or: rows must meet either condition. Press to change to “and”.',
         id: 'v3odhQtIi8',
       });
-export const alsoHidesCellsText = (cells?: Dynamic) =>
+export const alsoHidesCellsText = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Also hides {cells}',
       id: 'JeGgYeOQco',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const editFilterLineLabel = (line?: Dynamic) =>
+export const editFilterLineLabel = (line: string): string =>
   translateMessage(
     {
       defaultMessage: 'Edit filter: {line}',
       id: 'Cfc8C54rg5',
     },
     {
-      line: line,
+      line,
     },
   );
-export const filterByColumnLabel = (column?: Dynamic, isFiltered: Dynamic = false) =>
+export const filterByColumnLabel = (column: RuleColumn, isFiltered: boolean = false): string =>
   isFiltered
     ? translateMessage(
         {
@@ -857,28 +901,38 @@ export const filterByColumnLabel = (column?: Dynamic, isFiltered: Dynamic = fals
           column: ruleColumnName(column),
         },
       );
-export const largestCountLabel = (count?: Dynamic) =>
+export const largestCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, number} largest',
       id: 'TbjdPrtkv+',
     },
     {
-      count: count,
+      count,
     },
   );
-export const smallestCountLabel = (count?: Dynamic) =>
+export const smallestCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, number} smallest',
       id: '72RUe/6RZ9',
     },
     {
-      count: count,
+      count,
     },
   );
 export const sortMessages = {
-  bar: (isFiltered?: Dynamic) =>
+  sortCutsCellsForAgent: () =>
+    translateMessage({
+      defaultMessage: 'Clear your sort to ask Agent about these cells.',
+      id: 'zhqFx5lyPS',
+    }),
+  sortAndFilterCutCellsForAgent: () =>
+    translateMessage({
+      defaultMessage: 'Clear your sort and filter to ask Agent about these cells.',
+      id: 'cpMeldoshO',
+    }),
+  bar: (isFiltered: boolean) =>
     isFiltered
       ? translateMessage({
           defaultMessage: 'Sort and filter',
@@ -888,7 +942,7 @@ export const sortMessages = {
           defaultMessage: 'Sort',
           id: 'Nip0Cb6jqY',
         }),
-  forYouOnly: (isFiltered?: Dynamic) =>
+  forYouOnly: (isFiltered: boolean) =>
     isFiltered
       ? translateMessage({
           defaultMessage: 'Sorted and filtered for you only',
@@ -908,7 +962,7 @@ export const sortMessages = {
       defaultMessage: 'Puts the table’s rows in this order for everyone.',
       id: 'cAo+r/WFfW',
     }),
-  refresh: (isFiltered?: Dynamic) =>
+  refresh: (isFiltered: boolean) =>
     isFiltered
       ? translateMessage({
           defaultMessage: 'The rows shown may not match your sort or filter. Reapply to update them.',
@@ -918,7 +972,7 @@ export const sortMessages = {
           defaultMessage: 'The rows shown may not be in sorted order. Reapply your sort to update them.',
           id: 'fXGdUEDvlF',
         }),
-  clearAll: (isFiltered?: Dynamic) =>
+  clearAll: (isFiltered: boolean) =>
     isFiltered
       ? translateMessage({
           defaultMessage: 'Clear all sorts and filters',
@@ -934,13 +988,15 @@ export const sortMessages = {
       id: 'R+LCoTT1Ck',
     }),
 };
-export const editSortLabel = (sort?: Dynamic) =>
+export const editSortLabel = (sort: string): string =>
   translateMessage(
     {
       defaultMessage: 'Edit sort: {sort}',
       id: '3XUjhNk1SD',
     },
     {
-      sort: sort,
+      sort,
     },
   );
+export const filterForWhomLabel = (forWhom: SortsFor | null): string | null =>
+  forWhom === null ? null : forWhom === 'oneself' ? filterMessages.forYouOnly() : filterMessages.forEveryone();

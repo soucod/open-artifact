@@ -12,15 +12,19 @@
  *   node scripts/open-artifact.mjs daemon status | stop
  *   node scripts/open-artifact.mjs help                        the daemon CLI's other commands
  *
- * Who is calling: `OPEN_ARTIFACT_HARNESS` and `OPEN_ARTIFACT_SESSION` when set; in Claude Code the harness is
- * `claude-code` and the session `CLAUDE_CODE_SESSION_ID`; in Codex `codex` and `CODEX_THREAD_ID`; otherwise `cli` and
- * no session (the workspace, the current folder, still owns what is made). A plugin's MCP server and hooks pass
- * `--harness` themselves.
+ * Who is calling: `OPEN_ARTIFACT_HARNESS` and `OPEN_ARTIFACT_SESSION` when set; otherwise the harness whose profile
+ * names a variable that is set in this command's environment (`markers`, `sessionEnv`), and its session from the
+ * profile's `sessionEnv` (Claude Code `CLAUDECODE` and `CLAUDE_CODE_SESSION_ID`, Codex `CODEX_THREAD_ID`, Antigravity
+ * `ANTIGRAVITY_AGENT` and `ANTIGRAVITY_CONVERSATION_ID`); otherwise `cli` and no session (the workspace, the current
+ * folder, still owns what is made). A plugin's MCP server and hooks pass `--harness` themselves. The profiles are the
+ * daemon's harness profiles: the ones it ships (vendor/harnesses, or the daemon's own folder in a checkout), then the
+ * person's and the adapters' in `<OPEN_ARTIFACT_HOME>/harnesses/`, read as plain JSON.
  *
  * In a repository checkout without vendor/ (before `node scripts/build-skill.mjs`), the daemon runs from source.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -61,19 +65,53 @@ if (!env.OPEN_ARTIFACT_PLUGIN_DIR && basename(dirname(skillDir)) === 'skills' &&
 
 // ---------------------------------------------------------------- who is calling
 
-// The harness, from the variables each sets in the commands its agent runs, and its session id from the same.
-const harnesses = [
-  ['claude-code', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID'],
-  ['codex', 'CODEX_THREAD_ID', 'CODEX_THREAD_ID'],
-];
+// The harness profiles (plain JSON, read here without the daemon's code): the shipped ones, then the person's own and
+// the ones adapters reported. A harness with files in both gets the union of their variables.
+const home = (() => {
+  const named = env.OPEN_ARTIFACT_HOME || '~/.agents/open-artifact';
+  return resolve(named === '~' ? homedir() : named.startsWith('~/') ? join(homedir(), named.slice(2)) : named);
+})();
+const shippedProfiles = env.OPEN_ARTIFACT_HARNESS_PROFILES || (bin === vendoredBin ? join(vendor, 'harnesses') : resolve(dirname(sourceBin), '..', '..', 'harnesses'));
+const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** `[name, markers, session variables]` for every harness with a profile, in order. */
+function harnessVariables() {
+  const found = new Map();
+  for (const dir of [shippedProfiles, join(home, 'harnesses')]) {
+    let names = [];
+    try {
+      names = readdirSync(dir).filter((name) => name.endsWith('.json')).sort();
+    } catch {
+      continue;
+    }
+    for (const file of names) {
+      let profile;
+      try {
+        profile = JSON.parse(readFileSync(join(dir, file), 'utf8'));
+      } catch {
+        continue;
+      }
+      if (!profile || typeof profile !== 'object') continue;
+      const name = file.slice(0, -'.json'.length);
+      if (!found.has(name)) found.set(name, [name, [], []]);
+      const [, markers, sessions] = found.get(name);
+      const sessionEnv = typeof profile.sessionEnv === 'string' && VARIABLE.test(profile.sessionEnv) ? profile.sessionEnv : null;
+      const listed = Array.isArray(profile.markers) ? profile.markers.filter((m) => typeof m === 'string' && VARIABLE.test(m)) : [];
+      for (const marker of [...listed, ...(sessionEnv ? [sessionEnv] : [])]) if (!markers.includes(marker)) markers.push(marker);
+      if (sessionEnv && !sessions.includes(sessionEnv)) sessions.push(sessionEnv);
+    }
+  }
+  return [...found.values()];
+}
+
 // A plugin's MCP server and hooks name their harness with `--harness`: that wins over the variables, so an app started
 // from inside another agent's session (and holding its variables) does not take that session for its own.
 const named = process.argv.indexOf('--harness');
 if (named > 1 && process.argv[named + 1] && !env.OPEN_ARTIFACT_HARNESS) env.OPEN_ARTIFACT_HARNESS = process.argv[named + 1];
-for (const [name, marker, sessionVariable] of harnesses) {
-  if (env.OPEN_ARTIFACT_HARNESS ? env.OPEN_ARTIFACT_HARNESS !== name : !env[marker]) continue;
+for (const [name, markers, sessionVariables] of harnessVariables()) {
+  if (env.OPEN_ARTIFACT_HARNESS ? env.OPEN_ARTIFACT_HARNESS !== name : !markers.some((marker) => env[marker])) continue;
   env.OPEN_ARTIFACT_HARNESS = name;
-  if (!env.OPEN_ARTIFACT_SESSION && env[sessionVariable]) env.OPEN_ARTIFACT_SESSION = env[sessionVariable];
+  const sessionVariable = sessionVariables.find((variable) => env[variable]);
+  if (!env.OPEN_ARTIFACT_SESSION && sessionVariable) env.OPEN_ARTIFACT_SESSION = env[sessionVariable];
   break;
 }
 

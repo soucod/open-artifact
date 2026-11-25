@@ -1,9 +1,26 @@
 import { useUiWindow } from '../kit/theme.tsx';
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
-export function createPlanArrivalFlash({ afterMs: afterMs, atNextFrame: atNextFrame, onChange: onChange }: Dynamic) {
-  let lastDrawn: Dynamic = null;
-  let cancelFlash: Dynamic = null;
+/** What the import dialog drew, which tells whether a plan arrived. */
+export interface PlanArrivalDrawn {
+  isOpen: boolean;
+  isAwaited: boolean;
+  isWishOut: boolean;
+  plansHeardCount: number;
+}
+type CancelTimer = () => void;
+export interface PlanArrivalFlashTimers {
+  afterMs(ms: number, run: () => void): CancelTimer;
+  atNextFrame(run: () => void): CancelTimer;
+  onChange(isOn: boolean): void;
+}
+export interface PlanArrivalFlash {
+  drawn(drawnState: PlanArrivalDrawn): void;
+  isOn(): boolean;
+  stop(): void;
+}
+export function createPlanArrivalFlash({ afterMs, atNextFrame, onChange }: PlanArrivalFlashTimers): PlanArrivalFlash {
+  let lastDrawn: PlanArrivalDrawn | null = null;
+  let cancelFlash: CancelTimer | null = null;
   let flash = () => {
     let wasOn = cancelFlash !== null;
     cancelFlash?.();
@@ -16,7 +33,7 @@ export function createPlanArrivalFlash({ afterMs: afterMs, atNextFrame: atNextFr
     if (!wasOn) onChange(true);
   };
   return {
-    drawn(drawnState?: Dynamic) {
+    drawn(drawnState) {
       let isSame =
         lastDrawn?.isOpen === drawnState.isOpen &&
         lastDrawn.isAwaited === drawnState.isAwaited &&
@@ -34,11 +51,11 @@ export function createPlanArrivalFlash({ afterMs: afterMs, atNextFrame: atNextFr
   };
 }
 export function usePlanArrivalFlash({
-  isOpen: isOpen,
-  isAwaited: isAwaited,
-  isWishOut: isWishOut,
-  plansHeardCount: plansHeardCount,
-}: Dynamic) {
+  isOpen,
+  isAwaited,
+  isWishOut,
+  plansHeardCount,
+}: PlanArrivalDrawn) {
   let pageWindow = useUiWindow();
   let [isOn, setOn] = React.useState(false);
   let flash = React.useMemo(
@@ -46,12 +63,12 @@ export function usePlanArrivalFlash({
       pageWindow === undefined
         ? null
         : createPlanArrivalFlash({
-            afterMs: (ms?: Dynamic, callback?: Dynamic) => {
-              let timer = pageWindow.setTimeout(callback, ms);
+            afterMs: (ms, run) => {
+              let timer = pageWindow.setTimeout(run, ms);
               return () => pageWindow.clearTimeout(timer);
             },
-            atNextFrame: (callback?: Dynamic) => {
-              let frame = pageWindow.requestAnimationFrame(callback);
+            atNextFrame: (run) => {
+              let frame = pageWindow.requestAnimationFrame(run);
               return () => pageWindow.cancelAnimationFrame(frame);
             },
             onChange: setOn,
@@ -61,17 +78,17 @@ export function usePlanArrivalFlash({
   React.useEffect(() => () => flash?.stop(), [flash]);
   React.useLayoutEffect(() => {
     flash?.drawn({
-      isOpen: isOpen,
-      isAwaited: isAwaited,
-      isWishOut: isWishOut,
-      plansHeardCount: plansHeardCount,
+      isOpen,
+      isAwaited,
+      isWishOut,
+      plansHeardCount,
     });
   }, [flash, isOpen, isAwaited, isWishOut, plansHeardCount]);
   let isOnNow = React.useCallback(() => flash?.isOn() ?? false, [flash]);
   return React.useMemo(
     () => ({
-      isOn: isOn,
-      isOnNow: isOnNow,
+      isOn,
+      isOnNow,
     }),
     [isOn, isOnNow],
   );

@@ -1,9 +1,23 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellCondition, NumberOperand } from '@open-artifact/sheets-core';
 import { dateToSerial, END_OF_DAY_FRACTION, serialToIsoDate } from '../model/date-serials.ts';
 import { operatorOfCondition } from '../format/conditional/conditions.ts';
 import { isSameJsonValue } from '../model/same-json.ts';
-export function inputsOfFilterChoice(choice?: Dynamic, isDate?: Dynamic) {
-  let numberInput = isDate ? 'day' : 'number';
+import type { ConditionChoice } from '../messages/conditional-format.ts';
+import type { OwnFilterConditionHeld } from '../state/initial-state.ts';
+/** The kind of a field a filter condition is typed in. */
+export type FilterInputKind = 'text' | 'count' | 'number' | 'day';
+/** A condition as it is held in the filter list: its choice, and what is typed in its fields. */
+export interface FilterChoiceHeld extends OwnFilterConditionHeld {
+  choice: ConditionChoice;
+}
+/** How the fields of a filter condition are read: a number typed, the largest count, the longest text. */
+export interface FilterInputLimits {
+  numberTyped: (typed: string) => number | null;
+  mostCounted: number;
+  longestText: number;
+}
+export function inputsOfFilterChoice(choice: ConditionChoice, isDate: boolean): FilterInputKind[] {
+  const numberInput = isDate ? 'day' : 'number';
   switch (choice) {
     case 'isBlank':
     case 'isNotBlank':
@@ -35,11 +49,11 @@ export function inputsOfFilterChoice(choice?: Dynamic, isDate?: Dynamic) {
   }
 }
 export function conditionFromFilterChoice(
-  { choice: choice, first: first, second: second }: Dynamic,
-  isDate: Dynamic,
-  { numberTyped: numberTyped, mostCounted: mostCounted, longestText: longestText }: Dynamic,
-) {
-  let numberOfInput = (input?: Dynamic) => (!isDate ? numberTyped(input) : isIsoDateText(input) ? dateToSerial(input) : null);
+  { choice, first, second }: FilterChoiceHeld,
+  isDate: boolean,
+  { numberTyped, mostCounted, longestText }: FilterInputLimits,
+): CellCondition | null {
+  const numberOfInput = (typed: string) => (!isDate ? numberTyped(typed) : isIsoDateText(typed) ? dateToSerial(typed) : null);
   let endOfDay = isDate ? END_OF_DAY_FRACTION : 0;
   switch (choice) {
     case 'isBlank':
@@ -61,7 +75,7 @@ export function conditionFromFilterChoice(
     case 'textDoesNotContain':
     case 'textStartsWith':
     case 'textEndsWith': {
-      let typed = Array.from<Dynamic>(first.replace(CONTROL_CHARACTERS_PATTERN, '').trim()).slice(0, longestText).join('');
+      const typed = Array.from(first.replace(CONTROL_CHARACTERS_PATTERN, '').trim()).slice(0, longestText).join('');
       return typed === ''
         ? null
         : {
@@ -71,7 +85,7 @@ export function conditionFromFilterChoice(
     }
     case 'isAmongTheLargest':
     case 'isAmongTheSmallest': {
-      let typed = parseCountTyped(first, mostCounted);
+      const typed = parseCountTyped(first, mostCounted);
       return typed === null
         ? null
         : {
@@ -81,7 +95,7 @@ export function conditionFromFilterChoice(
     }
     case 'numberIsBetween':
     case 'numberIsNotBetween': {
-      let [typed, otherTyped] = [numberOfInput(first), numberOfInput(second)];
+      const [typed, otherTyped] = [numberOfInput(first), numberOfInput(second)];
       if (typed === null || otherTyped === null) return null;
       return {
         kind: choice,
@@ -91,7 +105,7 @@ export function conditionFromFilterChoice(
     }
     case 'equalTo':
     case 'notEqualTo': {
-      let typed = numberOfInput(first);
+      const typed = numberOfInput(first);
       if (typed === null) return null;
       if (!isDate)
         return {
@@ -107,7 +121,7 @@ export function conditionFromFilterChoice(
     }
     case 'lessThan':
     case 'greaterThanOrEqualTo': {
-      let typed = numberOfInput(first);
+      const typed = numberOfInput(first);
       return typed === null
         ? null
         : {
@@ -118,7 +132,7 @@ export function conditionFromFilterChoice(
     }
     case 'lessThanOrEqualTo':
     case 'greaterThan': {
-      let typed = numberOfInput(first);
+      const typed = numberOfInput(first);
       return typed === null
         ? null
         : {
@@ -129,9 +143,9 @@ export function conditionFromFilterChoice(
     }
   }
 }
-export function isWholeDayRange(condition?: Dynamic) {
+export function isWholeDayRange(condition: CellCondition): boolean {
   if (condition.kind !== 'numberIsBetween' && condition.kind !== 'numberIsNotBetween') return false;
-  let { oneEnd: oneEnd, otherEnd: otherEnd } = condition;
+  const { oneEnd, otherEnd } = condition;
   return (
     oneEnd.kind === 'number' &&
     otherEnd.kind === 'number' &&
@@ -139,31 +153,35 @@ export function isWholeDayRange(condition?: Dynamic) {
     otherEnd.number === oneEnd.number + END_OF_DAY_FRACTION
   );
 }
-export function filterChoiceFromCondition(condition?: Dynamic, isDate?: Dynamic, formatNumber?: Dynamic) {
-  let inputOfOperand = (operand?: Dynamic) => {
+export function filterChoiceFromCondition(
+  condition: CellCondition,
+  isDate: boolean,
+  formatNumber: (number: number) => string,
+): FilterChoiceHeld {
+  const inputOfOperand = (operand: NumberOperand) => {
     if (operand.kind !== 'number') return '';
     return isDate ? (serialToIsoDate(operand.number) ?? '') : formatNumber(operand.number);
   };
-  let choice = operatorOfCondition(condition);
+  const choice = operatorOfCondition(condition);
   switch (condition.kind) {
     case 'numberIs':
       return {
-        choice: choice,
+        choice,
         first: inputOfOperand(condition.operand),
         second: '',
       };
     case 'numberIsBetween':
     case 'numberIsNotBetween': {
-      let [first, second] = [inputOfOperand(condition.oneEnd), inputOfOperand(condition.otherEnd)];
+      const [first, second] = [inputOfOperand(condition.oneEnd), inputOfOperand(condition.otherEnd)];
       if (!isDate || !isWholeDayRange(condition))
         return {
-          choice: choice,
-          first: first,
-          second: second,
+          choice,
+          first,
+          second,
         };
       return {
         choice: condition.kind === 'numberIsBetween' ? 'equalTo' : 'notEqualTo',
-        first: first,
+        first,
         second: '',
       };
     }
@@ -174,14 +192,14 @@ export function filterChoiceFromCondition(condition?: Dynamic, isDate?: Dynamic,
     case 'textStartsWith':
     case 'textEndsWith':
       return {
-        choice: choice,
+        choice,
         first: condition.text,
         second: '',
       };
     case 'isAmongTheLargest':
     case 'isAmongTheSmallest':
       return {
-        choice: choice,
+        choice,
         first: String(condition.count),
         second: '',
       };
@@ -191,43 +209,43 @@ export function filterChoiceFromCondition(condition?: Dynamic, isDate?: Dynamic,
     case 'isAnError':
     case 'booleanIs':
       return {
-        choice: choice,
+        choice,
         first: '',
         second: '',
       };
   }
 }
-export function isConditionEditableAsChoice(condition?: Dynamic, isDate?: Dynamic) {
-  let operands = operandsOfFilterCondition(condition);
-  if (operands.some(({ kind: kind }: Dynamic) => kind !== 'number')) return false;
+export function isConditionEditableAsChoice(condition: CellCondition, isDate: boolean): boolean {
+  const operands = operandsOfFilterCondition(condition);
+  if (operands.some(({ kind }) => kind !== 'number')) return false;
   if (!isDate || operands.length === 0) return true;
-  let roundTripped = conditionFromFilterChoice(filterChoiceFromCondition(condition, true, String), true, LENIENT_FILTER_INPUT_LIMITS);
+  const roundTripped = conditionFromFilterChoice(filterChoiceFromCondition(condition, true, String), true, LENIENT_FILTER_INPUT_LIMITS);
   return isSameJsonValue(roundTripped, condition);
 }
 export const CONTROL_CHARACTERS_PATTERN = /\p{Cc}/gu;
-export const parseCountTyped = (typed?: Dynamic, mostCounted?: Dynamic) => {
-  let count = /^\d+$/.test(typed.trim()) ? Number(typed) : 0;
+export const parseCountTyped = (typed: string, mostCounted: number): number | null => {
+  const count = /^\d+$/.test(typed.trim()) ? Number(typed) : 0;
   return count >= 1 && count <= mostCounted ? count : null;
 };
-export const isIsoDateText = (text?: Dynamic) => /^\d{4}-\d{2}-\d{2}$/.test(text);
-export const numberOperandOfInput = (number?: Dynamic) => ({
+export const isIsoDateText = (text: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(text);
+export const numberOperandOfInput = (number: number): NumberOperand => ({
   kind: 'number',
-  number: number,
+  number,
 });
 export const isFilterInputInvalid = (
-  inputKind: Dynamic,
-  typed: Dynamic,
-  { numberTyped: numberTyped, mostCounted: mostCounted }: Dynamic,
-) =>
+  inputKind: FilterInputKind,
+  typed: string,
+  { numberTyped, mostCounted }: Pick<FilterInputLimits, 'numberTyped' | 'mostCounted'>,
+): boolean =>
   typed.trim() !== '' &&
   ((inputKind === 'number' && numberTyped(typed) === null) || (inputKind === 'count' && parseCountTyped(typed, mostCounted) === null));
-export const operandsOfFilterCondition = (condition?: Dynamic) =>
+export const operandsOfFilterCondition = (condition: CellCondition): NumberOperand[] =>
   condition.kind === 'numberIs'
     ? [condition.operand]
     : condition.kind === 'numberIsBetween' || condition.kind === 'numberIsNotBetween'
       ? [condition.oneEnd, condition.otherEnd]
       : [];
-export const LENIENT_FILTER_INPUT_LIMITS = {
+export const LENIENT_FILTER_INPUT_LIMITS: FilterInputLimits = {
   numberTyped: () => null,
   mostCounted: 1 / 0,
   longestText: 1 / 0,

@@ -22,7 +22,7 @@ export function countFilledCellsToImport(table: LinesToImport, plan: PlanOfLines
   return filledCount;
 }
 export function tableWriteHasRoom(write: TableIntoSheet, change: WhatATableChangesAnswer, workbook: WorkbookReads): boolean {
-  let { sheetId: sheetId, rows: rows, columns: columns } = write;
+  let { sheetId, rows, columns } = write;
   if (hasRoomForFilledCells(rows.length * columns.length, workbook)) return true;
   let replacesRows = write.how.kind === 'replaceRows';
   let replacedRowIds = new Set<RowId>();
@@ -37,20 +37,20 @@ export function tableWriteHasRoom(write: TableIntoSheet, change: WhatATableChang
   let replacedRowIndexes = [...replacedRowIds].flatMap((rowId) => workbook.rowIndexOf(sheetId, rowId) ?? []);
   let columnCount = workbook.listSheets().find((sheet) => sheet.sheetId === sheetId)?.columnCount;
   if (replacedRowIndexes.length === 0 || columnCount === undefined) return hasRoomForFilledCells(addedFilledCount, workbook);
-  let { firstIndex: firstIndex, count: rowCount } = spanOfIndexes(replacedRowIndexes);
+  let { firstIndex, count: rowCount } = spanOfIndexes(replacedRowIndexes);
   let replacedFilledCells = workbook
     .filledCellsIn(sheetId, {
       topRowIndex: firstIndex,
-      rowCount: rowCount,
+      rowCount,
       leftColumnIndex: 0,
-      columnCount: columnCount,
+      columnCount,
     })
-    .filter(({ rowId: rowId }) => replacedRowIds.has(rowId));
+    .filter(({ rowId }) => replacedRowIds.has(rowId));
   return hasRoomForFilledCells(addedFilledCount - replacedFilledCells.length, workbook);
 }
 export function makeUniqueSheetName(requestedName: string, workbook: WorkbookReads): string {
   let characters = Array.from<string>(requestedName.replaceAll(/\p{Cc}/gu, '').replaceAll(/^\p{White_Space}+|\p{White_Space}+$/gu, ''));
-  let takenNames = new Set(workbook.listSheets().map(({ name: name }) => foldSheetNameCase(name)));
+  let takenNames = new Set(workbook.listSheets().map(({ name }) => foldSheetNameCase(name)));
   let maxLength = workbook.longestSheetNameInCharacters();
   for (let attempt = 1; ; attempt++) {
     let suffix = attempt === 1 ? '' : ` ${attempt}`;

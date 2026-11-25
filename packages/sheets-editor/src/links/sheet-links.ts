@@ -1,10 +1,16 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
 import { firstPlaceInSheet } from '../state/places.ts';
 import { DEFAULT_CELL_DENSITY } from '../grid/cell-metrics-values.ts';
 import { noticeGivesWay } from '../state/queries.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { PageState, SavedPlace } from '../state/initial-state.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { CopyLinkOutcome } from '../shell/sheet-links.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function savedPlaceForLinkedSheet(reads: WorkbookReads, sheetIdOfLink?: Dynamic, savedPlace?: Dynamic) {
+export function savedPlaceForLinkedSheet(
+  reads: WorkbookReads,
+  sheetIdOfLink: SheetId | null,
+  savedPlace: SavedPlace | null,
+): SavedPlace | null {
   if (sheetIdOfLink === null || sheetIdOfLink === savedPlace?.sheetId) return savedPlace;
   let firstPlace = firstPlaceInSheet(reads, sheetIdOfLink);
   return firstPlace === null
@@ -15,7 +21,7 @@ export function savedPlaceForLinkedSheet(reads: WorkbookReads, sheetIdOfLink?: D
         density: DEFAULT_CELL_DENSITY,
       };
 }
-export const copyLinkToSheet = (state: PageState, sheetId?: Dynamic) => ({
+export const copyLinkToSheet = (state: PageState, sheetId: SheetId | null): PageTransition => ({
   state:
     state.notice?.kind === 'linkNotCopied'
       ? {
@@ -30,7 +36,7 @@ export const copyLinkToSheet = (state: PageState, sheetId?: Dynamic) => ({
     },
   ],
 });
-export const noticeLinkNotCopied = (state: PageState, whyNot?: Dynamic) =>
+export const noticeLinkNotCopied = (state: PageState, whyNot: CopyLinkOutcome): PageState =>
   whyNot === null || (state.notice !== null && !noticeGivesWay(state.notice))
     ? state
     : {

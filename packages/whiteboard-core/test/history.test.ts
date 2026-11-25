@@ -15,7 +15,8 @@ import {
   type HistoryStep,
 } from '../src/history.ts';
 import { parseBoardContent } from '../src/normalize.ts';
-import { MAX_BOARD_ELEMENTS, type ArrowElement, type BoardContent, type BoardElement, type NoteElement } from '../src/schema.ts';
+import { MAX_BOARD_ELEMENTS, type ArrowElement, type BoardContent, type BoardElement, type ImageElement, type NoteElement, type TableElement } from '../src/schema.ts';
+import { tableFromGrid } from '../src/table.ts';
 
 const note = (id: string, text: string, x = 0, extra: Partial<NoteElement> = {}): NoteElement => ({
   type: 'note',
@@ -203,6 +204,65 @@ describe('board diffs', () => {
   it('merges changed fields by group', () => {
     const merged = mergeChangedFields({ x: 1, y: 2, text: 'theirs' }, { x: 1, y: 2, text: 'a' }, { x: 5, y: 2, text: 'a' });
     assert.deepEqual(merged, { x: 5, y: 2, text: 'theirs' });
+  });
+
+  it('merges a group move with a concurrent resize field by field', () => {
+    const before = board(note('n1', 'a', 0, { groups: ['g1'] }), note('n2', 'b', 200, { groups: ['g1'] }));
+    const moved = board(note('n1', 'a', 400, { groups: ['g1'] }), note('n2', 'b', 600, { groups: ['g1'] }));
+    const diff = diffBoardContents(before, moved);
+    assert.ok(diff);
+    // Someone else resizes n1 while the group moves.
+    const now = board(note('n1', 'a', 0, { groups: ['g1'], w: 300 }), note('n2', 'b', 200, { groups: ['g1'] }));
+    const applied = applyBoardDiff(now, diff, 'forward');
+    assert.deepEqual([find(applied, 'n1')?.type === 'note' && find(applied, 'n1'), find(applied, 'n2')].map((element) => element && element.type === 'note' && [element.x, element.w]), [
+      [400, 300],
+      [600, 180],
+    ]);
+    const undone = applyBoardDiff(applied, diff, 'back');
+    const n1 = find(undone, 'n1');
+    assert.deepEqual(n1?.type === 'note' && [n1.x, n1.w], [0, 300], 'undoing the move keeps the resize');
+  });
+
+  it('still applies a multi-element step that changes more than geometry whole', () => {
+    const before = board(note('n1', 'a'), note('n2', 'b', 200));
+    const after = board(note('n1', 'A', 400), note('n2', 'B', 600));
+    const diff = diffBoardContents(before, after);
+    assert.ok(diff);
+    const applied = applyBoardDiff(board(note('n1', 'a', 0, { w: 300 }), note('n2', 'b', 200)), diff, 'forward');
+    const n1 = find(applied, 'n1');
+    assert.deepEqual(n1?.type === 'note' && [n1.x, n1.w, n1.text], [400, 180, 'A']);
+  });
+
+  it('keeps a drawing style someone else set', () => {
+    const drawing = (id: string, extra: Partial<ImageElement> = {}): ImageElement => ({
+      type: 'image',
+      id,
+      x: 0,
+      y: 0,
+      w: 100,
+      h: 100,
+      src: `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')}`,
+      ...extra,
+    });
+    const diff = diffBoardContents(board(drawing('d1')), board(drawing('d1', { x: 300 })));
+    assert.ok(diff);
+    const undone = applyBoardDiff(board(drawing('d1', { x: 300, style: 'comic' })), diff, 'back');
+    const element = find(undone, 'd1');
+    assert.deepEqual(element?.type === 'image' && [element.x, element.style], [0, 'comic']);
+    const restyled = diffBoardContents(board(drawing('d1')), board(drawing('d1', { style: 'draft' })));
+    assert.ok(restyled);
+    const reverted = find(applyBoardDiff(board(drawing('d1', { style: 'draft' })), restyled, 'back'), 'd1');
+    assert.equal(reverted?.type === 'image' && reverted.style, undefined, 'undoing a restyle takes the style off');
+  });
+
+  it('leaves table fills and heat maps as the board has them, like cell text', () => {
+    const table = (extra: Partial<TableElement> = {}): TableElement => ({ type: 'table', id: 't1', x: 0, y: 0, head: true, color: 'white', ...tableFromGrid([['a', 'b'], ['1', '2']]), ...extra });
+    const diff = diffBoardContents(board(table()), board(table({ x: 300 })));
+    assert.ok(diff);
+    // Someone else tints the table after the move.
+    const tints = { fills: { r1: { c1: 'blue' as const } }, heat: { cols: { c2: 'green' as const } } };
+    const undone = find(applyBoardDiff(board(table({ x: 300, ...tints })), diff, 'back'), 't1');
+    assert.deepEqual(undone?.type === 'table' && [undone.x, undone.fills, undone.heat], [0, tints.fills, tints.heat]);
   });
 
   it('refuses steps that would overflow the board', () => {

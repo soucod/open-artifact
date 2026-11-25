@@ -1,5 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
-export function patchMethodUntilUndone(target?: Dynamic, methodName?: Dynamic, wrap?: Dynamic) {
+/** Something that takes focus: the window or an element. */
+interface Focusable {
+  focus(options?: FocusOptions): void;
+}
+export function patchMethodUntilUndone<Target, Name extends keyof Target>(
+  target: Target,
+  methodName: Name,
+  wrap: (original: Target[Name]) => Target[Name],
+) {
   let original = target[methodName];
   let patched = wrap(original);
   target[methodName] = patched;
@@ -7,30 +14,34 @@ export function patchMethodUntilUndone(target?: Dynamic, methodName?: Dynamic, w
     if (target[methodName] === patched) target[methodName] = original;
   };
 }
-export function holdProgrammaticFocus(view?: Dynamic, shouldHold?: Dynamic, onHeld: Dynamic = () => {}) {
-  let isActive: Dynamic = true;
+export function holdProgrammaticFocus(
+  view: Window & typeof globalThis,
+  shouldHold: () => boolean,
+  onHeld: (focused: Focusable) => void = () => {},
+) {
+  let isActive = true;
   let isHolding = () => isActive && shouldHold();
   let elementClasses = [view.HTMLElement, view.SVGElement, view.MathMLElement];
   let undoPatches = [
-    ...[view, ...elementClasses.flatMap((elementClass?: Dynamic) => elementClass?.prototype ?? [])].map(
-      (target?: Dynamic) =>
+    ...[view, ...elementClasses.flatMap((elementClass) => elementClass?.prototype ?? [])].map(
+      (target: Focusable) =>
         patchMethodUntilUndone(
           target,
           'focus',
-          (originalFocus?: Dynamic) =>
-            function (this: Dynamic, focusOptions?: Dynamic) {
+          (originalFocus) =>
+            function (this: Focusable, focusOptions?: FocusOptions) {
               if (isHolding()) onHeld(this);
               else originalFocus.call(this, focusOptions);
             },
         ),
     ),
     ...[view.HTMLInputElement, view.HTMLTextAreaElement].map(
-      ({ prototype: prototype }: Dynamic) =>
+      ({ prototype }) =>
         patchMethodUntilUndone(
           prototype,
           'select',
-          (originalSelect?: Dynamic) =>
-            function (this: Dynamic) {
+          (originalSelect) =>
+            function (this: HTMLInputElement | HTMLTextAreaElement) {
               if (!isHolding()) originalSelect.call(this);
             },
         ),
@@ -38,20 +49,20 @@ export function holdProgrammaticFocus(view?: Dynamic, shouldHold?: Dynamic, onHe
   ];
   return () => {
     isActive = false;
-    undoPatches.forEach((undo2?: Dynamic) => undo2());
+    undoPatches.forEach((undo) => undo());
   };
 }
-export function createScrollGestureTimer(now: Dynamic = () => performance.now()) {
-  let startedAt: Dynamic = Number.NEGATIVE_INFINITY;
+export function createScrollGestureTimer(now: () => number = () => performance.now()) {
+  let startedAt = Number.NEGATIVE_INFINITY;
   return {
     begin: () => void (startedAt = now()),
     end: () => void (startedAt = Number.NEGATIVE_INFINITY),
     isUnderWay: () => now() - startedAt < SCROLL_GESTURE_HOLD_MS,
   };
 }
-export function watchWindowFocusLeft(view?: Dynamic, now: Dynamic = () => performance.now()) {
-  let leftAt: Dynamic = view.document.hasFocus() ? null : Number.NEGATIVE_INFINITY;
-  let hadFocusLeft: Dynamic = false;
+export function watchWindowFocusLeft(view: Window, now: () => number = () => performance.now()) {
+  let leftAt = view.document.hasFocus() ? null : Number.NEGATIVE_INFINITY;
+  let hadFocusLeft = false;
   let onBlur = () => {
     leftAt = now();
   };
@@ -73,5 +84,8 @@ export function watchWindowFocusLeft(view?: Dynamic, now: Dynamic = () => perfor
     },
   };
 }
-export const isTrustedPointerDownEvent = ({ event: event }: Dynamic) => event?.isTrusted === true && event.type === 'pointerdown';
+export const isTrustedPointerDownEvent = ({ event }: Pick<Window, 'event'>) => event?.isTrusted === true && event.type === 'pointerdown';
 export const SCROLL_GESTURE_HOLD_MS = 500;
+
+export type ScrollGestureTimer = ReturnType<typeof createScrollGestureTimer>;
+export type WindowFocusWatch = ReturnType<typeof watchWindowFocusLeft>;

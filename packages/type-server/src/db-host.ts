@@ -14,8 +14,15 @@
  * Echoes: a page's write updates {@link DbHost}'s picture of the disk before
  * the watcher fires, so the watcher never reports it again, and the event for
  * it skips the writing client.
+ *
+ * Order: every `db` event carries the host's {@link DbOrder} (one `seq` per
+ * event, a new `epoch` per host). A listing says the `seq` it was read at, and
+ * a page's write is answered with the `seq` after it and the documents as
+ * stored ({@link DbReceipt}), so a page keeps, per document, whichever of
+ * them is newest, however their answers and the events interleave.
  */
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
@@ -26,8 +33,11 @@ import {
   type CommentThread,
   type DbChangeEvent,
   type DbDocument,
+  type DbOrder,
+  type DbReceipt,
   type DbWrite,
   type JsonRecord,
+  type Role,
 } from '@open-artifact/runtime/capabilities';
 import {
   API,
@@ -44,11 +54,13 @@ import {
   type DbGetResponse,
   type DbListResponse,
   type DbWriteRequest,
+  type DbWriteResponse,
   type ServerEvents,
 } from '@open-artifact/runtime/http-api';
-import { AGENT_AUTHOR, COMMENTS_FILE, CommentStore, agentView, type Author, type MessageReaction, type Thread } from '@open-artifact/server-sdk/comments';
+import { AGENT_AUTHOR, COMMENTS_FILE, CommentStore, agentView, type Author, type CommentLock, type MessageReaction, type Thread } from '@open-artifact/server-sdk/comments';
+import type { WakeSender } from '@open-artifact/protocol';
 import { DB_DIR, DbStore, docPathsOf, docSha256, splitPath } from '@open-artifact/server-sdk/db';
-import { countEdits, resetEdits } from './agent.ts';
+import { clearAsking, countEdits, resetEdits } from './agent.ts';
 import { HttpError, readJson, sendJson } from './http.ts';
 
 /** Largest JSON body of a page's db write batch. */
@@ -59,6 +71,12 @@ const MAX_COMMENT_BODY = 256 * 1024;
 const WATCH_DEBOUNCE_MS = 120;
 /** Full rescan interval when the platform cannot watch, ms. */
 const POLL_MS = 2_000;
+/**
+ * Full rescans soon after a watch starts, ms after it. A new watch is armed by the OS in the background (FSEvents on
+ * macOS): a change made in that moment, such as a Link push just as a page opens, is never reported, and the slow
+ * rescan would show it only after `POLL_MS * 5`.
+ */
+export const ARM_RESCAN_MS: readonly number[] = [300, 1_500];
 
 /** What a {@link DbHost} reports to its server. */
 export interface DbHostOptions {
@@ -73,7 +91,7 @@ export interface DbHostOptions {
   /** A page wrote these document paths. */
   onWrite?(paths: string[], client: string): void;
   /** Hands a thread to the agent (`unasked`: a reply that does not ask it); resolves whether it was delivered now. */
-  sendThread?(thread: Thread, how?: SendHow): Promise<'delivered' | 'queued' | 'failed'>;
+  sendThread?(thread: Thread, how?: SendHow): Promise<'delivered' | 'drafted' | 'queued' | 'failed'>;
   log?(message: string): void;
   /**
    * False for a type that keeps comments but no document store (its files
@@ -83,6 +101,26 @@ export interface DbHostOptions {
   documents?: boolean;
   /** Refuses an agent's batch the type's page would drop part of (the type's `writesProblem`). */
   writesProblem?(writes: readonly unknown[], read: (path: string) => unknown): { code: string; message: string } | null;
+  /** The documents a commenter may write, by their id (the type's `commenterWrites`); without it, none. */
+  commenterWrites?(path: string, guestId: string): boolean;
+  /**
+   * `events`: this process is the only writer and `fs.watch` reports every write at once (a host's own storage), so
+   * no rescan runs on a timer (none while arming the watch, no slow poll); if a watch cannot start, the poll does.
+   * Default `poll`.
+   */
+  watch?: 'poll' | 'events';
+  /** How comment writes are locked (`CommentStore`): `file` (default) across processes, `process` within this one. */
+  commentLock?: CommentLock;
+}
+
+/** A guest of a share link, as the server passes them to {@link DbHost.handle}. */
+export interface DbGuest {
+  name: string;
+  /** Who their writes are by, for events. */
+  client: string;
+  /** Their viewer id (`guest-…`) and role, for what they may write. */
+  id?: string;
+  role?: Role;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -185,7 +223,7 @@ export function pageThread(thread: Thread): CommentThread {
     ...(thread.detail ? { detail: thread.detail } : {}),
     location: (isPlain(thread.location) ? thread.location : {}) as JsonRecord,
     status: thread.status === 'resolved' ? 'resolved' : 'open',
-    ...(thread.agent ? { agent: { status: thread.agent.status } } : {}),
+    ...(thread.agent ? { agent: { status: thread.agent.status, ...(thread.agent.status === 'delivered' && thread.agent.via === 'drafted' ? { drafted: true as const } : {}) } } : {}),
     ...(thread.status === 'resolved' && thread.resolvedBy ? { resolvedBy: pageAuthor(thread.resolvedBy) } : {}),
     messages: thread.messages.map((message) => ({
       id: message.id,
@@ -218,6 +256,8 @@ function pageReactions(reactions: readonly MessageReaction[]): CommentReaction[]
 /** How a thread goes to the agent: `unasked`, a reply that does not @mention it, in a thread it took part in. */
 export interface SendHow {
   unasked?: boolean;
+  /** Who sent the thread, when not the owner (an editor on a hosted artifact whose owner lets editors ask). */
+  from?: WakeSender;
 }
 
 /** The text of the request that hands a thread to the agent (the thread itself travels as data). */
@@ -234,6 +274,9 @@ export function threadRequestText(thread: Thread, how: SendHow = {}): string {
 
 /** The db store and comments of one open (or acted-on) artifact. */
 export class DbHost {
+  /** This host's order: a new epoch per instance, one `seq` per db event. */
+  private readonly epoch = randomUUID();
+  private seq = 0;
   readonly root: string;
   readonly db: DbStore;
   readonly comments: CommentStore;
@@ -244,6 +287,7 @@ export class DbHost {
   private commentsText: string | null = null;
   private watchers: FSWatcher[] = [];
   private poll: NodeJS.Timeout | null = null;
+  private arming: NodeJS.Timeout[] = [];
   private timer: NodeJS.Timeout | null = null;
   private dirty = new Set<string>();
   private fullScan = false;
@@ -254,7 +298,7 @@ export class DbHost {
     this.options = options;
     this.root = options.root;
     this.db = new DbStore(options.root);
-    this.comments = new CommentStore(options.root);
+    this.comments = new CommentStore(options.root, { lock: options.commentLock ?? 'file' });
   }
 
   /* ---- watching ---------------------------------------------------------- */
@@ -289,9 +333,12 @@ export class DbHost {
       });
       rootWatcher.on('error', () => undefined);
       this.watchers.push(rootWatcher);
-    } catch {
+    } catch (error) {
       watching = false;
+      if (this.options.watch === 'events') this.options.log?.(`cannot watch ${this.root} (${error instanceof Error ? error.message : String(error)}); polling it`);
     }
+    // A single writer's watch reports every write and is armed when `watch` returns: nothing to poll for.
+    if (watching && this.options.watch === 'events') return;
     // A slow full rescan covers platforms without (recursive) watching and missed events.
     this.poll = setInterval(
       () => {
@@ -302,6 +349,15 @@ export class DbHost {
       watching ? POLL_MS * 5 : POLL_MS,
     );
     this.poll.unref?.();
+    if (watching) this.arming = ARM_RESCAN_MS.map((ms) => {
+      const timer = setTimeout(() => {
+        this.fullScan = true;
+        this.commentsDirty = true;
+        this.schedule();
+      }, ms);
+      timer.unref?.();
+      return timer;
+    });
   }
 
   /** Stops watching. */
@@ -309,6 +365,8 @@ export class DbHost {
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
     if (this.poll) clearInterval(this.poll);
+    for (const timer of this.arming) clearTimeout(timer);
+    this.arming = [];
     if (this.timer) clearTimeout(this.timer);
     this.poll = null;
     this.timer = null;
@@ -375,7 +433,7 @@ export class DbHost {
     }
     const changed = Object.keys(changes);
     if (changed.length) {
-      this.options.emit('db', { changes, author: 'agent' } satisfies DbChangeEvent);
+      this.emitDb(changes, 'agent');
       this.options.onExternal?.(changed);
     }
     if (this.commentsDirty) {
@@ -390,6 +448,17 @@ export class DbHost {
   }
 
   /* ---- documents --------------------------------------------------------- */
+
+  /** Where the documents stand now. */
+  order(): DbOrder {
+    return { epoch: this.epoch, seq: this.seq };
+  }
+
+  /** Reports changes to the pages (`except` skips one client), as the next change in this host's order. */
+  private emitDb(changes: Record<string, JsonRecord | null>, author: string, except?: string): void {
+    this.seq += 1;
+    this.options.emit('db', { changes, author, epoch: this.epoch, seq: this.seq } satisfies DbChangeEvent, except);
+  }
 
   /** One document, or `null`. */
   get(path: string): JsonRecord | null {
@@ -410,6 +479,11 @@ export class DbHost {
    * `conflict`). Returns the changed paths (an event goes to every other client).
    */
   write(writes: unknown, author: string, except?: string): string[] {
+    return this.commit(writes, author, except).changed;
+  }
+
+  /** {@link write}, with the batch's {@link DbReceipt}: the order after it and every written document as stored. */
+  commit(writes: unknown, author: string, except?: string): { changed: string[]; receipt: DbReceipt } {
     if (!Array.isArray(writes) || writes.length === 0) throw new HttpError(400, 'invalid', 'writes is a non-empty array.');
     if (writes.length > DB_LIMITS.maxWrites) throw new HttpError(400, 'invalid', `At most ${DB_LIMITS.maxWrites} writes in one batch.`);
     const staged = new Map<string, JsonRecord | null>();
@@ -448,7 +522,9 @@ export class DbHost {
       throw new HttpError(409, 'conflict', `${what} since it was read: nothing was written.`, { paths: conflicts });
     }
     const changes: Record<string, JsonRecord | null> = {};
+    const documents: Record<string, JsonRecord | null> = {};
     for (const [path, data] of staged) {
+      documents[path] = data;
       // Always store (the picture may lag the disk); report only real changes.
       const text = data === null ? null : JSON.stringify(data);
       const before = this.known.get(path) ?? null;
@@ -462,10 +538,10 @@ export class DbHost {
       if (text !== before) changes[path] = data;
     }
     const changed = Object.keys(changes);
-    if (changed.length) this.options.emit('db', { changes, author } satisfies DbChangeEvent, except);
+    if (changed.length) this.emitDb(changes, author, except);
     // People's edits of the content since the agent last read it (the view context's `edits`).
     countEdits(this.root, changed.filter(isContentPath).length);
-    return changed;
+    return { changed, receipt: { ...this.order(), documents } };
   }
 
   /* ---- comments ---------------------------------------------------------- */
@@ -497,13 +573,29 @@ export class DbHost {
     const unasked = how.unasked === true;
     let thread = guarded(() => this.comments.markSent(threadId, { unasked }));
     this.commentsChanged();
-    const outcome = this.options.sendThread ? await this.options.sendThread(thread, unasked ? { unasked } : {}) : 'queued';
+    const outcome = this.options.sendThread ? await this.options.sendThread(thread, { ...(unasked ? { unasked } : {}), ...(how.from ? { from: how.from } : {}) }) : 'queued';
     if (outcome === 'failed') throw new HttpError(503, 'unavailable', 'The agent could not be reached; the thread stays marked for it.');
-    if (outcome === 'delivered' && !unasked) {
-      thread = guarded(() => this.comments.markDelivered(thread.id, 'hook'));
+    if ((outcome === 'delivered' || outcome === 'drafted') && !unasked) {
+      // `drafted`: in the agent's conversation, waiting for the person to send it there.
+      thread = guarded(() => this.comments.markDelivered(thread.id, outcome === 'drafted' ? 'drafted' : 'hook'));
       this.commentsChanged();
     }
     return thread;
+  }
+
+  /**
+   * Throws `not_writer` (403) unless every write of a commenter's batch is to a document the type lets them write,
+   * checked before anything is written.
+   */
+  private assertCommenterWrites(writes: unknown, guestId: string): void {
+    if (!Array.isArray(writes)) return;
+    const may = this.options.commenterWrites;
+    for (const raw of writes as Array<{ path?: unknown } | null>) {
+      const path = guarded(() => splitPath(raw?.path, 'doc')).join('/');
+      if (may === undefined || guestId === '' || !may(path, guestId)) {
+        throw new HttpError(403, 'not_writer', `A commenter can write only their own documents, not ${path}.`);
+      }
+    }
   }
 
   /* ---- page routes ------------------------------------------------------- */
@@ -513,7 +605,7 @@ export class DbHost {
    * `as` names a guest of a share link: their comments carry their name, and
    * their writes their author.
    */
-  async handle(route: string, req: IncomingMessage, res: ServerResponse, url: URL, as?: { name: string; client: string }): Promise<boolean> {
+  async handle(route: string, req: IncomingMessage, res: ServerResponse, url: URL, as?: DbGuest): Promise<boolean> {
     const method = req.method ?? 'GET';
     const postOnly = (): void => {
       if (method !== 'POST') throw new HttpError(405, 'invalid', 'POST only.');
@@ -527,17 +619,19 @@ export class DbHost {
         return true;
       }
       case API.dbList: {
-        const body: DbListResponse = { documents: this.list(url.searchParams.get('collection') ?? '') };
+        // Read synchronously after taking the order: the documents are as of `seq`.
+        const body: DbListResponse = { ...this.order(), documents: this.list(url.searchParams.get('collection') ?? '') };
         sendJson(res, 200, body);
         return true;
       }
       case API.dbWrite: {
         postOnly();
         const body = await readJson<Partial<DbWriteRequest>>(req, MAX_WRITE_BODY);
+        if (as?.role === 'commenter') this.assertCommenterWrites(body.writes, as.id ?? '');
         const client = typeof body.client === 'string' ? body.client : '';
-        const changed = this.write(body.writes, client || as?.client || 'owner', client || undefined);
+        const { changed, receipt } = this.commit(body.writes, client || as?.client || 'owner', client || undefined);
         if (changed.length) this.options.onWrite?.(changed, client);
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, { ok: true, ...receipt } satisfies DbWriteResponse);
         return true;
       }
       case API.comments: {
@@ -610,7 +704,9 @@ export class DbHost {
         const body = await readJson<Partial<CommentSendRequest>>(req, MAX_COMMENT_BODY);
         if (typeof body.threadId !== 'string') throw new HttpError(400, 'invalid', 'threadId is required.');
         this.threadById(body.threadId);
-        const thread = await this.sendThread(body.threadId, { unasked: body.unasked === true });
+        // A guest gets here only when the role check let them send (an editor whose owner lets editors ask).
+        const from = as?.role && as.role !== 'owner' ? { name: as.name, role: as.role } : undefined;
+        const thread = await this.sendThread(body.threadId, { unasked: body.unasked === true, ...(from ? { from } : {}) });
         sendJson(res, 200, { thread: pageThread(thread) } satisfies CommentThreadResponse);
         return true;
       }
@@ -631,6 +727,7 @@ export class DbHost {
     switch (name) {
       case 'open-artifact.db.read':
         resetEdits(this.root);
+        clearAsking(this.root);
         return guarded(() => this.db.readDb(typeof args.path === 'string' && args.path ? args.path : undefined, { query: args.query, limit: args.limit, cursor: args.cursor }));
       case 'open-artifact.db.write': {
         const writes = Array.isArray(args.writes) ? args.writes : [];
@@ -653,7 +750,7 @@ export class DbHost {
           changes[path] = text === null ? null : (JSON.parse(text) as JsonRecord);
         }
         if (Object.keys(changes).length) {
-          this.options.emit('db', { changes, author: 'agent' } satisfies DbChangeEvent);
+          this.emitDb(changes, 'agent');
           this.options.onExternal?.(Object.keys(changes));
         }
         return { writes: results };

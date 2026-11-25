@@ -4,9 +4,10 @@
  * that hands a request to the agent with what this viewer is looking at.
  */
 
-import { useState, type ReactNode } from 'react';
+import { useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ArrowUp, ChevronDown, Circle, Diamond, Film, Image, Loader2, Minus, MoveRight, RectangleHorizontal, Shapes, Spline, Square, Table, Type } from 'lucide-react';
-import { cn } from '@open-artifact/ui';
+import { cn, isComposingKey } from '@open-artifact/ui';
+import { getToolbarKeyTarget, isTextField } from '@open-artifact/editor-kit';
 import { useUi } from '../state/ui.ts';
 import { useView, type Tool } from '../state/view.ts';
 import { sendToAgent, useAgent } from '../services/agent.ts';
@@ -181,8 +182,24 @@ export function FootToolbar({ editing, ask }: FootToolbarProps): ReactNode {
   const tool = useView((s) => s.tool);
   const view = useView.getState;
   if (!editing && !ask) return null;
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (isComposingKey(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (isTextField(event.target)) return;
+    if (document.querySelector('[role="menu"], [role="listbox"]')) return;
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])')].filter(
+      (button) => !button.closest('form'),
+    );
+    const active = document.activeElement;
+    const index = active instanceof HTMLButtonElement ? buttons.indexOf(active) : -1;
+    const next = getToolbarKeyTarget(event.key, index, buttons.length);
+    if (next === null) return;
+    event.preventDefault();
+    buttons[next]?.focus();
+  };
+
   return (
-    <Card role="toolbar" aria-label={editing ? 'Insert' : 'Ask'} className="max-w-full gap-1 p-1">
+    <Card role="toolbar" aria-label={editing ? 'Insert' : 'Ask'} className="max-w-full gap-1 p-1" onKeyDown={onKeyDown}>
       {editing ? (
         <>
           <Tip label="Text" shortcut="T" side="top">

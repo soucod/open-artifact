@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Team poll</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; }
+  #status { color: #555; }
+</style>
+</head>
+<body>
+<!-- A synthetic page for e2e/host-page.test.mjs: a poll with db rules (anyone who can view votes; only an editor
+     changes the question), a file beside it, and hooks the test calls from the page's own frame. -->
+<h1><img id="logo" src="logo.svg" alt="" width="40" height="40"> Team poll</h1>
+<p id="question"></p>
+<p id="status">Starting…</p>
+<ul id="votes"></ul>
+<output id="me"></output>
+<script>
+  (async () => {
+    const status = document.getElementById('status');
+    const oa = window.openArtifact;
+    const db = await oa.use('db');
+    const user = await oa.use('user');
+    if (!db) {
+      status.textContent = 'no db';
+      return;
+    }
+    const votes = db.collection('votes');
+    votes.onSnapshot((snap) => {
+      document.getElementById('votes').innerHTML = snap.docs.map((d) => `<li data-vote="${d.id}">${d.data().choice}</li>`).join('');
+    });
+    db.collection('config').doc('main').onSnapshot((doc) => {
+      document.getElementById('question').textContent = doc.exists ? doc.data().question : '(no question)';
+    });
+    document.getElementById('me').textContent = JSON.stringify(user ? { owner: await user.isOwner(), canEdit: await user.canEdit() } : null);
+    const attempt = (run) => run().then(() => 'ok', (error) => error.code || String(error.message || error));
+    // What the test calls in this frame: each answers 'ok' or the error's code.
+    window.pageTest = {
+      vote: (id, choice) => attempt(() => votes.doc(id).set({ choice })),
+      ask: (question) => attempt(() => db.collection('config').doc('main').set({ question })),
+      note: async (text) => attempt(async () => (await oa.use('artifact')).publish({ 'notes.txt': text })),
+      comments: async () => (await oa.use('comments')) !== null,
+      logo: () => document.getElementById('logo').naturalWidth,
+      reach: (url) => fetch(url, { credentials: 'omit' }).then((r) => r.status, () => 'blocked'),
+    };
+    status.textContent = 'ready';
+  })().catch((err) => {
+    document.getElementById('status').textContent = `failed: ${err.code || err.message}`;
+  });
+</script>
+</body>
+</html>

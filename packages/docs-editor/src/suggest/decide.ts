@@ -8,6 +8,7 @@ import { Selection } from 'prosemirror-state';
 import { docClient } from '../app/doc-client.ts';
 import { getDocs, setDocs } from '../app/store.ts';
 import { currentView, useEditor } from '../editor/format.ts';
+import { unfoldSuggestion } from './folded.ts';
 import { refreshOpenSuggestions, useOpenSuggestions } from './model.ts';
 import { firstPosOf } from './positions.ts';
 import { editSerialOf } from './plugin.ts';
@@ -158,8 +159,8 @@ export function undoDecisionByKeys(state: Parameters<typeof editSerialOf>[0]): b
 // ---- moving between suggestions --------------------------------------------------------------------------------
 
 /**
- * Looks at a suggestion: raises its card, scrolls its words into sight and puts the caret at its start. `focusText`
- * also gives the text the keyboard.
+ * Looks at a suggestion: raises its card, unfolds the sections hiding it, scrolls its words into sight and puts the
+ * caret at its start. `focusText` also gives the text the keyboard.
  */
 export function revealSuggestion(id: string, focusText = false): void {
   setDocs({ focusedSuggestion: id });
@@ -167,6 +168,7 @@ export function revealSuggestion(id: string, focusText = false): void {
   if (!view) return;
   const pos = firstPosOf(view.state.doc, id);
   if (pos === null) return;
+  unfoldSuggestion(view, id);
   const selection = Selection.near(view.state.doc.resolve(Math.min(pos, view.state.doc.content.size)), 1);
   view.dispatch(view.state.tr.setSelection(selection).scrollIntoView().setMeta('addToHistory', false));
   if (focusText) view.focus();

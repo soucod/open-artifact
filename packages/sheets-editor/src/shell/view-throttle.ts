@@ -1,9 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
-export function throttleViewChanges(onView?: Dynamic, targetWindow?: Dynamic) {
-  let pending: Dynamic = null;
-  let timer: Dynamic;
-  let wasThrottled: Dynamic = false;
-  return (view?: Dynamic, throttled?: Dynamic) => {
+/** Passes each view on, but while views come throttled, at most one per `VIEW_CHANGE_THROTTLE_MS`. */
+export function throttleViewChanges<View>(onView: (view: View) => void, targetWindow: Window): (view: View, throttled: boolean) => void {
+  let pending: { view: View } | null = null;
+  let timer: number | undefined;
+  let wasThrottled = false;
+  return (view, throttled) => {
     let shouldWait = throttled && (!wasThrottled || pending !== null);
     wasThrottled = throttled;
     if (!shouldWait) {
@@ -14,12 +14,12 @@ export function throttleViewChanges(onView?: Dynamic, targetWindow?: Dynamic) {
     }
     if (pending === null)
       timer = targetWindow.setTimeout(() => {
-        let value = pending;
+        let waiting = pending;
         pending = null;
-        if (value !== null) onView(value.view);
+        if (waiting !== null) onView(waiting.view);
       }, VIEW_CHANGE_THROTTLE_MS);
     pending = {
-      view: view,
+      view,
     };
   };
 }

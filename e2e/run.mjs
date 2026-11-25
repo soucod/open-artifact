@@ -14,6 +14,10 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const suites = fs.readdirSync(here).filter(f => f.endsWith('.test.mjs')).map(f => f.slice(0, -'.test.mjs'.length)).sort();
 const env = { ...process.env };
+// The suites' `open-artifact` commands stand for a person's own terminal. Run from inside an agent's session (these
+// variables), the command line would refuse publish and the remote changes (packages/daemon/src/agent-session.ts).
+const { agentVariables } = await import('../packages/daemon/src/agent-session.ts');
+for (const variable of agentVariables([path.join(path.dirname(here), 'packages', 'daemon', 'harnesses')]).keys()) delete env[variable];
 let only = null;
 
 const args = process.argv.slice(2);
@@ -40,8 +44,18 @@ if (!fs.existsSync(path.join(dir, 'design', 'SKILL.md'))) fail(`${dir} holds no 
 const unknown = (only ?? []).filter(s => !suites.includes(s));
 if (unknown.length) fail(`no suite ${unknown.join(', ')} (there are ${suites.join(', ')})`);
 
-const files = (only ?? suites).map(s => path.join(here, `${s}.test.mjs`));
+const chosen = only ?? suites;
+const files = chosen.map(s => path.join(here, `${s}.test.mjs`));
 console.log(`# e2e: ${dir}${env.E2E_BROWSER === '0' ? ' (no browser)' : ''}`);
+// The Cloudflare suites serve `deploy/cloudflare/dist` with `wrangler dev`, two suites at a time: build it once here, so
+// no suite rebuilds it under another's running wrangler (see buildWorkers in e2e/lib/cloudflare.mjs). When this build
+// fails, each suite builds for itself and reports why.
+const deploy = path.join(path.dirname(here), 'deploy', 'cloudflare');
+if (chosen.some(s => s.startsWith('cloudflare')) && fs.existsSync(path.join(deploy, 'node_modules', '.bin', 'wrangler'))) {
+  const built = spawnSync(process.execPath, ['build.mjs'], { cwd: deploy, encoding: 'utf8' });
+  if (built.status === 0) env.E2E_CLOUDFLARE_BUILT = '1';
+  else console.log(`# e2e: building deploy/cloudflare failed; each Cloudflare suite builds for itself:\n${`${built.stdout}${built.stderr}`.replace(/^/gm, '#   ')}`);
+}
 const r = spawnSync(process.execPath, ['--test', '--test-concurrency=2', '--test-reporter=spec', ...files], { env, stdio: 'inherit' });
 process.exit(r.status ?? 1);
 

@@ -15,8 +15,8 @@
 //! - A value is kept when it shows as the cell does: a number or a yes or no with the pattern (or General) in as many
 //!   characters as the cell shows, in en-US but with any locale's signs for numbers (`1.234,5`, `1 234,5`), compared
 //!   without spaces of any kind and with `’` as `'`; a text as it is (an empty one is nothing). A number whose
-//!   pattern isn't the look's own (one put in its place, or one that doesn't read, `''` too) is kept whatever it
-//!   shows.
+//!   pattern isn't the look's own (one put in its place, or one that doesn't read, `''` too), or whose pattern
+//!   shows it as a fraction (`# ?/?`, `yyyy;# ?/?` below 0), is kept whatever it shows, with the pattern.
 //! - Otherwise the text shown is read as a pasted text is, in the workbook's locale. With no value: a text pattern
 //!   (`@`) keeps the text as it is, and a number keeps the pattern when it shows such a number, as one typed into a
 //!   cell does, else it takes the pattern it brings or General. With a value not kept, the cell takes the number
@@ -255,7 +255,10 @@ fn held(
         };
         let kept = match value {
             ValueOfAnotherProgram::Number(n) => {
-                (!own || shows(&Value::number(*n))).then(|| CopiedInput::Number { value: *n })
+                let as_a_fraction = || {
+                    pattern.and_then(|p| NumberFormat::parse(p).ok()).is_some_and(|f| f.shows_as_a_fraction(*n))
+                };
+                (!own || as_a_fraction() || shows(&Value::number(*n))).then(|| CopiedInput::Number { value: *n })
             }
             ValueOfAnotherProgram::Boolean(b) => {
                 shows(&Value::Boolean(*b)).then_some(CopiedInput::Boolean { value: *b })
@@ -553,7 +556,7 @@ fn checks(expr: &Expr, names: &mut Vec<Rc<str>>) -> bool {
         Expr::Number(_) | Expr::Text(_) | Expr::Boolean(_) | Expr::Reference(_) | Expr::Missing => true,
         Expr::Error(error) => is_kept(*error),
         Expr::Name(name) => names.contains(name),
-        Expr::Array(array) => array.values().iter().all(|v| !matches!(v, Value::Error(e) if !is_kept(*e))),
+        Expr::Array(array) => array.values().all(|v| !matches!(v, Value::Error(e) if !is_kept(*e))),
         Expr::Unary(_, a) => checks(a, names),
         Expr::Binary(_, a, b) => checks(a, names) && checks(b, names),
         Expr::Call { function: None, .. } => false,

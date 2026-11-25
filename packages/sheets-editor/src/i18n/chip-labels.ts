@@ -1,8 +1,57 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Color } from '@open-artifact/sheets-core';
+import type { DropdownCellsRefused, DropdownOptionRemovedDone, DropdownOptionsAddedDone } from '../state/initial-state.ts';
 import { translateMessage } from './messages.ts';
 import { dropdownPaneMessages, cellColorName } from './format-labels.ts';
 import { DROPDOWN_OPTION_SETS, STATUS_OPTION_SET } from '../chips/dropdown-presets.ts';
-export function dropdownPresetName(preset?: Dynamic) {
+/** Options added to a dropdown: how many, how many skipped, whether the dropdown is now full, and the cells when not all of its cells. */
+export type DropdownOptionsAdded = Omit<DropdownOptionsAddedDone, 'what'>;
+/** An option removed from a dropdown, and the cells when not all of its cells. */
+export type DropdownOptionRemoved = Omit<DropdownOptionRemovedDone, 'what'>;
+/** The key of a preset set of dropdown options. */
+export type DropdownPresetKey = 'status' | 'priority' | 'yesNo' | 'approval' | 'health' | 'size';
+/** The key of an option of a preset set of dropdown options. */
+export type DropdownPresetOptionKey =
+  | 'notStarted'
+  | 'inProgress'
+  | 'blocked'
+  | 'done'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'yes'
+  | 'no'
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'onTrack'
+  | 'atRisk'
+  | 'offTrack'
+  | 'small'
+  | 'mediumSize'
+  | 'large'
+  | 'extraLarge';
+/** A preset set of dropdown options, by key, with each option's color. */
+export interface DropdownPreset {
+  key: DropdownPresetKey;
+  options: readonly { key: DropdownPresetOptionKey; color: Color }[];
+}
+/** A preset set of dropdown options with the options in words. */
+export interface LocalizedDropdownPreset {
+  key: DropdownPresetKey;
+  options: { label: string; color: Color }[];
+}
+/** A preset set of dropdown options and its name. */
+export interface NamedDropdownPreset {
+  label: string;
+  set: LocalizedDropdownPreset;
+}
+/** The format that makes cells a dropdown, starting from the status preset. */
+export interface NewDropdownFormat {
+  dropdown: true;
+  firstSet: LocalizedDropdownPreset;
+  setsByName: NamedDropdownPreset[];
+}
+export function dropdownPresetName(preset: DropdownPresetKey): string {
   switch (preset) {
     case 'status':
       return translateMessage({
@@ -36,7 +85,7 @@ export function dropdownPresetName(preset?: Dynamic) {
       });
   }
 }
-export function dropdownPresetOptionLabel(optionKey?: Dynamic) {
+export function dropdownPresetOptionLabel(optionKey: DropdownPresetOptionKey): string {
   switch (optionKey) {
     case 'notStarted':
       return translateMessage({
@@ -135,7 +184,7 @@ export function dropdownPresetOptionLabel(optionKey?: Dynamic) {
       });
   }
 }
-export function dropdownOptionsAddedForCellsText({ count: count, skipped: skipped, isFull: isFull }: Dynamic, cells?: Dynamic) {
+export function dropdownOptionsAddedForCellsText({ count, skipped, isFull }: DropdownOptionsAdded, cells: string): string {
   if (skipped === 0)
     return translateMessage(
       {
@@ -143,8 +192,8 @@ export function dropdownOptionsAddedForCellsText({ count: count, skipped: skippe
         id: 'Bejxh9q0n2',
       },
       {
-        count: count,
-        cells: cells,
+        count,
+        cells,
       },
     );
   return isFull
@@ -155,9 +204,9 @@ export function dropdownOptionsAddedForCellsText({ count: count, skipped: skippe
           id: 'HcIfGRClaP',
         },
         {
-          count: count,
-          skipped: skipped,
-          cells: cells,
+          count,
+          skipped,
+          cells,
         },
       )
     : translateMessage(
@@ -167,13 +216,13 @@ export function dropdownOptionsAddedForCellsText({ count: count, skipped: skippe
           id: 'GC/TNaD6ta',
         },
         {
-          count: count,
-          skipped: skipped,
-          cells: cells,
+          count,
+          skipped,
+          cells,
         },
       );
 }
-export function dropdownOptionRemovedText({ label: label, isSaved: isSaved, onlyIn: onlyIn }: Dynamic) {
+export function dropdownOptionRemovedText({ label, isSaved, onlyIn }: DropdownOptionRemoved): string {
   if (onlyIn === null)
     return isSaved
       ? translateMessage(
@@ -182,7 +231,7 @@ export function dropdownOptionRemovedText({ label: label, isSaved: isSaved, only
             id: 'TbV92pVIDf',
           },
           {
-            label: label,
+            label,
           },
         )
       : translateMessage(
@@ -191,7 +240,7 @@ export function dropdownOptionRemovedText({ label: label, isSaved: isSaved, only
             id: 'D8EnMKaN46',
           },
           {
-            label: label,
+            label,
           },
         );
   return isSaved
@@ -201,7 +250,7 @@ export function dropdownOptionRemovedText({ label: label, isSaved: isSaved, only
           id: '20Y1875V32',
         },
         {
-          label: label,
+          label,
           cells: onlyIn,
         },
       )
@@ -211,13 +260,13 @@ export function dropdownOptionRemovedText({ label: label, isSaved: isSaved, only
           id: '18SzHGtWS5',
         },
         {
-          label: label,
+          label,
           cells: onlyIn,
         },
       );
 }
-export function dropdownOptionsAddedText(added?: Dynamic) {
-  let { count: count, skipped: skipped, isFull: isFull, onlyIn: onlyIn } = added;
+export function dropdownOptionsAddedText(added: DropdownOptionsAdded): string {
+  let { count, skipped, isFull, onlyIn } = added;
   if (onlyIn !== null && count > 0) return dropdownOptionsAddedForCellsText(added, onlyIn);
   if (skipped === 0)
     return translateMessage(
@@ -226,7 +275,7 @@ export function dropdownOptionsAddedText(added?: Dynamic) {
         id: 'fYWNJMyaET',
       },
       {
-        count: count,
+        count,
       },
     );
   return isFull
@@ -237,8 +286,8 @@ export function dropdownOptionsAddedText(added?: Dynamic) {
           id: 'nibirqsMdi',
         },
         {
-          count: count,
-          skipped: skipped,
+          count,
+          skipped,
         },
       )
     : translateMessage(
@@ -248,12 +297,12 @@ export function dropdownOptionsAddedText(added?: Dynamic) {
           id: 'Ny0xdVQMrn',
         },
         {
-          count: count,
-          skipped: skipped,
+          count,
+          skipped,
         },
       );
 }
-export function dropdownCellsRefusalText(refusal?: Dynamic) {
+export function dropdownCellsRefusalText(refusal: DropdownCellsRefused): string {
   switch (refusal.why) {
     case 'ofAnotherDropdown':
       return translateMessage({
@@ -287,7 +336,7 @@ export function dropdownCellsRefusalText(refusal?: Dynamic) {
       );
   }
 }
-export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dynamic) {
+export function personRowLabel(name: string, who: string | null, isHeldByCell: boolean): string {
   if (who === 'you')
     return isHeldByCell
       ? translateMessage(
@@ -296,7 +345,7 @@ export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dyn
             id: 'tSRj477kGB',
           },
           {
-            name: name,
+            name,
           },
         )
       : translateMessage(
@@ -305,7 +354,7 @@ export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dyn
             id: '2V/02EhhX+',
           },
           {
-            name: name,
+            name,
           },
         );
   if (who === 'guest')
@@ -316,7 +365,7 @@ export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dyn
             id: '700YyKou/7',
           },
           {
-            name: name,
+            name,
           },
         )
       : translateMessage(
@@ -325,7 +374,7 @@ export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dyn
             id: 'Tj7buc6HSP',
           },
           {
-            name: name,
+            name,
           },
         );
   return isHeldByCell
@@ -335,21 +384,21 @@ export function personRowLabel(name?: Dynamic, who?: Dynamic, isHeldByCell?: Dyn
           id: 'b2FdOsDZh2',
         },
         {
-          name: name,
+          name,
         },
       )
     : name;
 }
-export const localizeDropdownPreset = ({ key: key, options: options }: Dynamic) => ({
-  key: key,
+export const localizeDropdownPreset = ({ key, options }: DropdownPreset): LocalizedDropdownPreset => ({
+  key,
   options: options.map(
-    (option?: Dynamic) => ({
+    (option) => ({
       label: dropdownPresetOptionLabel(option.key),
       color: option.color,
     }),
   ),
 });
-export const dropdownPresetChosenText = (preset?: Dynamic, optionCount?: Dynamic) =>
+export const dropdownPresetChosenText = (preset: DropdownPresetKey | 'custom', optionCount: number): string =>
   preset === 'custom'
     ? translateMessage({
         defaultMessage: 'Custom: type your own options',
@@ -362,10 +411,10 @@ export const dropdownPresetChosenText = (preset?: Dynamic, optionCount?: Dynamic
         },
         {
           set: dropdownPresetName(preset),
-          optionCount: optionCount,
+          optionCount,
         },
       );
-export const dropdownPresetButtonLabel = (chosen?: Dynamic) =>
+export const dropdownPresetButtonLabel = (chosen: DropdownPresetKey | 'custom'): string =>
   translateMessage(
     {
       defaultMessage: 'Preset: {chosen}',
@@ -375,65 +424,65 @@ export const dropdownPresetButtonLabel = (chosen?: Dynamic) =>
       chosen: chosen === 'custom' ? dropdownPaneMessages.customOptions() : dropdownPresetName(chosen),
     },
   );
-export const localizedDropdownPresets = () =>
+export const localizedDropdownPresets = (): NamedDropdownPreset[] =>
   DROPDOWN_OPTION_SETS.map(
-    (preset?: Dynamic) => ({
+    (preset) => ({
       label: dropdownPresetName(preset.key),
       set: localizeDropdownPreset(preset),
     }),
   );
-export const newDropdownFormat = () => ({
+export const newDropdownFormat = (): NewDropdownFormat => ({
   dropdown: true,
   firstSet: localizeDropdownPreset(STATUS_OPTION_SET),
   setsByName: localizedDropdownPresets(),
 });
-export const toolUnavailableText = (tool?: Dynamic) =>
+export const toolUnavailableText = (tool: string): string =>
   translateMessage(
     {
       defaultMessage: '{tool} isn’t available for the selected cells.',
-      id: 'OjVl8psG8l',
+      id: 'e/dmZcDOeR',
     },
     {
-      tool: tool,
+      tool,
     },
   );
-export const newDropdownFormatOpeningList = () => ({
+export const newDropdownFormatOpeningList = (): NewDropdownFormat & { replacesFormulas: true; thenOpens: 'list' } => ({
   ...newDropdownFormat(),
   replacesFormulas: true,
   thenOpens: 'list',
 });
-export const dropdownOptionsForCellLabel = (cell?: Dynamic) =>
+export const dropdownOptionsForCellLabel = (cell: string): string =>
   translateMessage(
     {
       defaultMessage: 'Options for {cell}',
       id: 'XX8Kx3pmzc',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const optionListForCellLabel = (cell?: Dynamic, optionCount?: Dynamic) =>
+export const optionListForCellLabel = (cell: string, optionCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{optionCount, plural, one {List of # option for {cell}} other {List of # options for {cell}}}',
       id: 'h5Z2oh9cY7',
     },
     {
-      cell: cell,
-      optionCount: optionCount,
+      cell,
+      optionCount,
     },
   );
-export const addOptionText = (text?: Dynamic) =>
+export const addOptionText = (text: string): string =>
   translateMessage(
     {
       defaultMessage: 'Add “{text}”',
       id: 'oY52ahYifg',
     },
     {
-      text: text,
+      text,
     },
   );
-export const optionColorName = (color?: Dynamic) =>
+export const optionColorName = (color: Color): string =>
   color.kind !== 'standard'
     ? cellColorName('fillColor', color)
     : translateMessage(
@@ -446,68 +495,68 @@ export const optionColorName = (color?: Dynamic) =>
           hue: color.hue,
         },
       );
-export const dropdownCellsButtonLabel = (chosen?: Dynamic) =>
+export const dropdownCellsButtonLabel = (chosen: string): string =>
   translateMessage(
     {
       defaultMessage: 'Cells: {chosen}',
       id: 'zHGk+7S5VH',
     },
     {
-      chosen: chosen,
+      chosen,
     },
   );
-export const onlyCellsLabel = (cells?: Dynamic) =>
+export const onlyCellsLabel = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Only {cells}',
       id: '7FeNQfMC4C',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const optionAlreadyExistsText = (option?: Dynamic) =>
+export const optionAlreadyExistsText = (optionLabel: string): string =>
   translateMessage(
     {
       defaultMessage: '“{option}” is already an option.',
       id: 'F1OPOBT5CH',
     },
     {
-      option: option,
+      option: optionLabel,
     },
   );
-export const optionNumberLabel = (number?: Dynamic) =>
+export const optionNumberLabel = (number: number): string =>
   translateMessage(
     {
       defaultMessage: 'Option {number, number}',
       id: '8/pRdQ3zFj',
     },
     {
-      number: number,
+      number,
     },
   );
-export const optionColorButtonLabel = (number?: Dynamic) =>
+export const optionColorButtonLabel = (number: number): string =>
   translateMessage(
     {
       defaultMessage: 'Option {number, number} color',
       id: 'c8ATfwcTzC',
     },
     {
-      number: number,
+      number,
     },
   );
-export const optionColorButtonHeardAs = (number?: Dynamic, color?: Dynamic) =>
+export const optionColorButtonHeardAs = (number: number, color: Color): string =>
   translateMessage(
     {
       defaultMessage: 'Option {number, number} color, {color}',
       id: 'ya0bzzyz5p',
     },
     {
-      number: number,
+      number,
       color: cellColorName('fillColor', color),
     },
   );
-export const reorderOptionLabel = (number?: Dynamic, label?: Dynamic) =>
+export const reorderOptionLabel = (number: number, label: string): string =>
   label.trim() === ''
     ? translateMessage(
         {
@@ -515,7 +564,7 @@ export const reorderOptionLabel = (number?: Dynamic, label?: Dynamic) =>
           id: 'V/W03J+8oN',
         },
         {
-          number: number,
+          number,
         },
       )
     : translateMessage(
@@ -527,7 +576,7 @@ export const reorderOptionLabel = (number?: Dynamic, label?: Dynamic) =>
           label: label.trim(),
         },
       );
-export const removeOptionLabel = (number?: Dynamic, label?: Dynamic) =>
+export const removeOptionLabel = (number: number, label: string): string =>
   label.trim() === ''
     ? translateMessage(
         {
@@ -535,7 +584,7 @@ export const removeOptionLabel = (number?: Dynamic, label?: Dynamic) =>
           id: 'Ieu729Co2l',
         },
         {
-          number: number,
+          number,
         },
       )
     : translateMessage(
@@ -553,14 +602,14 @@ export const peoplePickerMessages = {
       defaultMessage: 'Searching…',
       id: 'R5W/gP878D',
     }),
-  found: (count?: Dynamic) =>
+  found: (count: number): string =>
     translateMessage(
       {
         defaultMessage: '{count, plural, =0 {No people found} one {# person listed} other {# people listed}}',
         id: 'kE0OOmcExu',
       },
       {
-        count: count,
+        count,
       },
     ),
   noMatches: () =>
@@ -599,13 +648,13 @@ export const peoplePickerMessages = {
       id: 'Zo/z4eGuKq',
     }),
 };
-export const morePeopleCountText = (count?: Dynamic) =>
+export const morePeopleCountText = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {+#} other {+#}}',
       id: 'vCW45oQJS9',
     },
     {
-      count: count,
+      count,
     },
   );

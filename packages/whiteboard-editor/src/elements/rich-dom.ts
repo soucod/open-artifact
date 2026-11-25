@@ -1,7 +1,7 @@
 /**
  * The DOM half of the formatted (rich) in-place text editor: filling the
  * editing surface, formatting commands, list handling, the as-you-type
- * conveniences, plain-text paste and copy, and text links.
+ * conveniences, paste and copy (plain and formatted), and text links.
  *
  * The surface follows the browser's own editing conventions (what
  * `execCommand` makes): a `<div>` per paragraph, lists as `<ul>`/`<ol>`
@@ -27,11 +27,13 @@ import {
   planArrowInput,
   planPaste,
   plainCopyText,
+  serializeEditorText,
   type ArrowCaretContext,
   type DrawnArrow,
   type ListKind,
   type RichNodeFactory,
 } from './rich-text.ts';
+import { RICH_TEXT_CLIPBOARD_TYPE, hasInlineFormat, richClipboardHtml } from '../lib/rich-clipboard.ts';
 
 /* ------------------------------------------------------------------------ */
 /* Events and chrome                                                        */
@@ -44,10 +46,10 @@ export const LINK_CHORD_EVENT = 'wb-link-chord';
 export const BULLETS_PRESS_EVENT = 'wb-bullets-press';
 
 /**
- * Chrome that may take focus without ending the edit: the format bar and
- * the menus and popovers it opens.
+ * Chrome that may take focus without ending the edit: the format bar, the
+ * menus and popovers it opens, and the link card.
  */
-export const EDITOR_CHROME_SELECTOR = '[data-wb-format-bar], [data-wb-chrome][role="menu"], [data-wb-chrome][role="dialog"]';
+export const EDITOR_CHROME_SELECTOR = '[data-wb-format-bar], [data-wb-chrome][role="menu"], [data-wb-chrome][role="dialog"], [data-wb-link-card]';
 
 /** Whether an event target is editor chrome ({@link EDITOR_CHROME_SELECTOR}). */
 export function isEditorChromeTarget(target: EventTarget | null): boolean {
@@ -96,6 +98,15 @@ function domNodes(doc: Document): RichNodeFactory<Node> {
 /** Replaces the surface's content with stored text, formatted (see the module comment). */
 export function renderIntoEditor(root: HTMLElement, text: string, profile: TextProfile): void {
   root.replaceChildren(...buildEditorNodes(editorBlocks(text, profile), domNodes(root.ownerDocument)));
+  describeEditorLinks(root);
+}
+
+/** Gives each link of the surface its address as its accessible description. */
+function describeEditorLinks(root: HTMLElement): void {
+  for (const link of root.querySelectorAll<HTMLElement>('a[data-href]')) {
+    const href = link.dataset.href ?? '';
+    if (link.getAttribute('aria-description') !== href) link.setAttribute('aria-description', href);
+  }
 }
 
 /** Puts the caret at the end of the surface's last line. */
@@ -617,6 +628,65 @@ export function copyPlainSelection(event: ClipboardEvent, cut: boolean): void {
   if (cut) doc.execCommand('delete');
 }
 
+/** Marks a selection inside them keeps when it is copied on its own. */
+const INLINE_MARK_SELECTOR = `${BOLD_ELEMENT_SELECTOR},${ITALIC_ELEMENT_SELECTOR},a[data-href],code`;
+
+/** The stored text of the part of the surface `range` covers, marks it sits inside included. */
+function rangeStoredText(root: HTMLElement, range: Range, profile: TextProfile): string {
+  const doc = root.ownerDocument;
+  let holder = doc.createElement('div');
+  holder.append(range.cloneContents());
+  for (let at = elementOf(range.commonAncestorContainer); at && at !== root && root.contains(at); at = at.parentElement) {
+    if (!at.matches(INLINE_MARK_SELECTOR)) continue;
+    const mark = doc.createElement(at.tagName);
+    for (const attribute of at.attributes) mark.setAttribute(attribute.name, attribute.value);
+    mark.append(...holder.childNodes);
+    holder = doc.createElement('div');
+    holder.append(mark);
+  }
+  return serializeEditorText(holder, profile);
+}
+
+/**
+ * Copy and cut in a formatted field: a selection with links or marks also
+ * goes out as stored text and clean HTML (see `lib/rich-clipboard.ts`);
+ * otherwise as {@link copyPlainSelection}.
+ */
+export function copyEditorSelection(event: ClipboardEvent, root: HTMLElement, profile: TextProfile, cut: boolean): void {
+  const doc = root.ownerDocument;
+  const selection = doc.getSelection();
+  const range = selection && selection.rangeCount > 0 && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+  const stored = range && profile.marks === 'on' && root.contains(range.commonAncestorContainer) ? rangeStoredText(root, range, profile) : '';
+  if (!event.clipboardData || !hasInlineFormat(stored)) {
+    copyPlainSelection(event, cut);
+    return;
+  }
+  event.preventDefault();
+  event.clipboardData.setData('text/plain', plainCopyText(selection?.toString() ?? ''));
+  event.clipboardData.setData('text/html', richClipboardHtml(stored));
+  event.clipboardData.setData(RICH_TEXT_CLIPBOARD_TYPE, stored);
+  if (cut) doc.execCommand('delete');
+}
+
+/**
+ * Inserts stored text (copied from a formatted field) at the selection,
+ * formatted. Returns `false` when it does not fit the field (it holds one
+ * line, or has no marks), for the caller to paste it as plain text.
+ */
+export function pasteStoredText(root: HTMLElement, stored: string, profile: TextProfile): boolean {
+  if (profile.marks !== 'on' || stored === '' || (profile.lines === 'one' && stored.includes('\n'))) return false;
+  const doc = root.ownerDocument;
+  const holder = doc.createElement('div');
+  renderIntoEditor(holder, stored, profile);
+  // The browser moves atomic chips out of the line it inserts into; they are locked again once in.
+  for (const chip of holder.querySelectorAll('[contenteditable]')) chip.removeAttribute('contenteditable');
+  // One paragraph goes in as inline content, so it joins the line at the caret.
+  const only = holder.childElementCount === 1 && holder.firstElementChild?.tagName === 'DIV' ? holder.firstElementChild : holder;
+  doc.execCommand('insertHTML', false, only.innerHTML);
+  lockEditorLinks(root);
+  return true;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Links                                                                    */
 /* ------------------------------------------------------------------------ */
@@ -627,6 +697,7 @@ export function lockEditorLinks(root: HTMLElement): void {
     link.contentEditable = 'false';
     link.removeAttribute('style');
   }
+  describeEditorLinks(root);
   const selection = root.ownerDocument.getSelection();
   const caretLink = elementOf(selection?.isCollapsed ? selection.anchorNode : null)?.closest('a[data-href]');
   if (caretLink && root.contains(caretLink)) placeCaretAfter(caretLink);
@@ -841,12 +912,28 @@ function selectedLinkChips(doc: Document): HTMLElement[] {
   const range = selection.getRangeAt(0);
   const covered = linksCoveringRange(root, range)[0];
   if (covered) return linkRunAround(root, covered);
+  const chip = chipAtRange(range);
+  return chip !== null ? linkRunAround(root, chip) : [];
+}
+
+/** The chip a range sits in, or a caret sits right after. */
+function chipAtRange(range: Range): HTMLElement | null {
   const { commonAncestorContainer: ancestor, collapsed, startContainer, startOffset } = range;
   const before = !collapsed ? null : startContainer.nodeType === Node.ELEMENT_NODE ? startContainer.childNodes[startOffset - 1] : startOffset === 0 ? startContainer.previousSibling : null;
-  const chip =
-    elementOf(ancestor)?.closest<HTMLElement>(LINK_CHIP_SELECTOR) ??
-    (before instanceof HTMLElement && before.matches(LINK_CHIP_SELECTOR) ? before : null);
-  return chip !== null ? linkRunAround(root, chip) : [];
+  return elementOf(ancestor)?.closest<HTMLElement>(LINK_CHIP_SELECTOR) ?? (before instanceof HTMLElement && before.matches(LINK_CHIP_SELECTOR) ? before : null);
+}
+
+/** The link chip a collapsed caret rests in or right after, else `null`. */
+export function caretLinkChip(doc: Document = document): HTMLElement | null {
+  const selection = doc.getSelection();
+  if (!selection?.isCollapsed || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  return editableRootOfRange(range) !== null ? chipAtRange(range) : null;
+}
+
+/** The link the selection is in, covers or rests right after, else `null`. */
+export function selectedLinkChip(doc: Document = document): HTMLElement | null {
+  return selectedLinkChips(doc)[0] ?? null;
 }
 
 /** What the link field would work on now; `null` outside an editing surface. */

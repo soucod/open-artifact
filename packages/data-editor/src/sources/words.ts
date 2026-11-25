@@ -41,6 +41,7 @@ export const SET_BY_THE_PAGE_LABEL = 'Set by the page';
 export const RESULT_ROWS_LABEL = 'Result rows';
 export const BACK_TO_SOURCES_LABEL = 'Back to Sources';
 export const FILES_GROUP_NAME = 'Files';
+export const STORAGE_GROUP_NAME = 'Artifact storage';
 export const TRANSFORMS_GROUP_NAME = 'Transforms';
 export const UNUSED_SOURCE_LABEL = 'Unused';
 export const UNUSED_SOURCE_DESCRIPTION = 'Nothing in this artifact uses this source.';
@@ -83,7 +84,7 @@ export const REFRESH_DATA_LABEL = 'Refresh data';
 export const WHEN_SOMEONE_OPENS_IT_LABEL = 'When someone opens it';
 export const ABOUT_SOURCES_TITLE = 'About sources';
 export const SAVED_DATA_LABEL = 'Saved data';
-export const SOURCES_LOAD_FROM_MESSAGE = 'Each source loads from a connector or a file.';
+export const SOURCES_LOAD_FROM_MESSAGE = 'Each source loads from a connector, a file, or artifact storage.';
 export const SAVED_FILES_MESSAGE = 'Files are stored in this artifact and deleted with it.';
 export const RESULTS_REUSED_MESSAGE = 'Results are reused for as long as Refresh data is set, then load again.';
 export const REFRESH_LOADS_NOW_MESSAGE = 'The refresh button loads new results now.';
@@ -140,6 +141,10 @@ export function describeConnectorGroupLabel(connector: string, count: number): s
 
 export function describeFilesGroupLabel(count: number): string {
   return plural(count, 'file', 'files');
+}
+
+export function describeStorageGroupLabel(count: number): string {
+  return plural(count, 'saved source', 'saved sources');
 }
 
 export function describeTransformsGroupLabel(count: number): string {

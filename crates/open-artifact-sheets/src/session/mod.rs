@@ -27,10 +27,12 @@ mod changes;
 mod edits;
 mod history;
 mod history_reads;
+mod interactive;
 mod new_ids;
+mod packed;
 mod parts;
 mod place;
-mod reads;
+pub(crate) mod reads;
 mod undo;
 
 use hashbrown::{HashMap, HashSet};
@@ -43,7 +45,7 @@ use crate::evaluate::Place;
 use crate::ids::LineId;
 use crate::value::Value;
 use crate::workbook::load::{Op, Refusal};
-use crate::workbook::{version, Workbook};
+use crate::workbook::{snapshot, version, Workbook};
 use crate::Clock;
 use changes::Changes;
 
@@ -100,6 +102,20 @@ impl Forgotten {
         forgotten
     }
 
+    fn from_snapshot(workbook: &Workbook) -> Self {
+        let mut forgotten = Self::default();
+        forgotten.sheets.extend(workbook.deleted_sheets.iter().map(|sheet| sheet.id.clone()));
+        for sheet in workbook.sheets.iter().chain(&workbook.deleted_sheets) {
+            for (axis, forgotten) in [(&sheet.rows, &mut forgotten.rows), (&sheet.columns, &mut forgotten.columns)] {
+                for id in axis.deleted() {
+                    let base = workbook.bases.name(id.base);
+                    forgotten.entry_ref(base).or_default().insert(id.n);
+                }
+            }
+        }
+        forgotten
+    }
+
     /// Adds what the operations delete.
     fn add(&mut self, ops: &[Op]) {
         let add = |lines: &mut HashMap<String, HashSet<u32>>, runs: &[crate::ids::IdRun]| {
@@ -145,6 +161,7 @@ struct Loading {
     /// The revision the pages are of, after the first one: a page of another revision starts the load over.
     revision: Option<u64>,
     ops: Vec<Op>,
+    snapshot: Option<snapshot::Snapshot>,
     is_repeat: bool,
     /// Whether the load is needed whatever revision is confirmed: an edit of others could not be applied.
     is_needed: bool,
@@ -191,6 +208,11 @@ struct Report {
     /// Whether operations applied changed the workbook's shape (sheets, rows, columns): every formula is worked out
     /// again at once.
     reshaped: bool,
+    /// A pivot edit calculates its new spill before the answer is sent.
+    works_out_pivot: bool,
+    /// Formulas whose text rows or columns inserted after every cell changed (a range the lines went into, a cell
+    /// past them): when formulas wait to be worked out, they are told at once.
+    texts_to_check: Vec<(String, String, String)>,
 }
 
 pub struct WorkbookSession {
@@ -258,6 +280,15 @@ enum Request {
         edit: Json,
     },
     ReadWorkbook,
+    ReadWorkbookWithCellsPacked,
+    #[serde(rename_all = "camelCase")]
+    ReadRowsWithCellsPacked {
+        sheet_id: String,
+        #[serde(deserialize_with = "crate::workbook::layout::written::maybe_null")]
+        rows: Option<Vec<String>>,
+        #[serde(deserialize_with = "crate::workbook::layout::written::maybe_null")]
+        columns: Option<packed::Columns>,
+    },
     AnswerBeforeCalculating,
     Calculate,
     ReceiveServerRevision {
@@ -276,6 +307,17 @@ enum Request {
         revision: u64,
         v: u32,
         ops: Vec<Json>,
+        next: Option<u64>,
+    },
+    LinesOfLoad {
+        ops: Vec<Op>,
+    },
+    ReceiveLinesOfLoad {
+        from: u64,
+        revision: u64,
+        #[serde(rename = "v")]
+        _v: u32,
+        lines: String,
         next: Option<u64>,
     },
     ReceiveStreamedEdit {
@@ -304,6 +346,15 @@ enum Request {
         /// Edits made after it, each when it can be (left out, none; null is unreadable).
         #[serde(default)]
         edits_that_go_along: Vec<EditAlong>,
+        /// The sheet whose columns are made wider for the numbers the edit gives a pattern (`formatCells` with a
+        /// number format); null or left out, none.
+        #[serde(default)]
+        makes_room_for_numbers_in: Option<String>,
+        /// The order the person sees a sheet's rows in, when they put them in an order of their own (read
+        /// strictly, its sheet and runs of rows): fills, pastes and borders of the sheet are made in it
+        /// (`edits/seen.rs`).
+        #[serde(default)]
+        own_row_order: Option<OwnRowOrder>,
     },
     #[serde(rename_all = "camelCase")]
     QueueNextUndo {
@@ -358,7 +409,7 @@ enum Outcome {
 }
 
 /// The most cells a workbook holds (`limits.mostCells` of the shared description).
-const MOST_CELLS: usize = 200_000;
+const MOST_CELLS: usize = 500_000;
 
 /// The cells the workbook keeps, those of deleted sheets, rows and columns among them.
 fn cells_kept(workbook: &Workbook) -> usize {
@@ -398,9 +449,12 @@ enum WentAlong {
 /// the parts before it), and the place it changed.
 struct Unit {
     ops: Vec<Op>,
+    works_out_pivot: bool,
     /// Each with whether it is one of the parts of operations too large to send whole.
     parts: Vec<(Vec<Op>, Vec<Op>, bool)>,
     place: place::Place,
+    /// How many of the last parts are the widths making room for numbers (`makesRoomForNumbersIn`).
+    room: usize,
 }
 
 /// A code of new ids as they are made: 8 to 16 small letters and digits.
@@ -419,14 +473,49 @@ fn refusal_of(refused: edits::Refused) -> Json {
 
 /// Operations applied to a workbook, as the parts they are sent in: whole, or too large for that, in parts, each
 /// taken back by what reverses it after the parts before it.
+/// The rows and columns of the cells an edit's operations give a number format in sheet `sheet_id`.
+fn numbers_given_patterns(workbook: &Workbook, ops: &[Op], sheet_id: &str) -> Vec<(HashSet<LineId>, HashSet<LineId>)> {
+    let lines = |runs: &[crate::ids::IdRun]| -> HashSet<LineId> {
+        runs.iter().flat_map(|run| (run.first..run.first + run.count).map(move |n| (run.base.as_str(), n))).filter_map(|(b, n)| Some(LineId { base: workbook.bases.find(b)?, n })).collect()
+    };
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::SetCellFormats { sheet_id: id, formats } if id == sheet_id => Some(formats),
+            _ => None,
+        })
+        .flatten()
+        .filter(|f| f.format.get("numberFormat").is_some())
+        .map(|f| (lines(&f.rows), lines(&f.columns)))
+        .collect()
+}
+
+/// The order a person sees a sheet's rows in (`queueEdit`'s `ownRowOrder`), read in `edits/seen.rs`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnRowOrder {
+    sheet_id: String,
+    #[serde(deserialize_with = "nonempty_runs")]
+    rows: Vec<crate::ids::IdRun>,
+}
+
+fn nonempty_runs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<crate::ids::IdRun>, D::Error> {
+    let runs = Vec::<crate::ids::IdRun>::deserialize(d)?;
+    // None, or a run of none, is not read.
+    if runs.is_empty() || runs.iter().any(|run| run.count == 0) {
+        return Err(serde::de::Error::custom("no rows"));
+    }
+    Ok(runs)
+}
+
 fn parts_to_send(before: &Workbook, ops: &[Op], reverse: Vec<Op>) -> Result<Vec<(Vec<Op>, Vec<Op>, bool)>, Json> {
     match parts::of(ops, &reverse) {
         Ok(None) => Ok(vec![(ops.to_vec(), reverse, false)]),
         Ok(Some(parts)) => {
+            let is_split = parts.len() > 1;
             let mut shown = before.clone();
             parts
                 .into_iter()
-                .map(|ops| shown.apply_in_place(&ops).map(|reverse| (ops, reverse, true)).map_err(|r| json!(r)))
+                .map(|ops| shown.apply_in_place(&ops).map(|reverse| (ops, reverse, is_split)).map_err(|r| json!(r)))
                 .collect()
         }
         Err(parts::TooLarge) => Err(json!(Refusal::EditTooLarge)),
@@ -438,7 +527,6 @@ fn read_ops(ops: &[Json]) -> Option<Vec<Op>> {
     ops.iter().map(|op| serde_json::from_value(op.clone()).ok()).collect()
 }
 
-/// The value a formula's cell shows, and the cells its array spills into, by id.
 /// What the formulas of the workbook shown last came to, into the workbook shown anew: of the cells that hold what
 /// they held.
 fn carry_outcomes(old: &Workbook, new: &mut Workbook) {
@@ -456,22 +544,30 @@ fn carry_outcomes(old: &Workbook, new: &mut Workbook) {
     new.outcomes = outcomes;
 }
 
-/// What the page is told of a formula's cell: its value, the number format it brings, for one in a cycle the cell
-/// of the first formula of the cycle it reads (a cycle's #REF! is told again when that changes), and its spill as
-/// `readWorkbook` tells it (told again when it fills to elsewhere, or is blocked by another cell or would fill to
-/// elsewhere, whatever its value). Then whether it is a cell an array fills rather than a formula's own. Last, for a
-/// formula whose array fills cells, that array: its own cell is told again when any value of it changes. And the
-/// formula's text as it reads: told again when rows or columns inserted, deleted or moved, or a sheet renamed, write
-/// its references otherwise.
-type Told = (
-    Value,
-    Option<crate::brought::Brought>,
-    Option<(String, String, String)>,
-    Option<Json>,
-    bool,
-    Option<std::rc::Rc<crate::value::Array>>,
-    Option<String>,
-);
+/// What the page is told of a formula or of a cell it spills into.
+struct Told {
+    value: Value,
+    brought: Option<crate::brought::Brought>,
+    cycle_entry: Option<(String, String, String)>,
+    spill: Option<Json>,
+    spilled: bool,
+    /// A formula's anchor is told again when any value of its spill changes.
+    array: Option<std::rc::Rc<crate::value::Array>>,
+    formula_text: Option<String>,
+}
+
+impl Told {
+    fn changed_from(&self, before: &Self, reshaped: bool) -> bool {
+        self.value != before.value
+            || self.brought != before.brought
+            || self.spill != before.spill
+            || self.spilled != before.spilled
+            || self.array != before.array
+            || self.formula_text != before.formula_text
+            // After a shape change, a new cycle entry on its own does not trigger a cell notification.
+            || (!reshaped && self.cycle_entry != before.cycle_entry)
+    }
+}
 
 fn formula_values(workbook: &Workbook) -> HashMap<(String, String, String), Told> {
     let mut values = HashMap::with_capacity(workbook.outcomes.len());
@@ -494,27 +590,37 @@ fn formula_values(workbook: &Workbook) -> HashMap<(String, String, String), Told
             crate::workbook::Input::Formula { formula } => Some(workbook.formula_text(i, formula)),
             _ => None,
         });
-        let told = (outcome.value.clone(), outcome.brought.clone(), entry, spill, false, array, formula_text);
+        let told = Told {
+            value: outcome.value.clone(),
+            brought: outcome.brought.clone(),
+            cycle_entry: entry,
+            spill,
+            spilled: false,
+            array,
+            formula_text,
+        };
         values.insert((sheet_id.clone(), text(*r), text(*c)), told);
         let (Some(sheet), Some(crate::calculate::SpillOutcome::Fills { array, .. })) = (sheet, &outcome.spill) else {
             continue;
         };
         let (Some(top), Some(left)) = (sheet.rows.position(*r), sheet.columns.position(*c)) else { continue };
-        for i in 0..array.rows() {
-            for j in 0..array.columns() {
-                if i == 0 && j == 0 {
-                    continue;
-                }
-                let (Some(row), Some(column)) = (sheet.rows.line(top + i), sheet.columns.line(left + j)) else {
-                    continue;
-                };
-                // The page is not told of a cell the array holds nothing in.
-                if matches!(array.get(i, j), Value::Blank) {
-                    continue;
-                }
-                let told = (array.get(i, j).clone(), None, None, None, true, None, None);
-                values.insert((sheet_id.clone(), text(row), text(column)), told);
+        for ((i, j), value) in array.entries() {
+            if (i, j) == (0, 0) {
+                continue;
             }
+            let (Some(row), Some(column)) = (sheet.rows.line(top + i), sheet.columns.line(left + j)) else {
+                continue;
+            };
+            let told = Told {
+                value: value.clone(),
+                brought: None,
+                cycle_entry: None,
+                spill: None,
+                spilled: true,
+                array: None,
+                formula_text: None,
+            };
+            values.insert((sheet_id.clone(), text(row), text(column)), told);
         }
     }
     values
@@ -863,17 +969,15 @@ fn cells_filled_from(workbook: &Workbook, sheet_id: &str, r: &str, c: &str) -> V
     let Some(sheet) = workbook.sheet_index(sheet_id).map(|i| &workbook.sheets[i]) else { return Vec::new() };
     let Some((r, c)) = workbook.bases.parse(r).zip(workbook.bases.parse(c)) else { return Vec::new() };
     let outcome = workbook.outcome(sheet_id, r, c).and_then(|o| o.spill.as_ref());
-    let Some(crate::calculate::SpillOutcome::Fills { to, .. }) = outcome else { return Vec::new() };
+    let Some(crate::calculate::SpillOutcome::Fills { array, .. }) = outcome else { return Vec::new() };
     let Some((top, left)) = sheet.rows.position(r).zip(sheet.columns.position(c)) else { return Vec::new() };
-    let mut cells = Vec::new();
-    for row in top..=to.0 {
-        for column in (left..=to.1).filter(|&column| (row, column) != (top, left)) {
-            if let Some((rl, cl)) = sheet.rows.line(row).zip(sheet.columns.line(column)) {
-                cells.push((sheet_id.to_string(), workbook.bases.text(rl), workbook.bases.text(cl)));
-            }
-        }
-    }
-    cells
+    array.entries()
+        .filter(|(at, _)| *at != (0, 0))
+        .filter_map(|((row, column), _)| {
+            let (r, c) = sheet.rows.line(top + row).zip(sheet.columns.line(left + column))?;
+            Some((sheet_id.to_string(), workbook.bases.text(r), workbook.bases.text(c)))
+        })
+        .collect()
 }
 
 /// Whether any formula is left in a sheet, in a row and column not deleted.
@@ -891,6 +995,7 @@ fn has_live_formulas(workbook: &Workbook) -> bool {
 enum OthersPlace {
     Now(Json),
     Later(place::Place),
+    Insertion(Op),
 }
 
 /// Whether a workbook is one the page's edits may leave: a sheet at least, and no two sheets of one name, whatever
@@ -958,6 +1063,53 @@ fn shape_change(before: &Workbook, after: &Workbook, ops: &[Op]) -> (bool, Vec<(
     (false, touched)
 }
 
+/// The formulas whose text rows or columns inserted after every cell change (operations applied: the workbook is as
+/// it is after them): a reference of theirs ends, or is, past the lines inserted, or ends on a deleted line that now
+/// gives way to one of them. Formulas that do not read (#ERROR!) too; not those in deleted rows or columns.
+fn texts_moved(after: &Workbook, ops: &[Op]) -> Vec<(String, String, String)> {
+    use crate::formula::Reference;
+    let mut moved = Vec::new();
+    for op in ops {
+        let (sheet_id, run, is_rows) = match op {
+            Op::InsertRows { sheet_id, rows, .. } => (sheet_id, rows, true),
+            Op::InsertColumns { sheet_id, columns, .. } => (sheet_id, columns, false),
+            _ => continue,
+        };
+        let Some(s) = after.sheet_index(sheet_id) else { continue };
+        let axis = if is_rows { &after.sheets[s].rows } else { &after.sheets[s].columns };
+        let first = after.bases.find(&run.base).and_then(|base| axis.position(crate::ids::LineId { base, n: run.first }));
+        let Some(at) = first else { continue };
+        // An end where it was is before the lines; one past them, or a deleted one that gives way to one of them
+        // (toward the other end), is not.
+        let moved_end = |p: usize| p >= at;
+        let ends = |reference: &Reference| -> bool {
+            let Some(l) = after.locate(reference).filter(|l| l.sheet == s) else { return false };
+            match (reference, is_rows) {
+                (Reference::Cell { .. } | Reference::Range { .. } | Reference::Rows { .. }, true) => {
+                    moved_end(l.top.0) || moved_end(l.bottom.0)
+                }
+                (Reference::Cell { .. } | Reference::Range { .. } | Reference::Columns { .. }, false) => {
+                    moved_end(l.left.0) || moved_end(l.right.0)
+                }
+                (Reference::Columns { top, .. }, true) => top.is_some() && moved_end(l.top.0),
+                (Reference::Rows { left, .. }, false) => left.is_some() && moved_end(l.left.0),
+            }
+        };
+        for sheet in &after.sheets {
+            for (&(r, c), cell) in &sheet.cells {
+                if !sheet.rows.contains(r) || !sheet.columns.contains(c) {
+                    continue;
+                }
+                let crate::workbook::Input::Formula { formula } = &cell.input else { continue };
+                if formula.references.iter().any(ends) {
+                    moved.push((sheet.id.clone(), after.bases.text(r), after.bases.text(c)));
+                }
+            }
+        }
+    }
+    moved
+}
+
 /// Whether operations change the workbook's shape: its sheets, or the rows and columns in them.
 fn reshapes(ops: &[Op]) -> bool {
     ops.iter().any(|op| {
@@ -974,6 +1126,7 @@ fn reshapes(ops: &[Op]) -> bool {
                 | Op::UndeleteRows { .. }
                 | Op::UndeleteColumns { .. }
                 | Op::MoveRows { .. }
+                | Op::ReorderRows { .. }
                 | Op::MoveColumns { .. }
         )
     })
@@ -1009,6 +1162,11 @@ impl WorkbookSession {
     }
 
     pub fn answer_json(&mut self, request: &str) -> String {
+        self.answer_with_cells(request, |_, _| {})
+    }
+
+    /// A request answered as JSON. Packed reads send each associated block through `take` in index order.
+    pub fn answer_with_cells(&mut self, request: &str, mut take: impl FnMut(&[u8], &str)) -> String {
         let Ok(json) = serde_json::from_str::<Json>(request) else {
             return refused(Refusal::UnreadableRequest);
         };
@@ -1101,6 +1259,19 @@ impl WorkbookSession {
                 }
                 serde_json::to_string(&self.workbook.contents_written()).expect("contents serialize")
             }
+            Request::ReadWorkbookWithCellsPacked => {
+                if !(self.answer_before_calculating && self.is_calculation_due) {
+                    self.calculate_now();
+                }
+                let mut next = 0;
+                self.workbook.contents_written().pack(|cells| packed::send(cells, &mut next, &mut take)).to_string()
+            }
+            Request::ReadRowsWithCellsPacked { sheet_id, rows, columns } => {
+                if !(self.answer_before_calculating && self.is_calculation_due) {
+                    self.calculate_now();
+                }
+                packed::read_rows(&self.workbook, &sheet_id, rows, columns, take)
+            }
             Request::AnswerBeforeCalculating => {
                 self.start_syncing();
                 self.answer_before_calculating = true;
@@ -1160,6 +1331,18 @@ impl WorkbookSession {
                 self.catch_up();
                 self.sync_state()
             }
+            Request::LinesOfLoad { ops } => match snapshot::lines_of_load(&ops) {
+                Ok(lines) => json!({"kind": "linesOfLoad", "lines": lines}).to_string(),
+                Err(why) => refused(why),
+            },
+            Request::ReceiveLinesOfLoad { from, revision, lines, next, .. } => {
+                self.start_syncing();
+                if self.stop.is_none() {
+                    self.receive_lines_of_load(from, revision, &lines, next);
+                    self.catch_up();
+                }
+                self.sync_state()
+            }
             Request::ReceiveStreamedEdit { revision, applied } => {
                 self.start_syncing();
                 if self.stop.is_some() {
@@ -1186,6 +1369,8 @@ impl WorkbookSession {
                 time_zone_of_the_browser,
                 edits_before,
                 edits_that_go_along,
+                makes_room_for_numbers_in,
+                own_row_order,
             } => {
                 self.start_syncing();
                 let context = edits::Context {
@@ -1193,8 +1378,10 @@ impl WorkbookSession {
                     code: &new_id_code,
                     browser_zone: time_zone_of_the_browser.as_deref(),
                     shown_to_the_person: shown_to_the_person.as_deref(),
+                    own_row_order: own_row_order.as_ref(),
+                    seen: None,
                 };
-                self.queue_edit(op_id, edit, &context, edits_before, edits_that_go_along)
+                self.queue_edit(op_id, edit, &context, edits_before, edits_that_go_along, makes_room_for_numbers_in.as_deref())
             }
             Request::QueueNextUndo { op_id } => {
                 self.start_syncing();
@@ -1250,7 +1437,7 @@ impl WorkbookSession {
     }
 
     fn queue_edit(&mut self, op_id: String, edit: Json, context: &edits::Context, befores: Vec<EditBefore>,
-        along: Vec<EditAlong>) -> String {
+        along: Vec<EditAlong>, makes_room_for_numbers_in: Option<&str>) -> String {
         // Every code of new ids is well formed, and every edit readable, or none is.
         let codes = std::iter::once(context.code)
             .chain(befores.iter().map(|b| b.new_id_code.as_str()))
@@ -1299,7 +1486,7 @@ impl WorkbookSession {
         // Rows, columns or sheets moved (by a move or a sort) are made alone: among other edits, refused.
         let is_among_several = !befores.is_empty() || !along.is_empty();
         let moves_among_several =
-            |made: &edits::Made| is_among_several && made.ops.iter().any(|op| matches!(op, Op::MoveRows { .. } | Op::MoveColumns { .. } | Op::MoveSheets { .. }));
+            |made: &edits::Made| is_among_several && made.ops.iter().any(|op| matches!(op, Op::MoveRows { .. } | Op::ReorderRows { .. } | Op::MoveColumns { .. } | Op::MoveSheets { .. }));
         let (start, was_due) = (self.workbook.clone(), self.is_calculation_due);
         let mut made_units: Vec<Unit> = Vec::new();
         // Which edit each unit made is (`history::Role`), by its index among the edits made.
@@ -1361,7 +1548,11 @@ impl WorkbookSession {
         let mut place_changed = None;
         let others = made_units.len();
         if !made.ops.is_empty() {
-            match self.apply_unit(made, limits, follow_up) {
+            let room = makes_room_for_numbers_in.map(|sheet_id| (sheet_id, numbers_given_patterns(&self.workbook, &made.ops, sheet_id), self.workbook.clone()));
+            match self.apply_unit(made, limits, follow_up).and_then(|unit| match room {
+                Some((sheet_id, given, before)) => self.make_room_for_numbers(unit, &before, sheet_id, &given),
+                None => Ok(unit),
+            }) {
                 Ok(units) => {
                     place_changed = Some(place::Told::of(&units.place, &self.workbook));
                     roles.push(history::Role::Asked);
@@ -1405,14 +1596,22 @@ impl WorkbookSession {
         }
 
         // Every part of every edit made, as one step, each with the edit it is of.
-        let part_roles: Vec<history::Role> =
-            made_units.iter().zip(&roles).flat_map(|(u, &role)| std::iter::repeat_n(role, u.parts.len())).collect();
+        let part_roles: Vec<history::Role> = made_units
+            .iter()
+            .zip(&roles)
+            .flat_map(|(u, &role)| {
+                std::iter::repeat_n(role, u.parts.len() - u.room).chain(std::iter::repeat_n(history::Role::Room, u.room))
+            })
+            .collect();
         let parts: Vec<(Vec<Op>, Vec<Op>, bool)> = made_units.iter_mut().flat_map(|u| std::mem::take(&mut u.parts)).collect();
         let several = parts.len() > 1;
         self.workbook.revision += parts.len() as u64;
         // A step of the edit alone tells its place as its operations change it when taken back; one of several edits
         // tells each edit's (`history::Role`).
-        let is_alone = others == 0 && made_units.len() == 1 && went_along.iter().all(|w| !matches!(w, WentAlong::Made(_)));
+        let is_alone = others == 0
+            && made_units.len() == 1
+            && made_units[0].room == 0
+            && went_along.iter().all(|w| !matches!(w, WentAlong::Made(_)));
         let roles = (!is_alone).then_some(part_roles);
         let is_one_action = parts.iter().any(|p| p.2);
         let mut step =
@@ -1437,6 +1636,7 @@ impl WorkbookSession {
             Some((workbook, units)) => (workbook, made_units[..*units].iter().map(|u| u.ops.len()).sum()),
             None => (&start, 0),
         };
+        self.report.works_out_pivot |= made_units.iter().any(|unit| unit.works_out_pivot);
         let ops: Vec<Op> = made_units.into_iter().flat_map(|u| u.ops).collect();
         for op in &ops {
             self.report.changes.of_op(op, &self.workbook);
@@ -1572,6 +1772,7 @@ impl WorkbookSession {
         };
         let place = made.place.unwrap_or_else(|| place::of_ops(&before, &self.workbook, &made.ops));
         let mut ops = made.ops;
+        let works_out_pivot = matches!(follow_up, Some(edits::FollowUp::Pivot(_)));
         if let Some(follow_up) = follow_up {
             let more = edits::follow_up_ops(&self.workbook, follow_up);
             if !more.is_empty() {
@@ -1587,7 +1788,45 @@ impl WorkbookSession {
                 ops.extend(more);
             }
         }
-        Ok(Unit { ops, parts, place })
+        Ok(Unit { ops, parts, place, works_out_pivot, room: 0 })
+    }
+
+    /// The columns of the cells given a number format made wider to show their numbers (`makesRoomForNumbersIn`):
+    /// the widths set after the edit, in a part of their own.
+    fn make_room_for_numbers(&mut self, mut unit: Unit, before: &Workbook, sheet_id: &str,
+        given: &[(HashSet<LineId>, HashSet<LineId>)]) -> Result<Unit, Json> {
+        if given.is_empty() {
+            return Ok(unit);
+        }
+        let is_given = |(r, c): (LineId, LineId)| given.iter().any(|(rows, columns)| rows.contains(&r) && columns.contains(&c));
+        let widths = edits::lines::fit::widths_making_room_for_numbers(before, &self.workbook, sheet_id, is_given);
+        if widths.is_empty() {
+            return Ok(unit);
+        }
+        // Next columns of one base given the same width go in one run.
+        let mut runs: Vec<(LineId, u32, u32)> = Vec::new();
+        for (column, width) in widths {
+            match runs.last_mut() {
+                Some((first, count, w)) if *w == width && first.base == column.base && first.n + *count == column.n => *count += 1,
+                _ => runs.push((column, 1, width)),
+            }
+        }
+        let widths = runs
+            .into_iter()
+            .map(|(first, count, width)| {
+                json!({"columns": {"base": self.workbook.bases.name(first.base), "first": first.n, "count": count}, "widthInPixels": width})
+            })
+            .collect::<Vec<_>>();
+        let op: Op = serde_json::from_value(json!({"kind": "setColumnWidths", "sheetId": sheet_id, "widths": widths}))
+            .expect("widths read");
+        let shown = self.workbook.clone();
+        let more = vec![op];
+        let reverse = self.workbook.apply_in_place(&more).map_err(|r| json!(r))?;
+        let parts = parts_to_send(&shown, &more, reverse)?;
+        unit.room += parts.len();
+        unit.parts.extend(parts);
+        unit.ops.extend(more);
+        Ok(unit)
     }
 
     fn receive_send_outcome(&mut self, op_id: &str, outcome: Outcome) {
@@ -1624,8 +1863,7 @@ impl WorkbookSession {
     /// The workbook shown without an edit taken out of the queue: as it is, when the edit did not apply to it.
     fn take_out(&mut self, edit: Queued) {
         if edit.reverse.is_some() {
-            self.undone(&edit);
-            self.rebuild(&[]);
+            self.rebuild(&[], Some(&edit));
         }
     }
 
@@ -1662,7 +1900,7 @@ impl WorkbookSession {
                 self.confirmed_revision = revision;
                 self.confirmed.revision = revision;
                 self.report.confirmed.push(edit.op_id);
-                self.rebuild(&ops);
+                self.rebuild(&ops, None);
                 return true;
             }
         }
@@ -1687,7 +1925,7 @@ impl WorkbookSession {
         self.report.confirmed.push(edit.op_id);
         if !is_made {
             let ops = edit.recorded.ops;
-            self.rebuild(&ops);
+            self.rebuild(&ops, None);
         }
         true
     }
@@ -1742,7 +1980,7 @@ impl WorkbookSession {
         }
         // Ahead, or the page's own edit, saved there, waiting for it.
         if revision > self.confirmed_revision + 1 || self.is_own(revision) {
-            self.ahead.insert(revision, applied);
+            self.ahead.entry(revision).or_insert(applied);
             return;
         }
         self.apply_streamed(revision, applied);
@@ -1790,7 +2028,7 @@ impl WorkbookSession {
             return None;
         }
         let ops = read_ops(&applied.ops)
-            .filter(|ops| !ops.is_empty() && applied.v >= version::OLDEST && version::of_ops(ops) == applied.v)
+            .filter(|ops| !ops.is_empty() && applied.v >= version::OLDEST && version::of_wire_ops(ops, &applied.ops) == applied.v)
             .filter(|ops| ops.iter().all(Op::is_well_formed));
         if ops.is_none() {
             self.report.fault = Some("streamedEditUnreadable");
@@ -1821,18 +2059,26 @@ impl WorkbookSession {
         }
         self.confirmed_revision += 1;
         self.confirmed.revision = self.confirmed_revision;
-        let place = place::of_ops(&before, &self.confirmed, &ops);
-        // Where rows or columns were deleted is a place by position, read when the answer is made; others are the
-        // cells as they are now.
-        let deletes_lines = ops.iter().any(|op| matches!(op, Op::DeleteRows { .. } | Op::DeleteColumns { .. }));
-        let place = if deletes_lines { OthersPlace::Later(place) } else { OthersPlace::Now(place.to_json(&self.confirmed)) };
+        let place = if let [op @ (Op::InsertRows { .. } | Op::InsertColumns { .. })] = ops.as_slice() {
+            // Resolve the whole rows or columns against the workbook shown after buffered edits have applied.
+            OthersPlace::Insertion(op.clone())
+        } else {
+            let place = place::of_ops(&before, &self.confirmed, &ops);
+            // Deletions are reported by position. Other edits here are reported by the cells they changed.
+            let deletes_lines = ops.iter().any(|op| matches!(op, Op::DeleteRows { .. } | Op::DeleteColumns { .. }));
+            if deletes_lines { OthersPlace::Later(place) } else { OthersPlace::Now(place.to_json(&self.confirmed)) }
+        };
         let (touched, retold, changed) = touches_formulas(&before, &self.confirmed, &ops);
         self.report.touched |= touched;
         self.forget_told(retold);
+        self.retext_unread(&ops);
         self.cells_changed(changed);
         let (reshaped, touched) = shape_change(&before, &self.confirmed, &ops);
         self.report.reshaped |= reshaped;
         self.report.touched |= !touched.is_empty();
+        if !reshaped && !touched.is_empty() {
+            self.report.texts_to_check.extend(texts_moved(&self.confirmed, &ops));
+        }
         self.anything_changed(!touched.is_empty());
         if self.queue.is_empty() {
             let mut shown = self.confirmed.clone();
@@ -1842,21 +2088,30 @@ impl WorkbookSession {
                 self.report.changes.of_op(op, &self.workbook);
             }
         } else {
-            self.rebuild(&ops);
+            self.rebuild(&ops, None);
         }
         self.report.others.push((revision, place));
         self.check_caught_up();
     }
 
-    fn receive_load_page(&mut self, from: u64, revision: u64, v: u32, ops: &[Json], next: Option<u64>) {
+    fn start_load_page(&mut self, from: u64, revision: u64) -> Option<&mut Loading> {
         self.hear_of(revision);
-        let Some(loading) = &mut self.loading else { return };
+        let loading = self.loading.as_mut()?;
         if from != loading.from {
-            return;
+            return None;
         }
         if loading.revision.is_some_and(|r| r != revision) {
             // The workbook changed between pages: start over.
             *loading = Loading { is_repeat: true, is_needed: loading.is_needed, ..Loading::default() };
+            return None;
+        }
+        Some(loading)
+    }
+
+    fn receive_load_page(&mut self, from: u64, revision: u64, v: u32, ops: &[Json], next: Option<u64>) {
+        let Some(loading) = self.start_load_page(from, revision) else { return };
+        if loading.snapshot.is_some() {
+            self.stop = Some("unreadableLoad");
             return;
         }
         if v < version::OLDEST {
@@ -1879,15 +2134,43 @@ impl WorkbookSession {
             return;
         }
         let loading = self.loading.take().expect("loading");
-        let revision = loading.revision.unwrap_or(revision);
         let mut loaded = Workbook::default();
         if loaded.apply(&loading.ops).is_err() {
             self.stop = Some("unreadableLoad");
             return;
         }
+        self.finish_load(revision, loaded, Forgotten::of(&loading.ops));
+    }
+
+    fn receive_lines_of_load(&mut self, from: u64, revision: u64, lines: &str, next: Option<u64>) {
+        let Some(loading) = self.start_load_page(from, revision) else { return };
+        if !loading.ops.is_empty() {
+            self.stop = Some("unreadableLoad");
+            return;
+        }
+        let snapshot = loading.snapshot.get_or_insert_with(snapshot::Snapshot::new);
+        if snapshot.append(lines, next.is_none()).is_none() {
+            self.stop = Some("unreadableLoad");
+            return;
+        }
+        loading.revision = Some(revision);
+        loading.is_repeat = false;
+        if let Some(next) = next {
+            loading.from = next;
+            return;
+        }
+        let Some(loaded) = self.loading.take().and_then(|loading| loading.snapshot?.finish()) else {
+            self.stop = Some("unreadableLoad");
+            return;
+        };
+        let forgotten = Forgotten::from_snapshot(&loaded);
+        self.finish_load(revision, loaded, forgotten);
+    }
+
+    fn finish_load(&mut self, revision: u64, mut loaded: Workbook, forgotten: Forgotten) {
         self.newest_revision = self.newest_revision.max(revision);
         loaded.revision = revision;
-        self.forgotten = Forgotten::of(&loading.ops);
+        self.forgotten = forgotten;
         self.confirmed = loaded;
         self.confirmed_revision = revision;
         // The page's edits the server saved by this revision are in it.
@@ -1902,7 +2185,7 @@ impl WorkbookSession {
             }
         }
         self.queue = kept;
-        self.rebuild(&[]);
+        self.rebuild(&[], None);
         self.report.changes.everything();
         self.report.reshaped = true;
         self.confirm_acknowledged();
@@ -1941,10 +2224,40 @@ impl WorkbookSession {
         }
         for key in cells {
             // But a cell an array filled, given a value of its own: told again once worked out.
-            if self.told.get(&key).is_some_and(|told| told.4) && holds_own_value(&self.workbook, &key) {
+            if self.told.get(&key).is_some_and(|told| told.spilled) && holds_own_value(&self.workbook, &key) {
                 continue;
             }
             self.told.remove(&key);
+        }
+    }
+
+    /// The text of the formula in a cell when it does not read (as a formula, `=Nope!A1` or `=IF(A1;2)`, say).
+    fn unread_formula_text(&self, (sheet_id, r, c): &(String, String, String)) -> Option<String> {
+        let wb = &self.workbook;
+        let i = wb.sheet_index(sheet_id)?;
+        let cell = wb.sheets[i].cells.get(&(wb.bases.parse(r)?, wb.bases.parse(c)?))?;
+        let crate::workbook::Input::Formula { formula } = &cell.input else { return None };
+        cell.parsed.as_ref().filter(|parsed| parsed.is_err())?;
+        Some(wb.formula_text(i, formula))
+    }
+
+    /// Cells set from a formula that does not read to another (`=Nope!A1` to `=Nope!A3`, say) keep what they come
+    /// to, and the page, told of them at the edit, is told of them again only when that changes: what it was told of
+    /// them takes their new text.
+    fn retext_unread(&mut self, ops: &[Op]) {
+        if self.told.is_empty() {
+            return;
+        }
+        for op in ops {
+            let Op::SetCells { sheet_id, cells, .. } = op else { continue };
+            for cell in cells {
+                let key = (sheet_id.clone(), cell.r.clone(), cell.c.clone());
+                if let Some(text) = self.unread_formula_text(&key) {
+                    if let Some(told) = self.told.get_mut(&key).filter(|told| !told.spilled) {
+                        told.formula_text = Some(text);
+                    }
+                }
+            }
         }
     }
 
@@ -1957,6 +2270,7 @@ impl WorkbookSession {
             let (touched, retold, changed) = touches_formulas(&self.workbook, &self.workbook, reverse);
             self.report.touched |= touched;
             self.forget_told(retold);
+            self.retext_unread(reverse);
             self.cells_changed(changed);
             self.report.reshaped |= reshapes(reverse);
         }
@@ -1984,7 +2298,7 @@ impl WorkbookSession {
         }
         // An array worked out whose formula is taken out: the cells the page was told it fills are told with the edit,
         // emptied before the formulas are worked out (when the page was told of any cell an array fills).
-        let told_filled = self.told.values().any(|told| told.4);
+        let told_filled = self.told.values().any(|told| told.spilled);
         for op in ops.iter().filter(|_| told_filled) {
             let Op::SetCells { sheet_id, cells, .. } = op else { continue };
             for cell in cells {
@@ -1997,7 +2311,7 @@ impl WorkbookSession {
                     }
                 }
                 for key in cells_filled_from(before, sheet_id, &cell.r, &cell.c) {
-                    if self.told.get(&key).is_some_and(|told| told.4) {
+                    if self.told.get(&key).is_some_and(|told| told.spilled) {
                         self.report.changes.cell(&key.0, &key.1, &key.2);
                         self.told.remove(&key);
                     }
@@ -2008,6 +2322,7 @@ impl WorkbookSession {
         let (touched, retold, changed) = touches_formulas(before, &self.workbook, ops);
         self.report.touched |= touched;
         self.forget_told(retold);
+        self.retext_unread(ops);
         self.cells_changed(changed);
         // Cells the edit set to no formula were told of with it: nothing of theirs waits to be told again.
         let told = !self.told.is_empty();
@@ -2022,6 +2337,9 @@ impl WorkbookSession {
         // Formulas reading past rows or columns inserted after every cell wait, until they are worked out or set to
         // something else (and those reading them, as they read a formula waiting).
         self.report.touched |= !touched.is_empty();
+        if !reshaped && !touched.is_empty() {
+            self.report.texts_to_check.extend(texts_moved(&self.workbook, ops));
+        }
         if let Some(changed) = &mut self.changed {
             changed.formulas.extend(touched);
         }
@@ -2029,12 +2347,14 @@ impl WorkbookSession {
 
     /// The workbook shown, again: the confirmed one with the page's own edits on top. The edits up to the one being
     /// sent are kept when they no longer apply (the server has them); a later one that no longer applies is dropped.
-    fn rebuild(&mut self, others: &[Op]) {
-        // A rename taken back and made again, the sheet's name what it was, tells its layout but not the formulas
-        // reading it.
+    fn rebuild(&mut self, others: &[Op], removed: Option<&Queued>) {
+        // Formulas that read a renamed sheet are told when its visible name changes across the rebuild.
         let renamed_before = self.report.changes.renamed.clone();
         let names_before: HashMap<String, String> =
             self.workbook.sheets.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
+        if let Some(edit) = removed {
+            self.undone(edit);
+        }
         for edit in &self.queue {
             if let Some(reverse) = &edit.reverse {
                 for op in reverse {
@@ -2147,14 +2467,32 @@ impl WorkbookSession {
                 self.report.touched = false;
             }
         }
-        if self.report.reshaped {
+        if self.report.reshaped || self.report.works_out_pivot {
             self.is_calculation_due = false;
         } else if self.answer_before_calculating && (self.report.touched || self.is_calculation_due) {
             self.is_calculation_due = true;
+            self.tell_formula_texts_changed();
             return;
         }
         for (sheet_id, r, c) in &self.values_changed() {
             self.report.changes.cell(sheet_id, r, c);
+        }
+    }
+
+    /// The formulas whose text rows or columns inserted changed, while formulas wait to be worked out: told now, with
+    /// their text (their values when they are worked out).
+    fn tell_formula_texts_changed(&mut self) {
+        for key in std::mem::take(&mut self.report.texts_to_check) {
+            if let Some(told) = self.told.get_mut(&key) {
+                let (sheet_id, r, c) = &key;
+                let wb = &self.workbook;
+                if let (Some(i), Some(r), Some(c)) = (wb.sheet_index(sheet_id), wb.bases.parse(r), wb.bases.parse(c)) {
+                    if let Some(crate::workbook::Input::Formula { formula }) = wb.sheets[i].cells.get(&(r, c)).map(|cell| &cell.input) {
+                        told.formula_text = Some(wb.formula_text(i, formula));
+                    }
+                }
+            }
+            self.report.changes.cell(&key.0, &key.1, &key.2);
         }
     }
 
@@ -2165,14 +2503,7 @@ impl WorkbookSession {
         let values = formula_values(&self.workbook);
         let mut changed = Vec::new();
         for (key, value) in &values {
-            // A structural change can give an existing circular reference a different
-            // route through the same cycle without changing what the cell displays.
-            if self.report.reshaped {
-                if let Some(old) = self.told.get_mut(key) {
-                    old.2.clone_from(&value.2);
-                }
-            }
-            if self.told.get(key) != Some(value) {
+            if self.told.get(key).is_none_or(|before| value.changed_from(before, self.report.reshaped)) {
                 changed.push(key.clone());
             }
         }
@@ -2194,7 +2525,7 @@ impl WorkbookSession {
             }
         };
         for (key, told) in &self.told {
-            if !values.contains_key(key) && !has_value(key, told.4) {
+            if !values.contains_key(key) && !has_value(key, told.spilled) {
                 changed.push(key.clone());
             }
         }
@@ -2265,13 +2596,13 @@ impl WorkbookSession {
                 }
                 let key = (sheet.id.clone(), workbook.bases.text(r), workbook.bases.text(c));
                 let text = workbook.formula_text(i, formula);
-                let text_changed = deferred_lines && self.told.get(&key).and_then(|v| v.6.as_ref()).is_some_and(|old| old != &text);
+                let text_changed = deferred_lines && self.told.get(&key).and_then(|v| v.formula_text.as_ref()).is_some_and(|old| old != &text);
                 if !text_changed && !renamed.iter().any(reads) {
                     continue;
                 }
                 // Told with their text as it reads now: not told again for it.
                 if let Some(told) = self.told.get_mut(&key) {
-                    told.6 = Some(text);
+                    told.formula_text = Some(text);
                 }
                 cells.push(key);
             }
@@ -2284,7 +2615,7 @@ impl WorkbookSession {
     fn sync_state_text(&mut self, kind: Option<&str>) -> String {
         self.settle_formulas();
         for op in std::mem::take(&mut self.untold) {
-            self.report.changes.of_op(&op, &self.workbook);
+            self.report.changes.of_op_taken_back(&op, &self.workbook);
         }
         self.report.changes.extend(std::mem::take(&mut self.untold_changes));
         self.tell_formulas_reading();
@@ -2320,6 +2651,9 @@ impl WorkbookSession {
                     let place = match place {
                         OthersPlace::Now(json) => self.as_shown(json.clone()),
                         OthersPlace::Later(place) => self.as_shown(place.to_json(&self.workbook)),
+                        OthersPlace::Insertion(op) => {
+                            place::of_ops(&self.workbook, &self.workbook, std::slice::from_ref(op)).to_json(&self.workbook)
+                        }
                     };
                     json!({"revision": revision, "placeChanged": place})
                 })

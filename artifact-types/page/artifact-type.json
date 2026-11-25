@@ -1,0 +1,16 @@
+{
+  "slug": "page",
+  "name": "Page",
+  "title": "Page (free HTML pages)",
+  "description": "A free page: one complete HTML document the agent writes, index.html in the artifact's own folder with any files beside it, opened as a live local page. The page can keep a small shared database, upload and list files, hand the viewer a file to save, read who is viewing, broadcast to other open views and take comments, through the runtime capabilities the agent declares when it creates or updates the artifact.",
+  "summary": "A free HTML page with the runtime capabilities you declare: a tool, a mini game, an explainer page.",
+  "artifactTitle": "Untitled page",
+  "category": "Pages",
+  "version": "0.1.0",
+  "skill": "SKILL.md",
+  "intents": ["other", "web page", "webpage", "html page", "interactive page", "widget", "mini game", "explainer page", "页面", "网页", "小工具", "小游戏", "解释页"],
+  "when": "The person wants a small interactive page that no other installed type fits: a widget or tool, a calculator, a mini game, an explainer page, a poll, checklist or sign-up sheet that remembers what people do on it.",
+  "titleFrom": "index.html",
+  "engines": { "openArtifact": ">=1" },
+  "openArtifact": { "style": "page" }
+}

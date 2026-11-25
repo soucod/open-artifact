@@ -6,8 +6,9 @@
  * Model, per document path:
  * - `server`: the last value the store reported (by listing, a change event,
  *   or our own acknowledged write);
- * - `acked`: our writes acknowledged in the last few seconds, re-applied over
- *   `server` so a late event about an older write does not flash old data;
+ * - `acked`: (stores without an order) our writes acknowledged in the last
+ *   few seconds, re-applied over `server` so a late event about an older
+ *   write does not flash old data;
  * - `inflight`: the change being written;
  * - `pending`: the change waiting to be written (debounced, merged).
  *
@@ -15,6 +16,16 @@
  * JSON merge patches computed against the document as it was before them, so
  * two people editing different fields of one element both win; the same
  * field: the last write wins.
+ *
+ * Order: events arrive in the store's order, but a listing or a write's
+ * answer may arrive before or after events about older or newer changes.
+ * When the store keeps an order ({@link SyncOrder}), each of them carries a
+ * whole document at a `seq`, and each document keeps the newest it has seen
+ * (`floor`): anything at or below it is old news. Without an order,
+ * acknowledged writes are re-applied over events for
+ * {@link ACKNOWLEDGED_WRITE_GRACE_MS} instead. A new epoch (the store
+ * restarted) or a reconnected event stream (changes may have gone unheard)
+ * reads every document again in the background.
  *
  * Local edits are applied at once ({@link LiveStore.commit}), split into
  * documents on the next tick, and written after {@link LIVE_EDIT_DEBOUNCE_MS}
@@ -52,6 +63,9 @@ import {
   type SyncChangeEvent,
   type SyncDocument,
   type SyncErrorCode,
+  type SyncListing,
+  type SyncOrder,
+  type SyncReceipt,
   type SyncTimers,
   type SyncTransport,
   type SyncWrite,
@@ -313,6 +327,7 @@ type Change = { kind: 'delete' } | { kind: 'patch'; patch: DocumentValue; replac
 
 const DELETE: Change = { kind: 'delete' };
 
+/** An acknowledged write, re-applied for a while (stores without an order). */
 interface Acked {
   change: Change;
   at: number;
@@ -329,6 +344,8 @@ interface Entry {
   server: DocumentValue | undefined;
   /** The store reported this document deleted. */
   removedSeen: boolean;
+  /** The `seq` `server` is as of (an event, a listing or a write's answer); -1 when unknown. */
+  floor: number;
   inflight: Change | undefined;
   pending: Change | undefined;
   acked: Acked[];
@@ -471,6 +488,19 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
   /** Documents a {@link LiveStore.writeNow} batch is writing: the engine holds their changes meanwhile. */
   const guarded = new Map<string, number>();
   let directWrites = 0;
+
+  /** The store's order (see the file header): its epoch, the newest event `seq` heard, each collection's listing `seq`. */
+  let orderEpoch: string | undefined;
+  let lastEventSeq = 0;
+  const listedAt = new Map<string, number>();
+  /** False once `listing` failed where `list` answered (see {@link listCollection}). */
+  let listingWorks = true;
+  /** Reading every document again while live: running, wanted again after it, retries. */
+  let relistRunning = false;
+  let relistWanted = false;
+  let relistAttempt = 0;
+  let relistFailures = 0;
+  let relistTimer: TimerHandle | undefined;
   let snapshot: LiveSnapshot<T> = buildSnapshot();
 
   /* ---------------------------------------------------------------- entries */
@@ -482,6 +512,8 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
         path,
         server: undefined,
         removedSeen: false,
+        // A document the listing did not hold is absent as of the listing.
+        floor: listedAt.get(collectionOfPath(path)) ?? -1,
         inflight: undefined,
         pending: undefined,
         acked: [],
@@ -501,7 +533,9 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
 
   /** Forgets entries that hold nothing. */
   function sweep(entry: Entry): void {
-    if (entry.server === undefined && !entry.removedSeen && entry.inflight === undefined && entry.pending === undefined && entry.acked.length === 0) {
+    // A floor something older may still arrive under (an event, or a listing being read) keeps the entry.
+    const floorNeeded = entry.floor > Math.max(lastEventSeq, listedAt.get(collectionOfPath(entry.path)) ?? 0) || (entry.floor >= 0 && listing());
+    if (entry.server === undefined && !entry.removedSeen && !floorNeeded && entry.inflight === undefined && entry.pending === undefined && entry.acked.length === 0) {
       entries.delete(entry.path);
     }
   }
@@ -643,28 +677,224 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
 
   function applyRemote(event: SyncChangeEvent): void {
     materialize();
+    const touched = takeEvent(event);
+    if (touched.length > 0) refresh(touched, true);
+    schedule();
+  }
+
+  /** Applies one event to the entries; returns the paths it changed. */
+  function takeEvent(event: SyncChangeEvent): string[] {
+    const known = orderEpoch;
+    const seq = orderSeq(event);
+    // (A new epoch already reads everything again.)
+    const restarted = known !== undefined && known !== orderEpoch;
+    if (event.resync === true && !restarted && missedBefore(seq)) resyncSoon();
     const touched: string[] = [];
     for (const [path, data] of Object.entries(event.changes)) {
       if (!collections.has(collectionOfPath(path))) continue;
       const entry = entryFor(path);
-      if (data === null) {
-        entry.server = undefined;
-        entry.removedSeen = true;
-        const pending = entry.pending;
-        if (pending !== undefined && pending.kind === 'patch' && !pending.replace && entry.inflight === undefined) itemGone(entry);
-      } else {
-        entry.server = data;
-        entry.removedSeen = false;
-        entry.goneNoticed = false;
-        const pending = entry.pending;
-        if (pending !== undefined && pending.kind === 'patch' && !pending.replace) {
-          const patch = dropShapeConflicts(pending.patch, viewOf(entry, false));
-          if (patch !== pending.patch) setPending(entry, Object.keys(patch).length === 0 ? undefined : { kind: 'patch', patch, replace: false }, entry.lastAt);
-        }
+      if (seq !== undefined && !advance(entry, seq)) {
+        sweep(entry);
+        continue;
       }
+      takeDocument(entry, data);
       touched.push(path);
     }
-    if (touched.length > 0) refresh(touched, true);
+    if (seq !== undefined && seq > lastEventSeq) lastEventSeq = seq;
+    return touched;
+  }
+
+  /** Takes the store's copy of one document (`null`: deleted by someone else). */
+  function takeDocument(entry: Entry, data: DocumentValue | null): void {
+    if (data === null) {
+      entry.server = undefined;
+      entry.removedSeen = true;
+      const pending = entry.pending;
+      if (pending !== undefined && pending.kind === 'patch' && !pending.replace && entry.inflight === undefined) itemGone(entry);
+      return;
+    }
+    entry.server = data;
+    entry.removedSeen = false;
+    entry.goneNoticed = false;
+    const pending = entry.pending;
+    if (pending !== undefined && pending.kind === 'patch' && !pending.replace) {
+      const patch = dropShapeConflicts(pending.patch, viewOf(entry, false));
+      if (patch !== pending.patch) setPending(entry, Object.keys(patch).length === 0 ? undefined : { kind: 'patch', patch, replace: false }, entry.lastAt);
+    }
+  }
+
+  /* ----------------------------------------------------------------- order */
+
+  /**
+   * Moves a document's floor to `seq`; `false` when it already shows that
+   * change or a newer one (old news). The copy taken at `seq` holds every
+   * acknowledged write before it.
+   */
+  function advance(entry: Entry, seq: number): boolean {
+    if (seq <= entry.floor) return false;
+    entry.floor = seq;
+    entry.acked = [];
+    return true;
+  }
+
+  /** The `seq` of an event, listing or write answer, when the store keeps an order (adopting its epoch). */
+  function orderSeq(order: Partial<SyncOrder> | void): number | undefined {
+    if (order === undefined || typeof order.epoch !== 'string' || typeof order.seq !== 'number') return undefined;
+    if (order.epoch !== orderEpoch) {
+      const restarted = orderEpoch !== undefined;
+      orderEpoch = order.epoch;
+      if (restarted) {
+        // The store restarted: its old order means nothing now, and changes may have gone unheard.
+        lastEventSeq = 0;
+        listedAt.clear();
+        for (const entry of entries.values()) entry.floor = -1;
+        resyncSoon();
+      }
+    }
+    return order.seq;
+  }
+
+  /**
+   * Whether a stream that started at `seq` may have missed changes this store
+   * keeps: neither the events heard nor every collection's listing reach it.
+   */
+  function missedBefore(seq: number | undefined): boolean {
+    if (seq === undefined) return true;
+    if (seq <= lastEventSeq) return false;
+    return codec.collections.some((collection) => (listedAt.get(collection) ?? -1) < seq);
+  }
+
+  /** True while a listing is being read (an entry's floor must outlive it). */
+  function listing(): boolean {
+    return relistRunning || awaitingStore();
+  }
+
+  /**
+   * Reads one collection, with the store's order when it keeps one. A Shell
+   * older than `listing` (left open while the daemon was upgraded) refuses it
+   * as `invalid` or `not_granted`: the collection is asked again as `list`,
+   * and once `list` answers, the engine keeps to `list`.
+   */
+  function listCollection(collection: string): Promise<SyncListing> {
+    const list = (): Promise<SyncListing> => transport.list(collection).then((documents) => ({ documents }));
+    if (transport.listing === undefined || !listingWorks) return list();
+    return transport.listing(collection).catch((listingError: unknown) => {
+      const code = syncErrorCode(listingError);
+      if (code !== 'invalid' && code !== 'not_granted') throw listingError;
+      return list().then(
+        (listed) => {
+          listingWorks = false;
+          return listed;
+        },
+        () => Promise.reject(listingError),
+      );
+    });
+  }
+
+  /**
+   * Takes one collection's listing; returns the paths it changed. Documents
+   * it lacks were deleted (as of the listing, when it has an order).
+   */
+  function takeListing(collection: string, result: SyncListing): string[] {
+    const seq = orderSeq(result);
+    const touched: string[] = [];
+    const seen = new Set<string>();
+    for (const document of result.documents) {
+      if (collectionOfPath(document.path) !== collection) continue;
+      seen.add(document.path);
+      const entry = entryFor(document.path);
+      if (seq !== undefined && !advance(entry, seq)) continue;
+      takeDocument(entry, document.data);
+      touched.push(document.path);
+    }
+    for (const entry of [...entries.values()]) {
+      if (seen.has(entry.path) || collectionOfPath(entry.path) !== collection) continue;
+      if (seq !== undefined && !advance(entry, seq)) continue;
+      if (entry.server === undefined) continue;
+      // Edited on the saved copy (or while offline), deleted in the store meanwhile: the edit goes.
+      takeDocument(entry, null);
+      touched.push(entry.path);
+    }
+    if (seq !== undefined && seq > (listedAt.get(collection) ?? -1)) listedAt.set(collection, seq);
+    return touched;
+  }
+
+  /** Every collection's listing. */
+  function listAll(): Promise<SyncListing[]> {
+    return Promise.all(codec.collections.map((collection) => listCollection(collection)));
+  }
+
+  /**
+   * Reads every document again while live (the event stream reconnected or
+   * the store restarted): editing and writing go on, and what changed shows
+   * as a remote edit. Retries quietly when the store does not answer.
+   */
+  function resyncSoon(): void {
+    // While loading, the load reads everything (a resync heard meanwhile is replayed after it).
+    if (disposed || loadState !== 'live') return;
+    if (relistRunning) {
+      relistWanted = true;
+      return;
+    }
+    if (relistTimer !== undefined) {
+      timers.clearTimeout(relistTimer);
+      relistTimer = undefined;
+    }
+    relistWanted = false;
+    relistRunning = true;
+    const attempt = ++relistAttempt;
+    buffered = [];
+    listAll().then(
+      (listings) => {
+        if (attempt !== relistAttempt || disposed) return;
+        relistFailures = 0;
+        materialize();
+        // Still running meanwhile: a resync this asks for (a new epoch, a stream that restarted) runs after it.
+        const touched = new Set<string>();
+        listings.forEach((result, index) => {
+          for (const path of takeListing(codec.collections[index]!, result)) touched.add(path);
+        });
+        for (const path of replayBuffered()) touched.add(path);
+        relistRunning = false;
+        if (touched.size > 0) refresh([...touched], true);
+        for (const entry of [...entries.values()]) sweep(entry);
+        schedule();
+        emitStatus();
+        if (relistWanted) resyncSoon();
+      },
+      (error: unknown) => {
+        if (attempt !== relistAttempt || disposed) return;
+        materialize();
+        const touched = replayBuffered();
+        relistRunning = false;
+        if (touched.length > 0) refresh(touched, true);
+        schedule();
+        if (isAccessError(syncErrorCode(error))) return;
+        const delay = LIVE_RECONNECT_BACKOFF_MS[Math.min(relistFailures, LIVE_RECONNECT_BACKOFF_MS.length - 1)] ?? 60_000;
+        relistFailures += 1;
+        relistTimer = timers.setTimeout(() => {
+          relistTimer = undefined;
+          resyncSoon();
+        }, delay);
+      },
+    );
+  }
+
+  /** Applies the events heard while a listing was read; returns the paths they changed. */
+  function replayBuffered(): string[] {
+    const events = buffered ?? [];
+    buffered = undefined;
+    const touched: string[] = [];
+    for (const event of events) touched.push(...takeEvent(event));
+    return touched;
+  }
+
+  function stopRelist(): void {
+    relistAttempt += 1;
+    relistRunning = false;
+    relistWanted = false;
+    if (relistTimer !== undefined) timers.clearTimeout(relistTimer);
+    relistTimer = undefined;
   }
 
   /** Recomputes the local documents of some paths and recomposes the value. */
@@ -711,6 +941,7 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
 
   function load(): void {
     if (disposed) return;
+    stopRelist();
     const attempt = ++loadAttempt;
     // The saved copy stays up (and editable) while loading again.
     if (loadState !== 'cached') loadState = 'loading';
@@ -727,42 +958,16 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
       loadFailed(attempt, { code: 'unavailable', message: 'timed out' });
     }, LIVE_EXTENDED_LOAD_TIMEOUT_MS);
     emitStatus();
-    Promise.all(codec.collections.map((collection) => transport.list(collection))).then(
-      (lists) => {
+    listAll().then(
+      (listings) => {
         if (attempt !== loadAttempt || disposed) return;
         clearLoadTimers();
-        const seen = new Set<string>();
-        for (const list of lists) {
-          for (const document of list) {
-            if (!collections.has(collectionOfPath(document.path))) continue;
-            const entry = entryFor(document.path);
-            entry.server = document.data;
-            entry.removedSeen = false;
-            seen.add(document.path);
-          }
-        }
-        for (const entry of entries.values()) {
-          if (!seen.has(entry.path) && entry.server !== undefined) {
-            entry.server = undefined;
-            entry.removedSeen = true;
-            // Edited on the saved copy, deleted in the store meanwhile: the edit goes.
-            const pending = entry.pending;
-            if (pending !== undefined && pending.kind === 'patch' && !pending.replace && entry.inflight === undefined) itemGone(entry);
-          }
-        }
-        const events = buffered ?? [];
-        buffered = undefined;
+        listings.forEach((result, index) => takeListing(codec.collections[index]!, result));
         loadState = 'live';
         loadFailures = 0;
         lastError = undefined;
-        for (const event of events) {
-          for (const [path, data] of Object.entries(event.changes)) {
-            if (!collections.has(collectionOfPath(path))) continue;
-            const entry = entryFor(path);
-            entry.server = data ?? undefined;
-            entry.removedSeen = data === null;
-          }
-        }
+        // Events heard while loading: in order, the ones the listing already holds are old news.
+        replayBuffered();
         local = new Map();
         bytes.clear();
         totalBytes = 0;
@@ -1002,14 +1207,14 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
     const flight: Flight = { entries: sent, writes, settled: false, timer: undefined };
     flights.add(flight);
     flight.timer = timers.setTimeout(() => settle(flight, { code: 'unavailable', error: new Error('the write timed out') }), STUCK_WRITE_TIMEOUT_MS);
-    let request: Promise<void>;
+    let request: Promise<SyncReceipt | void>;
     try {
       request = transport.write(writes);
     } catch (error) {
       request = Promise.reject(error);
     }
     request.then(
-      () => settle(flight, undefined),
+      (receipt) => settle(flight, undefined, receipt),
       (error: unknown) => settle(flight, { code: syncErrorCode(error), error }),
     );
   }
@@ -1033,7 +1238,27 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
     if (entry.pending === undefined) entry.firstAt = 0;
   }
 
-  function settle(flight: Flight, failure: { code: SyncErrorCode; error: unknown } | undefined): void {
+  /** The `seq` of a write's answer that names its documents, when the store keeps an order. */
+  function receiptSeq(receipt: SyncReceipt | void): number | undefined {
+    if (receipt === undefined || !isPlainRecord(receipt.documents)) return undefined;
+    return orderSeq(receipt);
+  }
+
+  /** Takes a written document as the store answered it (unless something newer is known). */
+  function takeStored(entry: Entry, write: SyncWrite, receipt: SyncReceipt, seq: number, now: number): void {
+    const stored = receipt.documents[entry.path];
+    if (stored === undefined || !advance(entry, seq)) return;
+    if (write.op === 'update' && entry.server === undefined && entry.removedSeen) {
+      // Deleted before the update landed: the store now holds a stub; remove it.
+      itemGone(entry);
+      setPending(entry, DELETE, now);
+      entry.notBefore = 0;
+    }
+    entry.server = stored ?? undefined;
+    entry.removedSeen = false;
+  }
+
+  function settle(flight: Flight, failure: { code: SyncErrorCode; error: unknown } | undefined, receipt?: SyncReceipt | void): void {
     if (flight.settled) return;
     flight.settled = true;
     if (flight.timer !== undefined) timers.clearTimeout(flight.timer);
@@ -1044,6 +1269,7 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
       backpressureSince = undefined;
       lastSyncedAt = now;
       if (lastError !== undefined && lastError.code !== 'refused') lastError = undefined;
+      const seq = receiptSeq(receipt);
       flight.writes.forEach((write, index) => {
         const entry = flight.entries[index]!;
         const change = entry.inflight;
@@ -1051,6 +1277,10 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
         entry.failures = 0;
         entry.solo = false;
         if (change === undefined) return;
+        if (seq !== undefined) {
+          takeStored(entry, write, receipt as SyncReceipt, seq, now);
+          return;
+        }
         if (write.op === 'delete') {
           entry.server = undefined;
           entry.removedSeen = false;
@@ -1066,6 +1296,7 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
         entry.acked.push({ change, at: now });
         if (entry.acked.length > MAX_UNCOALESCED_ACKNOWLEDGED_WRITES) entry.acked.shift();
       });
+      if (seq !== undefined) for (const entry of flight.entries) sweep(entry);
       refresh(
         flight.entries.map((entry) => entry.path),
         false,
@@ -1221,10 +1452,11 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
     directWrites += 1;
     emitStatus();
     let timer: TimerHandle | undefined;
+    let receipt: SyncReceipt | void;
     try {
-      await new Promise<void>((resolve, reject) => {
+      receipt = await new Promise<SyncReceipt | void>((resolve, reject) => {
         timer = timers.setTimeout(() => reject(Object.assign(new Error('the write timed out'), { code: 'unavailable' })), STUCK_WRITE_TIMEOUT_MS);
-        let request: Promise<void>;
+        let request: Promise<SyncReceipt | void>;
         try {
           request = transport.write([...writes]);
         } catch (error) {
@@ -1258,6 +1490,20 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
     materialize();
     lastSyncedAt = now;
     if (lastError !== undefined && lastError.code !== 'refused') lastError = undefined;
+    const seq = receiptSeq(receipt);
+    if (seq !== undefined) {
+      const stored = (receipt as SyncReceipt).documents;
+      for (const path of new Set(paths)) {
+        const entry = entryFor(path);
+        const data = stored[path];
+        if (data === undefined || !advance(entry, seq)) continue;
+        entry.server = data ?? undefined;
+        entry.removedSeen = false;
+      }
+      refresh(paths, false);
+      schedule();
+      return;
+    }
     for (const write of writes) {
       const entry = entryFor(write.path);
       let change: Change;
@@ -1404,6 +1650,7 @@ export function createLiveStore<T, C = unknown>(options: LiveStoreOptions<T, C>)
       disposed = true;
       unsubscribe();
       clearLoadTimers();
+      stopRelist();
       if (cacheTimer !== undefined) {
         timers.clearTimeout(cacheTimer);
         cacheTimer = undefined;

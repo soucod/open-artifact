@@ -3,14 +3,18 @@
  * every page hears when anyone (a page or the agent) writes.
  */
 import {
+  type ChipLookup,
+  type DateStyle,
   type DocState,
   DecisionJournal,
   Refusal,
   applyOps,
   blockXml,
+  chipText,
   committed,
   docToDisk,
   isAtom,
+  isChipKind,
   isText,
   proposalIds,
   suggestionAsOf,
@@ -63,7 +67,22 @@ export class DocRequestError extends Error {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** A page's `{locale, timeZone}`, as far as it is strings. */
+function dateStyleOf(value: unknown): DateStyle {
+  if (!isRecord(value)) return {};
+  return {
+    ...(typeof value.locale === 'string' && value.locale.length <= 64 ? { locale: value.locale } : {}),
+    ...(typeof value.timeZone === 'string' && value.timeZone.length <= 64 ? { timeZone: value.timeZone } : {}),
+  };
+}
+
 const deny = (reason: string, detail: string, extra: { index?: number; data?: DocJsonObject } = {}): DocCallAnswer => ({ verdict: 'deny', reason, detail, ...extra });
+
+/** What a tab's chips show, for {@link chipCount}: the doc's names, and the dates as the asking page writes them. */
+export interface ChipReading {
+  lookup: ChipLookup;
+  dates?: DateStyle;
+}
 
 /**
  * How many times `text` is in a tab, counted as the editor's find bar counts the open tab: in each text block, along
@@ -88,6 +107,32 @@ export function findCount(doc: DocState, text: string, caseSensitive: boolean): 
     }
   }
   return hits;
+}
+
+/**
+ * How many chips in a tab show `text` among their words, each counted once: the find bar's count adds these to
+ * {@link findCount}. Case folds as there.
+ */
+export function chipCount(doc: DocState, text: string, caseSensitive: boolean, chips: ChipReading): number {
+  const sameCase = (s: string) =>
+    caseSensitive
+      ? s
+      : Array.from(s, (ch) => {
+          const low = ch.toLowerCase();
+          return low.length === ch.length ? low : ch;
+        }).join('');
+  const needle = sameCase(text);
+  let found = 0;
+  if (!needle) return found;
+  for (const entry of walk(doc.blocks)) {
+    if (!isText(entry.block)) continue;
+    for (const item of entry.block.inline ?? []) {
+      if (!isAtom(item) || !isChipKind(item.atom)) continue;
+      const words = chipText(item.atom, item.attrs ?? {}, chips.lookup, chips.dates);
+      if (words !== null && sameCase(words).includes(needle)) found++;
+    }
+  }
+  return found;
 }
 
 /** The ids of the blocks a write changed, added or removed, by tab. */
@@ -318,13 +363,28 @@ export class DocHost {
     const tabId = this.store.tabOfNode(node);
     if (!tabId) return deny('node_gone', 'no such node');
     const doc = this.store.doc(tabId);
-    // The find bar's count for a tab that is not open.
-    if (payload.kind === 'search' && typeof payload.text === 'string') return { verdict: 'allow', rev: doc.rev, hits: findCount(doc, payload.text, payload.caseSensitive === true) };
+    const asked = payload.kind === 'search' && typeof payload.text === 'string' ? payload.text : null;
+    // The find bar's count for a tab that is not open, its chips' words included.
+    if (asked !== null) {
+      const exact = payload.caseSensitive === true;
+      const chips = chipCount(doc, asked, exact, { lookup: this.chipLookup(), dates: dateStyleOf(payload.dates) });
+      return { verdict: 'allow', rev: doc.rev, hits: findCount(doc, asked, exact) + chips };
+    }
     if (payload.kind === 'suggestions') {
       const ids = Array.isArray(payload.ids) ? new Set(payload.ids.filter((item): item is string => typeof item === 'string')) : undefined;
       return { verdict: 'allow', rev: doc.rev, suggestions: this.suggestions(doc, viewer.id, ids) as unknown as DocJsonObject[] };
     }
     return { verdict: 'allow', rev: doc.rev, doc: docToDisk(doc) as unknown as DocJsonObject };
+  }
+
+  /** What the doc's chips name: its dropdown options, its tabs, and the people it knows (the names its pages get too). */
+  private chipLookup(): ChipLookup {
+    const { enums, tabs } = this.store.manifest;
+    return {
+      option: (list, index) => (Object.hasOwn(enums, list) ? (enums[list]!.options[index]?.name ?? null) : null),
+      tab: id => (Object.hasOwn(tabs, id) ? tabs[id]!.name : null),
+      person: id => this.people.nameOf(id) ?? null,
+    };
   }
 
   /** The page's edit of a tab's prose: ops on the rev it holds, no hash guards, with its decisions kept for undo. */

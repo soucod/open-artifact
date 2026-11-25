@@ -8,6 +8,9 @@ import type {
   EngineRecordedEdit,
   Filter,
   IdRun,
+  PivotKeeps,
+  PivotTableSource,
+  PivotWrittenValue,
   ReadXlsxFileRequest,
   Refused,
   RuleInIds,
@@ -38,9 +41,10 @@ import {
 } from '../store/workbook-sync.ts';
 import { runEditOrRefuse, type WorkerLine } from './worker-line.ts';
 import type { SheetsUtilities } from './wasm-bindings.ts';
-import type { Happening, MessageToPage, QuestionAnswered, StoreQuestion } from './workbook-host.ts';
+import type { CopyAnswered, Happening, MessageToPage, QuestionAnswered, StoreQuestion } from './workbook-host.ts';
+import type { CopyWritten } from './written-copy.ts';
 import type { ErrorKind } from '../model/refusals.ts';
-import type { SavingState } from '../state/initial-state.ts';
+import type { SavingState, TableRead } from '../state/initial-state.ts';
 import type { WorkbookStore } from '../store/workbook-node.ts';
 import type { ClockReading } from '../store/frames.ts';
 import type { LoadOutcome, SaveOutcome } from '../store/requests.ts';
@@ -48,8 +52,8 @@ import type { LoadOutcome, SaveOutcome } from '../store/requests.ts';
 /** What changed the workbook: formulas worked out alone, an edit of the page's own, or something unasked. */
 export type CauseOfWorkbookChange = 'formulasAlone' | 'ownEdit' | 'unasked';
 
-/** The tables read of each sheet, and whether they are of the sheet as it stands. */
-export type TablesRead = Map<SheetId, { tables: TableOfASheet[]; isLatest: boolean }>;
+/** The tables read of each sheet. */
+export type TablesRead = Map<SheetId, TableRead>;
 
 /** Where saving stands, as the page is told it. */
 export interface WorkbookSavingState {
@@ -64,7 +68,7 @@ export type XlsxFileAsked = Omit<ReadXlsxFileRequest, 'kind'>;
 
 /** What a question of each kind carries, beside its kind; each kind is a service of the workbook's reads. */
 export interface WorkbookQuestionFields {
-  cellsToCopy: { oneCorner: CellId; otherCorner: CellId; rowsOutOfView: readonly IdRun[] };
+  writtenCopy: { oneCorner: CellId; otherCorner: CellId; rowsOutOfView: IdRun[] };
   dropdownOptionsToOffer: { oneCorner: CellId; otherCorner: CellId };
   cellsThatADropdownWouldClear: { oneCorner: CellId; otherCorner: CellId; dropdown: DropdownToPointAt };
   cellsOfTheDropdownAt: { cellId: CellId };
@@ -82,13 +86,26 @@ export interface WorkbookQuestionFields {
   filteredRows: { table: TableInIds; filter: Filter };
   valuesOfFilteredColumn: { table: TableInIds; filter: Filter | null; c: ColumnId };
   rowsInSortedOrder: { toSort: RowsToSort };
+  tablesOfSheet: { sheetId: SheetId };
+  pivotTableAt: { cellId: CellId };
+  valuesToFilterPivotTableBy: {
+    source: PivotTableSource;
+    c: ColumnId;
+    keeps: PivotKeeps;
+    listed: Iterable<PivotWrittenValue | null>;
+  };
   causeOfError: { cellId: CellId; cellNow: string };
 }
 export type QuestionKind = keyof WorkbookQuestionFields;
 export type QuestionOf<K extends QuestionKind> = { kind: K } & WorkbookQuestionFields[K];
 /** A question the page asks the workbook on the worker. */
 export type WorkbookQuestion = { [K in QuestionKind]: QuestionOf<K> }[QuestionKind];
-export type AnswerOfQuestion<K extends QuestionKind> = ReturnType<WorkbookServices[K]>;
+/** A copy is written on the worker; every other question is a service of the workbook's reads. */
+export type AnswerOfQuestion<K extends QuestionKind> = K extends 'writtenCopy'
+  ? CopyAnswered | null
+  : K extends keyof WorkbookServices
+    ? ReturnType<WorkbookServices[K]>
+    : never;
 
 /** What the store answered a question of the host. */
 export type StoreAnswer =
@@ -169,8 +186,11 @@ export interface OpenedWorkbook {
   isAnswerAwaited(): boolean;
   onAnswersCame(listener: () => void): () => void;
   onCauseOfErrorCame(listener: (cellId: CellId | null) => void): () => void;
-  readCellsToCopyAhead(oneCorner: CellId, otherCorner: CellId, rowsOutOfView: readonly IdRun[]): boolean;
-  onCellsToCopyRead(listener: () => void): () => void;
+  /** Asks the worker to write a copy of the cells between two corners; `true` while it is yet to come. */
+  askForCopy(oneCorner: CellId, otherCorner: CellId, rowsOutOfView: IdRun[]): boolean;
+  /** The copy the worker wrote of the cells between two corners, once it came; `null` before, or when none was written. */
+  copyWritten(oneCorner: CellId, otherCorner: CellId, rowsOutOfView: IdRun[]): CopyWritten | null;
+  onCopyWritten(listener: () => void): () => void;
   onChanged(listener: (cause: CauseOfWorkbookChange) => void): () => void;
   saving(): SavingState;
   revisionHeld(): number | null;
@@ -198,13 +218,13 @@ export function createTablesReadKeeper() {
   return {
     afterReading(sheetAsItStands: (sheetId: SheetId) => SheetRead | null): TablesRead {
       let gone = [...tablesRead].filter(
-        ([sheetId, { isLatest: isLatest }]) => isLatest && readFor.get(sheetId)?.sheet.deref() !== sheetAsItStands(sheetId),
+        ([sheetId, { isLatest }]) => isLatest && readFor.get(sheetId)?.sheet.deref() !== sheetAsItStands(sheetId),
       );
       if (gone.length === 0) return tablesRead;
       let next = new Map(tablesRead);
-      for (let [sheetId, { tables: tables }] of gone)
+      for (let [sheetId, { tables }] of gone)
         next.set(sheetId, {
-          tables: tables,
+          tables,
           isLatest: false,
         });
       tablesRead = next;
@@ -215,7 +235,7 @@ export function createTablesReadKeeper() {
       let sameTables = readFor.get(sheetId)?.json === json ? before?.tables : undefined;
       readFor.set(sheetId, {
         sheet: new WeakRef<object>(sheetAsItStands(sheetId) ?? {}),
-        json: json,
+        json,
       });
       tablesRead = new Map(tablesRead).set(sheetId, {
         tables: sameTables ?? tables,
@@ -231,7 +251,7 @@ export function asSameThreadWorkbook(workbook: SyncedWorkbook): OpenedWorkbook {
   let runOnThisThread = <Outcome>(run: () => Outcome, answer: (outcome: NoInfer<Outcome> | Refused<RefusalOfEveryEdit | 'savingStopped'>) => void) => {
     let thrown: unknown[] = [];
     isOwnEditRunning = true;
-    let outcome = runEditOrRefuse(workbook, run, (item) => void thrown.push(item));
+    let outcome = runEditOrRefuse(workbook, run, (error) => void thrown.push(error));
     isOwnEditRunning = false;
     answer(outcome);
     if (thrown.length > 0) throw thrown[0];
@@ -273,12 +293,13 @@ export function asSameThreadWorkbook(workbook: SyncedWorkbook): OpenedWorkbook {
     isAnswerAwaited: () => false,
     onAnswersCame: () => () => {},
     onCauseOfErrorCame: () => () => {},
-    readCellsToCopyAhead: () => false,
-    onCellsToCopyRead: () => () => {},
+    askForCopy: () => false,
+    copyWritten: () => null,
+    onCopyWritten: () => () => {},
   };
 }
 export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<OpenedWorkbook | null> {
-  let { line: line, utilities: utilities } = options;
+  let { line, utilities } = options;
   let reading: WorkbookRead | null = null;
   let reads: WorkbookReads | null = null;
   let readsBefore: WorkbookReads | null = null;
@@ -322,18 +343,18 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
   let send = (message: MessageToHost) => {
     if (!hasEnded) line.send(message);
   };
-  let answerTo = (question: WorkbookQuestion, askIfMissing: boolean): QuestionAnswered | null => {
+  let answerTo = (question: WorkbookQuestion): QuestionAnswered | null => {
     let key = questionKey(question);
     let answer = answers.get(key);
     if (answer !== undefined) return answer;
-    if (hasEnded || !askIfMissing) return null;
+    if (hasEnded) return null;
     questionsMissed += 1;
     if (!answers.has(key)) {
       answers.set(key, undefined);
       questionsAwaited += 1;
       send({
         kind: 'ask',
-        question: question,
+        question,
       });
     }
     return null;
@@ -342,15 +363,15 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
     if (hasEnded) return 'neverToCome';
     let question: QuestionOf<'causeOfError'> = {
       kind: 'causeOfError',
-      cellId: cellId,
-      cellNow: cellNow,
+      cellId,
+      cellNow,
     };
     let key = questionKey(question);
     if (!answers.has(key)) {
       answers.set(key, undefined);
       send({
         kind: 'ask',
-        question: question,
+        question,
       });
     }
     let answer = answers.get(key);
@@ -391,220 +412,165 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
       timeZones: guarded(localeUtilities.timeZones),
       timeZoneNamed: guarded(localeUtilities.timeZoneNamed),
       locales: guarded(localeUtilities.locales),
-      cellsToCopy(oneCorner, otherCorner, rowsOutOfView) {
-        let answer = answerTo(
-          {
-            kind: 'cellsToCopy',
-            oneCorner: oneCorner,
-            otherCorner: otherCorner,
-            rowsOutOfView: rowsOutOfView,
-          },
-          false,
-        );
-        return answer?.about === 'cellsToCopy' ? answer.answer : null;
-      },
+      cellsToCopy: () => null,
       dropdownOptionsToOffer(oneCorner, otherCorner) {
-        let answer = answerTo(
-          {
-            kind: 'dropdownOptionsToOffer',
-            oneCorner: oneCorner,
-            otherCorner: otherCorner,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'dropdownOptionsToOffer',
+          oneCorner,
+          otherCorner,});
         return answer?.about === 'dropdownOptionsToOffer' ? answer.answer : null;
       },
       cellsThatADropdownWouldClear(oneCorner, otherCorner, dropdown) {
-        let answer = answerTo(
-          {
-            kind: 'cellsThatADropdownWouldClear',
-            oneCorner: oneCorner,
-            otherCorner: otherCorner,
-            dropdown: dropdown,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'cellsThatADropdownWouldClear',
+          oneCorner,
+          otherCorner,
+          dropdown,});
         return answer?.about === 'cellsThatADropdownWouldClear' ? answer.answer : null;
       },
       cellsOfTheDropdownAt(cellId) {
-        let answer = answerTo(
-          {
-            kind: 'cellsOfTheDropdownAt',
-            cellId: cellId,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'cellsOfTheDropdownAt',
+          cellId,});
         return answer?.about === 'cellsOfTheDropdownAt' ? answer.answer : null;
       },
-      whatATableChanges({ rows: rows, ...table }) {
+      whatATableChanges({ rows, ...table }) {
         let rowsId = tableRowsIds.get(rows);
         if (rowsId === undefined) {
           rowsId = tableRowsCount += 1;
           tableRowsIds.set(rows, rowsId);
           send({
             kind: 'rowsOfATable',
-            rowsId: rowsId,
-            rows: rows,
+            rowsId,
+            rows,
           });
         }
-        let answer = answerTo(
-          {
-            kind: 'whatATableChanges',
-            rowsId: rowsId,
-            table: table,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'whatATableChanges',
+          rowsId,
+          table,});
         return answer?.about === 'whatATableChanges' ? answer.answer : null;
       },
       formatsGivenAsIf(sheetId, asIf) {
-        let answer = answerTo(
-          {
-            kind: 'formatsGivenAsIf',
-            sheetId: sheetId,
-            asIf: asIf,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'formatsGivenAsIf',
+          sheetId,
+          asIf,});
         return answer?.about === 'formatsGivenAsIf' ? answer.answer : null;
       },
       conditionalFormatSuggestions(oneCorner, otherCorner) {
-        let answer = answerTo(
-          {
-            kind: 'conditionalFormatSuggestions',
-            oneCorner: oneCorner,
-            otherCorner: otherCorner,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'conditionalFormatSuggestions',
+          oneCorner,
+          otherCorner,});
         return answer?.about === 'conditionalFormatSuggestions' ? answer.answer : null;
       },
       tableAtCell(cellId) {
-        let answer = answerTo(
-          {
-            kind: 'tableAtCell',
-            cellId: cellId,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'tableAtCell',
+          cellId,});
         return answer?.about === 'tableAtCell' ? answer.answer : null;
       },
       cellTableAt(cellId) {
-        let answer = answerTo(
-          {
-            kind: 'cellTableAt',
-            cellId: cellId,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'cellTableAt',
+          cellId,});
         return answer?.about === 'cellTableAt' ? answer.answer : null;
       },
       cellTables(sheetId) {
-        let answer = answerTo(
-          {
-            kind: 'cellTables',
-            sheetId: sheetId,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'cellTables',
+          sheetId,});
         return answer?.about === 'cellTables' ? answer.answer : null;
       },
       cellTableDeclaredAs(sheetId, cellTable) {
-        let answer = answerTo(
-          {
-            kind: 'cellTableDeclaredAs',
-            sheetId: sheetId,
-            cellTable: cellTable,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'cellTableDeclaredAs',
+          sheetId,
+          cellTable,});
         return answer?.about === 'cellTableDeclaredAs' ? answer.answer : null;
       },
       conditionalFormatsAsAgentIsTold(oneCorner, otherCorner) {
-        let answer = answerTo(
-          {
-            kind: 'conditionalFormatsAsAgentIsTold',
-            oneCorner: oneCorner,
-            otherCorner: otherCorner,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'conditionalFormatsAsAgentIsTold',
+          oneCorner,
+          otherCorner,});
         return answer?.about === 'conditionalFormatsAsAgentIsTold' ? answer.answer : null;
       },
       conditionalFormatsInIds(sheetId, written) {
-        let answer = answerTo(
-          {
-            kind: 'conditionalFormatsInIds',
-            sheetId: sheetId,
-            written: written,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'conditionalFormatsInIds',
+          sheetId,
+          written,});
         return answer?.about === 'conditionalFormatsInIds' ? answer.answer : null;
       },
       conditionalFormatsByAddress(sheetId, rules) {
-        let answer = answerTo(
-          {
-            kind: 'conditionalFormatsByAddress',
-            sheetId: sheetId,
-            rules: rules,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'conditionalFormatsByAddress',
+          sheetId,
+          rules,});
         return answer?.about === 'conditionalFormatsByAddress' ? answer.answer : null;
       },
       proposedFormulaValue(cellId, text) {
-        let answer = answerTo(
-          {
-            kind: 'proposedFormulaValue',
-            cellId: cellId,
-            text: text,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'proposedFormulaValue',
+          cellId,
+          text,});
         return answer?.about === 'proposedFormulaValue' ? answer.answer : null;
       },
       filteredRows(table, filter) {
-        let answer = answerTo(
-          {
-            kind: 'filteredRows',
-            table: table,
-            filter: filter,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'filteredRows',
+          table,
+          filter,});
         return answer?.about === 'filteredRows' ? answer.answer : null;
       },
       valuesOfFilteredColumn(table, filter, column) {
-        let answer = answerTo(
-          {
-            kind: 'valuesOfFilteredColumn',
-            table: table,
-            filter: filter,
-            c: column,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'valuesOfFilteredColumn',
+          table,
+          filter,
+          c: column,});
         return answer?.about === 'valuesOfFilteredColumn' ? answer.answer : null;
       },
       rowsInSortedOrder(toSort) {
-        let answer = answerTo(
-          {
-            kind: 'rowsInSortedOrder',
-            toSort: toSort,
-          },
-          true,
-        );
+        let answer = answerTo({
+          kind: 'rowsInSortedOrder',
+          toSort,});
         return answer?.about === 'rowsInSortedOrder' ? answer.answer : null;
       },
-      causeOfError: causeOfError,
+      tablesOfSheet(sheetId) {
+        let answer = answerTo({
+          kind: 'tablesOfSheet',
+          sheetId,
+        });
+        return answer?.about === 'tablesOfSheet' ? answer.answer : null;
+      },
+      pivotTableAt(cellId) {
+        let answer = answerTo({
+          kind: 'pivotTableAt',
+          cellId,
+        });
+        return answer?.about === 'pivotTableAt' ? answer.answer : null;
+      },
+      valuesToFilterPivotTableBy(source, column, keeps, listed) {
+        let answer = answerTo({
+          kind: 'valuesToFilterPivotTableBy',
+          source,
+          c: column,
+          keeps,
+          listed,
+        });
+        return answer?.about === 'valuesToFilterPivotTableBy' ? answer.answer : null;
+      },
+      causeOfError,
     });
   async function answerStore(questionNumber: number, question: StoreQuestion): Promise<void> {
     let answer = await askStore(question);
     send({
       kind: 'storeAnswered',
-      questionNumber: questionNumber,
-      answer: answer,
+      questionNumber,
+      answer,
     });
   }
   async function askStore(question: StoreQuestion): Promise<StoreAnswer> {
@@ -631,10 +597,10 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
   function takeAnswer(answered: QuestionAnswered) {
     let key = questionKey(answered.question);
     let wasAwaited = answers.has(key) && answers.get(key) === undefined;
-    if (answered.about === 'cellsToCopy' && key !== cellsToCopyKey) return;
+    if (answered.about === 'writtenCopy' && key !== cellsToCopyKey) return;
     answers.set(key, answered);
     if (answered.about === 'causeOfError') return callSyncListeners(causeOfErrorListeners, answered.question.cellId);
-    if (answered.about === 'cellsToCopy') return callSyncListeners(cellsToCopyListeners);
+    if (answered.about === 'writtenCopy') return callSyncListeners(cellsToCopyListeners);
     if (!wasAwaited) return;
     questionsAwaited -= 1;
     if (questionsAwaited > 0) return;
@@ -690,7 +656,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
         if (happening.caughtUp === null || before === null || reads === null) return callSyncListeners(loadedListeners, null);
         return callSyncListeners(loadedListeners, {
           ...happening.caughtUp,
-          before: before,
+          before,
           after: reads,
         });
       }
@@ -745,7 +711,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
       options.reportThrown(error);
     }
   };
-  line.onMessage(({ happened: happened }) => takeHappenings(happened));
+  line.onMessage(({ happened }) => takeHappenings(happened));
   options.onWorkerEnded(() => {
     if (hasEnded) return;
     hasEnded = true;
@@ -776,7 +742,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
       {
         kind: 'savingChanged',
         ...stoppedState,
-        hasUnsavedEdits: hasUnsavedEdits,
+        hasUnsavedEdits,
       },
       {
         kind: 'formulasLeftChanged',
@@ -850,8 +816,8 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               editAnswers.push(answer);
               return send({
                 kind: 'queueEdit',
-                edit: edit,
-                restOfAct: restOfAct,
+                edit,
+                restOfAct,
               });
             },
             undoOrRedo(direction, answer) {
@@ -863,7 +829,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               undoAnswers.push(answer);
               return send({
                 kind: 'undoOrRedo',
-                direction: direction,
+                direction,
               });
             },
             queueEditsThatTakeBack(builtOnRevision, edits, answer) {
@@ -875,8 +841,8 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               takeBackAnswers.push(answer);
               return send({
                 kind: 'queueEditsThatTakeBack',
-                builtOnRevision: builtOnRevision,
-                edits: edits,
+                builtOnRevision,
+                edits,
               });
             },
             seeRowsInOwnOrder(sheetId, rows, answer) {
@@ -884,8 +850,8 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               ownRowOrderAnswers.push(answer);
               return send({
                 kind: 'seeRowsInOwnOrder',
-                sheetId: sheetId,
-                rows: rows,
+                sheetId,
+                rows,
               });
             },
             xlsxFile(asked, answer) {
@@ -893,7 +859,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               xlsxAnswers.push(answer);
               return send({
                 kind: 'writeXlsxFile',
-                asked: asked,
+                asked,
               });
             },
             tableAt(cellId, answer) {
@@ -901,7 +867,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               tableAnswers.push(answer);
               return send({
                 kind: 'readTableAt',
-                cellId: cellId,
+                cellId,
               });
             },
             followTablesOf(sheetId) {
@@ -909,7 +875,7 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               sheetIdFollowed = sheetId;
               send({
                 kind: 'followTablesOf',
-                sheetId: sheetId,
+                sheetId,
               });
             },
             tablesRead: () => tablesRead,
@@ -919,12 +885,12 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
             isAnswerAwaited: () => questionsAwaited > 0,
             onAnswersCame: syncListenerAdder(answersListeners),
             onCauseOfErrorCame: syncListenerAdder(causeOfErrorListeners),
-            readCellsToCopyAhead(oneCorner, otherCorner, rowsOutOfView) {
-              let question: QuestionOf<'cellsToCopy'> = {
-                kind: 'cellsToCopy',
-                oneCorner: oneCorner,
-                otherCorner: otherCorner,
-                rowsOutOfView: rowsOutOfView,
+            askForCopy(oneCorner, otherCorner, rowsOutOfView) {
+              let question: QuestionOf<'writtenCopy'> = {
+                kind: 'writtenCopy',
+                oneCorner,
+                otherCorner,
+                rowsOutOfView,
               };
               let key = questionKey(question);
               if (hasEnded) return false;
@@ -934,11 +900,22 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
               answers.set(key, undefined);
               send({
                 kind: 'ask',
-                question: question,
+                question,
               });
               return true;
             },
-            onCellsToCopyRead: syncListenerAdder(cellsToCopyListeners),
+            copyWritten(oneCorner, otherCorner, rowsOutOfView) {
+              let answer = answers.get(
+                questionKey({
+                  kind: 'writtenCopy',
+                  oneCorner,
+                  otherCorner,
+                  rowsOutOfView,
+                }),
+              );
+              return answer?.about === 'writtenCopy' && answer.answer !== null ? copyAsAnswered(answer.answer) : null;
+            },
+            onCopyWritten: syncListenerAdder(cellsToCopyListeners),
             onChanged: syncListenerAdder(changeListeners),
             saving: () => savingState.saving,
             revisionHeld: () => revisionHeld,
@@ -957,26 +934,26 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
             editStreamed: (revision, applied) =>
               send({
                 kind: 'editStreamed',
-                revision: revision,
-                applied: applied,
+                revision,
+                applied,
               }),
             storeRevisionReported: (revision) =>
               send({
                 kind: 'storeRevisionReported',
-                revision: revision,
+                revision,
               }),
             timeTold: (time) =>
               void (
                 time !== options.timeTold &&
                 send({
                   kind: 'timeTold',
-                  time: time,
+                  time,
                 })
               ),
             availabilityStated: (availability) =>
               send({
                 kind: 'availabilityStated',
-                availability: availability,
+                availability,
               }),
             storeReconnected: () =>
               send({
@@ -989,24 +966,40 @@ export function openWorkbookOnWorker(options: WorkerWorkbookOptions): Promise<Op
             tabVisibilityChanged: (isHidden) =>
               send({
                 kind: 'tabVisibilityChanged',
-                isHidden: isHidden,
+                isHidden,
               }),
           },
   );
 }
-export const NO_TABLES_READ: TablesRead = new Map<SheetId, { tables: TableOfASheet[]; isLatest: boolean }>();
+export const NO_TABLES_READ: TablesRead = new Map<SheetId, TableRead>();
 export const SAVING_STOPPED_STATE: WorkbookSavingState = {
   saving: 'stopped',
   hasUnsavedEdits: false,
   unsavedEditCount: 0,
   refusalOfEveryEdit: 'savingStopped',
 };
+export const copyAsAnswered = ({ contents, values, textWithNumbersWhole, whatTheLookThrew }: CopyAnswered): CopyWritten => ({
+  contents: {
+    ...contents,
+    valuesOfCopiedCells:
+      values === null
+        ? null
+        : {
+            copiedCellsAsAnswered: contents.copiedCellsAsText,
+            values,
+          },
+    textWithNumbersWhole: textWithNumbersWhole ?? contents.text,
+  },
+  whatTheLookThrew,
+});
 export const questionKey = (question: WorkbookQuestion) => JSON.stringify(question);
-export const isTableQuestion = ({ about: about }: { about: QuestionKind }) =>
+export const isTableQuestion = ({ about }: { about: QuestionKind }) =>
   about === 'tableAtCell' ||
   about === 'cellTableAt' ||
   about === 'cellTables' ||
   about === 'cellTableDeclaredAs' ||
   about === 'filteredRows' ||
   about === 'rowsInSortedOrder' ||
-  about === 'valuesOfFilteredColumn';
+  about === 'valuesOfFilteredColumn' ||
+  about === 'tablesOfSheet' ||
+  about === 'valuesToFilterPivotTableBy';

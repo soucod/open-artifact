@@ -1,0 +1,20 @@
+// The rooms test Worker of packages/host-cloudflare (src/dev-worker.ts): every artifact a Durable Object on its own
+// SQLite, with a permissive host. For `wrangler dev -c wrangler.rooms.jsonc` only (e2e/cloudflare.test.mjs): NEVER
+// deploy it. The product Worker is wrangler.jsonc. Built by build.mjs into dist/rooms/.
+{
+  "name": "open-artifact-rooms-dev",
+  "main": "dist/rooms/worker.js",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: node:http, node:stream, node:crypto… for the type server. enable_request_signal: request.signal
+  // aborts when the client goes, so an event stream with nothing to send is ended at once (not at its next write).
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal", "request_signal_passthrough"],
+  // build.mjs bundles; workerd compiles the Sheets engine (dist/rooms/sheets.wasm) at upload.
+  "no_bundle": true,
+  // Only dist/rooms is uploaded as modules (the bundle and its wasm); the assets are the sibling dist/assets.
+  "base_dir": "dist/rooms",
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false }],
+  // dist/assets/_open-artifact/** (the editors, the Shell, support.js) is served by the platform without the Worker.
+  "assets": { "directory": "dist/assets", "binding": "ASSETS", "html_handling": "none", "not_found_handling": "none" },
+  "durable_objects": { "bindings": [{ "name": "ARTIFACT", "class_name": "DevArtifactObject" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DevArtifactObject"] }]
+}

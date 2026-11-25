@@ -1,4 +1,24 @@
-import type { Dynamic } from '../dynamic.ts';
+import type {
+  LastDone,
+  CellsSortedDone,
+  DoneWithoutDetail,
+  DropdownOptionMovedDone,
+  DropdownOptionRemovedDone,
+  DropdownOptionsAddedDone,
+  FormattedDone,
+  ListSetDone,
+  NoDateEnteredDone,
+  PeopleInCellDone,
+  RulesDone,
+  SheetShownForDone,
+} from '../state/initial-state.ts';
+import type { EntryCameToError } from '../state/reasons-for-errors.ts';
+import type { ConditionalFormatDone } from '../messages/conditional-format.ts';
+import type { ErrorExplanation } from '../messages/formula-errors.ts';
+import type { CopiedCellsLetGo } from '../state/copied-cells.ts';
+import type { CellFormatChoice } from './change-labels.ts';
+import type { DropdownOptionsAdded } from './chip-labels.ts';
+import type { ParagraphListKind } from '../messages/import.ts';
 import {
   truncateGraphemes,
   PERSON_NAME_IN_NOTICE_MAX_CHARACTERS,
@@ -21,14 +41,51 @@ import { undoableDoneText } from './notice-labels.ts';
 import { lineGroupsDoneWords } from '../messages/line-groups.ts';
 import { placedViewMovedWords, placedViewChangeUndoneWords } from '../messages/charts.ts';
 import { frozeRowsText, frozeColumnsText } from './agent-turn-labels.ts';
-import { listKindOnOffWords, checkedStateWords } from '../messages/import.ts';
+import { listKindOnOffWords, checkedStateWords, interactiveDoneText } from '../messages/import.ts';
+import { namedViewDoneLabel } from '../tables/named-view-messages.ts';
 import { dropdownPresetChosenText, dropdownOptionRemovedText, dropdownOptionsAddedText } from './chip-labels.ts';
 import { errorExplanationWords } from '../messages/formula-errors.ts';
 import { agentFixLabel } from './formula-fix-labels.ts';
 import { timeZoneSetText } from '../ui/locale-time-zone-pick.ts';
 import { localeSetWords } from '../messages/locale.ts';
-export function personChipChangeText(change?: Dynamic) {
-  let { cell: cell } = change;
+/** A column cells were sorted by after the first one, and which way. */
+export type ThenSortedBy = Pick<CellsSortedDone, 'column' | 'direction'>;
+/** What the page did last, with the fields some kinds carry that `LastDone` does not list yet. */
+export type LastDoneTold =
+  | Exclude<
+      LastDone,
+      | DropdownOptionMovedDone
+      | DropdownOptionRemovedDone
+      | DropdownOptionsAddedDone
+      | CellsSortedDone
+      | SheetShownForDone
+      | NoDateEnteredDone
+      | FormattedDone
+      | ListSetDone
+      | DoneWithoutDetail
+      | RulesDone
+      | EntryCameToError
+    >
+  | (DropdownOptionMovedDone & { onlyIn: string | null })
+  | (CellsSortedDone & { thenBy?: ThenSortedBy[] })
+  | (SheetShownForDone & { isFormulaOfAgentDiscarded?: undefined })
+  | NoDateEnteredTold
+  | (Omit<FormattedDone, 'format'> & { format: CellFormatChoice })
+  | (Omit<ListSetDone, 'list'> & { list: ParagraphListKind })
+  | (DropdownOptionRemovedDone & { onlyIn: string | null })
+  | (Omit<DropdownOptionsAddedDone, 'onlyIn'> & DropdownOptionsAdded)
+  | (Omit<DoneWithoutDetail, 'what'> & { what: Exclude<DoneWithoutDetail['what'], ConditionalFormatDone['what']> })
+  | ConditionalFormatDone
+  | (Omit<EntryCameToError, 'reason'> & { reason: ErrorExplanation });
+/** No date entered in a cell, because the cell holds a dropdown or a checkbox. */
+export type NoDateEnteredTold = NoDateEnteredDone & { cellHas: 'dropdown' | 'checkbox' };
+/** The words of an undo offer: its title, and what more it says. */
+interface UndoOfferWords {
+  title: string;
+  description?: string;
+}
+export function personChipChangeText(change: PeopleInCellDone): string {
+  let { cell } = change;
   let name = truncateGraphemes(change.name, PERSON_NAME_IN_NOTICE_MAX_CHARACTERS);
   switch (change.what) {
     case 'personAdded':
@@ -39,8 +96,8 @@ export function personChipChangeText(change?: Dynamic) {
           id: 'u82WAUR36Z',
         },
         {
-          name: name,
-          cell: cell,
+          name,
+          cell,
           count: change.heldNowCount,
         },
       );
@@ -52,8 +109,8 @@ export function personChipChangeText(change?: Dynamic) {
             id: 'X8MEq8JduN',
           },
           {
-            name: name,
-            cell: cell,
+            name,
+            cell,
           },
         );
       return translateMessage(
@@ -63,8 +120,8 @@ export function personChipChangeText(change?: Dynamic) {
           id: 'p7ET49QrOv',
         },
         {
-          name: name,
-          cell: cell,
+          name,
+          cell,
           count: change.heldNowCount,
         },
       );
@@ -76,8 +133,8 @@ export function personChipChangeText(change?: Dynamic) {
             id: '2SpmCVPYPb',
           },
           {
-            name: name,
-            cell: cell,
+            name,
+            cell,
             count: change.replacedCount,
           },
         );
@@ -87,8 +144,8 @@ export function personChipChangeText(change?: Dynamic) {
           id: 'J42J6BKciU',
         },
         {
-          name: name,
-          cell: cell,
+          name,
+          cell,
           count: change.replacedCount,
         },
       );
@@ -100,8 +157,8 @@ export function personChipChangeText(change?: Dynamic) {
             id: 'PcFiCTKwza',
           },
           {
-            name: name,
-            cell: cell,
+            name,
+            cell,
           },
         );
       return translateMessage(
@@ -110,13 +167,13 @@ export function personChipChangeText(change?: Dynamic) {
           id: 'ElX8/uDthp',
         },
         {
-          name: name,
-          cell: cell,
+          name,
+          cell,
         },
       );
   }
 }
-export function noDateEnteredText({ cellHas: cellHas, cell: cell }: Dynamic) {
+export function noDateEnteredText({ cellHas, cell }: NoDateEnteredTold): string {
   switch (cellHas) {
     case 'dropdown':
       return translateMessage(
@@ -125,7 +182,7 @@ export function noDateEnteredText({ cellHas: cellHas, cell: cell }: Dynamic) {
           id: 'k00eIS5B7m',
         },
         {
-          cell: cell,
+          cell,
         },
       );
     case 'checkbox':
@@ -135,12 +192,12 @@ export function noDateEnteredText({ cellHas: cellHas, cell: cell }: Dynamic) {
           id: 'SbKWWl8YKW',
         },
         {
-          cell: cell,
+          cell,
         },
       );
   }
 }
-export function copiedCellsLetGoText({ leaves: leaves, cells: cells }: Dynamic) {
+export function copiedCellsLetGoText({ leaves, cells }: CopiedCellsLetGo): string {
   switch (leaves) {
     case 'stillCopied':
       return translateMessage(
@@ -149,7 +206,7 @@ export function copiedCellsLetGoText({ leaves: leaves, cells: cells }: Dynamic) 
           id: 'Bo2KPL+Q78',
         },
         {
-          cells: cells,
+          cells,
         },
       );
     case 'cutCanceledAndPasteCopies':
@@ -159,7 +216,7 @@ export function copiedCellsLetGoText({ leaves: leaves, cells: cells }: Dynamic) 
           id: 'SMH8q+Invh',
         },
         {
-          cells: cells,
+          cells,
         },
       );
     case 'cutCanceled':
@@ -169,12 +226,12 @@ export function copiedCellsLetGoText({ leaves: leaves, cells: cells }: Dynamic) 
       });
   }
 }
-export function describeLastDone(givenDone?: Dynamic) {
+export function describeLastDone(givenDone: LastDoneTold): string {
   let lastDone =
     'rangeCount' in givenDone
       ? {
           ...givenDone,
-          cells: cellGroupCountText(givenDone.rangeCount),
+          cells: cellGroupCountText(givenDone.rangeCount!),
         }
       : givenDone;
   switch (lastDone.what) {
@@ -187,6 +244,11 @@ export function describeLastDone(givenDone?: Dynamic) {
     case 'offerDiscarded':
     case 'agentStopped':
       return conditionalFormatDoneWords(lastDone);
+    case 'namedViewPicked':
+    case 'namedViewSaved':
+    case 'namedViewUpdated':
+    case 'namedViewRenamed':
+      return namedViewDoneLabel(lastDone);
     case 'moreOfCellShown':
       return translateMessage(
         {
@@ -371,6 +433,19 @@ export function describeLastDone(givenDone?: Dynamic) {
         defaultMessage: 'Gridlines shown',
         id: 'UCIp2J/wf7',
       });
+    case 'interactiveReset':
+    case 'interactiveDefaultsSaved':
+      return interactiveDoneText(lastDone);
+    case 'pivotTableAdded':
+      return translateMessage({
+        defaultMessage: 'Pivot table added on a new sheet',
+        id: 'baJVVjPb+v',
+      });
+    case 'pivotTableUpdated':
+      return translateMessage({
+        defaultMessage: 'Pivot table updated',
+        id: 'yYrrCd8+Ok',
+      });
     case 'rowsSized':
       return rowHeightSetText(lastDone);
     case 'columnsSized':
@@ -481,18 +556,18 @@ export function describeLastDone(givenDone?: Dynamic) {
         },
       );
     case 'undoOfferMade': {
-      let { title: titleOrThenBy, description: descriptionOrRest } =
+      let { title, description }: UndoOfferWords =
         lastDone.offer.kind === 'dropdownOptionDeleted' ? dropdownOptionDeletedOffer(lastDone.offer, 1 / 0) : describeUndoOffer(lastDone.offer);
-      if (lastDone.offer.kind === 'sortChangedResults' && descriptionOrRest !== undefined) return descriptionOrRest;
+      if (lastDone.offer.kind === 'sortChangedResults' && description !== undefined) return description;
       if (lastDone.headerRow !== undefined) {
         let headerRowText = describeLastDone(lastDone.headerRow);
-        return descriptionOrRest === undefined ? headerRowText : `${headerRowText} ${descriptionOrRest}`;
+        return description === undefined ? headerRowText : `${headerRowText} ${description}`;
       }
       let isTitleAlone =
         lastDone.offer.kind === 'dropdownOptionDeleted' ? lastDone.offer.isSaved : lastDone.offer.kind === 'sheetDeleted' && !lastDone.offer.isSaved;
-      return descriptionOrRest === undefined || isTitleAlone
-        ? titleOrThenBy
-        : `${titleOrThenBy}${titleOrThenBy.endsWith('…') ? '' : '.'} ${descriptionOrRest}`;
+      return description === undefined || isTitleAlone
+        ? title
+        : `${title}${title.endsWith('…') ? '' : '.'} ${description}`;
     }
     case 'dropdownOptionsSet':
       return translateMessage(
@@ -673,8 +748,8 @@ export function describeLastDone(givenDone?: Dynamic) {
           );
     case 'cellsSorted':
       if (lastDone.thenBy !== undefined) {
-        let { thenBy: titleOrThenBy, ...descriptionOrRest } = lastDone;
-        return titleOrThenBy.reduce(appendThenSortedBy, describeLastDone(descriptionOrRest));
+        let { thenBy, ...firstSort } = lastDone;
+        return thenBy.reduce(appendThenSortedBy, describeLastDone(firstSort));
       }
       return lastDone.direction === 'ascending'
         ? translateMessage(
@@ -951,17 +1026,17 @@ export function describeLastDone(givenDone?: Dynamic) {
           });
   }
 }
-export const cellGroupCountText = (count?: Dynamic) =>
+export const cellGroupCountText = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {# group of cells} other {# groups of cells}}',
       id: 'V5v/FLzo5Q',
     },
     {
-      count: count,
+      count,
     },
   );
-export const appendThenSortedBy = (said: Dynamic, { column: column, direction: direction }: Dynamic) =>
+export const appendThenSortedBy = (said: string, { column, direction }: ThenSortedBy): string =>
   direction === 'ascending'
     ? translateMessage(
         {
@@ -969,8 +1044,8 @@ export const appendThenSortedBy = (said: Dynamic, { column: column, direction: d
           id: 'RkFCj639US',
         },
         {
-          said: said,
-          column: column,
+          said,
+          column,
         },
       )
     : translateMessage(
@@ -979,7 +1054,7 @@ export const appendThenSortedBy = (said: Dynamic, { column: column, direction: d
           id: 'vbKXyS+rdU',
         },
         {
-          said: said,
-          column: column,
+          said,
+          column,
         },
       );

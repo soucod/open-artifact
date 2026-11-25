@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
 import { selectedAreaAsSeen, selectionInRowOrder } from '../presence/selections.ts';
 import { rangeSpansOnScreen, isSpanEndInSight, hitTestGrid } from '../grid/geometry.ts';
 import { isPointOnFillHandle } from '../selection/fill-handle.ts';
@@ -8,62 +8,87 @@ import { withoutOtherRanges } from '../selection/several-ranges.ts';
 import { commentAnchorOfCells, cellsOfCommentAnchor } from './anchors.ts';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { ownRowOrderOfSheet, wholeRowSpanIn } from '../model/line-ids.ts';
-import { withNoEffects } from '../state/transitions.ts';
+import { withNoEffects, type PageEffect, type PageTransition } from '../state/transitions.ts';
 import { isModalOpen } from '../ui/find.ts';
 import { showSheet } from '../state/sheet-tabs.ts';
 import { isNothingOpenButPane } from '../state/edit-refusals.ts';
 import { hasFilteredRowsIn } from '../tables/filtered-rows.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { CellsOfComment, CommentOnPage, PageState } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { GridPoint } from '../grid/geometry.ts';
+import type { GridLayout } from '../grid/layout.ts';
+import type { FillContext } from '../selection/fill-handle.ts';
+import type { PageContext, CommentsTold } from '../state/event-reducer.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function isActiveCellInComment({ cells: cells }: Dynamic, { activeCell: activeCell }: Dynamic, reads: WorkbookReads) {
+
+/** Where a new comment goes: its anchor, its cells as an address, and the number of its sheet. */
+export interface NewCommentPlace {
+  anchor: string;
+  cells: string;
+  sheetNumber: number;
+}
+
+export function isActiveCellInComment(
+  { cells }: Pick<CommentOnPage, 'cells'>,
+  { activeCell }: Pick<PageState, 'activeCell'>,
+  reads: WorkbookReads,
+): boolean {
   let activeCellPosition = reads.positionOfCell(activeCell);
-  let value = cells.activeCell.sheetId === activeCell.sheetId ? selectedAreaAsSeen(cells, reads) : null;
+  let commentArea = cells.activeCell.sheetId === activeCell.sheetId ? selectedAreaAsSeen(cells, reads) : null;
   return (
     activeCellPosition !== null &&
-    value !== null &&
-    activeCellPosition.rowIndex >= value.topRowIndex &&
-    activeCellPosition.rowIndex < value.topRowIndex + value.rowCount &&
-    activeCellPosition.columnIndex >= value.leftColumnIndex &&
-    activeCellPosition.columnIndex < value.leftColumnIndex + value.columnCount
+    commentArea !== null &&
+    activeCellPosition.rowIndex >= commentArea.topRowIndex &&
+    activeCellPosition.rowIndex < commentArea.topRowIndex + commentArea.rowCount &&
+    activeCellPosition.columnIndex >= commentArea.leftColumnIndex &&
+    activeCellPosition.columnIndex < commentArea.leftColumnIndex + commentArea.columnCount
   );
 }
-export function openCommentCountBySheet({ comments: comments }: Dynamic, reads: WorkbookReads) {
-  let countBySheet = new (Map as Dynamic)();
-  for (let { cells: cells, isResolved: isResolved } of (comments ?? []) as Dynamic) {
-    let { sheetId: sheetId } = cells.activeCell;
+export function openCommentCountBySheet({ comments }: Pick<PageState, 'comments'>, reads: WorkbookReads): Map<SheetId, number> {
+  let countBySheet = new Map<SheetId, number>();
+  for (let { cells, isResolved } of comments ?? []) {
+    let { sheetId } = cells.activeCell;
     if (!isResolved && selectedAreaAsSeen(cells, reads) !== null) countBySheet.set(sheetId, (countBySheet.get(sheetId) ?? 0) + 1);
   }
   return countBySheet;
 }
-export function doesCommentEndAtSelectionCorner(cells?: Dynamic, area?: Dynamic, reads?: Dynamic, cellReads?: Dynamic, layout?: Dynamic) {
-  let commentArea = cells.activeCell.sheetId === reads.sheetId ? selectedAreaAsSeen(cells, cellReads) : null;
+/** Whether the comment's cells end on screen where the area ends, at its bottom-right corner. */
+export function doesCommentEndAtSelectionCorner(
+  cells: CellsOfComment,
+  area: CellArea | null,
+  state: PageState,
+  reads: WorkbookReads,
+  layout: GridLayout,
+): boolean {
+  let commentArea = cells.activeCell.sheetId === state.sheetId ? selectedAreaAsSeen(cells, reads) : null;
   if (commentArea === null || area === null) return false;
-  let [commentSpans, areaSpans] = [rangeSpansOnScreen(commentArea, reads, layout, reads), rangeSpansOnScreen(area, reads, layout, reads)];
+  let [commentSpans, areaSpans] = [rangeSpansOnScreen(commentArea, state, layout, state), rangeSpansOnScreen(area, state, layout, state)];
   return (
     [commentSpans.across, commentSpans.down, areaSpans.across, areaSpans.down].every(isSpanEndInSight) &&
-    [commentSpans.across, commentSpans.down].every(({ start: start, end: end }: Dynamic) => start < end) &&
+    [commentSpans.across, commentSpans.down].every(({ start, end }) => start < end) &&
     commentSpans.across.end === areaSpans.across.end &&
     commentSpans.down.end === areaSpans.down.end
   );
 }
-export function commentAtSelectionCorner(state: PageState, reads?: Dynamic, context?: Dynamic) {
-  if (!isPointOnFillHandle(state, reads, context, true)) return null;
-  let { reads: cellReads } = context;
-  let [selection, layout] = [selectedArea(state, cellReads), layoutOfView(state, cellReads)];
+/** The comment marked at the corner of the selection when the finger is on the fill handle there. */
+export function commentAtSelectionCorner(state: PageState, point: GridPoint, context: FillContext): CommentOnPage | null {
+  if (!isPointOnFillHandle(state, point, context, true)) return null;
+  let { reads } = context;
+  let [selection, layout] = [selectedArea(state, reads), layoutOfView(state, reads)];
   return (
     state.comments?.findLast(
-      ({ cells: cells, isResolved: isResolved, isOpen: isOpen }: Dynamic) =>
-        (isOpen || !isResolved) && doesCommentEndAtSelectionCorner(cells, selection, state, cellReads, layout),
+      ({ cells, isResolved, isOpen }) =>
+        (isOpen || !isResolved) && doesCommentEndAtSelectionCorner(cells, selection, state, reads, layout),
     ) ?? null
   );
 }
-export function newCommentPlace(state: PageState, reads: WorkbookReads) {
+export function newCommentPlace(state: PageState, reads: WorkbookReads): NewCommentPlace | null {
   let filteredArea = isFilteredSelectionForComment(state, reads)
     ? mergedAreaOrCellOf(reads, state.activeCell)
     : selectedArea(withoutOtherRanges(state), reads);
   if (filteredArea === null) return null;
-  let { sheetId: sheetId } = state.activeCell;
+  let { sheetId } = state.activeCell;
   let startCellId = reads.cellIdAt(sheetId, filteredArea.topRowIndex, filteredArea.leftColumnIndex);
   let endCellId = reads.cellIdAt(
     sheetId,
@@ -79,16 +104,16 @@ export function newCommentPlace(state: PageState, reads: WorkbookReads) {
     },
     reads,
   );
-  let value = commentAnchorOfCells(stored.activeCell, stored.selectionCorner);
-  let matchIndex = reads.listSheets().findIndex((input?: Dynamic) => input.sheetId === sheetId);
-  if (value === null || matchIndex < 0) return null;
+  let anchor = commentAnchorOfCells(stored.activeCell, stored.selectionCorner);
+  let sheetIndex = reads.listSheets().findIndex((sheet) => sheet.sheetId === sheetId);
+  if (anchor === null || sheetIndex < 0) return null;
   return {
-    anchor: value,
+    anchor,
     cells: areaToA1AsStored(filteredArea, ownRowOrderOfSheet(reads, sheetId)),
-    sheetNumber: matchIndex + 1,
+    sheetNumber: sheetIndex + 1,
   };
 }
-export function openCommentAtSelection(state: PageState, reads: ReadsWithTextMeasurer, isForAgent?: Dynamic) {
+export function openCommentAtSelection(state: PageState, reads: ReadsWithTextMeasurer, isForAgent: boolean): PageTransition {
   let navigated = withoutOtherRanges(
     state.menu === null
       ? state
@@ -119,23 +144,23 @@ export function openCommentAtSelection(state: PageState, reads: ReadsWithTextMea
           {
             kind: 'openCommentBox',
             ...place,
-            isForAgent: isForAgent,
+            isForAgent,
           },
         ],
       };
 }
-export function openCommentByKeyboard(state: PageState, reads: WorkbookReads, handle?: Dynamic) {
-  let comment = state.comments?.find((comment2?: Dynamic) => comment2.handle === handle);
+export function openCommentByKeyboard(state: PageState, reads: WorkbookReads, handle: string | undefined): PageTransition {
+  let comment = state.comments?.find((listed) => listed.handle === handle);
   return comment === undefined ||
     state.mode.kind !== 'navigating' ||
     state.newCommentOn !== null ||
-    state.comments?.some(({ isOpen: isOpen }: Dynamic) => isOpen) === true ||
+    state.comments?.some(({ isOpen }) => isOpen) === true ||
     state.contextBarMenu !== null ||
     isCommentBlocked(state) ||
     !isActiveCellInComment(comment, state, reads)
     ? withNoEffects(state)
     : {
-        state: state,
+        state,
         effects: [
           {
             kind: 'openComment',
@@ -145,12 +170,12 @@ export function openCommentByKeyboard(state: PageState, reads: WorkbookReads, ha
         ],
       };
 }
-export function shutCommentLeftBehind(state: PageState, transition: Dynamic, reads: WorkbookReads) {
-  let comment = transition.state.comments?.find(({ isOpen: isOpen }: Dynamic) => isOpen);
+export function shutCommentLeftBehind(state: PageState, transition: PageTransition, reads: WorkbookReads): PageTransition {
+  let comment = transition.state.comments?.find(({ isOpen }) => isOpen);
   return comment !== undefined &&
     !isSameCell(state.activeCell, transition.state.activeCell) &&
     !isActiveCellInComment(comment, transition.state, reads) &&
-    !transition.effects.some(({ kind: kind }: Dynamic) => kind === 'openComment')
+    !transition.effects.some(({ kind }) => kind === 'openComment')
     ? {
         ...transition,
         effects: [
@@ -162,9 +187,9 @@ export function shutCommentLeftBehind(state: PageState, transition: Dynamic, rea
       }
     : transition;
 }
-export function goToComment(state: PageState, reads: ReadsWithTextMeasurer, handle?: Dynamic) {
+export function goToComment(state: PageState, reads: ReadsWithTextMeasurer, handle: string): PageState {
   let isBlocked = state.mode.kind !== 'navigating' || isModalOpen(state) || state.dragging !== null;
-  let commentCells = state.comments?.find((comment2?: Dynamic) => comment2.handle === handle)?.cells;
+  let commentCells = state.comments?.find((listed) => listed.handle === handle)?.cells;
   let comment = commentCells === undefined ? undefined : selectionInRowOrder('seen', commentCells, reads);
   if (isBlocked || comment === undefined || selectedArea(comment, reads) === null) return state;
   let navigated = withoutOtherRanges(showSheet(state, reads, comment.activeCell.sheetId));
@@ -174,7 +199,7 @@ export function goToComment(state: PageState, reads: ReadsWithTextMeasurer, hand
     selectionCorner: comment.selectionCorner,
   };
 }
-export function shutCommentBoxLeftBehind(state: PageState, transition: Dynamic, reads: WorkbookReads) {
+export function shutCommentBoxLeftBehind(state: PageState, transition: PageTransition, reads: WorkbookReads): PageTransition {
   let newCommentOn = transition.state.newCommentOn;
   return newCommentOn !== null &&
     !isSameCell(state.activeCell, transition.state.activeCell) &&
@@ -197,12 +222,18 @@ export function shutCommentBoxLeftBehind(state: PageState, transition: Dynamic, 
       }
     : transition;
 }
-export function shutCommentsOnPress(state: PageState, reads?: Dynamic, transition?: Dynamic, cellReads?: Dynamic) {
+/** Shuts the comment box and open comment when the press lands off the cells. */
+export function shutCommentsOnPress(
+  state: PageState,
+  point: GridPoint,
+  transition: PageTransition,
+  reads: ReadsWithTextMeasurer,
+): PageTransition {
   let hasNewComment = state.newCommentOn !== null && !canCommentModePickNow(state);
-  let hasOpenComment = state.comments?.some(({ isOpen: isOpen }: Dynamic) => isOpen) === true;
+  let hasOpenComment = state.comments?.some(({ isOpen }) => isOpen) === true;
   let isDraggingChanged = transition.state.dragging !== state.dragging;
   if ((!hasNewComment && !hasOpenComment) || isDraggingChanged) return transition;
-  if (hitTestGrid(reads, state, layoutOfView(state, cellReads)) !== null) return transition;
+  if (hitTestGrid(point, state, layoutOfView(state, reads)) !== null) return transition;
   return {
     ...transition,
     effects: [
@@ -210,7 +241,7 @@ export function shutCommentsOnPress(state: PageState, reads?: Dynamic, transitio
         ? [
             {
               kind: 'shutCommentBox',
-            },
+            } satisfies PageEffect,
           ]
         : []),
       ...transition.effects,
@@ -218,54 +249,54 @@ export function shutCommentsOnPress(state: PageState, reads?: Dynamic, transitio
         ? [
             {
               kind: 'shutComment',
-            },
+            } satisfies PageEffect,
           ]
         : []),
     ],
   };
 }
-export const withCommentsTold = (transition: Dynamic, { listed: listed, boxAnchor: boxAnchor }: Dynamic) => ({
-  ...transition,
-  comments: listed.flatMap(({ anchor: anchor, ...input }: Dynamic) => {
-    let cellsOfCommentAnchor2 = cellsOfCommentAnchor(anchor);
-    return cellsOfCommentAnchor2 === null
+export const withCommentsTold = (state: PageState, { listed, boxAnchor }: Pick<CommentsTold, 'listed' | 'boxAnchor'>): PageState => ({
+  ...state,
+  comments: listed.flatMap(({ anchor, ...comment }) => {
+    let cells = cellsOfCommentAnchor(anchor);
+    return cells === null
       ? []
       : [
           {
-            ...input,
-            cells: cellsOfCommentAnchor2,
+            ...comment,
+            cells,
           },
         ];
   }),
   newCommentOn: boxAnchor === null ? null : cellsOfCommentAnchor(boxAnchor),
 });
 export const isActiveCellInOpenComment = (
-  { comments: comments, newCommentOn: newCommentOn }: Dynamic,
+  { comments, newCommentOn }: Pick<PageState, 'comments' | 'newCommentOn'>,
   reads: WorkbookReads,
-  activeCell?: Dynamic,
-) =>
+  activeCell: CellId,
+): boolean =>
   [
     ...(newCommentOn === null ? [] : [newCommentOn]),
-    ...(comments ?? []).flatMap(({ cells: cells, isOpen: isOpen }: Dynamic) => (isOpen ? [cells] : [])),
+    ...(comments ?? []).flatMap(({ cells, isOpen }) => (isOpen ? [cells] : [])),
   ].some(
-    (input?: Dynamic) =>
+    (cells) =>
       isActiveCellInComment(
         {
-          cells: input,
+          cells,
         },
         {
-          activeCell: activeCell,
+          activeCell,
         },
         reads,
       ),
   );
-export const isCommentWithAgent = ({ commentsWithAgent: commentsWithAgent }: Dynamic, handle?: Dynamic) =>
+export const isCommentWithAgent = ({ commentsWithAgent }: Pick<PageState, 'commentsWithAgent'>, handle: string): boolean =>
   commentsWithAgent?.handles.includes(handle) === true;
-export const isCommentMarkedOnGrid = (state: PageState, { handle: handle, isOpen: isOpen, isResolved: isResolved }: Dynamic) =>
+export const isCommentMarkedOnGrid = (state: PageState, { handle, isOpen, isResolved }: CommentOnPage): boolean =>
   isOpen || (!isResolved && (state.commentsPointedAt.includes(handle) || isCommentWithAgent(state, handle)));
-export const commentAtActiveCell = (state: PageState, reads: WorkbookReads) =>
-  state.comments?.find((comment?: Dynamic) => !comment.isResolved && isActiveCellInComment(comment, state, reads)) ?? null;
-export const updateCommentModePicksCells = (state: PageState, { refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) => {
+export const commentAtActiveCell = (state: PageState, reads: WorkbookReads): CommentOnPage | null =>
+  state.comments?.find((comment) => !comment.isResolved && isActiveCellInComment(comment, state, reads)) ?? null;
+export const updateCommentModePicksCells = (state: PageState, { refusalOfEveryEdit }: Pick<PageContext, 'refusalOfEveryEdit'>): PageState => {
   let picksCells =
     state.isCommentModeOn && !state.isCommentModeLeftByPress && (refusalOfEveryEdit === 'readOnly' || state.isCommentModeForACard !== true);
   return picksCells === state.doesCommentModePickCells
@@ -275,35 +306,36 @@ export const updateCommentModePicksCells = (state: PageState, { refusalOfEveryEd
         doesCommentModePickCells: picksCells,
       };
 };
-export const doesCommentModePick = (state: PageState) =>
+export const doesCommentModePick = (state: PageState): boolean =>
   state.doesCommentModePickCells && state.comments !== null && state.mode.kind !== 'editing';
-export const canCommentModePickNow = (state: PageState) =>
+export const canCommentModePickNow = (state: PageState): boolean =>
   state.doesCommentModePickCells && state.comments !== null && state.mode.kind === 'navigating' && state.find === null && isNothingOpenButPane(state);
-export const isFilteredSelectionForComment = (state: PageState, reads: WorkbookReads) => {
-  let selectedArea2 = selectedArea(withoutOtherRanges(state), reads);
-  if (selectedArea2 === null) return false;
+/** Whether the selection cannot take a comment as it is: rows in it are filtered out or stand apart in the order seen. */
+export const isFilteredSelectionForComment = (state: PageState, reads: WorkbookReads): boolean => {
+  let area = selectedArea(withoutOtherRanges(state), reads);
+  if (area === null) return false;
   let rowSpan = {
-    firstIndex: selectedArea2.topRowIndex,
-    count: selectedArea2.rowCount,
+    firstIndex: area.topRowIndex,
+    count: area.rowCount,
   };
   return (
-    hasFilteredRowsIn(state, reads, selectedArea2) || wholeRowSpanIn('stored', ownRowOrderOfSheet(reads, state.activeCell.sheetId), rowSpan) === null
+    hasFilteredRowsIn(state, reads, area) || wholeRowSpanIn('stored', ownRowOrderOfSheet(reads, state.activeCell.sheetId), rowSpan) === null
   );
 };
-export const hasCommentToOpenAtSelection = (state: PageState, reads: WorkbookReads) =>
+export const hasCommentToOpenAtSelection = (state: PageState, reads: WorkbookReads): boolean =>
   state.comments !== null &&
   state.mode.kind === 'navigating' &&
   (commentAtActiveCell(state, reads) !== null || newCommentPlace(state, reads) !== null);
-export const isCommentBlocked = (state: PageState) =>
+export const isCommentBlocked = (state: PageState): boolean =>
   state.find !== null || state.dragging !== null || isModalOpen(state) || !isNothingOpenButPane(state);
-export const goToCommentKeepingScroll = (state: PageState, reads: ReadsWithTextMeasurer, handle?: Dynamic) => {
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = state;
+export const goToCommentKeepingScroll = (state: PageState, reads: ReadsWithTextMeasurer, handle: string): PageState => {
+  let { scrollLeft, scrollTop } = state;
   let navigated = goToComment(state, reads, handle);
   return navigated === state
     ? state
     : {
         ...navigated,
-        scrollLeft: scrollLeft,
-        scrollTop: scrollTop,
+        scrollLeft,
+        scrollTop,
       };
 };

@@ -1,19 +1,89 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Border, BorderStyle, SheetId } from '@open-artifact/sheets-core';
+import type { BorderSide, WholeCellFormat } from '../model/cell-format.ts';
+import type { WorkbookReads } from '../model/workbook.ts';
+import type { CellArea, CellPosition } from '../selection/model.ts';
+import type { PaintPair } from './cell-drawing.tsx';
+import type { GridLayout } from './layout.ts';
 import { shownLineAtOrBefore, shownLineAtOrAfter } from '../model/line-sizes.ts';
 import { colorKey, NO_COLOR } from '../model/colors.ts';
 import { textColorsOnFill } from '../format/cell-colors.ts';
 import { isInSpan } from './geometry.ts';
 import { DEFAULT_CELL_FORMAT } from '../model/cell-format.ts';
-export function strongerBorder(first?: Dynamic, second?: Dynamic) {
+/** A border that is drawn. */
+export type BorderLine = Extract<Border, { kind: 'line' }>;
+/** How a border style is drawn: how wide it shows, the width and offsets of its strokes, and its dash pattern. */
+export interface BorderLook {
+  width: number;
+  strokeWidth: number;
+  strokes: number[];
+  dashes: string | null;
+}
+/** Some lines of one axis, with the shown line just before them and the one just after. */
+export interface ShownLines {
+  before: number;
+  indexes: readonly number[];
+  after: number;
+}
+/** A border drawn unbroken along cells: the line, the index before its first cell, its first and the one after its last. */
+export interface BorderRun {
+  line: BorderLine;
+  beforeFirst: number;
+  first: number;
+  afterLast: number;
+}
+/** The borders of the cell at a place, or null where no cell's format is read. */
+export type BordersAtPlace = (cell: CellPosition) => Pick<WholeCellFormat, 'border'> | null;
+/** The borders of the cell at a row and column. */
+export type BordersAtCell = (rowIndex: number, columnIndex: number) => WholeCellFormat['border'];
+/** The lines of the grid to draw borders on, and where they are on screen. */
+export interface GridOfBorders {
+  rows: ShownLines;
+  columns: ShownLines;
+  formatAt: BordersAtPlace;
+  mergedAreas: readonly CellArea[];
+  leftOfColumn: (columnIndex: number) => number;
+  topOfRow: (rowIndex: number) => number;
+}
+/** The borders of one style and color, as a single path. */
+export interface BorderPath {
+  key: string;
+  path: string;
+  strokeWidth: number;
+  dashes: string | null;
+  paint: PaintPair | null;
+}
+/** A side of an area, or the lines inside it across and down. */
+export type AreaBorderSide = BorderSide | 'horizontal' | 'vertical';
+/** Whether the cells along a side have borders: all, part, none, or no such line to have one. */
+export type AreaBorderState = 'all' | 'part' | 'none' | null;
+export type AreaBorderLines = Record<AreaBorderSide, AreaBorderState>;
+/** The borders of an area, and whether they were read from a sample of its cells. */
+export interface AreaBorders {
+  lines: AreaBorderLines;
+  isFromSample: boolean;
+}
+/** An area to read the borders of, with the reads it needs. */
+export interface AreaToReadBordersOf {
+  area: CellArea;
+  formatAt: BordersAtPlace;
+  mergedAreas: readonly CellArea[];
+  bordersMayChangeBefore: { rows: number[]; columns: number[] };
+}
+/** The stroke paths of one border style and color, as they are gathered. */
+interface StrokesOfLine {
+  line: BorderLine;
+  strokes: string[];
+}
+export function strongerBorder(first: Border, second: Border): BorderLine | null {
   if (first.kind === 'none') return second.kind === 'none' ? null : second;
   if (second.kind === 'none') return first;
   return borderStyleRank(second.style) > borderStyleRank(first.style) ? second : first;
 }
 export function borderOverhangBelow(
-  { topRowIndex: topRowIndex, rowCount: rowCount, leftColumnIndex: leftColumnIndex }: Dynamic,
-  layout?: Dynamic,
-  bordersAt?: Dynamic,
-) {
+  { topRowIndex, rowCount, leftColumnIndex }: Pick<CellArea, 'topRowIndex' | 'rowCount' | 'leftColumnIndex'>,
+  layout: Pick<GridLayout, 'rowEdges' | 'rowCount'>,
+  bordersAt: BordersAtCell,
+): number {
   let endRow = topRowIndex + rowCount;
   let lastRow = Math.max(topRowIndex, shownLineAtOrBefore(layout.rowEdges, endRow - 1));
   let nextRow = shownLineAtOrAfter(layout.rowEdges, endRow);
@@ -27,23 +97,23 @@ export function borderOverhangBelow(
   );
   return border === null ? 0 : BORDER_LOOKS[border.style].width - 1;
 }
-export function borderLineKey(line?: Dynamic) {
+export function borderLineKey(line: BorderLine): string {
   let cached = BORDER_LINE_KEY_CACHE.get(line);
   if (cached !== undefined) return cached;
   let key = `${line.style} ${colorKey(line.color)}`;
   BORDER_LINE_KEY_CACHE.set(line, key);
   return key;
 }
-export function borderPaint({ color: color }: Dynamic) {
+export function borderPaint({ color }: BorderLine): PaintPair | null {
   let cached = BORDER_PAINT_CACHE.get(colorKey(color));
   if (cached !== undefined) return cached;
   let paint = textColorsOnFill(color, NO_COLOR);
   BORDER_PAINT_CACHE.set(colorKey(color), paint);
   return paint;
 }
-export function borderRunsAlongLine({ before: before, indexes: indexes, after: after }: Dynamic, lineAt?: Dynamic) {
-  let runs: Dynamic = [];
-  indexes.forEach((index?: Dynamic, position?: Dynamic) => {
+export function borderRunsAlongLine({ before, indexes, after }: ShownLines, lineAt: (index: number) => BorderLine | null): BorderRun[] {
+  let runs: BorderRun[] = [];
+  indexes.forEach((index, position) => {
     let line = lineAt(index);
     if (line === null) return;
     let next = indexes[position + 1] ?? after;
@@ -52,7 +122,7 @@ export function borderRunsAlongLine({ before: before, indexes: indexes, after: a
       lastRun.afterLast = next;
     else
       runs.push({
-        line: line,
+        line,
         beforeFirst: indexes[position - 1] ?? before,
         first: index,
         afterLast: next,
@@ -60,9 +130,9 @@ export function borderRunsAlongLine({ before: before, indexes: indexes, after: a
   });
   return runs;
 }
-export function buildBorderPaths(grid?: Dynamic) {
-  let { rows: rows, columns: columns, formatAt: formatAt, mergedAreas: mergedAreas, leftOfColumn: leftOfColumn, topOfRow: topOfRow } = grid;
-  let lineBetween = (first?: Dynamic, second?: Dynamic, firstSide?: Dynamic, secondSide?: Dynamic) => {
+export function buildBorderPaths(grid: GridOfBorders): BorderPath[] {
+  let { rows, columns, formatAt, mergedAreas, leftOfColumn, topOfRow } = grid;
+  let lineBetween = (first: CellPosition, second: CellPosition, firstSide: BorderSide, secondSide: BorderSide) => {
     let line = strongerBorder(
       formatAt(first)?.border[firstSide] ?? {
         kind: 'none',
@@ -73,80 +143,80 @@ export function buildBorderPaths(grid?: Dynamic) {
     );
     return line === null || isInsideOneMergedArea(mergedAreas, first, second) ? null : line;
   };
-  let lineBetweenRows = (upperRow?: Dynamic, lowerRow?: Dynamic, columnIndex?: Dynamic) =>
+  let lineBetweenRows = (upperRow: number, lowerRow: number, columnIndex: number) =>
     lineBetween(
       {
         rowIndex: upperRow,
-        columnIndex: columnIndex,
+        columnIndex,
       },
       {
         rowIndex: lowerRow,
-        columnIndex: columnIndex,
+        columnIndex,
       },
       'bottom',
       'top',
     );
-  let lineBetweenColumns = (leftColumn?: Dynamic, rightColumn?: Dynamic, rowIndex?: Dynamic) =>
+  let lineBetweenColumns = (leftColumn: number, rightColumn: number, rowIndex: number) =>
     lineBetween(
       {
-        rowIndex: rowIndex,
+        rowIndex,
         columnIndex: leftColumn,
       },
       {
-        rowIndex: rowIndex,
+        rowIndex,
         columnIndex: rightColumn,
       },
       'right',
       'left',
     );
-  let pathsByKey = new (Map as Dynamic)();
+  let pathsByKey = new Map<string, StrokesOfLine>();
   let addRun = (
-    { line: line, first: first, afterLast: afterLast }: Dynamic,
-    isHorizontal?: Dynamic,
-    crossIndex?: Dynamic,
-    crossingLines?: Dynamic,
+    { line, first, afterLast }: BorderRun,
+    isHorizontal: boolean,
+    crossIndex: number,
+    crossingLines: (BorderLine | null)[],
   ) => {
-    let { width: width, strokes: strokes } = BORDER_LOOKS[line.style];
+    let { width, strokes } = BORDER_LOOKS[line.style];
     let [alongEdge, crossEdge] = isHorizontal ? [leftOfColumn, topOfRow] : [topOfRow, leftOfColumn];
-    let crossingWidths = crossingLines.map((input?: Dynamic) => (input === null ? 0 : BORDER_LOOKS[input.style].width));
-    let start = Math.max(alongEdge(first) - (Math.max as Dynamic)(...crossingWidths, 1), alongEdge(0));
+    let crossingWidths = crossingLines.map((crossingLine) => (crossingLine === null ? 0 : BORDER_LOOKS[crossingLine.style].width));
+    let start = Math.max(alongEdge(first) - Math.max(...crossingWidths, 1), alongEdge(0));
     let end = alongEdge(afterLast);
     let middle = clampLineOffset(crossEdge(crossIndex), crossEdge(0), width) - width / 2;
-    let entry = pathsByKey.get(borderLineKey(line)) ?? {
-      line: line,
+    let entry: StrokesOfLine = pathsByKey.get(borderLineKey(line)) ?? {
+      line,
       strokes: [],
     };
     pathsByKey.set(borderLineKey(line), entry);
-    for (let stroke of strokes as Dynamic) {
+    for (let stroke of strokes) {
       let offset = middle + stroke;
       entry.strokes.push(isHorizontal ? `M${start} ${offset}H${end}` : `M${offset} ${start}V${end}`);
     }
   };
-  for (let [previousIndex, lineIndex] of neighbourIndexPairs(rows) as Dynamic) {
-    let runs = borderRunsAlongLine(columns, (input?: Dynamic) => lineBetweenRows(previousIndex, lineIndex, input));
-    for (let run of runs as Dynamic)
+  for (let [previousIndex, lineIndex] of neighbourIndexPairs(rows)) {
+    let runs = borderRunsAlongLine(columns, (columnIndex) => lineBetweenRows(previousIndex, lineIndex, columnIndex));
+    for (let run of runs)
       addRun(
         run,
         true,
         lineIndex,
-        [previousIndex, lineIndex].map((input?: Dynamic) => lineBetweenColumns(run.beforeFirst, run.first, input)),
+        [previousIndex, lineIndex].map((rowIndex) => lineBetweenColumns(run.beforeFirst, run.first, rowIndex)),
       );
   }
-  for (let [previousIndex, lineIndex] of neighbourIndexPairs(columns) as Dynamic) {
-    let runs = borderRunsAlongLine(rows, (input?: Dynamic) => lineBetweenColumns(previousIndex, lineIndex, input));
-    for (let run of runs as Dynamic)
+  for (let [previousIndex, lineIndex] of neighbourIndexPairs(columns)) {
+    let runs = borderRunsAlongLine(rows, (rowIndex) => lineBetweenColumns(previousIndex, lineIndex, rowIndex));
+    for (let run of runs)
       addRun(
         run,
         false,
         lineIndex,
-        [previousIndex, lineIndex].map((input?: Dynamic) => lineBetweenRows(run.beforeFirst, run.first, input)),
+        [previousIndex, lineIndex].map((columnIndex) => lineBetweenRows(run.beforeFirst, run.first, columnIndex)),
       );
   }
   let paths = [...pathsByKey];
-  paths.sort(([, input]: Dynamic, [, options]: Dynamic) => borderStyleRank(input.line.style) - borderStyleRank(options.line.style));
+  paths.sort(([, firstStrokes], [, secondStrokes]) => borderStyleRank(firstStrokes.line.style) - borderStyleRank(secondStrokes.line.style));
   return paths.map(
-    ([key, { line: line, strokes: strokes }]: Dynamic) => ({
-      key: key,
+    ([key, { line, strokes }]) => ({
+      key,
       path: strokes.join(''),
       strokeWidth: BORDER_LOOKS[line.style].strokeWidth,
       dashes: BORDER_LOOKS[line.style].dashes,
@@ -154,74 +224,74 @@ export function buildBorderPaths(grid?: Dynamic) {
     }),
   );
 }
-export function summarizeAreaBorders(lines?: Dynamic, isFromSample?: Dynamic) {
+export function summarizeAreaBorders(lines: AreaBorderLines, isFromSample: boolean) {
   if (isFromSample)
-    return [...OUTER_BORDER_SIDES, ...INNER_BORDER_SIDES].some((input?: Dynamic) => lines[input] === 'all' || lines[input] === 'part')
+    return [...OUTER_BORDER_SIDES, ...INNER_BORDER_SIDES].some((side) => lines[side] === 'all' || lines[side] === 'part')
       ? 'some'
       : 'unsure';
-  let allAre = (sides?: Dynamic, state?: Dynamic) =>
-    sides.every((input?: Dynamic) => lines[input] === null || lines[input] === state);
+  let allAre = (sides: readonly AreaBorderSide[], state: AreaBorderState) =>
+    sides.every((side) => lines[side] === null || lines[side] === state);
   if (allAre(OUTER_BORDER_SIDES, 'none') && allAre(INNER_BORDER_SIDES, 'none')) return 'none';
   if (allAre(OUTER_BORDER_SIDES, 'all') && allAre(INNER_BORDER_SIDES, 'all')) return 'all';
   if (allAre(OUTER_BORDER_SIDES, 'all') && allAre(INNER_BORDER_SIDES, 'none')) return 'outer';
   if (allAre(OUTER_BORDER_SIDES, 'none') && allAre(INNER_BORDER_SIDES, 'all')) return 'inner';
   let [onlySide, ...otherSides] = [...OUTER_BORDER_SIDES, ...INNER_BORDER_SIDES].filter(
-    (input?: Dynamic) => lines[input] !== 'none' && lines[input] !== null,
+    (side) => lines[side] !== 'none' && lines[side] !== null,
   );
   return onlySide !== undefined && otherSides.length === 0 && lines[onlySide] === 'all' ? onlySide : 'some';
 }
-export function sampleEvenly(items?: Dynamic, count?: Dynamic) {
+export function sampleEvenly<Item>(items: readonly Item[], count: number): readonly Item[] {
   if (items.length <= count) return items;
-  let sample: Dynamic = [];
-  for (let index: Dynamic = 0; index < count; index += 1) {
+  let sample: Item[] = [];
+  for (let index = 0; index < count; index += 1) {
     let item = items[Math.round((index * (items.length - 1)) / (count - 1))];
     if (item === undefined) throw Error('a list cannot be spread over fewer than two');
     sample.push(item);
   }
   return sample;
 }
-export function borderLineCandidates(start?: Dynamic, count?: Dynamic, bases?: Dynamic, offsets?: Dynamic) {
+export function borderLineCandidates(start: number, count: number, bases: readonly number[], offsets: readonly number[]): number[] {
   let indexes = [
-    ...new (Set as Dynamic)(
-      [start, ...bases.flatMap((input?: Dynamic) => offsets.map((input2?: Dynamic) => input + input2))].filter(
-        (input?: Dynamic) => isInSpan(input, start, count),
+    ...new Set(
+      [start, ...bases.flatMap((base) => offsets.map((offset) => base + offset))].filter(
+        (index) => isInSpan(index, start, count),
       ),
     ),
   ];
-  indexes.sort((input?: Dynamic, options?: Dynamic) => input - options);
+  indexes.sort((first, second) => first - second);
   return indexes;
 }
 export function readAreaBorders({
-  area: area,
-  formatAt: formatAt,
-  mergedAreas: mergedAreas,
-  bordersMayChangeBefore: bordersMayChangeBefore,
-}: Dynamic) {
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = area;
-  let isFromSample: Dynamic = false;
+  area,
+  formatAt,
+  mergedAreas,
+  bordersMayChangeBefore,
+}: AreaToReadBordersOf): AreaBorders {
+  let { topRowIndex, leftColumnIndex, rowCount, columnCount } = area;
+  let isFromSample = false;
   let rowBreaks = [
     ...bordersMayChangeBefore.rows,
-    ...mergedAreas.flatMap((input?: Dynamic) => [input.topRowIndex, input.topRowIndex + input.rowCount]),
+    ...mergedAreas.flatMap((merged) => [merged.topRowIndex, merged.topRowIndex + merged.rowCount]),
   ];
   let columnBreaks = [
     ...bordersMayChangeBefore.columns,
-    ...mergedAreas.flatMap((input?: Dynamic) => [input.leftColumnIndex, input.leftColumnIndex + input.columnCount]),
+    ...mergedAreas.flatMap((merged) => [merged.leftColumnIndex, merged.leftColumnIndex + merged.columnCount]),
   ];
   let rowLines = borderLineCandidates(topRowIndex, rowCount, rowBreaks, [0]);
   let columnLines = borderLineCandidates(leftColumnIndex, columnCount, columnBreaks, [0]);
-  let readLines = (isHorizontal?: Dynamic, lineIndexes?: Dynamic) => {
-    let [beforeSide, afterSide] = isHorizontal ? ['bottom', 'top'] : ['right', 'left'];
+  let readLines = (isHorizontal: boolean, lineIndexes: number[]): AreaBorderState => {
+    let [beforeSide, afterSide]: [BorderSide, BorderSide] = isHorizontal ? ['bottom', 'top'] : ['right', 'left'];
     let crossIndexes = isHorizontal ? columnLines : rowLines;
     let sampledLines = sampleEvenly(
       lineIndexes,
       Math.max(Math.floor(MAX_BORDER_SAMPLES / crossIndexes.length), MIN_BORDER_SAMPLES_PER_LINE),
     );
     let sampledCross = sampleEvenly(crossIndexes, Math.floor(MAX_BORDER_SAMPLES / Math.max(sampledLines.length, 1)));
-    let hasLine: Dynamic = false;
-    let hasGap: Dynamic = false;
-    for (let lineIndex of sampledLines as Dynamic)
-      for (let crossIndex of sampledCross as Dynamic) {
-        let cellAt = (index?: Dynamic) =>
+    let hasLine = false;
+    let hasGap = false;
+    for (let lineIndex of sampledLines)
+      for (let crossIndex of sampledCross) {
+        let cellAt = (index: number): CellPosition =>
           isHorizontal
             ? {
                 rowIndex: index,
@@ -260,18 +330,18 @@ export function readAreaBorders({
       horizontal: readLines(true, borderLineCandidates(topRowIndex + 1, rowCount - 1, rowBreaks, innerOffsets)),
       vertical: readLines(false, borderLineCandidates(leftColumnIndex + 1, columnCount - 1, columnBreaks, innerOffsets)),
     },
-    isFromSample: isFromSample,
+    isFromSample,
   };
 }
-export const BORDER_STYLE_ORDER = ['dotted', 'dashed', 'thin', 'medium', 'double', 'thick'];
-export const borderStyleRank = (style?: Dynamic) => BORDER_STYLE_ORDER.indexOf(style);
-export const solidBorderLook = (width?: Dynamic) => ({
-  width: width,
+export const BORDER_STYLE_ORDER: readonly BorderStyle[] = ['dotted', 'dashed', 'thin', 'medium', 'double', 'thick'];
+export const borderStyleRank = (style: BorderStyle): number => BORDER_STYLE_ORDER.indexOf(style);
+export const solidBorderLook = (width: number): BorderLook => ({
+  width,
   strokeWidth: width,
   strokes: [0],
   dashes: null,
 });
-export const BORDER_LOOKS = {
+export const BORDER_LOOKS: Record<BorderStyle, BorderLook> = {
   thin: solidBorderLook(1),
   medium: solidBorderLook(2),
   thick: solidBorderLook(3),
@@ -290,28 +360,28 @@ export const BORDER_LOOKS = {
     dashes: null,
   },
 };
-export const borderStyleWidth = (style?: Dynamic) => BORDER_LOOKS[style].width;
-export const MAX_BORDER_WIDTH = (Math.max as Dynamic)(...Object.values(BORDER_LOOKS).map(({ width: width }: Dynamic) => width));
+export const borderStyleWidth = (style: BorderStyle): number => BORDER_LOOKS[style].width;
+export const MAX_BORDER_WIDTH = Math.max(...Object.values(BORDER_LOOKS).map(({ width }) => width));
 export const bordersAtCellOf =
-  (sheet?: Dynamic, sheetId?: Dynamic) =>
-  (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+  (sheet: WorkbookReads, sheetId: SheetId): BordersAtCell =>
+  (rowIndex, columnIndex) => {
     let cellId = sheet.cellIdAt(sheetId, rowIndex, columnIndex);
     return (cellId === null ? DEFAULT_CELL_FORMAT : sheet.formatOf(cellId)).border;
   };
-export const isInsideOneMergedArea = (mergedAreas?: Dynamic, first?: Dynamic, second?: Dynamic) =>
+export const isInsideOneMergedArea = (mergedAreas: readonly CellArea[], first: CellPosition, second: CellPosition): boolean =>
   mergedAreas.some(
-    (area?: Dynamic) =>
+    (area) =>
       [first, second].every(
-        ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+        ({ rowIndex, columnIndex }) =>
           isInSpan(rowIndex, area.topRowIndex, area.rowCount) && isInSpan(columnIndex, area.leftColumnIndex, area.columnCount),
       ),
   );
-export const BORDER_LINE_KEY_CACHE = new (WeakMap as Dynamic)();
-export const BORDER_PAINT_CACHE = new (Map as Dynamic)();
-export const neighbourIndexPairs = ({ before: before, indexes: indexes, after: after }: Dynamic) =>
-  indexes.length === 0 ? [] : [...indexes, after].map((index?: Dynamic, position?: Dynamic) => [indexes[position - 1] ?? before, index]);
-export const clampLineOffset = (value?: Dynamic, start?: Dynamic, width?: Dynamic) => Math.max(value, start + width);
-export const NO_AREA_BORDERS = {
+export const BORDER_LINE_KEY_CACHE = new WeakMap<BorderLine, string>();
+export const BORDER_PAINT_CACHE = new Map<string, PaintPair | null>();
+export const neighbourIndexPairs = ({ before, indexes, after }: ShownLines): [number, number][] =>
+  indexes.length === 0 ? [] : [...indexes, after].map((index, position) => [indexes[position - 1] ?? before, index]);
+export const clampLineOffset = (offset: number, start: number, width: number): number => Math.max(offset, start + width);
+export const NO_AREA_BORDERS: AreaBorderLines = {
   top: 'none',
   bottom: 'none',
   left: 'none',
@@ -319,7 +389,7 @@ export const NO_AREA_BORDERS = {
   horizontal: null,
   vertical: null,
 };
-export const OUTER_BORDER_SIDES = ['top', 'bottom', 'left', 'right'];
-export const INNER_BORDER_SIDES = ['horizontal', 'vertical'];
+export const OUTER_BORDER_SIDES: readonly BorderSide[] = ['top', 'bottom', 'left', 'right'];
+export const INNER_BORDER_SIDES: readonly ('horizontal' | 'vertical')[] = ['horizontal', 'vertical'];
 export const MAX_BORDER_SAMPLES = 500;
 export const MIN_BORDER_SAMPLES_PER_LINE = Math.floor(Math.sqrt(MAX_BORDER_SAMPLES));

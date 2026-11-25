@@ -16,6 +16,7 @@ import {
   COORDINATE_LIMIT,
   DEFAULT_STICKER_SIZE,
   DEFAULT_TIMER_MS,
+  DRAWING_STYLE_PATTERN,
   ELEMENT_ID_PATTERN,
   FACE_STICKER_ART,
   HEX_COLOR_PATTERN,
@@ -36,6 +37,7 @@ import {
   MAX_HTML_STATE_CHARS,
   MAX_LABEL_CHARS,
   MAX_NOTE_TILT,
+  MAX_PLACEHOLDER_CHARS,
   MAX_STROKE_POINTS,
   MAX_TIMER_MS,
   MIN_ELEMENT_SIZE,
@@ -66,9 +68,9 @@ import {
   type TextStyle,
   type TimerFields,
 } from './schema.ts';
-import { clampElementText, isUploadedBlobSource, normalizeImageSource } from './image-source.ts';
+import { clampElementText, isSvgImageSource, isUploadedBlobSource, normalizeImageSource } from './image-source.ts';
 import { normalizeImageCrop } from './image-crop.ts';
-import { normalizeHttpUrl, normalizeLinkFields } from './links.ts';
+import { normalizeHttpUrl, normalizeLinkFields, sanitizeShortLabel } from './links.ts';
 import { isStickerArt, normalizeStickerGlyph, stickerGlyphForArt } from './stickers.ts';
 import { normalizeTable } from './table.ts';
 import { sliceChars, truncateAuthorName } from './text-limits.ts';
@@ -138,6 +140,12 @@ export function normalizeTextStyleFields(input: Loose): TextStyle {
     ...(typeof input.ink === 'string' ? { ink: normalizePaletteColor(input.ink, INK_COLOR_NAMES, 'ink') } : {}),
     ...pickTextAlign(input),
   };
+}
+
+/** A text placeholder: one plain line, cleaned like a link title, at most {@link MAX_PLACEHOLDER_CHARS}; `undefined` when empty. */
+export function normalizePlaceholder(value: unknown): string | undefined {
+  const placeholder = sanitizeShortLabel(value, MAX_PLACEHOLDER_CHARS);
+  return placeholder !== '' ? placeholder : undefined;
 }
 
 /** The agent's authorship stamps (`by: "agent"`, `words`). */
@@ -356,16 +364,19 @@ function normalizeElementFields(raw: unknown, takenIds: ReadonlySet<ElementId>):
       };
     case 'text': {
       const wrap = clampFiniteNumber(input.wrap, MIN_ELEMENT_SIZE, MAX_ELEMENT_SIZE);
+      const placeholder = normalizePlaceholder(input.placeholder);
+      const text = elementText(input.text);
       return {
         type: 'text',
         id,
         x,
         y,
-        text: elementText(input.text),
+        text: placeholder !== undefined && text.trim() === '' ? '' : text,
         size: parseEnumValue(input.size, TEXT_SIZES, 'body'),
         color: ink(input.color),
         ...(wrap !== undefined ? { wrap } : {}),
         ...pickTextAlign(input),
+        ...(placeholder !== undefined ? { placeholder } : {}),
         ...pickAuthorshipFields(input),
       };
     }
@@ -375,6 +386,7 @@ function normalizeElementFields(raw: unknown, takenIds: ReadonlySet<ElementId>):
       const crop = normalizeImageCrop(input.crop);
       const video = typeof input.video === 'string' && isUploadedBlobSource(input.video) ? normalizeImageSource(input.video) : undefined;
       const href = video === undefined ? normalizeHttpUrl(input.href) : undefined;
+      const style = isSvgImageSource(src) && typeof input.style === 'string' && DRAWING_STYLE_PATTERN.test(input.style) ? input.style : undefined;
       return {
         type: 'image',
         id,
@@ -386,6 +398,7 @@ function normalizeElementFields(raw: unknown, takenIds: ReadonlySet<ElementId>):
         ...(crop !== undefined ? { crop } : {}),
         ...(video !== undefined ? { video } : {}),
         ...(href !== undefined ? { href } : {}),
+        ...(style !== undefined ? { style } : {}),
         ...pickBy(input),
       };
     }

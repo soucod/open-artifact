@@ -16,6 +16,7 @@ use super::{LONGEST_DROPDOWN_OPTION, MOST_OPTIONS_IN_A_DROPDOWN};
 use crate::ids::{Bases, IdRun, LineId};
 use crate::number_format::Room;
 use crate::shown::{shown, ShownValue};
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{sorted_runs, Leaf};
 use crate::workbook::layout::{merged_boxes, written, CellIds};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
@@ -321,7 +322,7 @@ impl Giving<'_> {
                     CellToSet { r, c, input }
                 })
                 .collect();
-            ops.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells, listed: false });
+            ops.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells, form: CellForm::ListUnlessLarge });
         }
         Made { ops, place: Some(place) }
     }
@@ -385,7 +386,7 @@ pub fn add_option(
     let set_cell = |option: &DropdownOption| {
         let input = Input::DropdownOption { option_id: option.option_id.clone(), label: option.label.clone() };
         let cells = vec![CellToSet { r: r.clone(), c: c.clone(), input: Some(input) }];
-        Op::SetCells { sheet_id: sheet_id.clone(), cells, listed: false }
+        Op::SetCells { sheet_id: sheet_id.clone(), cells, form: CellForm::Auto }
     };
     // A label the dropdown has (capitals aside) is that option.
     let lower = label.to_lowercase();
@@ -485,7 +486,7 @@ pub fn set_options(
                         CellToSet { r, c, input: None }
                     })
                     .collect();
-                ops.push(Op::SetCells { sheet_id: sheet_id.clone(), cells, listed: false });
+                ops.push(Op::SetCells { sheet_id: sheet_id.clone(), cells, form: CellForm::Auto });
             }
             Ok(Made { ops, place: Some(place) })
         }

@@ -113,11 +113,14 @@ pub struct SheetSettings {
     pub last_frozen_column: Option<Option<String>>,
     #[serde(default, deserialize_with = "written::not_null", skip_serializing_if = "Option::is_none")]
     pub are_gridlines_hidden: Option<bool>,
+    #[serde(default, deserialize_with = "written::read", skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<Option<String>>,
 }
 
 impl SheetSettings {
     fn is_empty(&self) -> bool {
-        self.last_frozen_row.is_none() && self.last_frozen_column.is_none() && self.are_gridlines_hidden.is_none()
+        self.last_frozen_row.is_none() && self.last_frozen_column.is_none()
+            && self.are_gridlines_hidden.is_none() && self.interactive.is_none()
     }
 }
 
@@ -249,6 +252,11 @@ impl Workbook {
                         Some(None) => Some(None),
                         None => None,
                     };
+                    if let Some(Some(id)) = &s.settings.interactive {
+                        if !self.views.contains_key(id.as_str()) {
+                            return Err(Refusal::UnknownView);
+                        }
+                    }
                     checked.push((index, row, column, s.settings.are_gridlines_hidden));
                 }
                 let mut reverse = Vec::with_capacity(sheets.len());
@@ -265,6 +273,9 @@ impl Workbook {
                     }
                     if let Some(hidden) = hidden {
                         old.are_gridlines_hidden = Some(std::mem::replace(&mut sheet.are_gridlines_hidden, hidden));
+                    }
+                    if let Some(interactive) = &s.settings.interactive {
+                        old.interactive = Some(std::mem::replace(&mut sheet.interactive, interactive.clone()));
                     }
                     reverse.push(SheetToSet { sheet_id: s.sheet_id.clone(), settings: old });
                 }

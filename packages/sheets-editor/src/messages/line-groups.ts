@@ -1,6 +1,15 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { GroupDone, GroupsDone, ShownToLevelDone } from '../state/initial-state.ts';
+import type { LabelEnds } from '../model/a1-references.ts';
+import type { LinesAxisName } from '../grid/geometry.ts';
+import type { SelectedRangeView } from '../view/page-view.ts';
 import { translateMessage } from '../i18n/messages.ts';
-export function lineGroupsDoneWords(done?: Dynamic) {
+
+/** Rows or columns between two labels, such as a group of lines. */
+export interface LabelledLineSpan extends LabelEnds {
+  of: LinesAxisName;
+}
+
+export function lineGroupsDoneWords(done: GroupDone | GroupsDone | ShownToLevelDone): string {
   switch (done.what) {
     case 'grouped':
       return translateMessage(
@@ -96,7 +105,7 @@ export function lineGroupsDoneWords(done?: Dynamic) {
           );
   }
 }
-export function selectionWithHiddenLinesWords(cellsWords: Dynamic, { rowCount: rowCount, columnCount: columnCount }: Dynamic) {
+export function selectionWithHiddenLinesWords(cellsWords: string, { rowCount, columnCount }: SelectedRangeView['outOfSight']): string {
   if (columnCount === 0)
     return translateMessage(
       {
@@ -147,7 +156,7 @@ export function selectionWithHiddenLinesWords(cellsWords: Dynamic, { rowCount: r
     },
   );
 }
-export const groupLinesLabel = (lineKind?: Dynamic, count?: Dynamic) =>
+export const groupLinesLabel = (lineKind: LinesAxisName, count: number): string =>
   lineKind === 'rows'
     ? translateMessage(
         {
@@ -155,7 +164,7 @@ export const groupLinesLabel = (lineKind?: Dynamic, count?: Dynamic) =>
           id: '3Ru98v1OIb',
         },
         {
-          count: count,
+          count,
         },
       )
     : translateMessage(
@@ -164,10 +173,10 @@ export const groupLinesLabel = (lineKind?: Dynamic, count?: Dynamic) =>
           id: 'GRN3/UTdpf',
         },
         {
-          count: count,
+          count,
         },
       );
-export const ungroupLinesLabel = (lineKind?: Dynamic) =>
+export const ungroupLinesLabel = (lineKind: LinesAxisName): string =>
   lineKind === 'rows'
     ? translateMessage({
         defaultMessage: 'Ungroup rows',
@@ -177,29 +186,29 @@ export const ungroupLinesLabel = (lineKind?: Dynamic) =>
         defaultMessage: 'Ungroup columns',
         id: 'cKLFkMRM8y',
       });
-export const collapseGroupsLabel = (count?: Dynamic) =>
+export const collapseGroupsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Collapse group} other {Collapse # groups}}',
       id: '3iaLsDqmvY',
     },
     {
-      count: count,
+      count,
     },
   );
-export const expandGroupsLabel = (count?: Dynamic) =>
+export const expandGroupsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Expand group} other {Expand # groups}}',
       id: 'Rvc68E31Je',
     },
     {
-      count: count,
+      count,
     },
   );
-export const lineSpanSelector = ({ of: lineKind, first: first, last: last }: Dynamic) =>
+export const lineSpanSelector = ({ of: lineKind, first, last }: LabelledLineSpan): 'row' | 'rows' | 'column' | 'columns' =>
   lineKind === 'rows' ? (first === last ? 'row' : 'rows') : first === last ? 'column' : 'columns';
-export const toggleGroupLabel = (group?: Dynamic, isCollapsed?: Dynamic) =>
+export const toggleGroupLabel = (group: LabelledLineSpan, isCollapsed: boolean): string =>
   isCollapsed
     ? translateMessage(
         {
@@ -225,7 +234,7 @@ export const toggleGroupLabel = (group?: Dynamic, isCollapsed?: Dynamic) =>
           last: group.last,
         },
       );
-export const showToLevelLabel = (lineKind?: Dynamic, level?: Dynamic) =>
+export const showToLevelLabel = (lineKind: LinesAxisName, level: number): string =>
   lineKind === 'rows'
     ? translateMessage(
         {
@@ -233,7 +242,7 @@ export const showToLevelLabel = (lineKind?: Dynamic, level?: Dynamic) =>
           id: 'nroq0TuraU',
         },
         {
-          level: level,
+          level,
         },
       )
     : translateMessage(
@@ -242,10 +251,10 @@ export const showToLevelLabel = (lineKind?: Dynamic, level?: Dynamic) =>
           id: 'Spp8R16J6+',
         },
         {
-          level: level,
+          level,
         },
       );
-export const lineGroupsLabel = (lineKind?: Dynamic) =>
+export const lineGroupsLabel = (lineKind: LinesAxisName): string =>
   lineKind === 'rows'
     ? translateMessage({
         defaultMessage: 'Row groups',

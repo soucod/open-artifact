@@ -37,7 +37,6 @@ export const REMOVED_PAGE_ELEMENTS: readonly string[] = [
   'link',
   'meta',
   'base',
-  'form',
   'iframe',
   'frame',
   'frameset',

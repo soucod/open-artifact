@@ -8,7 +8,15 @@
         "mcp",
         "--harness",
         "cursor"
-      ]
+      ],
+      "env": {
+        "OPEN_ARTIFACT_PLUGIN_REMOTE": "${OPEN_ARTIFACT_SERVER}",
+        "OPEN_ARTIFACT_REMOTE": "${env:OPEN_ARTIFACT_REMOTE}",
+        "OPEN_ARTIFACT_REMOTE_NAME": "${env:OPEN_ARTIFACT_REMOTE_NAME}",
+        "OPEN_ARTIFACT_REMOTE_TOKEN": "${env:OPEN_ARTIFACT_REMOTE_TOKEN}",
+        "OPEN_ARTIFACT_PUBLISH": "${env:OPEN_ARTIFACT_PUBLISH}",
+        "OPEN_ARTIFACT_REMOTE_INSECURE_HTTP": "${env:OPEN_ARTIFACT_REMOTE_INSECURE_HTTP}"
+      }
     }
   }
 }

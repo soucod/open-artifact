@@ -1,4 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, SheetId } from '@open-artifact/sheets-core';
+import type { CaretInEntryPlaced } from '../editor/entry-boxes.ts';
+import type { GridHit } from '../grid/geometry.ts';
+import type { CaretSpan, FormulaKeyAct } from '../keys/key-acts.ts';
+import type { OwnRowOrder } from '../model/line-ids.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { PointerDragged, PointerPressed } from '../state/event-reducer.ts';
+import type { EditingMode, PageMode } from '../state/transitions.ts';
+import type { FormulaReferencesFound, WrittenReference } from './references.ts';
 import { findFormulaReferences, resolveFormulaReference, sheetPrefixForFormula, isWholeLineReference } from './references.ts';
 import { hasSpaceBetweenOperands } from './word-tokens.ts';
 import { areasToA1AsStored } from './from-words/where.ts';
@@ -27,11 +35,44 @@ import { dragPositionClearOfStuckHeaders, columnSpanAt } from '../grid/sticky-he
 import { jumpOrExtendSelection } from '../selection/jumps.ts';
 import { extendSelectionByKey, cellAfterKeyMove } from '../selection/keyboard.ts';
 import { cellShownText } from '../clipboard/text-escaping.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { PageState, PointedReference, ReferenceInEntry } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function referencesInFormula(formula?: Dynamic, reads?: Dynamic) {
-  let parsed = findFormulaReferences(formula, reads);
+/** Whole rows or whole columns, pointed at by their header. */
+export type PointedWhole = 'rows' | 'columns';
+/** The cells pointed at for a reference: from `anchor` to `at`, or the whole rows or columns they lie in. */
+export interface CellsPointedAt {
+  anchor: CellId;
+  at: CellId;
+  whole: PointedWhole | null;
+  cameToMergedCellsAt?: CellId | null;
+}
+/** A reference written into the entry by pointing at cells, with the text it took the place of. */
+export interface PointedReferenceWritten extends PointedReference, CellsPointedAt {
+  tookPlaceOf?: string;
+}
+/** A caret in an entry's text, and whether the person put it there rather than the page. */
+export interface EntryCaret extends CaretSpan {
+  isPlacedByHand?: true;
+}
+/** An entry caret, with the text it was in. */
+export interface EntryCaretInText extends EntryCaret {
+  text: string;
+}
+/** Where a reference may be written in a formula: over one written there, or in a gap that takes one. */
+export interface ReferenceSlot extends CaretSpan {
+  written: WrittenReference | null;
+}
+/** The tip shown of the cells a pointed reference covers. */
+export interface PointedCellsTip {
+  cells: string;
+  /** What the cell shows, for a reference to one cell. */
+  text: string | null;
+  doArrowsMoveIt: boolean;
+}
+export type PointAtCellsAct = Extract<FormulaKeyAct, { kind: 'pointAtCells' }>;
+export function referencesInFormula(formula: string, decimalSign: DecimalSignName): FormulaReferencesFound {
+  let parsed = findFormulaReferences(formula, decimalSign);
   return hasSpaceBetweenOperands(formula)
     ? {
         ...parsed,
@@ -39,14 +80,14 @@ export function referencesInFormula(formula?: Dynamic, reads?: Dynamic) {
       }
     : parsed;
 }
-export function highlightedReferences(formula: Dynamic, sheetId: Dynamic, reads: WorkbookReads) {
+export function highlightedReferences(formula: string, sheetId: SheetId, reads: WorkbookReads): ReferenceInEntry[] {
   let sheets = reads.listSheets();
-  let huesByArea = new (Map as Dynamic)();
-  let { references: references } = referencesInFormula(formula, reads.decimalSign);
-  return references.flatMap((reference?: Dynamic) => {
+  let huesByArea = new Map<string, string>();
+  let { references } = referencesInFormula(formula, reads.decimalSign);
+  return references.flatMap((reference): ReferenceInEntry[] => {
     let found = resolveFormulaReference(reference, sheetId, sheets);
     if (found === null) return [];
-    let { sheet: sheet, area: area, pieces: pieces } = found;
+    let { sheet, area, pieces } = found;
     let { sheetId: refSheetId } = sheet;
     let areaKey = `${refSheetId} ${areasToA1AsStored(pieces, sheet.ownRowOrder)}`;
     let hue = huesByArea.get(areaKey) ?? referenceHue(huesByArea.size);
@@ -58,18 +99,18 @@ export function highlightedReferences(formula: Dynamic, sheetId: Dynamic, reads:
     return [
       {
         sheetId: refSheetId,
-        area: area,
+        area,
         ...(pieces.length > 1 && {
-          pieces: pieces,
+          pieces,
         }),
-        hue: hue,
-        writtenAt: writtenAt,
+        hue,
+        writtenAt,
       },
     ];
   });
 }
-export function syncReferencesInEntry(previousState: Dynamic, state: PageState, reads: WorkbookReads) {
-  let { mode: mode, activeCell: activeCell, workbookChangeCount: workbookChangeCount } = state;
+export function syncReferencesInEntry(previousState: PageState, state: PageState, reads: WorkbookReads): PageState {
+  let { mode, activeCell, workbookChangeCount } = state;
   if (mode === previousState.mode && workbookChangeCount === previousState.workbookChangeCount) return state;
   let references =
     mode.kind === 'editing' && isFormulaText(mode.text) ? highlightedReferences(mode.text, activeCell.sheetId, reads) : NO_REFERENCES;
@@ -80,10 +121,10 @@ export function syncReferencesInEntry(previousState: Dynamic, state: PageState, 
         referencesInEntry: references,
       };
 }
-export function referenceSlotAt(text?: Dynamic, caret?: Dynamic) {
+export function referenceSlotAt(text: string, caret: EntryCaret): ReferenceSlot | null {
   if (!isFormulaText(text) || isInsideArrayLiteral(text.slice(0, caret.start))) return null;
-  let { references: references, quoted: quoted } = referencesInFormula(text, 'point');
-  let enclosing = references.find(({ start: start, end: end }: Dynamic) => start <= caret.start && caret.end <= end);
+  let { references, quoted } = referencesInFormula(text, 'point');
+  let enclosing = references.find(({ start, end }) => start <= caret.start && caret.end <= end);
   if (enclosing !== undefined)
     return {
       start: enclosing.start,
@@ -91,7 +132,7 @@ export function referenceSlotAt(text?: Dynamic, caret?: Dynamic) {
       written: enclosing,
     };
   return !quoted.some(
-    ({ start: start, end: end, isClosed: isClosed }: Dynamic) => start < caret.start && (caret.start < end || !isClosed),
+    ({ start, end, isClosed }) => start < caret.start && (caret.start < end || !isClosed),
   ) &&
     REFERENCE_MAY_FOLLOW_PATTERN.test(text.slice(0, caret.start)) &&
     REFERENCE_MAY_PRECEDE_PATTERN.test(text.slice(caret.end))
@@ -101,17 +142,17 @@ export function referenceSlotAt(text?: Dynamic, caret?: Dynamic) {
       }
     : null;
 }
-export function isPointingPossible(mode?: Dynamic, caretInEntry?: Dynamic) {
+export function isPointingPossible(mode: PageMode, caretInEntry: CaretInEntryPlaced | undefined): boolean {
   if (mode.kind !== 'editing' || caretInEntry?.isComposing === true) return false;
   if (mode.isBegunToListFunctions === true) return false;
   let caret = caretOrEnd(mode.text, caretInEntry);
   return !isEntryUntouchedAt(mode, caret) && referenceSlotAt(mode.text, caret) !== null;
 }
-export function pointedArea(reads: WorkbookReads, { anchor: anchor, at: at2, whole: whole }: Dynamic) {
+export function pointedArea(reads: WorkbookReads, { anchor, at, whole }: CellsPointedAt): CellArea | null {
   let pointed = selectionAreaAndKind(
     {
       activeCell: anchor,
-      selectionCorner: at2,
+      selectionCorner: at,
     },
     reads,
   );
@@ -127,14 +168,21 @@ export function pointedArea(reads: WorkbookReads, { anchor: anchor, at: at2, who
       }
     : grown;
 }
-export function writtenAddress(area?: Dynamic, whole?: Dynamic, ownRowOrder?: Dynamic) {
+export function writtenAddress(area: CellArea, whole: PointedWhole | null, ownRowOrder: OwnRowOrder | null): string | null {
   let address = wholeAreaToA1AsStored(area, ownRowOrder);
   if (whole === null || address === null) return address;
-  let { first: first, last: last } = whole === 'rows' ? rowLabelEnds(area, ownRowOrder) : columnLabelEnds(area);
+  let { first, last } = whole === 'rows' ? rowLabelEnds(area, ownRowOrder) : columnLabelEnds(area);
   return `${first}:${last}`;
 }
-export function writeReferenceIntoEntry(state: PageState, reads: WorkbookReads, slot?: Dynamic, lead?: Dynamic, pointing?: Dynamic) {
-  let { anchor: anchor, whole: whole } = pointing;
+/** Writes the cells pointed at over the slot, after `lead` (a separator, when the reference is added after another). */
+export function writeReferenceIntoEntry(
+  state: PageState,
+  reads: WorkbookReads,
+  slot: CaretSpan,
+  lead: string,
+  pointing: CellsPointedAt,
+): PageState {
+  let { anchor, whole } = pointing;
   let area = pointedArea(reads, pointing);
   let sheetName = findSheetById(reads, anchor.sheetId)?.name;
   if (state.mode.kind !== 'editing' || area === null || sheetName === undefined) return state;
@@ -166,32 +214,36 @@ export function writeReferenceIntoEntry(state: PageState, reads: WorkbookReads, 
     pointedReference: {
       start: writtenStart,
       end: writtenStart + address.length,
-      text: text,
-      tookPlaceOf: tookPlaceOf,
+      text,
+      tookPlaceOf,
       ...pointing,
     },
   };
 }
-export function areaOfWrittenReference(reference: Dynamic, { sheetId: sheetId, activeCell: activeCell }: Dynamic, reads: WorkbookReads) {
+export function areaOfWrittenReference(
+  reference: WrittenReference | null,
+  { sheetId, activeCell }: Pick<PageState, 'sheetId' | 'activeCell'>,
+  reads: WorkbookReads,
+): CellArea | null {
   let found = reference === null ? null : resolveFormulaReference(reference, activeCell.sheetId, reads.listSheets());
   return found?.sheet.sheetId === sheetId && found.pieces.length === 1 ? found.area : null;
 }
-export function cellOfWrittenReference(reference: Dynamic, state: PageState, reads: WorkbookReads) {
+export function cellOfWrittenReference(reference: WrittenReference | null, state: PageState, reads: WorkbookReads): CellId | null {
   let area = areaOfWrittenReference(reference, state, reads);
   return area === null ? null : reads.cellIdAt(state.sheetId, area.topRowIndex, area.leftColumnIndex);
 }
-export function wholeOfReference(reference?: Dynamic) {
+export function wholeOfReference(reference: WrittenReference | null): PointedWhole | null {
   if (reference === null) return null;
   return reference.rows.count === null ? 'columns' : reference.columns.count === null ? 'rows' : null;
 }
-export function pointAtCell(state: PageState, pointer: Dynamic, reads: ReadsWithTextMeasurer) {
-  let { mode: mode, sheetId: sheetId, activeCell: activeCell } = state;
+export function pointAtCell(state: PageState, pointer: PointerPressed, reads: ReadsWithTextMeasurer): PageState | null {
+  let { mode, sheetId, activeCell } = state;
   if (mode.kind !== 'editing' || pointer.isByFinger) return null;
   if (pointer.caretInEntry?.isComposing === true) return null;
   let hit = hitTestGrid(pointer, state, layoutOfView(state, reads));
   if (hit === null || hit.kind === 'corner') return null;
   let whole = WHOLE_OF_HEADER_KIND[hit.kind];
-  let { rowIndex: rowIndex, columnIndex: columnIndex } = {
+  let { rowIndex, columnIndex } = {
     rowIndex: 0,
     columnIndex: 0,
     ...hit,
@@ -200,17 +252,17 @@ export function pointAtCell(state: PageState, pointer: Dynamic, reads: ReadsWith
   if (cellId === null) return null;
   if (whole === null && isSameCell(anchorCellOf(reads, cellId), activeCell)) return null;
   let caret = caretOrEnd(mode.text, pointer.caretInEntry);
-  let live = livePointedReference(state);
+  const live = livePointedReference(state);
   if (live === null && isEntryUntouchedAt(mode, caret)) return null;
-  let isInLive = live !== null && !isPointedReferenceEmpty(live) && live.start <= caret.start && caret.end <= live.end;
-  let slot = isInLive
+  const isInLive = live !== null && !isPointedReferenceEmpty(live) && live.start <= caret.start && caret.end <= live.end;
+  let slot: ReferenceSlot | null = isInLive
     ? {
         ...live,
         written: null,
       }
     : referenceSlotAt(mode.text, caret);
   if (slot === null) return null;
-  let draggingState = {
+  let draggingState: PageState = {
     ...state,
     dragging: {
       kind: 'pointing',
@@ -232,12 +284,12 @@ export function pointAtCell(state: PageState, pointer: Dynamic, reads: ReadsWith
       {
         anchor: cellId,
         at: cellId,
-        whole: whole,
+        whole,
       },
     );
-  let liveAnchor = isInLive ? live.anchor : cellOfWrittenReference(slot.written, state, reads);
+  const liveAnchor = isInLive ? live.anchor : cellOfWrittenReference(slot.written, state, reads);
   let liveWhole = isInLive ? live.whole : wholeOfReference(slot.written);
-  let extendsFromAnchor =
+  const extendsFromAnchor =
     pointer.isShiftHeld &&
     (whole === null || liveWhole === null || whole === liveWhole) &&
     liveAnchor?.sheetId === sheetId &&
@@ -245,20 +297,20 @@ export function pointAtCell(state: PageState, pointer: Dynamic, reads: ReadsWith
   return writeReferenceIntoEntry(draggingState, reads, slot, '', {
     anchor: extendsFromAnchor ? liveAnchor : cellId,
     at: cellId,
-    whole: whole,
+    whole,
   });
 }
-export function dragPointedReference(state: PageState, pointer: Dynamic, reads: ReadsWithTextMeasurer) {
+export function dragPointedReference(state: PageState, pointer: PointerDragged, reads: ReadsWithTextMeasurer): PageState {
   let live = livePointedReference(state);
   if (live === null) return state;
   let layout = layoutOfView(state, reads);
   let { rows: rowsFrozen, columns: columnsFrozen } = scrollPositionInLines(state, layout);
   let grownSoFar = rowsFrozen.under + columnsFrozen.under > 0 ? pointedArea(reads, live) : null;
-  let { anchor: anchor, whole: whole } = live;
+  let { anchor, whole } = live;
   let hit = dragPositionClearOfStuckHeaders(pointer, state, reads, layout, {
     of: whole ?? columnSpanAt,
     fromRow: reads.positionOfCell(anchor)?.rowIndex ?? 0,
-    grownSoFar: grownSoFar,
+    grownSoFar,
   });
   let growsAlong = {
     rows: whole !== 'columns',
@@ -272,14 +324,14 @@ export function dragPointedReference(state: PageState, pointer: Dynamic, reads: 
     return scrolled.scrollTop !== state.scrollTop || scrolled.scrollLeft !== state.scrollLeft ? scrolled : state;
   }
   let pointedState = writeReferenceIntoEntry(state, reads, live, '', {
-    anchor: anchor,
+    anchor,
     at: cellId,
-    whole: whole,
+    whole,
   });
   return scrollToShowPosition(pointedState, reads, hit, growsAlong, 'pointer');
 }
-export function shouldArrowsMoveText(mode?: Dynamic, caret?: Dynamic, pointedReference?: Dynamic) {
-  let { text: text, arrowsActOn: arrowsActOn } = mode;
+export function shouldArrowsMoveText(mode: EditingMode, caret: EntryCaret, pointedReference: PointedReferenceWritten | null): boolean {
+  let { text, arrowsActOn } = mode;
   if (arrowsActOn === 'text' || caret.isPlacedByHand === true || caret.start !== caret.end) return false;
   let atCaret = pointedReferenceAtCaret(pointedReference, text, caret);
   if (atCaret !== null && atCaret.whole === null) return true;
@@ -288,12 +340,12 @@ export function shouldArrowsMoveText(mode?: Dynamic, caret?: Dynamic, pointedRef
 export function movePointedReference(
   state: PageState,
   reads: ReadsWithTextMeasurer,
-  caret: Dynamic,
-  { rowDelta: rowDelta, columnDelta: columnDelta, isToEdgeOfData: isToEdgeOfData, isStretching: isStretching }: Dynamic,
-) {
+  caret: EntryCaret,
+  { rowDelta, columnDelta, isToEdgeOfData, isStretching }: PointAtCellsAct,
+): PageState {
   let delta = {
-    rowDelta: rowDelta,
-    columnDelta: columnDelta,
+    rowDelta,
+    columnDelta,
   };
   if (state.mode.kind !== 'editing') return state;
   let atCaret = pointedReferenceAtCaret(state.pointedReference, state.mode.text, caret);
@@ -301,14 +353,14 @@ export function movePointedReference(
   let homeCell =
     state.sheetId === state.activeCell.sheetId
       ? state.activeCell
-      : state.placesLeft.find(({ sheetId: placeLeft }: Dynamic) => placeLeft === state.sheetId)?.activeCell;
+      : state.placesLeft.find(({ sheetId: placeLeft }) => placeLeft === state.sheetId)?.activeCell;
   if (slot === null || homeCell === undefined) return state;
-  let livePointed = [atCaret?.anchor, atCaret?.at].some(
-    (input?: Dynamic) => input?.sheetId !== state.sheetId || reads.positionOfCell(input) === null,
+  const livePointed = [atCaret?.anchor, atCaret?.at].some(
+    (cell) => cell?.sheetId !== state.sheetId || reads.positionOfCell(cell) === null,
   )
     ? null
     : atCaret;
-  let stretchesIt = livePointed !== null && !isPointedReferenceEmpty(livePointed) && isStretching;
+  const stretchesIt = livePointed !== null && !isPointedReferenceEmpty(livePointed) && isStretching;
   let startSelection = stretchesIt
     ? {
         activeCell: livePointed.anchor,
@@ -317,7 +369,7 @@ export function movePointedReference(
     : selectionAtCell(livePointed?.at ?? homeCell);
   let mergeCameTo = (livePointed === null && homeCell === state.activeCell ? state : livePointed)?.cameToMergedCellsAt ?? null;
   let isStillInMerge = mergeCameTo !== null && isSameCell(anchorCellOf(reads, mergeCameTo), startSelection.activeCell);
-  let stateAtStart = {
+  let stateAtStart: PageState = {
     ...state,
     ...startSelection,
     cameToMergedCellsAt: isStillInMerge && !stretchesIt ? mergeCameTo : null,
@@ -335,21 +387,21 @@ export function movePointedReference(
     : stretchesIt
       ? extendSelectionByKey(stateAtStart, reads, delta)
       : moveActiveCellTo(stateAtStart, reads, cellAfterKeyMove(stateAtStart, reads, delta));
-  let { activeCell: anchor, selectionCorner: at2, scrollLeft: scrollLeft, scrollTop: scrollTop } = moved;
+  let { activeCell: anchor, selectionCorner: at, scrollLeft, scrollTop } = moved;
   let isAnchorSame = livePointed === null || isSameCell(anchor, livePointed.anchor);
-  if (isSameCell(at2, startSelection.selectionCorner) && isAnchorSame) return state;
-  let { cameToMergedCellsAt: cameToMergedCellsAt } = moved;
-  let pointing = {
-    anchor: anchor,
-    at: at2,
+  if (isSameCell(at, startSelection.selectionCorner) && isAnchorSame) return state;
+  let { cameToMergedCellsAt } = moved;
+  let pointing: CellsPointedAt = {
+    anchor,
+    at,
     whole: null,
-    cameToMergedCellsAt: cameToMergedCellsAt,
+    cameToMergedCellsAt,
   };
   return writeReferenceIntoEntry(
     {
       ...state,
-      scrollLeft: scrollLeft,
-      scrollTop: scrollTop,
+      scrollLeft,
+      scrollTop,
     },
     reads,
     slot,
@@ -357,26 +409,26 @@ export function movePointedReference(
     pointing,
   );
 }
-export function pickUpReferenceAtCaret(state: PageState, reads: ReadsWithTextMeasurer, caret?: Dynamic) {
+export function pickUpReferenceAtCaret(state: PageState, reads: ReadsWithTextMeasurer, caret: EntryCaret): PageState | null {
   if (state.mode.kind !== 'editing') return null;
-  let { text: text } = state.mode;
+  let { text } = state.mode;
   let slot = referenceSlotAt(text, caret);
   if (slot === null) return null;
-  let { written: written } = slot;
+  let { written } = slot;
   if (written === null) {
-    let { start: start, end: end } = caret;
-    let { activeCell: anchor, activeCell: at, cameToMergedCellsAt: cameToMergedCellsAt } = state;
+    let { start, end } = caret;
+    let { activeCell: anchor, activeCell: at, cameToMergedCellsAt } = state;
     return start === end
       ? {
           ...state,
           pointedReference: {
-            start: start,
-            end: end,
-            text: text,
-            anchor: anchor,
-            at: at,
+            start,
+            end,
+            text,
+            anchor,
+            at,
             whole: null,
-            cameToMergedCellsAt: cameToMergedCellsAt,
+            cameToMergedCellsAt,
           },
         }
       : null;
@@ -386,7 +438,7 @@ export function pickUpReferenceAtCaret(state: PageState, reads: ReadsWithTextMea
   let corners = selectionOfArea(state, reads, area);
   let cornerPosition = corners === null ? null : reads.positionOfCell(corners.selectionCorner);
   if (corners === null || cornerPosition === null) return null;
-  let { activeCell: activeCell, selectionCorner: selectionCorner } = corners;
+  let { activeCell, selectionCorner } = corners;
   let { start: writtenStart, end: writtenEnd } = written;
   return scrollToShowPosition(
     {
@@ -394,7 +446,7 @@ export function pickUpReferenceAtCaret(state: PageState, reads: ReadsWithTextMea
       pointedReference: {
         start: writtenStart,
         end: writtenEnd,
-        text: text,
+        text,
         anchor: activeCell,
         at: selectionCorner,
         whole: null,
@@ -406,8 +458,8 @@ export function pickUpReferenceAtCaret(state: PageState, reads: ReadsWithTextMea
     'key',
   );
 }
-export function toggleArrowsTarget(state: PageState, reads: ReadsWithTextMeasurer, caret?: Dynamic) {
-  let { mode: mode, pointedReference: pointedReference } = state;
+export function toggleArrowsTarget(state: PageState, reads: ReadsWithTextMeasurer, caret: EntryCaret): PageState {
+  let { mode, pointedReference } = state;
   if (mode.kind !== 'editing') return state;
   if (shouldArrowsMoveText(mode, caret, pointedReference))
     return {
@@ -421,7 +473,7 @@ export function toggleArrowsTarget(state: PageState, reads: ReadsWithTextMeasure
         to: 'text',
       },
     };
-  let stateWithCells = {
+  let stateWithCells: PageState & { mode: EditingMode } = {
     ...state,
     mode: {
       ...mode,
@@ -453,16 +505,17 @@ export function toggleArrowsTarget(state: PageState, reads: ReadsWithTextMeasure
     },
   };
 }
-export function cycleReferenceDollars(text?: Dynamic, caret?: Dynamic) {
+/** The text with the `$` signs of the reference at the caret cycled, and the caret after it; `null` where no reference is there. */
+export function cycleReferenceDollars(text: string, caret: EntryCaret): { text: string; caretAt: number } | null {
   let written = referenceSlotAt(text, caret)?.written ?? null;
   if (written === null) return null;
-  let { dollarOfColumn: dollarOfColumn, dollarOfRow: dollarOfRow } =
-    written.ends.find(({ letters: letters, digits: digits }: Dynamic) => letters !== '' && digits !== '') ?? written.ends[0];
+  let { dollarOfColumn, dollarOfRow } =
+    written.ends.find(({ letters, digits }) => letters !== '' && digits !== '') ?? written.ends[0];
   let columnDollar = dollarOfColumn === '$' ? '' : '$';
   let rowDollar = dollarOfColumn === dollarOfRow ? '$' : '';
-  let rewritten: Dynamic = '';
-  let copiedTo: Dynamic = written.start;
-  for (let { start: endStart, end: endEnd, letters: letters, digits: digits } of written.ends as Dynamic) {
+  let rewritten = '';
+  let copiedTo = written.start;
+  for (let { start: endStart, end: endEnd, letters, digits } of written.ends) {
     let columnPart = letters === '' ? '' : `${columnDollar}${letters}`;
     let rowPart = digits === '' ? '' : `${rowDollar}${digits}`;
     rewritten += `${text.slice(copiedTo, endStart)}${columnPart}${rowPart}`;
@@ -474,9 +527,9 @@ export function cycleReferenceDollars(text?: Dynamic, caret?: Dynamic) {
   };
 }
 export function pointedCellsTip(
-  { pointedReference: pointedReference, dragging: dragging, formulaHelp: formulaHelp, mode: mode }: Dynamic,
+  { pointedReference, dragging, formulaHelp, mode }: Pick<PageState, 'pointedReference' | 'dragging' | 'formulaHelp' | 'mode'>,
   reads: WorkbookReads,
-) {
+): PointedCellsTip | null {
   if (pointedReference === null || pointedReference.start === pointedReference.end || dragging?.kind === 'pointing') return null;
   if (pointedReferenceAtCaret(pointedReference, pointedReference.text, caretOrEnd(pointedReference.text, formulaHelp.caret ?? undefined)) === null)
     return null;
@@ -488,8 +541,8 @@ export function pointedCellsTip(
     doArrowsMoveIt: mode.kind === 'editing' && mode.arrowsActOn !== 'text' && pointedReference.whole === null,
   };
 }
-export function dropPointedReference(state: PageState) {
-  let { pointedReference: pointedReference, dragging: dragging } = state;
+export function dropPointedReference(state: PageState): PageState {
+  let { pointedReference, dragging } = state;
   if (pointedReference === null && dragging?.kind !== 'pointing') return state;
   if (livePointedReference(state) !== null) return state;
   return {
@@ -498,32 +551,38 @@ export function dropPointedReference(state: PageState) {
     dragging: dragging?.kind === 'pointing' ? null : dragging,
   };
 }
-export const REFERENCE_HUES = ['violet', 'green', 'magenta', 'aqua', 'orange'];
-export const referenceHue = (index?: Dynamic) => REFERENCE_HUES[index % REFERENCE_HUES.length] ?? REFERENCE_HUES[0];
-export const NO_REFERENCES: Dynamic = [];
-export const hasLetteredEnd = ({ ends: ends }: Dynamic) => ends.some(({ letters: letters }: Dynamic) => letters !== '');
+export const REFERENCE_HUES: readonly string[] = ['violet', 'green', 'magenta', 'aqua', 'orange'];
+export const referenceHue = (index: number): string => REFERENCE_HUES[index % REFERENCE_HUES.length] ?? REFERENCE_HUES[0];
+export const NO_REFERENCES: ReferenceInEntry[] = [];
+export const hasLetteredEnd = ({ ends }: WrittenReference): boolean => ends.some(({ letters }) => letters !== '');
 export const REFERENCE_MAY_FOLLOW_PATTERN = /[=+\-*/(,;:^<>&]\s*$/;
 export const REFERENCE_MAY_PRECEDE_PATTERN = /^\s*(?:$|[=+\-*/),;:^<>&%])/;
-export const caretOrEnd = (text?: Dynamic, caret?: Dynamic) =>
+export const caretOrEnd = (text: string, caret: EntryCaretInText | undefined): EntryCaret =>
   caret?.text === text
     ? caret
     : {
         start: text.length,
         end: text.length,
       };
-export const isEntryUntouched = (mode?: Dynamic) =>
+/** Whether the entry holds the text it opened with, not typed over: the caret then is where the page put it. */
+export const isEntryUntouched = (mode: PageMode): boolean =>
   mode.kind === 'editing' && mode.isTypedOverCell !== true && mode.text === mode.textAtStart;
-export const isEntryUntouchedAt = (mode?: Dynamic, caret?: Dynamic) => isEntryUntouched(mode) && caret.isPlacedByHand !== true;
-export const isPointedReferenceEmpty = ({ start: start, end: end, anchor: anchor, at: at }: Dynamic) =>
+export const isEntryUntouchedAt = (mode: PageMode, caret: EntryCaret): boolean => isEntryUntouched(mode) && caret.isPlacedByHand !== true;
+export const isPointedReferenceEmpty = ({ start, end, anchor, at }: PointedReferenceWritten): boolean =>
   start === end && isSameCell(anchor, at);
-export const livePointedReference = ({ mode: mode, pointedReference: pointedReference }: Dynamic) =>
+/** The pointed reference, while the entry still holds the text it was written into. */
+export const livePointedReference = ({ mode, pointedReference }: Pick<PageState, 'mode' | 'pointedReference'>): PointedReferenceWritten | null =>
   mode.kind === 'editing' && mode.text === pointedReference?.text ? pointedReference : null;
-export const WHOLE_OF_HEADER_KIND = {
+export const WHOLE_OF_HEADER_KIND: Record<Exclude<GridHit['kind'], 'corner'>, PointedWhole | null> = {
   cell: null,
   rowHeader: 'rows',
   columnHeader: 'columns',
 };
-export const pointedReferenceAtCaret = (pointedReference?: Dynamic, text?: Dynamic, caret?: Dynamic) =>
+export const pointedReferenceAtCaret = (
+  pointedReference: PointedReferenceWritten | null,
+  text: string,
+  caret: CaretSpan,
+): PointedReferenceWritten | null =>
   pointedReference?.text === text && caret.start === pointedReference.end && caret.end === pointedReference.end ? pointedReference : null;
-export const isEditingSameText = ({ mode: mode }: Dynamic, { text: text, typingIn: typingIn }: Dynamic) =>
+export const isEditingSameText = ({ mode }: Pick<PageState, 'mode'>, { text, typingIn }: Pick<EditingMode, 'text' | 'typingIn'>): boolean =>
   mode.kind === 'editing' && mode.typingIn === typingIn && mode.text === text;

@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Open Artifact host on one EC2 instance: Docker Compose (the host + Caddy for HTTPS) with all data on an encrypted EBS
+  volume that outlives the instance, an Elastic IP, ports 80/443 open, and optional daily backups to an S3 bucket.
+  See deploy/aws/README.md.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Addresses }
+        Parameters: [AppHost, ContentDomain, AcmeEmail]
+      - Label: { default: Network }
+        Parameters: [VpcId, SubnetId, SshCidr]
+      - Label: { default: Instance and storage }
+        Parameters: [InstanceType, DataVolumeSize, ImageId]
+      - Label: { default: Software }
+        Parameters: [RepoUrl, RepoRef]
+      - Label: { default: Backups }
+        Parameters: [BackupBucket]
+
+Parameters:
+  AppHost:
+    Type: String
+    Description: The app host name (home page, sign-in), e.g. artifacts.example.com.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+  ContentDomain:
+    Type: String
+    Description: >-
+      The content domain; each artifact is served from <label>.<ContentDomain>. Use a different registrable domain
+      from AppHost, e.g. oa-content.example.net.
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+  AcmeEmail:
+    Type: String
+    Description: Contact address for the Let's Encrypt certificates.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC of the subnet below (the default VPC is fine).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A public subnet (one with a route to an internet gateway) in that VPC.
+  SshCidr:
+    Type: String
+    Default: ''
+    Description: >-
+      Leave empty to keep SSH closed and connect with Systems Manager Session Manager instead. Otherwise a CIDR allowed
+      to reach port 22, e.g. 203.0.113.7/32 (also add a key pair to the launch template yourself).
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large, t3a.small, t3a.medium, t3a.large, m6i.large, m7i.large]
+    Description: The image is built on the instance; 4 GiB of memory (t3.medium) builds it comfortably.
+  DataVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 10
+    Description: GiB of the data volume (artifacts, catalog, Docker images, certificates, local backups).
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Ubuntu 24.04 LTS (amd64), resolved from Canonical's public parameter.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/JimLiu/open-artifact.git
+    Description: The Open Artifact repository the instance builds the host image from.
+  RepoRef:
+    Type: String
+    Default: main
+    Description: The branch or release tag to build (a tag such as v0.14.6 keeps upgrades deliberate).
+  BackupBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      Name of an existing S3 bucket for the daily backups (the instance may put and get objects under open-artifact/).
+      Leave empty to keep backups on the data volume only.
+
+Conditions:
+  HasBackupBucket: !Not [!Equals [!Ref BackupBucket, '']]
+  HasSsh: !Not [!Equals [!Ref SshCidr, '']]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open Artifact host - HTTP (ACME and redirects) and HTTPS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: '::/0' }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: '::/0' }
+        - { IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTP/3 }
+        - { IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIpv6: '::/0', Description: HTTP/3 }
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-host' }
+
+  SshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasSsh
+    Properties:
+      GroupId: !GetAtt SecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshCidr
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager: a shell on the instance without SSH.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies: !If
+        - HasBackupBucket
+        - - PolicyName: open-artifact-backups
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ['s3:PutObject', 's3:GetObject']
+                  Resource: !Sub 'arn:${AWS::Partition}:s3:::${BackupBucket}/open-artifact/*'
+                - Effect: Allow
+                  Action: s3:ListBucket
+                  Resource: !Sub 'arn:${AWS::Partition}:s3:::${BackupBucket}'
+                  Condition:
+                    StringLike:
+                      s3:prefix: ['open-artifact/*']
+        - !Ref AWS::NoValue
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs: { VolumeSize: 16, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              # Open Artifact host: mount the data volume, put Docker's state on it, fetch the repository, write
+              # deploy/docker/.env once (with a generated signing key), start Compose, schedule the daily backup.
+              # Everything kept lives under /srv on the data volume, so a replaced instance picks it all up again.
+              set -euxo pipefail
+              exec > >(tee -a /var/log/open-artifact-setup.log) 2>&1
+              export DEBIAN_FRONTEND=noninteractive
+
+              # 1. The data volume (attached after boot starts): the one disk that is not the root disk.
+              root_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+              dev=
+              for i in $(seq 1 120); do
+                dev=$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" {print $1}' | grep -v "/dev/$root_disk\$" | head -n 1 || true)
+                [ -n "$dev" ] && break
+                sleep 5
+              done
+              [ -n "$dev" ] || { echo "no data volume attached"; exit 1; }
+              blkid "$dev" >/dev/null || mkfs.ext4 -L oa-data "$dev"
+              mkdir -p /srv
+              grep -q 'LABEL=oa-data' /etc/fstab || echo 'LABEL=oa-data /srv ext4 defaults,nofail 0 2' >> /etc/fstab
+              mount -a
+              mountpoint -q /srv
+
+              # 2. Docker, with its images and volumes (the host's /data, Caddy's certificates) on the data volume.
+              mkdir -p /etc/docker /srv/docker
+              cat > /etc/docker/daemon.json <<'JSON'
+              {"data-root": "/srv/docker", "log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "5"}}
+              JSON
+              apt-get update
+              apt-get install -y docker.io docker-compose-v2 docker-buildx git openssl
+              systemctl enable --now docker
+              if [ -n "${BackupS3}" ]; then snap install aws-cli --classic; fi
+
+              # 3. The repository and its settings, made once.
+              if [ ! -d /srv/open-artifact/.git ]; then
+                git clone --depth 1 --branch "${RepoRef}" "${RepoUrl}" /srv/open-artifact
+              fi
+              cd /srv/open-artifact/deploy/docker
+              if [ ! -f .env ]; then
+                umask 077
+                key=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+                sed -e "s|^APP_HOST=.*|APP_HOST=${AppHost}|" \
+                    -e "s|^CONTENT_DOMAIN=.*|CONTENT_DOMAIN=${ContentDomain}|" \
+                    -e "s|^ACME_EMAIL=.*|ACME_EMAIL=${AcmeEmail}|" \
+                    -e "s|^OA_SIGNING_KEYS=.*|OA_SIGNING_KEYS=$key|" \
+                    .env.example > .env
+              fi
+              docker compose up -d --build
+
+              # 4. A daily backup to /srv/backups (and to S3 when a bucket was given).
+              cat > /etc/systemd/system/open-artifact-backup.service <<UNIT
+              [Unit]
+              Description=Back up the Open Artifact host
+              After=docker.service
+              [Service]
+              Type=oneshot
+              Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+              Environment=AWS_DEFAULT_REGION=${AWS::Region}
+              Environment=BACKUP_DIR=/srv/backups
+              Environment=BACKUP_S3=${BackupS3}
+              ExecStart=/bin/sh /srv/open-artifact/deploy/backup.sh
+              UNIT
+              cat > /etc/systemd/system/open-artifact-backup.timer <<UNIT
+              [Unit]
+              Description=Back up the Open Artifact host daily
+              [Timer]
+              OnCalendar=*-*-* 03:30:00
+              RandomizedDelaySec=30m
+              Persistent=true
+              [Install]
+              WantedBy=timers.target
+              UNIT
+              systemctl daemon-reload
+              systemctl enable --now open-artifact-backup.timer
+              echo "Open Artifact host set up; owner sign-in address: cd /srv/open-artifact/deploy/docker && docker compose logs host"
+            - BackupS3: !If [HasBackupBucket, !Sub 's3://${BackupBucket}/open-artifact', '']
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-host' }
+
+  DataVolume:
+    Type: AWS::EC2::Volume
+    # Deleting or replacing the stack keeps a final snapshot of the data.
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AvailabilityZone: !GetAtt Instance.AvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-data' }
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+      Tags:
+        - { Key: Name, Value: !Sub '${AWS::StackName}-host' }
+
+Outputs:
+  PublicIp:
+    Description: Point both DNS records at this address.
+    Value: !Ref ElasticIp
+  DnsRecords:
+    Description: The two A records to create at your DNS provider.
+    Value: !Sub '${AppHost} A ${ElasticIp}  and  *.${ContentDomain} A ${ElasticIp}'
+  AppUrl:
+    Value: !Sub 'https://${AppHost}'
+  Shell:
+    Description: A shell on the instance (Session Manager); then see the owner sign-in address with the command after it.
+    Value: !Sub 'aws ssm start-session --target ${Instance} --region ${AWS::Region}   then   sudo sh -c "cd /srv/open-artifact/deploy/docker && docker compose logs host"'
+  DataVolumeId:
+    Value: !Ref DataVolume

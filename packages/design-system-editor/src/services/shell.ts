@@ -12,15 +12,18 @@ import { session } from './session.ts';
 import { useAgent } from './agent.ts';
 import { collabChromeReport, handleCollabCommand, subscribeCollab } from './collab.ts';
 
-/** The Shell's save state of ours. */
-function savedOf(save: SaveState): NonNullable<ChromeReport['saved']> {
+/**
+ * The Shell's save state of ours. Edits waiting for their save are `saving`; edits held back by a conflict could not
+ * be saved (`unsaved`).
+ */
+function savedOf(save: SaveState, conflicted = false): NonNullable<ChromeReport['saved']> {
   switch (save) {
     case 'saved':
       return 'saved';
     case 'saving':
       return 'saving';
     case 'dirty':
-      return 'unsaved';
+      return conflicted ? 'unsaved' : 'saving';
     case 'offline':
       return 'reconnecting';
     case 'readonly':
@@ -38,7 +41,7 @@ export function startShellBridge(): void {
     return {
       agent: agentChrome(useAgent.getState().status),
       exports: false,
-      ...(files.status === 'ready' ? { saved: savedOf(files.save) } : {}),
+      ...(files.status === 'ready' ? { saved: savedOf(files.save, files.conflicts.length > 0) } : {}),
       ...collabChromeReport(),
     };
   });

@@ -213,39 +213,53 @@ impl Sheet<'_> {
         });
         let mut rects: Vec<Rect> = declared.iter().map(|(_, h, c, f)| boxes(*h, *c, *f)).collect();
         let mut tables = Vec::new();
-        for (i, (id, (hf, hl), (c0, mut c1), footer)) in declared.into_iter().enumerate() {
-            let r0 = footer.map_or(hl, |f| f.1);
-            let (top, bottom) = (hf.min(r0), hf.max(r0));
-            let mut c = c1.saturating_add(1);
-            while c != usize::MAX
-                && self.has_content(hl, c, c)
-                && !rects.iter().any(|r| r.top <= bottom && top <= r.bottom && r.left <= c && c <= r.right)
-            {
-                c1 = c;
-                c += 1;
-            }
-            let frame = Frame { header: (hf, hl), columns: (c0, c1) };
-            let body = match footer {
-                Some((first, last)) => {
-                    let end = first.saturating_sub(1);
-                    let mut body = self.footer_body(&frame, end, last).unwrap_or_else(|| self.plain_body(&frame, end));
-                    body.footer = Some((first, last));
-                    body
-                }
-                None => self.open_body(&frame, &rects),
-            };
-            let bottom = match body.footer {
-                Some((_, last)) => last,
-                None => body.runs.last().map_or(hl, |r| r.last),
-            };
-            rects[i] = Rect { top: bottom.min(hf), left: c0.min(c1), bottom: bottom.max(hf), right: c0.max(c1) };
-            tables.push(Found { header: (hf, hl), columns: (c0, c1), body: body.runs, footer: body.footer, basis: Basis::Declared(id) });
+        for (i, (id, header, columns, footer)) in declared.into_iter().enumerate() {
+            let table = self.read_declaration(header, columns, footer, &rects, Basis::Declared(id));
+            rects[i] = table.area();
+            tables.push(table);
         }
         tables
     }
 
+    pub(super) fn read_declaration(
+        &self, header: (usize, usize), (left, mut right): (usize, usize),
+        footer: Option<(usize, usize)>, neighbors: &[Rect], basis: Basis,
+    ) -> Found {
+        let (first_header, last_header) = header;
+        let bottom = footer.map_or(last_header, |(_, last)| last);
+        let mut column = right.saturating_add(1);
+        while self.has_content(last_header, column, column)
+            && !neighbors.iter().any(|r| r.top <= bottom && first_header <= r.bottom && r.left <= column && column <= r.right)
+        {
+            right = column;
+            column += 1;
+        }
+        let frame = Frame { header, columns: (left, right) };
+        let body = match footer {
+            Some((first, last)) => {
+                let end = first.saturating_sub(1);
+                let mut body = self.footer_body(&frame, end, last).unwrap_or_else(|| self.plain_body(&frame, end));
+                body.footer = Some((first, last));
+                body
+            }
+            None => self.open_body(&frame, neighbors),
+        };
+        Found { header, columns: frame.columns, body: body.runs, footer: body.footer, basis }
+    }
+
+    /// Whether the first row of a block below blank rows goes on from the last row above them: the first cell
+    /// each shows is in the same column, and both or neither is a text (a number, a date, a
+    /// boolean and an error alike).
+    pub(super) fn goes_on(&self, above: usize, below: usize, c0: usize, c1: usize) -> bool {
+        match (self.cells_in(above, c0, c1).first(), self.cells_in(below, c0, c1).first()) {
+            (Some(a), Some(b)) => a.column == b.column && a.is_text() == b.is_text(),
+            _ => true,
+        }
+    }
+
     /// The body of a declared table with no footer: down through the blocks under it the heading does not come
-    /// again in, then rows of unticked checkboxes only.
+    /// again in, each going on from the row above the blank ones before it, then rows of unticked checkboxes
+    /// only.
     fn open_body(&self, frame: &Frame, rects: &[Rect]) -> Body {
         let hl = frame.header.1;
         let (c0, c1) = frame.columns;
@@ -257,7 +271,7 @@ impl Sheet<'_> {
                 0 => false,
                 1 => matches!(cells[0].value, Value::Boolean) || !self.unticked_in(first, c0, c1).is_empty(),
                 _ => true,
-            };
+            } && (end <= hl || self.goes_on(end, first, c0, c1));
             if !ok {
                 break;
             }

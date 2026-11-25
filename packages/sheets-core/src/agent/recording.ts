@@ -161,7 +161,9 @@ export function recordEdits(log: RecordingLog, make: (context: EditContext) => v
       },
       queue: (edit) => {
         const opId = `edit-${++queuedEdits}`;
-        const queued = session.answer({ kind: 'queueEdit', opId, newIdCode: newIdCode(), edit, shownToThePerson: [] });
+        // No shownToThePerson: that is the page's, for a paste it shows the person first (toBeShownFirst). The agent's
+        // writes show nothing first, so a formula's own words, in any script and however many, are not asked about.
+        const queued = session.answer({ kind: 'queueEdit', opId, newIdCode: newIdCode(), edit });
         if (queued.kind === 'nothingToChange') return queued;
         let step = isObject(queued.syncState) ? queued.syncState.nextStep : null;
         if (queued.kind !== 'editQueued' || !isObject(step) || step.kind !== 'sendEdit' || !isObject(step.recordedEdit)) {

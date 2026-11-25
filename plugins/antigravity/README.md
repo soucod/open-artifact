@@ -1,8 +1,8 @@
 # Open Artifact for Antigravity
 
-For Google Antigravity (the `agy` CLI and the Antigravity app). Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs and design systems as
+For Google Antigravity (the `agy` CLI and the Antigravity app). Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs, animated films and design systems as
 folders of files that open in one local page where you view, edit and comment: `/open-artifact slides …`,
-`design …`, `whiteboard …`, `sheets …`, `data …` or `docs …`. Needs Node.js 22.18+.
+`design …`, `whiteboard …`, `sheets …`, `data …`, `docs …`, `motion …` or `page …`. Needs Node.js 22.18+.
 
 ## Install
 
@@ -28,6 +28,12 @@ Antigravity and start a new conversation.
   namespaced by Antigravity as `open-artifact_open-artifact`;
 - `skills/open-artifact/`: the skill, carrying the daemon;
 - `hooks.json`: `SessionStart`, `PreInvocation` and `Stop`.
+
+## Publish to a server
+
+The plugin has no setting for it. Put the site in `~/.agents/open-artifact/preset.json`
+(`{ "OPEN_ARTIFACT_REMOTE": "https://artifacts.example.com" }`), or link one yourself with
+`open-artifact remote add <name> <https://host>`. See [the plugins README](../README.md#use-a-server-instead-of-this-computer).
 
 ## Send to agent
 

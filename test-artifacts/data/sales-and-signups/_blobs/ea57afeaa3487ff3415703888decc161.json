@@ -1,0 +1,12 @@
+{
+  "rows": [
+    { "region": "North", "target": 5200, "manager": "Ana" },
+    { "region": "South", "target": 4100, "manager": "Bo" },
+    { "region": "East", "target": 3900, "manager": "Chen" },
+    { "region": "West", "target": 4600, "manager": "Dee" }
+  ],
+  "meta": {
+    "code": "rows = targets.map(t => ({ region: t.name, target: t.goal, manager: t.owner }))",
+    "inputs": "targets.xlsx, sheet FY27"
+  }
+}

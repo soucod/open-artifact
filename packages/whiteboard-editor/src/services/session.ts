@@ -48,11 +48,15 @@ export const session = slot.session;
 /** The session, or `null` before it started (for code that may run early). */
 export const maybeSession = slot.maybeSession;
 
-/** Connects to the host. Rejects when the document store is unavailable. */
-export async function startSession(): Promise<Session> {
-  const { caps, viewer, abilities, shell } = await connectHost(['db', 'comments', 'assets', 'agent', 'room', 'downloads', 'history']);
+/**
+ * Connects to the host. Rejects when the document store is unavailable. `shell`: the Shell connection the boot
+ * already opened (`null` outside a Shell), so the page keeps one connection; omitted, the session opens its own.
+ */
+export async function startSession(shell?: ShellConnection | null): Promise<Session> {
+  const connected = await connectHost(['db', 'comments', 'assets', 'agent', 'room', 'downloads', 'history'], shell);
+  const { caps, viewer, abilities } = connected;
   const { db, comments, assets, agent, room, downloads, history } = caps;
   if (!db) throw new Error('This page could not reach its board. Open it again from your agent.');
   const peerId = (await room?.self().catch(() => null)) ?? viewer.id;
-  return slot.set({ db, comments, assets, agent, room, downloads: abilities.canSaveToHost ? downloads : null, history, viewer, peerId, ...abilities, shell });
+  return slot.set({ db, comments, assets, agent, room, downloads: abilities.canSaveToHost ? downloads : null, history, viewer, peerId, ...abilities, shell: connected.shell });
 }

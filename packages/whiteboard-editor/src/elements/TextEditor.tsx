@@ -41,20 +41,24 @@ import { notify } from '../services/announce.ts';
 import { updateElements } from '../state/board.ts';
 import { useSelection, type TextEditTarget } from '../state/selection.ts';
 import { capText, continueList, indentListLines, keyAction, keyChord, textEditHost, toggleMark, type TextSelection } from './edit.ts';
-import { openBoardLink } from './links.ts';
+import { RICH_TEXT_CLIPBOARD_TYPE } from '../lib/rich-clipboard.ts';
+import { linkClickAction } from '../lib/link-card.ts';
+import { focusLinkCard, hideLinkCard, linkCardFromEditor, openLink } from '../services/link-card.ts';
 import {
   BULLETS_PRESS_EVENT,
   LINK_CHORD_EVENT,
   attachTextArrowAutoformat,
   autoformatListShortcut,
   caretListItem,
-  copyPlainSelection,
+  copyEditorSelection,
+  selectedLinkChip,
   indentListSelection,
   isEditorChromeTarget,
   isRunningFormatCommand,
   lockEditorLinks,
   needsWholeBulletToggle,
   pastePlainText,
+  pasteStoredText,
   placeCaretAtEnd,
   renderIntoEditor,
   runEditCommand,
@@ -542,6 +546,15 @@ function RichTextEditor({
     if (pastePlainText(root, text, profile, room)) notifyOnce(textCutNotice(limit));
   };
 
+  /** Inserts formatted text copied from a field, when it fits; `false` to paste it as plain text instead. */
+  const insertStored = (stored: string): boolean => {
+    const root = box.current;
+    if (!root) return false;
+    const selected = storedTextCost(doc().getSelection()?.toString() ?? '', profile);
+    const room = limit - [...session.latest.current].length + selected;
+    return storedTextCost(stored, profile) <= room && pasteStoredText(root, stored, profile);
+  };
+
   // Fill the surface, focus it and place the caret once, when the edit starts.
   useLayoutEffect(() => {
     const root = box.current;
@@ -660,6 +673,18 @@ function RichTextEditor({
     const root = box.current;
     if (!root) return;
     const chord = keyChord(event, APPLE);
+    // The link card first: Escape hides it, Tab moves into it; Alt+Enter opens the link at the caret.
+    if ((chord === 'Escape' && linkCardFromEditor()) || (chord === 'Tab' && focusLinkCard())) {
+      event.preventDefault();
+      if (chord === 'Escape') hideLinkCard();
+      return;
+    }
+    const caretHref = chord === 'Alt+Return' ? selectedLinkChip(root.ownerDocument)?.dataset.href : undefined;
+    if (caretHref !== undefined) {
+      event.preventDefault();
+      openLink(caretHref, target);
+      return;
+    }
     const keys = profile.keys;
     const backwards = chord === 'Shift+Tab';
     const action = keyAction(keys, chord) ?? (backwards ? keyAction(keys, 'Tab') : undefined) ?? (chord === 'Escape' ? 'end' : undefined);
@@ -709,6 +734,8 @@ function RichTextEditor({
     event.preventDefault();
     const text = event.clipboardData.getData('text/plain');
     if (handlers.current.onPasteText?.(text)) return;
+    const stored = event.clipboardData.getData(RICH_TEXT_CLIPBOARD_TYPE);
+    if (stored !== '' && insertStored(stored)) return;
     insertPlain(text);
   };
 
@@ -785,13 +812,13 @@ function RichTextEditor({
     releaseHold.current = release;
   };
 
-  // Mod-click on a link follows it.
+  // Mod-click on a link opens it (a plain click puts the caret by it, which shows its card).
   const click = (event: MouseEvent<HTMLDivElement>) => {
     const link = (event.target as Element).closest<HTMLElement>('a[data-href]');
-    if (!link || !(APPLE ? event.metaKey : event.ctrlKey)) return;
+    if (!link || linkClickAction(event, APPLE) !== 'now') return;
     event.preventDefault();
     const href = link.dataset.href;
-    if (href) openBoardLink(href);
+    if (href) openLink(href, target);
   };
 
   return (
@@ -824,11 +851,11 @@ function RichTextEditor({
       onPaste={paste}
       onCopy={(event) => {
         event.stopPropagation();
-        copyPlainSelection(event.nativeEvent, false);
+        copyEditorSelection(event.nativeEvent, event.currentTarget, profile, false);
       }}
       onCut={(event) => {
         event.stopPropagation();
-        copyPlainSelection(event.nativeEvent, true);
+        copyEditorSelection(event.nativeEvent, event.currentTarget, profile, true);
       }}
       onDragStart={() => {
         selfDrag.current = true;

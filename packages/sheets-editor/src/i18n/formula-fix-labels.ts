@@ -1,16 +1,18 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { WhyFixCameToNothing } from '../state/initial-state.ts';
 import { truncateShownValue } from '../messages/formula-writing.ts';
 import { translateMessage } from './messages.ts';
 import { sheetMessages } from './sheet-messages.ts';
 import { errorCountLabel } from './grid-action-labels.ts';
-export function shortenedFixValue(shown?: Dynamic) {
+/** Where the agent's fixes are shown to the keyboard: in the rows of the list, elsewhere on the page, or outside the frame. */
+export type WhereFixesShow = 'inRows' | 'elsewhere' | 'outsideFrame';
+export function shortenedFixValue(shown: string): string {
   let truncated = truncateShownValue(shown);
   if (truncated === shown || !shown.startsWith('"')) return truncated;
   let inner = truncated.slice(1, -1);
   if (shown === `"${inner}"`) return shown;
   return `"${(/"*$/.exec(inner)?.[0].length ?? 0) % 2 === 1 ? inner.slice(0, -1) : inner}…"`;
 }
-export function agentFixLabel(formula?: Dynamic, shown?: Dynamic, withKeyHint?: Dynamic) {
+export function agentFixLabel(formula: string, shown: string, withKeyHint: boolean): string {
   let fix =
     shown === ''
       ? translateMessage(
@@ -19,7 +21,7 @@ export function agentFixLabel(formula?: Dynamic, shown?: Dynamic, withKeyHint?: 
             id: 'FuxBmMZKKG',
           },
           {
-            formula: formula,
+            formula,
           },
         )
       : translateMessage(
@@ -28,7 +30,7 @@ export function agentFixLabel(formula?: Dynamic, shown?: Dynamic, withKeyHint?: 
             id: '9qk6Ixx+Ux',
           },
           {
-            formula: formula,
+            formula,
             value: shortenedFixValue(shown),
           },
         );
@@ -39,11 +41,11 @@ export function agentFixLabel(formula?: Dynamic, shown?: Dynamic, withKeyHint?: 
       id: 'ziEtWxgv8e',
     },
     {
-      fix: fix,
+      fix,
     },
   );
 }
-export function agentWritingFixesText(shownWhere?: Dynamic) {
+export function agentWritingFixesText(shownWhere: WhereFixesShow): string {
   switch (shownWhere) {
     case 'inRows':
       return translateMessage({
@@ -62,7 +64,7 @@ export function agentWritingFixesText(shownWhere?: Dynamic) {
       });
   }
 }
-export function agentWroteFixesText(count?: Dynamic, shownWhere?: Dynamic) {
+export function agentWroteFixesText(count: number, shownWhere: WhereFixesShow): string {
   switch (shownWhere) {
     case 'inRows':
       return translateMessage(
@@ -72,7 +74,7 @@ export function agentWroteFixesText(count?: Dynamic, shownWhere?: Dynamic) {
           id: 'mrRwunjyCl',
         },
         {
-          count: count,
+          count,
         },
       );
     case 'elsewhere':
@@ -83,7 +85,7 @@ export function agentWroteFixesText(count?: Dynamic, shownWhere?: Dynamic) {
           id: 'lbWfdDxRQf',
         },
         {
-          count: count,
+          count,
         },
       );
     case 'outsideFrame':
@@ -93,12 +95,12 @@ export function agentWroteFixesText(count?: Dynamic, shownWhere?: Dynamic) {
           id: '9ETa7oz3Tx',
         },
         {
-          count: count,
+          count,
         },
       );
   }
 }
-export function fixFailureText(why?: Dynamic) {
+export function fixFailureText(why: WhyFixCameToNothing): string {
   switch (why) {
     case 'noFormula':
       return translateMessage({
@@ -127,7 +129,7 @@ export function fixFailureText(why?: Dynamic) {
       });
   }
 }
-export function fixFailureWithButtonText(why?: Dynamic) {
+export function fixFailureWithButtonText(why: WhyFixCameToNothing): string {
   return why === 'callFailed'
     ? translateMessage(
         {
@@ -150,14 +152,14 @@ export function fixFailureWithButtonText(why?: Dynamic) {
         },
       );
 }
-export const errorsWithFixButtonText = (errors?: Dynamic, button?: Dynamic) =>
+export const errorsWithFixButtonText = (errorCount: number, isFixErrorsButton: boolean): string =>
   translateMessage(
     {
       defaultMessage: '{errors}. {button}',
       id: 'pHwxuKGCP9',
     },
     {
-      errors: errorCountLabel(errors),
-      button: button ? sheetMessages.fixErrors() : sheetMessages.askAgentToFix(),
+      errors: errorCountLabel(errorCount),
+      button: isFixErrorsButton ? sheetMessages.fixErrors() : sheetMessages.askAgentToFix(),
     },
   );

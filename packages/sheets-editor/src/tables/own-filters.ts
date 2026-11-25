@@ -1,90 +1,217 @@
-import type { Dynamic } from '../dynamic.ts';
+import type {
+  CellTableRead,
+  ColumnId,
+  ColumnOfATable,
+  EngineCellTable,
+  Filter,
+  FilteredRowsAnswer,
+  IdRun,
+  RowId,
+  SheetId,
+  SortDirection,
+  TableInIds,
+  ValueAskedFor,
+  CellCondition,
+} from '@open-artifact/sheets-core';
 import { areaOfFilteredTable, indexRangesOverlap } from './finding.ts';
+import type { FilteredTableArea } from './finding.ts';
 import { mergedAreaOrCellOf, selectionPositionsOf } from '../selection/model.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { TableIndexRun } from '../selection/table-select.ts';
 import { areasOverlap } from '../model/workbook.ts';
 import { isInSpan } from '../grid/geometry.ts';
 import { booleanText } from '../model/cell-text.ts';
 import { showNumberInColumnFormat, describeColumnCondition } from '../format/conditional/descriptions.ts';
+import type { RulePlace } from '../format/conditional/descriptions.ts';
 import { isWholeDayRange } from './own-filter-conditions.ts';
 import { cellValueOf } from '../model/cell-values.ts';
-import { ownFilterRecordsArea } from './own-filter-actions.ts';
+import { ownFilterRecordsArea, dropUnusedOwnFilter } from './own-filter-actions.ts';
+import { namedViewAskedKey } from './named-view-model.ts';
+import type { NamedViewInHand } from './named-view-model.ts';
 import { findSheetById } from '../grid/layout.ts';
 import { sortHoldsOfColumn } from './sort.ts';
-import { rowIdsOutOfView, keepFilterClausesWhereColumns } from './filter-model.ts';
+import { rowIdsOutOfView, keepFilterClausesWhereColumns, mapFilterColumns } from './filter-model.ts';
+import type { FilterTerm } from './filter-model.ts';
 import { withoutFrozenRowKeys, keepSelectionOnShownRows, setRowsHiddenByOwnFilters } from './filtered-rows.ts';
 import { columnLetters } from '../model/a1-references.ts';
 import { columnLabelOf } from '../format/conditional/editor-view.ts';
 import { spanCutsOwnRowOrder } from '../model/line-ids.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { LineIndex, LineSpan } from '../model/line-ids.ts';
+import type { CellId, CellTablesRead, GroupOnGrid, WorkbookReads } from '../model/workbook.ts';
+import type { Notice, PageState, SortHoldsOfColumn } from '../state/initial-state.ts';
+import type { PageEffect, PageTransition } from '../state/transitions.ts';
+import type { PageEvent, SortKeyOfColumn } from '../state/event-reducer.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function filterTableOfCellTable(found?: Dynamic) {
+import type { RuleColumn, RuleOperand, RuleTest } from '../messages/conditional-format.ts';
+/** A table as a filter reads it: its header is always there. */
+export interface FilterTableInIds extends TableInIds {
+  header: NonNullable<TableInIds['header']>;
+}
+/** A table to filter, with the cell table it was read from: as declared, and where it is now. */
+export interface FilterTable {
+  cellTableId: string | null;
+  cellTable: EngineCellTable;
+  liveCellTable: EngineCellTable | null;
+  table: FilterTableInIds;
+  columns: ColumnOfATable[];
+}
+/** All a filter needs of a table to place it: the table and its columns. */
+export type TableToFilter = Pick<FilterTable, 'table' | 'columns'>;
+/** A column a sort goes by, as the page tells it. */
+export interface SaidOfSortColumn {
+  column: RuleColumn;
+  direction: SortDirection;
+  holds: SortHoldsOfColumn | null;
+}
+/** The page's own sort of a table: the columns it goes by and the rows in their sorted order. */
+export interface OwnFilterSort {
+  by: SortKeyOfColumn[];
+  said: SaidOfSortColumn[];
+  /** `null` until the rows in sorted order are read. */
+  rows: IdRun[] | null;
+  isRefused: boolean;
+}
+/** Why the rows a filter lets through could not be had now. */
+export type WhyRowsNotNow = 'tookTooLong' | 'dayIsNotKnown' | 'fault';
+/** A filter whose rows could not be had yet, why, and how often they were asked for. */
+export interface OwnFilterUnanswered {
+  why: WhyRowsNotNow;
+  tries: number;
+}
+/** A test of a filter line, as the page tells it. */
+export type SaidOfFilterItem =
+  | { kind: 'test'; test: RuleTest }
+  | { kind: 'isOneOf' | 'isNoneOf'; column: RuleColumn; values: (string | null)[] };
+/** A filter of the page's own, on a table: what it asks, the rows it lets through, and the sort of the table. */
+export interface OwnFilter extends FilterTable {
+  key: string;
+  filter: Filter | null;
+  /** `null` while no filter is asked, or its rows are not had yet. */
+  rows: FilteredRowsAnswer | null;
+  sort: OwnFilterSort | null;
+  namedViewInHand: NamedViewInHand | null;
+  unanswered: OwnFilterUnanswered | null;
+  /** The lines of the filter, as the page tells them. */
+  lines: SaidOfFilterItem[][];
+  /** The look stamp of the workbook the filter was last looked at with. */
+  lookedAtAsOf: number;
+}
+/** An own filter as it stood before a try, with the other filters of its sheet and the rows they hid. */
+export interface HeldOwnFilterSnapshot {
+  held: OwnFilter;
+  others: OwnFilter[];
+  rowsOutOfView: Set<RowId>;
+}
+/** How many records a filter lets through, of all the table holds. */
+export interface RecordCountsOfFilter {
+  inView: number;
+  all: number;
+}
+/** What came of asking the engine for the rows a filter lets through. */
+export type FilteredRowsAsked =
+  | { kind: 'rows'; filter: Filter; rows: FilteredRowsAnswer }
+  | { kind: 'tableIsGone' }
+  | { kind: 'notNow'; why: WhyRowsNotNow }
+  | { kind: 'nothingLeftToAsk' };
+/** A filter looked at again: its table as found now, what it asks, and the rows it lets through. */
+export interface OwnFilterAnswered {
+  kind: 'answered';
+  found: FilterTable;
+  filter: Filter | null;
+  rows: FilteredRowsAnswer | null;
+}
+/** What came of looking at a filter again. */
+export type OwnFilterLook =
+  | OwnFilterAnswered
+  | { kind: 'tableIsGone' }
+  | { kind: 'notNow'; readonly why: WhyRowsNotNow | 'hasNoRecord' | null };
+/** The page's own sort last chosen for a table, and the sort it had before, to undo it. */
+export interface OwnSortChoice {
+  tableKey: string;
+  by: SortKeyOfColumn[];
+  before: SortKeyOfColumn[] | null;
+}
+/** Columns of a table moved inside it: a cell of the table, and each column that went to another. */
+export interface ColumnsWentTo {
+  ofTableAt: CellId;
+  wentTo: [ColumnId, ColumnId][];
+}
+/** How filters are looked at again: put in force, only looked at, or put in force when a row of an area is missed. */
+export type OwnFiltersLookAgain = 'apply' | 'look' | { applyIfARowIsMissedAmong: CellArea };
+type StateOfOwnFilters = Pick<PageState, 'ownFilters'>;
+type StateOfFiltersDrawn = Pick<PageState, 'ownFilters' | 'ownFilterList' | 'rowsAskedFor'>;
+type LookStampOfState = Pick<PageState, 'workbookChangeCount' | 'formulasWorkedOutCount'>;
+export function filterTableOfCellTable(found: CellTableRead | 'tookTooLong' | 'nowhere' | null): FilterTable | null {
   if (found === null || typeof found === 'string' || found.table === null) return null;
-  let {
-    cellTableId: cellTableId,
-    cellTable: cellTable,
-    liveCellTable: liveCellTable,
-    table: { table: table, columns: columns },
+  const {
+    cellTableId,
+    cellTable,
+    liveCellTable,
+    table: { table, columns },
   } = found;
-  let { header: header } = table;
+  const { header } = table;
   if (header === null) throw Error('sheets-core read a cell table with no header');
   return {
-    cellTableId: cellTableId,
-    cellTable: cellTable,
-    liveCellTable: liveCellTable,
+    cellTableId,
+    cellTable,
+    liveCellTable,
     table: {
       ...table,
-      header: header,
+      header,
     },
-    columns: columns,
+    columns,
   };
 }
-export function isOwnFilterKeyUnused(state?: Dynamic, key?: Dynamic) {
-  let ownFilter = ownFilterByKey(state, key);
+export function isOwnFilterKeyUnused(state: StateOfOwnFilters, key: string): boolean {
+  const ownFilter = ownFilterByKey(state, key);
   return ownFilter !== null && isOwnFilterUnused(ownFilter);
 }
-export function ownFilterNotDrawnYet(state: PageState) {
-  let key = ownFilterKeyNotDrawnYet(state);
-  return ownFiltersOfSheet(state, state.sheetId).find(({ key: key2 }: Dynamic) => key2 === key) ?? null;
+export function ownFilterNotDrawnYet(state: PageState): OwnFilter | null {
+  const key = ownFilterKeyNotDrawnYet(state);
+  return ownFiltersOfSheet(state, state.sheetId).find(({ key: filterKey }) => filterKey === key) ?? null;
 }
-export function drawnOwnFiltersOfSheet(state?: Dynamic, sheetId?: Dynamic) {
-  let ownFilters = ownFiltersOfSheet(state, sheetId);
-  let keyNotDrawn = ownFilterKeyNotDrawnYet(state);
-  if (keyNotDrawn === null || ownFilters.every(({ key: key }: Dynamic) => key !== keyNotDrawn)) return ownFilters;
-  let cached = drawnOwnFiltersCache.get(ownFilters);
+export function drawnOwnFiltersOfSheet(state: StateOfFiltersDrawn, sheetId: SheetId): OwnFilter[] {
+  const ownFilters = ownFiltersOfSheet(state, sheetId);
+  const keyNotDrawn = ownFilterKeyNotDrawnYet(state);
+  if (keyNotDrawn === null || ownFilters.every(({ key }) => key !== keyNotDrawn)) return ownFilters;
+  const cached = drawnOwnFiltersCache.get(ownFilters);
   if (cached?.butFor === keyNotDrawn) return cached.drawn;
-  let drawn = ownFilters.filter(({ key: key }: Dynamic) => key !== keyNotDrawn);
+  const drawn = ownFilters.filter(({ key }) => key !== keyNotDrawn);
   drawnOwnFiltersCache.set(ownFilters, {
     butFor: keyNotDrawn,
-    drawn: drawn,
+    drawn,
   });
   return drawn;
 }
-export function ownFiltersWithoutKey(ownFilters?: Dynamic, key?: Dynamic, evenIfItAsks?: Dynamic) {
+export function ownFiltersWithoutKey(
+  ownFilters: Map<SheetId, OwnFilter[]>,
+  key: string | null,
+  evenIfItAsks: boolean,
+): Map<SheetId, OwnFilter[]> {
   if (key === null) return ownFilters;
-  let cached = ownFiltersWithoutKeyCache.get(ownFilters);
+  const cached = ownFiltersWithoutKeyCache.get(ownFilters);
   if (cached?.key === key && cached.evenIfItAsks === evenIfItAsks) return cached.kept;
-  let kept = new (Map as Dynamic)(
-    Array.from<Dynamic, Dynamic>(
+  const kept = new Map(
+    Array.from(
       ownFilters,
-      ([sheetId, filters]: Dynamic) => [
+      ([sheetId, filters]): [SheetId, OwnFilter[]] => [
         sheetId,
-        filters.filter((ownFilter?: Dynamic) => ownFilter.key !== key || (!evenIfItAsks && !isOwnFilterUnused(ownFilter))),
+        filters.filter((ownFilter) => ownFilter.key !== key || (!evenIfItAsks && !isOwnFilterUnused(ownFilter))),
       ],
     ),
   );
   ownFiltersWithoutKeyCache.set(ownFilters, {
-    key: key,
-    evenIfItAsks: evenIfItAsks,
-    kept: kept,
+    key,
+    evenIfItAsks,
+    kept,
   });
   return kept;
 }
-export function ownFilterTableArea(reads: WorkbookReads, ownFilter?: Dynamic) {
-  let area = areaOfFilteredTable(reads, ownFilter);
-  let { footerRows: footerRows } = ownFilter.liveCellTable;
+export function ownFilterTableArea(reads: WorkbookReads, ownFilter: FilterTable): FilteredTableArea | null {
+  const area = areaOfFilteredTable(reads, ownFilter);
+  const { footerRows } = ownFilter.liveCellTable;
   if (area === null || footerRows === null) return area;
-  let lastFooterRowIndex = reads.rowIndexOf(ownFilter.table.sheetId, footerRows.lastRow);
+  const lastFooterRowIndex = reads.rowIndexOf(ownFilter.table.sheetId, footerRows.lastRow);
   return lastFooterRowIndex === null
     ? area
     : {
@@ -92,28 +219,28 @@ export function ownFilterTableArea(reads: WorkbookReads, ownFilter?: Dynamic) {
         rowCount: Math.max(area.rowCount, lastFooterRowIndex - area.topRowIndex + 1),
       };
 }
-export function ownFilterAtCell(state: Dynamic, reads: WorkbookReads, cell?: Dynamic) {
-  let cellArea = mergedAreaOrCellOf(reads, cell);
+export function ownFilterAtCell(state: StateOfOwnFilters, reads: WorkbookReads, cell: CellId): OwnFilter | null {
+  const cellArea = mergedAreaOrCellOf(reads, cell);
   if (cellArea === null) return null;
   return (
-    ownFiltersOfSheet(state, cell.sheetId).find((ownFilter?: Dynamic) => {
-      let area = ownFilterTableArea(reads, ownFilter);
+    ownFiltersOfSheet(state, cell.sheetId).find((ownFilter) => {
+      const area = ownFilterTableArea(reads, ownFilter);
       return area !== null && areasOverlap(area, cellArea);
     }) ?? null
   );
 }
-export function rowBelowOwnFilterButtonsAt(state: Dynamic, reads: WorkbookReads, cell?: Dynamic) {
-  let position = reads.positionOfCell(cell);
+export function rowBelowOwnFilterButtonsAt(state: StateOfOwnFilters, reads: WorkbookReads, cell: CellId): number {
+  const position = reads.positionOfCell(cell);
   if (position === null) return 0;
-  let rowsBelowButtons = ownFiltersOfSheet(state, cell.sheetId).flatMap((ownFilter?: Dynamic) => {
-    let area = areaOfFilteredTable(reads, ownFilter);
+  const rowsBelowButtons = ownFiltersOfSheet(state, cell.sheetId).flatMap((ownFilter) => {
+    const area = areaOfFilteredTable(reads, ownFilter);
     return area !== null && position.rowIndex >= area.topRowIndex && isInSpan(position.columnIndex, area.leftColumnIndex, area.columnCount)
       ? area.rowIndexOfButtons + 1
       : [];
   });
-  return (Math.max as Dynamic)(0, ...rowsBelowButtons);
+  return Math.max(0, ...rowsBelowButtons);
 }
-export function filterValueText(place?: Dynamic, column?: Dynamic, value?: Dynamic) {
+export function filterValueText(place: RulePlace, column: ColumnId, value: ValueAskedFor): string {
   switch (value.kind) {
     case 'text':
     case 'error':
@@ -124,26 +251,26 @@ export function filterValueText(place?: Dynamic, column?: Dynamic, value?: Dynam
       return showNumberInColumnFormat(place, value.value, column);
   }
 }
-export function asDayEqualityTest(test?: Dynamic, condition?: Dynamic) {
-  let { condition: testCondition } = test;
+export function asDayEqualityTest(test: RuleTest, condition: CellCondition): RuleTest {
+  const { condition: testCondition } = test;
   if (testCondition.kind !== 'numberIsBetween' && testCondition.kind !== 'numberIsNotBetween') return test;
   if (!test.isOfDates || !isWholeDayRange(condition)) return test;
-  let comparison = testCondition.kind === 'numberIsBetween' ? 'equalTo' : 'notEqualTo';
+  const comparison = testCondition.kind === 'numberIsBetween' ? 'equalTo' : 'notEqualTo';
   return {
     ...test,
     condition: {
       kind: 'numberIs',
-      comparison: comparison,
+      comparison,
       operand: testCondition.oneEnd,
     },
   };
 }
-export function startAtFirstNumberRow(place?: Dynamic, column?: Dynamic) {
-  let { reads: reads, sheetId: sheetId, topRowIndex: topRowIndex } = place;
-  let columnIndex = reads.columnIndexOf(sheetId, column);
+export function startAtFirstNumberRow(place: RulePlace, column: ColumnId): RulePlace {
+  const { reads, sheetId, topRowIndex } = place;
+  const columnIndex = reads.columnIndexOf(sheetId, column);
   if (topRowIndex === null || columnIndex === null) return place;
-  for (let offset: Dynamic = 0; offset < NUMBER_ROW_SEARCH_LIMIT; offset += 1) {
-    let cellId = reads.cellIdAt(sheetId, topRowIndex + offset, columnIndex);
+  for (let offset = 0; offset < NUMBER_ROW_SEARCH_LIMIT; offset += 1) {
+    const cellId = reads.cellIdAt(sheetId, topRowIndex + offset, columnIndex);
     if (cellId === null) return place;
     if (cellValueOf(reads.cellOnShowIn(cellId))?.kind === 'number')
       return {
@@ -153,13 +280,13 @@ export function startAtFirstNumberRow(place?: Dynamic, column?: Dynamic) {
   }
   return place;
 }
-export function describeFilterItem(place: Dynamic, ownFilter: Dynamic, { c: column, asked: asked }: Dynamic) {
-  let columnLabel = columnLabelOfFilterTable(place.reads, ownFilter, column);
+export function describeFilterItem(place: RulePlace, ownFilter: TableToFilter, { c: column, asked }: FilterTerm): SaidOfFilterItem {
+  const columnLabel = columnLabelOfFilterTable(place.reads, ownFilter, column);
   if (asked.kind === 'meets') {
-    let test = describeColumnCondition(startAtFirstNumberRow(place, column), column, columnLabel, asked.condition);
-    let { condition: condition } = asked;
+    const test = describeColumnCondition(startAtFirstNumberRow(place, column), column, columnLabel, asked.condition);
+    const { condition } = asked;
     if (condition.kind === 'numberIs' && condition.operand.kind === 'sameRowInColumn' && test.condition.kind === 'numberIs') {
-      let operand = {
+      const operand: RuleOperand = {
         kind: 'column',
         column: columnLabelOfFilterTable(place.reads, ownFilter, condition.operand.c),
       };
@@ -169,7 +296,7 @@ export function describeFilterItem(place: Dynamic, ownFilter: Dynamic, { c: colu
           ...test,
           condition: {
             ...test.condition,
-            operand: operand,
+            operand,
           },
         },
       };
@@ -179,15 +306,15 @@ export function describeFilterItem(place: Dynamic, ownFilter: Dynamic, { c: colu
       test: asDayEqualityTest(test, condition),
     };
   }
-  let isOneOf = asked.kind === 'isOneOf';
-  let [firstValue, ...otherValues] = asked.values;
+  const isOneOf = asked.kind === 'isOneOf';
+  const [firstValue, ...otherValues] = asked.values;
   if (otherValues.length > 0)
     return {
       kind: asked.kind,
       column: columnLabel,
-      values: asked.values.map((value?: Dynamic) => (value === null ? null : filterValueText(place, column, value))),
+      values: asked.values.map((value) => (value === null ? null : filterValueText(place, column, value))),
     };
-  let valueText = firstValue === null ? null : filterValueText(place, column, firstValue);
+  const valueText = firstValue === null ? null : filterValueText(place, column, firstValue);
   return {
     kind: 'test',
     test: {
@@ -205,81 +332,81 @@ export function describeFilterItem(place: Dynamic, ownFilter: Dynamic, { c: colu
     },
   };
 }
-export function describeFilterLines(reads: WorkbookReads, ownFilter?: Dynamic, filter?: Dynamic) {
-  let { sheetId: sheetId, firstRowOfBody: firstRowOfBody } = ownFilter.table;
-  let place = {
-    reads: reads,
-    sheetId: sheetId,
+export function describeFilterLines(reads: WorkbookReads, ownFilter: TableToFilter, filter: Filter): SaidOfFilterItem[][] {
+  const { sheetId, firstRowOfBody } = ownFilter.table;
+  const place = {
+    reads,
+    sheetId,
     topRowIndex: reads.rowIndexOf(sheetId, firstRowOfBody),
   };
   return filter.allOf.map(
-    ({ anyOf: [firstItem, ...otherItems] }: Dynamic) => [
+    ({ anyOf: [firstItem, ...otherItems] }) => [
       describeFilterItem(place, ownFilter, firstItem),
-      ...otherItems.map((input?: Dynamic) => describeFilterItem(place, ownFilter, input)),
+      ...otherItems.map((item) => describeFilterItem(place, ownFilter, item)),
     ],
   );
 }
-export function canSortOwnFilterTable(reads: WorkbookReads, ownFilter?: Dynamic) {
-  let { sheetId: sheetId } = ownFilter.table;
-  let [recordsArea, sheet] = [ownFilterRecordsArea(reads, ownFilter), findSheetById(reads, sheetId)];
+export function canSortOwnFilterTable(reads: WorkbookReads, ownFilter: TableToFilter): boolean {
+  const { sheetId } = ownFilter.table;
+  const [recordsArea, sheet] = [ownFilterRecordsArea(reads, ownFilter), findSheetById(reads, sheetId)];
   if (recordsArea === null || sheet === undefined) return false;
-  let rows = {
+  const rows = {
     firstIndex: recordsArea.topRowIndex,
     count: recordsArea.rowCount,
   };
-  let rowsAcross = {
+  const rowsAcross = {
     ...recordsArea,
     leftColumnIndex: 0,
     columnCount: sheet.columnCount,
   };
-  let isTallAndInRows = (area?: Dynamic) => area !== undefined && area.rowCount > 1 && areasOverlap(area, rowsAcross);
+  const isTallAndInRows = (area: CellArea | undefined) => area !== undefined && area.rowCount > 1 && areasOverlap(area, rowsAcross);
   return (
     rows.count > 1 &&
     !isInSpan(sheet.frozenRowCount - 1, rows.firstIndex, rows.count) &&
     !cutsRowGroup(rows, sheet.rowGroups) &&
     !reads.mergedAreasIn(sheetId, rowsAcross).some(isTallAndInRows) &&
     !reads.cellsWithSpillIn(sheetId).some(
-      ({ r: rowId, c: columnId }: Dynamic) =>
+      ({ r: rowId, c: columnId }) =>
         isTallAndInRows(
           reads.spillOver({
-            sheetId: sheetId,
-            rowId: rowId,
-            columnId: columnId,
+            sheetId,
+            rowId,
+            columnId,
           })?.area,
         ),
     )
   );
 }
-export function saidOfSortColumn(reads: WorkbookReads, ownFilter: Dynamic, { c: columnId, direction: direction }: Dynamic) {
-  let recordsArea = ownFilterRecordsArea(reads, ownFilter);
-  let column = {
+export function saidOfSortColumn(reads: WorkbookReads, ownFilter: TableToFilter, { c: columnId, direction }: SortKeyOfColumn): SaidOfSortColumn {
+  const recordsArea = ownFilterRecordsArea(reads, ownFilter);
+  const column = {
     sheetId: ownFilter.table.sheetId,
-    columnId: columnId,
+    columnId,
   };
   return {
     column: columnLabelOfFilterTable(reads, ownFilter, columnId),
-    direction: direction,
+    direction,
     holds: recordsArea === null ? null : sortHoldsOfColumn(reads, column, recordsArea),
   };
 }
-export function rowIdsOutOfViewOf(ownFilters?: Dynamic) {
-  let rowIds = new (Set as Dynamic)();
-  for (let { rows: rows } of ownFilters as Dynamic) for (let rowId of rowIdsOutOfView(rows?.rowsOutOfView ?? []) as Dynamic) rowIds.add(rowId);
+export function rowIdsOutOfViewOf(ownFilters: readonly Pick<OwnFilter, 'rows'>[]): Set<RowId> {
+  const rowIds = new Set<RowId>();
+  for (const { rows } of ownFilters) for (const rowId of rowIdsOutOfView(rows?.rowsOutOfView ?? [])) rowIds.add(rowId);
   return rowIds;
 }
-export function setOwnFiltersOfSheet(state: PageState, sheetId?: Dynamic, ownFilters?: Dynamic) {
-  let bySheet = new (Map as Dynamic)(state.ownFilters);
+export function setOwnFiltersOfSheet(state: PageState, sheetId: SheetId, ownFilters: OwnFilter[]): PageState {
+  const bySheet = new Map(state.ownFilters);
   if (ownFilters.length === 0) bySheet.delete(sheetId);
   else bySheet.set(sheetId, ownFilters);
-  let next = {
+  const next = {
     ...state,
     ownFilters: bySheet,
   };
-  return ownFilters.some(({ sort: sort }: Dynamic) => sort !== null) ? next : setOwnRowOrderOfSheet(next, sheetId, null);
+  return ownFilters.some(({ sort }) => sort !== null) ? next : setOwnRowOrderOfSheet(next, sheetId, null);
 }
-export function setOwnRowOrderOfSheet(state: PageState, sheetId?: Dynamic, rows?: Dynamic) {
+export function setOwnRowOrderOfSheet(state: PageState, sheetId: SheetId, rows: IdRun[] | null): PageState {
   if ((state.ownRowOrders.get(sheetId) ?? null) === rows) return state;
-  let bySheet = new (Map as Dynamic)(state.ownRowOrders);
+  const bySheet = new Map(state.ownRowOrders);
   if (rows === null) bySheet.delete(sheetId);
   else bySheet.set(sheetId, rows);
   return {
@@ -287,48 +414,62 @@ export function setOwnRowOrderOfSheet(state: PageState, sheetId?: Dynamic, rows?
     ownRowOrders: bySheet,
   };
 }
-export function takeOwnRowOrderFromSorts(state: PageState, sheetId?: Dynamic) {
-  let rows = sortedRowsOfOwnFilters(ownFiltersOfSheet(state, sheetId));
+export function takeOwnRowOrderFromSorts(state: PageState, sheetId: SheetId): PageState {
+  const rows = sortedRowsOfOwnFilters(ownFiltersOfSheet(state, sheetId));
   return rows === null ? state : setOwnRowOrderOfSheet(state, sheetId, rows);
 }
-export function areSortedRowsInOrder({ ownRowOrders: ownRowOrders }: Dynamic, reads: WorkbookReads, sheetId: Dynamic, ownFilters: Dynamic) {
-  let [sortedRows, lineRows] = [sortedRowsOfOwnFilters(ownFilters), reads.linesOf(sheetId)?.rows];
+export function areSortedRowsInOrder(
+  { ownRowOrders }: Pick<PageState, 'ownRowOrders'>,
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  ownFilters: readonly Pick<OwnFilter, 'sort'>[],
+): boolean {
+  const [sortedRows, lineRows] = [sortedRowsOfOwnFilters(ownFilters), reads.linesOf(sheetId)?.rows];
   if (sortedRows === null || lineRows === undefined || ownRowOrders.get(sheetId) === sortedRows) return true;
-  let stretches = sortedRows.flatMap((rowId?: Dynamic) => lineRows.stretchesOf(rowId));
-  return stretches.every((stretch?: Dynamic, index?: Dynamic) => {
-    let previous = stretches[index - 1];
+  const stretches = sortedRows.flatMap((run) => lineRows.stretchesOf(run));
+  return stretches.every((stretch, index) => {
+    const previous: LineSpan | undefined = stretches[index - 1];
     return previous === undefined || previous.firstIndex + previous.count === stretch.firstIndex;
   });
 }
-export function areOwnFiltersInForce(state: Dynamic, reads: WorkbookReads, sheetId?: Dynamic, ownFilters?: Dynamic) {
-  let rowOrder = reads.linesOf(sheetId)?.rows;
-  let frozenRowCount = findSheetById(reads, sheetId)?.frozenRowCount;
-  let outOfView = rowsOutOfViewByOwnFiltersOn(state, sheetId);
-  let cached = ownFiltersInForceCache.get(ownFilters);
+export function areOwnFiltersInForce(
+  state: Pick<PageState, 'rowsOutOfViewByOwnFilters'>,
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  ownFilters: OwnFilter[],
+): boolean {
+  const rowOrder = reads.linesOf(sheetId)?.rows;
+  const frozenRowCount = findSheetById(reads, sheetId)?.frozenRowCount;
+  const outOfView = rowsOutOfViewByOwnFiltersOn(state, sheetId);
+  const cached = ownFiltersInForceCache.get(ownFilters);
   if (cached !== undefined && cached.order === rowOrder && cached.frozenRowCount === frozenRowCount && cached.outOfView === outOfView)
     return cached.areSo;
-  let areSo = isSameIdSet(withoutFrozenRowKeys(reads, sheetId, rowIdsOutOfViewOf(ownFilters)), outOfView);
+  const areSo = isSameIdSet(withoutFrozenRowKeys(reads, sheetId, rowIdsOutOfViewOf(ownFilters)), outOfView);
   ownFiltersInForceCache.set(ownFilters, {
     order: rowOrder,
-    frozenRowCount: frozenRowCount,
-    outOfView: outOfView,
-    areSo: areSo,
+    frozenRowCount,
+    outOfView,
+    areSo,
   });
   return areSo;
 }
-export function recordCountsOfOwnFilter(state: Dynamic, reads: WorkbookReads, { rows: rows, table: { sheetId: sheetId } }: Dynamic) {
+export function recordCountsOfOwnFilter(
+  state: Pick<PageState, 'ownFilters' | 'rowsOutOfViewByOwnFilters'>,
+  reads: WorkbookReads,
+  { rows, table: { sheetId } }: Pick<OwnFilter, 'rows' | 'table'>,
+): RecordCountsOfFilter | null {
   if (rows === null || !areOwnFiltersInForce(state, reads, sheetId, ownFiltersOfSheet(state, sheetId))) return null;
   return {
     inView: rows.recordsInView,
     all: rows.records,
   };
 }
-export function recordCountsOfPendingOwnFilter(state: PageState, reads: WorkbookReads) {
-  let ownFilter = ownFilterNotDrawnYet(state);
+export function recordCountsOfPendingOwnFilter(state: PageState, reads: WorkbookReads): RecordCountsOfFilter | null {
+  const ownFilter = ownFilterNotDrawnYet(state);
   return ownFilter === null ? null : recordCountsOfOwnFilter(state, reads, ownFilter);
 }
-export function putOwnFiltersInForce(state: PageState, reads: ReadsWithTextMeasurer, sheetId?: Dynamic, ownFilters?: Dynamic) {
-  let withFilters = setOwnFiltersOfSheet(state, sheetId, ownFilters);
+export function putOwnFiltersInForce(state: PageState, reads: ReadsWithTextMeasurer, sheetId: SheetId, ownFilters: OwnFilter[]): PageState {
+  const withFilters = setOwnFiltersOfSheet(state, sheetId, ownFilters);
   return areOwnFiltersInForce(state, reads, sheetId, ownFilters)
     ? keepSelectionOnShownRows(withFilters, reads)
     : setRowsHiddenByOwnFilters(withFilters, reads, sheetId, rowIdsOutOfViewOf(ownFilters));
@@ -336,34 +477,34 @@ export function putOwnFiltersInForce(state: PageState, reads: ReadsWithTextMeasu
 export function keepOwnFiltersWhileUnanswered(
   state: PageState,
   reads: ReadsWithTextMeasurer,
-  sheetId?: Dynamic,
-  ownFilters?: Dynamic,
-  keptWhileUnanswered?: Dynamic,
-) {
-  let withFilters = setOwnFiltersOfSheet(state, sheetId, ownFilters);
+  sheetId: SheetId,
+  ownFilters: OwnFilter[],
+  keptWhileUnanswered: OwnFilter[],
+): PageState {
+  const withFilters = setOwnFiltersOfSheet(state, sheetId, ownFilters);
   if (keptWhileUnanswered.length === 0) return withFilters;
-  if (ownFilters.every(({ filter: filter }: Dynamic) => filter === null))
+  if (ownFilters.every(({ filter }) => filter === null))
     return setRowsHiddenByOwnFilters(withFilters, reads, sheetId, NO_ROWS_OUT_OF_VIEW);
-  let keptKeys = new (Set as Dynamic)(keptWhileUnanswered.map(({ key: key }: Dynamic) => key));
-  let [othersOutOfView, keptOutOfView] = [
-    rowIdsOutOfViewOf(ownFiltersOfSheet(state, sheetId).filter(({ key: key }: Dynamic) => !keptKeys.has(key))),
+  const keptKeys = new Set(keptWhileUnanswered.map(({ key }) => key));
+  const [othersOutOfView, keptOutOfView] = [
+    rowIdsOutOfViewOf(ownFiltersOfSheet(state, sheetId).filter(({ key }) => !keptKeys.has(key))),
     rowIdsOutOfViewOf(keptWhileUnanswered),
   ];
-  let rowIdsStillOut = [...rowsOutOfViewByOwnFiltersOn(state, sheetId)].filter(
-    (input?: Dynamic) => othersOutOfView.has(input) || !keptOutOfView.has(input),
+  const rowIdsStillOut = [...rowsOutOfViewByOwnFiltersOn(state, sheetId)].filter(
+    (rowId) => othersOutOfView.has(rowId) || !keptOutOfView.has(rowId),
   );
-  return setRowsHiddenByOwnFilters(withFilters, reads, sheetId, new (Set as Dynamic)(rowIdsStillOut));
+  return setRowsHiddenByOwnFilters(withFilters, reads, sheetId, new Set(rowIdsStillOut));
 }
-export function askFilteredRows(reads: WorkbookReads, table?: Dynamic, filter?: Dynamic, isRetry: Dynamic = false) {
-  let answer = reads.filteredRows(table, filter);
+export function askFilteredRows(reads: WorkbookReads, table: TableInIds, filter: Filter, isRetry: boolean = false): FilteredRowsAsked | null {
+  const answer = reads.filteredRows(table, filter);
   if (answer === null) return null;
   if (answer.kind === 'filteredRows')
     return {
       kind: 'rows',
-      filter: filter,
+      filter,
       rows: answer,
     };
-  let { refusal: refusal } = answer;
+  const { refusal } = answer;
   if (refusal === 'filteredTableIsGone' || refusal === 'headerOfFilteredTableIsGone')
     return {
       kind: 'tableIsGone',
@@ -378,31 +519,35 @@ export function askFilteredRows(reads: WorkbookReads, table?: Dynamic, filter?: 
       kind: 'notNow',
       why: refusal === 'readTookTooLong' ? 'tookTooLong' : 'fault',
     };
-  let knownFilter = filterOnKnownColumns(reads, table.sheetId, filter);
+  const knownFilter = filterOnKnownColumns(reads, table.sheetId, filter);
   return isRetry || knownFilter === null || knownFilter.allOf.length === filter.allOf.length
     ? {
         kind: 'nothingLeftToAsk',
       }
     : askFilteredRows(reads, table, knownFilter, true);
 }
-export function refreshFilterTable(reads: WorkbookReads, ownFilter?: Dynamic, cellTables?: Dynamic) {
+export function refreshFilterTable(
+  reads: WorkbookReads,
+  ownFilter: FilterTable,
+  cellTables: CellTablesRead,
+): FilterTable | 'tookTooLong' | 'nowhere' | 'hasNoRecord' | null {
   if (cellTables === null || cellTables === 'tookTooLong') return cellTables;
-  let sameCellTable =
-    cellTables.find(({ cellTableId: cellTableId }: Dynamic) => cellTableId === ownFilter.cellTableId) ??
-    cellTables.find(({ cellTable: cellTable2 }: Dynamic) => isSameByJson(cellTable2, ownFilter.cellTable));
-  let cellTable = sameCellTable ?? reads.cellTableDeclaredAs(ownFilter.table.sheetId, ownFilter.cellTable);
+  const sameCellTable =
+    cellTables.find(({ cellTableId }) => cellTableId === ownFilter.cellTableId) ??
+    cellTables.find(({ cellTable: otherCellTable }) => isSameByJson(otherCellTable, ownFilter.cellTable));
+  const cellTable = sameCellTable ?? reads.cellTableDeclaredAs(ownFilter.table.sheetId, ownFilter.cellTable);
   if (cellTable === null || typeof cellTable === 'string') return cellTable;
-  let filterTable = filterTableOfCellTable(cellTable);
+  const filterTable = filterTableOfCellTable(cellTable);
   if (filterTable === null) return 'hasNoRecord';
-  let { isSure: isSure } = sameCellTable === undefined ? ownFilter.table.header : filterTable.table.header;
-  let table = {
+  const { isSure } = sameCellTable === undefined ? ownFilter.table.header : filterTable.table.header;
+  const table = {
     ...filterTable.table,
     header: {
       ...filterTable.table.header,
-      isSure: isSure,
+      isSure,
     },
   };
-  let { liveCellTable: liveCellTable } = filterTable;
+  const { liveCellTable } = filterTable;
   return {
     ...filterTable,
     cellTable: isSameByJson(filterTable.cellTable, ownFilter.cellTable) ? ownFilter.cellTable : filterTable.cellTable,
@@ -411,42 +556,47 @@ export function refreshFilterTable(reads: WorkbookReads, ownFilter?: Dynamic, ce
     columns: isSameByJson(filterTable.columns, ownFilter.columns) ? ownFilter.columns : filterTable.columns,
   };
 }
-export function lookAtOwnSort(reads: WorkbookReads, ownFilter?: Dynamic, sort?: Dynamic, rowsIfUnanswered?: Dynamic) {
-  let [firstBy, ...thenBy] = sort.by.filter(
-    ({ c: columnId }: Dynamic) => ownFilter.columns.some((column?: Dynamic) => column.c === columnId),
+export function lookAtOwnSort(
+  reads: WorkbookReads,
+  ownFilter: TableToFilter,
+  sort: Pick<OwnFilterSort, 'by' | 'rows'>,
+  rowsIfUnanswered: IdRun[] | null,
+): OwnFilterSort | null {
+  const [firstBy, ...thenBy] = sort.by.filter(
+    ({ c: columnId }) => ownFilter.columns.some((column) => column.c === columnId),
   );
   if (firstBy === undefined || !canSortOwnFilterTable(reads, ownFilter)) return null;
-  let by = thenBy.length + 1 === sort.by.length ? sort.by : [firstBy, ...thenBy];
-  let { sheetId: sheetId, firstRowOfBody: firstRowOfBody, lastRowOfBody: lastRowOfBody } = ownFilter.table;
-  let answer = reads.rowsInSortedOrder({
-    sheetId: sheetId,
+  const by = thenBy.length + 1 === sort.by.length ? sort.by : [firstBy, ...thenBy];
+  const { sheetId, firstRowOfBody, lastRowOfBody } = ownFilter.table;
+  const answer = reads.rowsInSortedOrder({
+    sheetId,
     oneRow: firstRowOfBody,
     otherRow: lastRowOfBody,
     byColumn: firstBy.c,
     direction: firstBy.direction,
     thenBy: thenBy.map(
-      ({ c: columnId, direction: direction }: Dynamic) => ({
+      ({ c: columnId, direction }) => ({
         byColumn: columnId,
-        direction: direction,
+        direction,
       }),
     ),
   });
-  let rows = answer?.kind !== 'rowsInSortedOrder' ? rowsIfUnanswered : isSameByJson(answer.rows, sort.rows) ? sort.rows : answer.rows;
+  const rows = answer?.kind !== 'rowsInSortedOrder' ? rowsIfUnanswered : isSameByJson(answer.rows, sort.rows) ? sort.rows : answer.rows;
   return {
-    by: by,
+    by,
     said: saidOfSortBy(reads, ownFilter, by),
-    rows: rows,
+    rows,
     isRefused: answer?.kind === 'refused',
   };
 }
 export function lookAtOwnFilter(
   reads: WorkbookReads,
-  ownFilter?: Dynamic,
-  filter?: Dynamic,
-  cellTables: Dynamic = reads.cellTables(ownFilter.table.sheetId),
-) {
-  let found = cellTables === 'asHeld' ? ownFilter : refreshFilterTable(reads, ownFilter, cellTables);
-  let hasNoRecordYet = found === 'hasNoRecord' && areaOfFilteredTable(reads, ownFilter) !== null;
+  ownFilter: FilterTable,
+  filter: Filter | null,
+  cellTables: CellTablesRead | 'asHeld' = reads.cellTables(ownFilter.table.sheetId),
+): OwnFilterLook {
+  const found = cellTables === 'asHeld' ? ownFilter : refreshFilterTable(reads, ownFilter, cellTables);
+  const hasNoRecordYet = found === 'hasNoRecord' && areaOfFilteredTable(reads, ownFilter) !== null;
   if (found === null)
     return {
       kind: 'notNow',
@@ -464,11 +614,11 @@ export function lookAtOwnFilter(
   if (filter === null || haveFilterColumnsChanged(found, ownFilter))
     return {
       kind: 'answered',
-      found: found,
+      found,
       filter: null,
       rows: null,
     };
-  let asked = askFilteredRows(reads, found.table, filter);
+  const asked = askFilteredRows(reads, found.table, filter);
   if (asked === null)
     return {
       kind: 'notNow',
@@ -477,7 +627,7 @@ export function lookAtOwnFilter(
   if (asked.kind === 'nothingLeftToAsk')
     return {
       kind: 'answered',
-      found: found,
+      found,
       filter: null,
       rows: null,
     };
@@ -485,17 +635,17 @@ export function lookAtOwnFilter(
     ? {
         ...asked,
         kind: 'answered',
-        found: found,
+        found,
       }
     : asked;
 }
-export function applyOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, ownFilter?: Dynamic, filter?: Dynamic) {
-  let { sheetId: sheetId } = ownFilter.table;
-  let isAsHeld = ownFilter.lookedAtAsOf === lookStampOfWorkbook(state) && ownFilter.unanswered === null;
-  let looked = isAsHeld ? lookAtOwnFilter(reads, ownFilter, filter, 'asHeld') : lookAtOwnFilter(reads, ownFilter, filter);
+export function applyOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, ownFilter: OwnFilter, filter: Filter | null): PageState {
+  const { sheetId } = ownFilter.table;
+  const isAsHeld = ownFilter.lookedAtAsOf === lookStampOfWorkbook(state) && ownFilter.unanswered === null;
+  const looked = isAsHeld ? lookAtOwnFilter(reads, ownFilter, filter, 'asHeld') : lookAtOwnFilter(reads, ownFilter, filter);
   switch (looked.kind) {
     case 'answered': {
-      let sort =
+      const sort =
         isAsHeld || ownFilter.sort === null ? ownFilter.sort : lookAtOwnSort(reads, looked.found, ownFilter.sort, ownFilter.sort.rows);
       return putOwnFiltersInForce(
         state,
@@ -516,7 +666,7 @@ export function applyOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, o
         sheetId,
         replaceOwnFilter(state, ownFilter, {
           ...ownFilter,
-          filter: filter,
+          filter,
           rows: null,
           unanswered: null,
           lines: [],
@@ -524,61 +674,138 @@ export function applyOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, o
       );
   }
 }
-export function sortOwnFilter(state: PageState, reads: WorkbookReads, ownFilter?: Dynamic, by?: Dynamic) {
-  let { sheetId: sheetId } = ownFilter.table;
-  let sort =
-    by === null
-      ? null
-      : lookAtOwnSort(
-          reads,
-          ownFilter,
-          {
-            by: by,
-            rows: null,
-          },
-          null,
-        );
-  let ownFilters = ownFiltersOfSheet(state, sheetId).map(
-    (other?: Dynamic) => withOwnSort(other, other.key === ownFilter.key ? sort : null),
-  );
-  let next = takeOwnRowOrderFromSorts(setOwnFiltersOfSheet(state, sheetId, ownFilters), sheetId);
-  let columnIndex = sort === null ? null : reads.columnIndexOf(sheetId, sort.by[0].c);
+export function ownSortChoiceAfter(
+  state: Pick<PageState, 'ownSortChosenLast'>,
+  { key: tableKey, sort }: Pick<OwnFilter, 'key' | 'sort'>,
+  by: SortKeyOfColumn[],
+): OwnSortChoice | null {
+  let before = sort?.by ?? null;
+  return isSameByJson(before, by)
+    ? state.ownSortChosenLast
+    : {
+        tableKey,
+        by,
+        before,
+      };
+}
+export function withNamedViewInHand(state: PageState, tableKey: string, namedViewInHand: NamedViewInHand | null): PageState {
+  let ownFilter = ownFilterByKey(state, tableKey);
+  return ownFilter === null || isSameByJson(ownFilter.namedViewInHand, namedViewInHand)
+    ? state
+    : setOwnFiltersOfSheet(
+        state,
+        ownFilter.table.sheetId,
+        replaceOwnFilter(state, ownFilter, {
+          ...ownFilter,
+          namedViewInHand,
+        }),
+      );
+}
+export function sortOwnFilter(state: PageState, reads: WorkbookReads, ownFilter: OwnFilter, by: SortKeyOfColumn[] | null): PageState {
+  let { sheetId } = ownFilter.table,
+    sort =
+      by === null
+        ? null
+        : lookAtOwnSort(
+            reads,
+            ownFilter,
+            {
+              by,
+              rows: null,
+            },
+            null,
+          ),
+    ownFilters = ownFiltersOfSheet(state, sheetId).flatMap((other) =>
+      other.key === ownFilter.key
+        ? [withOwnSort(other, sort)]
+        : other.sort !== null && other.filter === null
+          ? []
+          : [withOwnSort(other, null)],
+    ),
+    listTableKey = state.ownFilterList?.tableKey,
+    withList =
+      listTableKey !== undefined && !ownFilters.some(({ key }) => key === listTableKey)
+        ? {
+            ...state,
+            ownFilterList: null,
+          }
+        : state,
+    { namedViewInHand } = ownFilter,
+    next: PageState = {
+      ...withNamedViewInHand(
+        takeOwnRowOrderFromSorts(setOwnFiltersOfSheet(withList, sheetId, ownFilters), sheetId),
+        ownFilter.key,
+        namedViewInHand === null
+          ? null
+          : {
+              ...namedViewInHand,
+              isSortLeftOut: false,
+            },
+      ),
+      ownSortChosenLast: sort === null ? null : ownSortChoiceAfter(state, ownFilter, sort.by),
+    },
+    columnIndex = sort === null ? null : reads.columnIndexOf(sheetId, sort.by[0].c);
   if (sort === null || columnIndex === null) return next;
-  let column = columnLetters(columnIndex);
+  const column = columnLetters(columnIndex);
   return {
     ...next,
     lastDone: {
       what: 'rowsSorted',
-      column: column,
+      column,
       direction: sort.by[0].direction,
     },
   };
 }
-export function clearOwnSortByKey(state: PageState, reads: WorkbookReads, key?: Dynamic) {
-  let ownFilter = ownFilterByKey(state, key);
+export function clearOwnSortByKey(state: PageState, reads: WorkbookReads, key: string): PageState {
+  const ownFilter = ownFilterByKey(state, key);
   return ownFilter === null ? state : sortOwnFilter(state, reads, ownFilter, null);
 }
-export function ownRowOrdersNotGivenUp({ ownRowOrders: ownRowOrders }: Dynamic, book: WorkbookReads) {
-  let kept = [...ownRowOrders].filter(([sheetId]: Dynamic) => findSheetById(book, sheetId)?.isOwnRowOrderGivenUp === false);
-  return kept.length === ownRowOrders.size ? ownRowOrders : new (Map as Dynamic)(kept);
+export function ownSortToUndo(state: Pick<PageState, 'ownSortChosenLast' | 'ownFilters'>): OwnSortChoice | null {
+  let chosen = state.ownSortChosenLast,
+    ownFilter = chosen === null ? null : ownFilterByKey(state, chosen.tableKey);
+  return isSameByJson(ownFilter?.sort?.by, chosen?.by) ? chosen : null;
 }
-export function seeOwnRowOrderChanges(before: Dynamic, { state: state, effects: effects }: Dynamic, event: Dynamic, book: WorkbookReads) {
+export function undoOwnSortChoice(state: PageState, reads: ReadsWithTextMeasurer): PageState | null {
+  if (state.ownSortChosenLast === null) return null;
+  let { tableKey, before } = state.ownSortChosenLast,
+    refreshed = refreshStaleOwnFilters(state, reads, state.sheetId),
+    ownFilter = ownFilterByKey(refreshed, tableKey),
+    restored = ownFilter === null ? refreshed : sortOwnFilter(refreshed, reads, ownFilter, before);
+  return {
+    ...dropUnusedOwnFilter(restored, reads, tableKey),
+    ownSortChosenLast: null,
+    lastDone: {
+      what: 'undone',
+      cells: null,
+    },
+  };
+}
+export function ownRowOrdersNotGivenUp({ ownRowOrders }: Pick<PageState, 'ownRowOrders'>, book: WorkbookReads): Map<SheetId, IdRun[]> {
+  const kept = [...ownRowOrders].filter(([sheetId]) => findSheetById(book, sheetId)?.isOwnRowOrderGivenUp === false);
+  return kept.length === ownRowOrders.size ? ownRowOrders : new Map(kept);
+}
+export function seeOwnRowOrderChanges(
+  before: PageState,
+  { state, effects }: PageTransition,
+  event: PageEvent,
+  book: WorkbookReads,
+): PageTransition {
   if (state.ownRowOrders === before.ownRowOrders)
     return {
-      state: state,
-      effects: effects,
+      state,
+      effects,
     };
-  let keepsSelection =
+  const keepsSelection =
     state.rowsAskedFor === null &&
     event.kind !== 'workbookChanged' &&
     event.kind !== 'ownFiltersLookedAtAgain' &&
     event.kind !== 'ownFiltersBroughtBack';
-  let seeEffects = [...new (Set as Dynamic)([...before.ownRowOrders.keys(), ...state.ownRowOrders.keys()])].flatMap(
-    (sheetId?: Dynamic) => {
-      let rows = state.ownRowOrders.get(sheetId) ?? null;
+  const seeEffects = [...new Set([...before.ownRowOrders.keys(), ...state.ownRowOrders.keys()])].flatMap(
+    (sheetId): PageEffect[] => {
+      const rows = state.ownRowOrders.get(sheetId) ?? null;
       if (rows === (before.ownRowOrders.get(sheetId) ?? null)) return [];
-      let positions = keepsSelection ? selectionPositionsOf(state, book) : null;
-      let staysAt =
+      const positions = keepsSelection ? selectionPositionsOf(state, book) : null;
+      const staysAt =
         sheetId !== state.sheetId
           ? null
           : (positions ?? {
@@ -587,74 +814,146 @@ export function seeOwnRowOrderChanges(before: Dynamic, { state: state, effects: 
       return [
         {
           kind: 'seeRowsInOwnOrder',
-          sheetId: sheetId,
-          rows: rows,
-          staysAt: staysAt,
+          sheetId,
+          rows,
+          staysAt,
         },
       ];
     },
   );
-  let isOwnRowOrderAwaited = state.isOwnRowOrderAwaited || seeEffects.length > 0;
+  const isOwnRowOrderAwaited = state.isOwnRowOrderAwaited || seeEffects.length > 0;
   return {
     state: {
       ...state,
-      isOwnRowOrderAwaited: isOwnRowOrderAwaited,
+      isOwnRowOrderAwaited,
     },
     effects: [...effects, ...seeEffects],
   };
 }
-export function restoreHeldOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, snapshot?: Dynamic) {
-  let current = ownFilterByKey(state, snapshot.held.key);
+export function restoreHeldOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, snapshot: HeldOwnFilterSnapshot): PageState {
+  const current = ownFilterByKey(state, snapshot.held.key);
   if (current === null) return state;
-  let { sheetId: sheetId } = snapshot.held.table;
-  let heldWithSort = {
+  const { sheetId } = snapshot.held.table;
+  const heldWithSort = {
     ...snapshot.held,
     sort: current.sort,
   };
-  let replaced = replaceOwnFilter(state, current, heldWithSort);
+  const replaced = replaceOwnFilter(state, current, heldWithSort);
   return replaced.length === snapshot.others.length + 1 &&
     replaced.every(
-      (ownFilter?: Dynamic) =>
-        ownFilter === heldWithSort || snapshot.others.some((other?: Dynamic) => isSameOwnFilterLook(ownFilter, other)),
+      (ownFilter) =>
+        ownFilter === heldWithSort || snapshot.others.some((other) => isSameOwnFilterLook(ownFilter, other)),
     )
     ? setRowsHiddenByOwnFilters(setOwnFiltersOfSheet(state, sheetId, replaced), reads, sheetId, snapshot.rowsOutOfView)
     : putOwnFiltersInForce(state, reads, sheetId, replaced);
 }
-export function lookAgainAtOwnFilters(state: PageState, reads: ReadsWithTextMeasurer, how?: Dynamic, sheetId?: Dynamic) {
-  let held = ownFiltersOfSheet(state, sheetId);
-  if (held.length === 0) return state;
-  let cellTables = reads.cellTables(sheetId);
-  let looked = held.map(
-    (held2?: Dynamic) => ({
-      held: held2,
-      asked: lookAtOwnFilter(reads, held2, held2.filter, cellTables),
+export function namedViewInHandAfterMove(
+  reads: WorkbookReads,
+  {
+    namedViewInHand,
+    table: { sheetId },
+  }: Pick<OwnFilter, 'namedViewInHand' | 'table'>,
+  wentTo: ColumnsWentTo['wentTo'],
+): NamedViewInHand | null {
+  let namedView = reads
+    .namedViewsIn(sheetId)
+    .find(({ namedViewId }) => namedViewId === namedViewInHand?.namedViewId)?.namedView;
+  if (namedViewInHand === null || namedView === undefined) return namedViewInHand;
+  let columns = new Map(wentTo.map(([before, after]) => [before, after])),
+    columnAfter = (columnId: ColumnId): ColumnId => columns.get(columnId) ?? columnId,
+    moved = {
+      ...namedView,
+      filter: namedView.filter === null ? null : mapFilterColumns(namedView.filter, columnAfter),
+      sortBy: namedView.sortBy.map((sortKey) => ({
+        ...sortKey,
+        c: columnAfter(sortKey.c),
+      })),
+    };
+  return namedViewAskedKey(namedView) === namedViewInHand.asked
+    ? {
+        ...namedViewInHand,
+        asked: namedViewAskedKey(moved),
+      }
+    : namedViewInHand;
+}
+export function ownFilterAfterColumnsMoved(reads: WorkbookReads, ownFilter: OwnFilter, { ofTableAt, wentTo }: ColumnsWentTo): OwnFilter {
+  let [area, position] = [areaOfFilteredTable(reads, ownFilter), reads.positionOfCell(ofTableAt)];
+  if (
+    !(
+      area !== null &&
+      position !== null &&
+      isInSpan(position.rowIndex, area.topRowIndex, area.rowCount) &&
+      isInSpan(position.columnIndex, area.leftColumnIndex, area.columnCount)
+    )
+  )
+    return ownFilter;
+  let columns = new Map(wentTo),
+    columnAfter = (columnId: ColumnId): ColumnId => columns.get(columnId) ?? columnId,
+    sortKeyAfter = (sortKey: SortKeyOfColumn): SortKeyOfColumn => ({
+      ...sortKey,
+      c: columnAfter(sortKey.c),
     }),
-  );
-  let refreshed = looked.flatMap(({ held: held2, asked: asked }: Dynamic) => {
+    [firstKey, ...otherKeys] = ownFilter.sort?.by ?? [];
+  return {
+    ...ownFilter,
+    namedViewInHand: namedViewInHandAfterMove(reads, ownFilter, wentTo),
+    filter: ownFilter.filter === null ? null : mapFilterColumns(ownFilter.filter, columnAfter),
+    sort:
+      ownFilter.sort === null || firstKey === undefined
+        ? ownFilter.sort
+        : {
+            ...ownFilter.sort,
+            by: [sortKeyAfter(firstKey), ...otherKeys.map(sortKeyAfter)],
+          },
+  };
+}
+export function lookAgainAtOwnFilters(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  how: OwnFiltersLookAgain,
+  sheetId: SheetId,
+  columnsMoved?: ColumnsWentTo,
+): PageState {
+  const heldFilters = ownFiltersOfSheet(state, sheetId);
+  if (heldFilters.length === 0) return state;
+  const cellTables = reads.cellTables(sheetId);
+  const looked = heldFilters.map((ownFilter) => {
+    let moved = columnsMoved === undefined ? ownFilter : ownFilterAfterColumnsMoved(reads, ownFilter, columnsMoved);
+    return {
+      held: moved,
+      asked: lookAtOwnFilter(reads, moved, moved.filter, cellTables),
+    };
+  });
+  const refreshed = looked.flatMap(({ held, asked }): OwnFilter[] => {
     if (asked.kind === 'tableIsGone') return [];
     if (asked.kind === 'answered') {
-      let sortKept = haveFilterColumnsChanged(asked.found, held2) ? null : held2.sort;
-      let sort = sortKept === null ? null : lookAtOwnSort(reads, asked.found, sortKept, how === 'apply' ? null : sortKept.rows);
-      return [ownFilterFromAnswer(state, reads, held2.key, asked, sort)];
+      const sortKept = haveFilterColumnsChanged(asked.found, held) ? null : held.sort;
+      const sort = sortKept === null ? null : lookAtOwnSort(reads, asked.found, sortKept, how === 'apply' ? null : sortKept.rows);
+      return [
+        {
+          ...ownFilterFromAnswer(state, reads, held.key, asked, sort),
+          namedViewInHand: held.namedViewInHand,
+        },
+      ];
     }
-    if (held2.unanswered === null || asked.why === null || asked.why === 'hasNoRecord') return [held2];
+    if (held.unanswered === null || asked.why === null || asked.why === 'hasNoRecord') return [held];
     return [
       {
-        ...held2,
+        ...held,
         unanswered: {
           why: asked.why,
-          tries: held2.unanswered.tries + 1,
+          tries: held.unanswered.tries + 1,
         },
       },
     ];
   });
-  let isNewlyAnswered = refreshed.some(
-    ({ key: key, rows: rows }: Dynamic) =>
-      rows !== null && held.some((input?: Dynamic) => input.key === key && input.unanswered !== null),
+  const isNewlyAnswered = refreshed.some(
+    ({ key, rows }) =>
+      rows !== null && heldFilters.some((held) => held.key === key && held.unanswered !== null),
   );
-  let missesRow =
+  const missesRow =
     typeof how === 'object' && missesRowOutOfViewInArea(state, reads, sheetId, rowIdsOutOfViewOf(refreshed), how.applyIfARowIsMissedAmong);
-  let next =
+  const next =
     how === 'apply' || missesRow || isNewlyAnswered
       ? putOwnFiltersInForce(state, reads, sheetId, refreshed)
       : keepOwnFiltersWhileUnanswered(
@@ -662,15 +961,15 @@ export function lookAgainAtOwnFilters(state: PageState, reads: ReadsWithTextMeas
           reads,
           sheetId,
           refreshed,
-          held.filter(
-            ({ key: key, filter: filter }: Dynamic) =>
-              filter !== null && !refreshed.some((input?: Dynamic) => input.key === key && input.filter !== null),
+          heldFilters.filter(
+            ({ key, filter }) =>
+              filter !== null && !refreshed.some((refreshedFilter) => refreshedFilter.key === key && refreshedFilter.filter !== null),
           ),
         );
-  let hasSortUnanswered = held.some(({ sort: sort }: Dynamic) => sort?.rows === null);
-  let withRowOrder = how === 'apply' || hasSortUnanswered ? takeOwnRowOrderFromSorts(next, sheetId) : next;
-  let sorted = held.find(({ sort: sort }: Dynamic) => sort !== null);
-  let gone = held.find(({ key: key }: Dynamic) => !refreshed.some((input?: Dynamic) => input.key === key));
+  const hasSortUnanswered = heldFilters.some(({ sort }) => sort?.rows === null);
+  const withRowOrder = how === 'apply' || hasSortUnanswered ? takeOwnRowOrderFromSorts(next, sheetId) : next;
+  const sorted = heldFilters.find(({ sort }) => sort !== null);
+  const gone = heldFilters.find(({ key }) => !refreshed.some((refreshedFilter) => refreshedFilter.key === key));
   if (gone !== undefined)
     return withOwnFilterNotice(
       withRowOrder,
@@ -683,23 +982,23 @@ export function lookAgainAtOwnFilters(state: PageState, reads: ReadsWithTextMeas
             kind: 'filteredTableIsGone',
           },
     );
-  let sortDropped = refreshed.find(({ key: key, sort: sort }: Dynamic) => key === sorted?.key && sort === null);
+  const sortDropped = refreshed.find(({ key, sort }) => key === sorted?.key && sort === null);
   if (sortDropped !== undefined) {
-    let hasSortColumn = sorted?.sort?.by.some(
-      ({ c: columnId }: Dynamic) => sortDropped.columns.some((column?: Dynamic) => column.c === columnId),
+    const hasSortColumn = sorted?.sort?.by.some(
+      ({ c: columnId }) => sortDropped.columns.some((column) => column.c === columnId),
     );
     return withOwnFilterNotice(withRowOrder, {
       kind: 'ownSortIsOver',
       why: hasSortColumn === true ? 'tableChanged' : 'columnIsGone',
     });
   }
-  let whyNotWorkedOut = looked.flatMap(
-    ({ asked: asked }: Dynamic) => (asked.kind === 'notNow' && asked.why !== null ? [asked.why] : []),
+  const whyNotWorkedOut = looked.flatMap(
+    ({ asked }) => (asked.kind === 'notNow' && asked.why !== null ? [asked.why] : []),
   )[0];
   return how !== 'apply' || whyNotWorkedOut === undefined ? withRowOrder : noticeFilterNotWorkedOut(withRowOrder, whyNotWorkedOut);
 }
-export function recordAndTableRows(reads: WorkbookReads, ownFilter?: Dynamic) {
-  let [recordsArea, tableArea] = [ownFilterRecordsArea(reads, ownFilter), ownFilterTableArea(reads, ownFilter)];
+export function recordAndTableRows(reads: WorkbookReads, ownFilter: FilterTable): { records: TableIndexRun; all: TableIndexRun } | null {
+  const [recordsArea, tableArea] = [ownFilterRecordsArea(reads, ownFilter), ownFilterTableArea(reads, ownFilter)];
   return recordsArea === null || tableArea === null
     ? null
     : {
@@ -707,96 +1006,106 @@ export function recordAndTableRows(reads: WorkbookReads, ownFilter?: Dynamic) {
         all: indexRangeOfArea(tableArea),
       };
 }
-export function addOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, ownFilter?: Dynamic) {
-  let rows = recordAndTableRows(reads, ownFilter);
-  let kept = ownFiltersOfSheet(state, ownFilter.table.sheetId).filter((other?: Dynamic) => {
-    let otherRows = recordAndTableRows(reads, other);
+export function addOwnFilter(state: PageState, reads: ReadsWithTextMeasurer, ownFilter: OwnFilter): PageState {
+  const rows = recordAndTableRows(reads, ownFilter);
+  const kept = ownFiltersOfSheet(state, ownFilter.table.sheetId).filter((other) => {
+    const otherRows = recordAndTableRows(reads, other);
     if (rows === null || otherRows === null) return true;
     return !indexRangesOverlap(rows.records, otherRows.all) && !indexRangesOverlap(otherRows.records, rows.all);
   });
   return putOwnFiltersInForce(state, reads, ownFilter.table.sheetId, [...kept, ownFilter]);
 }
-export const filterTableAtCell = (reads: WorkbookReads, cellId?: Dynamic) => filterTableOfCellTable(reads.cellTableAt(cellId));
-export const NO_OWN_ROW_ORDERS = new (Map as Dynamic)();
-export const isOwnFilterUnused = ({ filter: filter, sort: sort }: Dynamic) => filter === null && sort === null;
-export const NO_OWN_FILTERS = new (Map as Dynamic)();
-export const ownFiltersOfSheet = ({ ownFilters: ownFilters }: Dynamic, sheetId?: Dynamic) => ownFilters.get(sheetId) ?? [];
-export const isOwnFilterDrawn = (state: Dynamic, { key: key }: Dynamic) => key !== ownFilterKeyNotDrawnYet(state);
-export const ownFilterKeyNotDrawnYet = ({ ownFilterList: ownFilterList, rowsAskedFor: rowsAskedFor }: Dynamic) =>
+export const filterTableAtCell = (reads: WorkbookReads, cellId: CellId): FilterTable | null => filterTableOfCellTable(reads.cellTableAt(cellId));
+export const NO_OWN_ROW_ORDERS = new Map<SheetId, IdRun[]>();
+export const isOwnFilterUnused = ({ filter, sort }: Pick<OwnFilter, 'filter' | 'sort'>): boolean => filter === null && sort === null;
+export const NO_OWN_FILTERS = new Map<SheetId, OwnFilter[]>();
+export const ownFiltersOfSheet = ({ ownFilters }: StateOfOwnFilters, sheetId: SheetId): OwnFilter[] => ownFilters.get(sheetId) ?? [];
+export const isOwnFilterDrawn = (state: StateOfFiltersDrawn, { key }: Pick<OwnFilter, 'key'>): boolean => key !== ownFilterKeyNotDrawnYet(state);
+export const ownFilterKeyNotDrawnYet = ({ ownFilterList, rowsAskedFor }: Pick<PageState, 'ownFilterList' | 'rowsAskedFor'>): string | null =>
   ownFilterList?.isFilterNotDrawnYet === true
     ? ownFilterList.tableKey
     : rowsAskedFor?.isFilterNotDrawnYet === true
       ? (rowsAskedFor.table?.key ?? null)
       : null;
-export const drawnOwnFiltersCache = new (WeakMap as Dynamic)();
-export const ownFiltersWithoutKeyCache = new (WeakMap as Dynamic)();
-export const allOwnFilters = ({ ownFilters: ownFilters }: Dynamic) => [...ownFilters.values()].flat();
-export const ownFilterByKey = (state?: Dynamic, key?: Dynamic) =>
-  allOwnFilters(state).find((ownFilter?: Dynamic) => ownFilter.key === key) ?? null;
-export const nextOwnFilterKey = (state?: Dynamic) =>
-  String(1 + (Math.max as Dynamic)(0, ...allOwnFilters(state).map(({ key: key }: Dynamic) => Number(key))));
+export const drawnOwnFiltersCache = new WeakMap<OwnFilter[], { butFor: string; drawn: OwnFilter[] }>();
+export const ownFiltersWithoutKeyCache = new WeakMap<
+  Map<SheetId, OwnFilter[]>,
+  { key: string; evenIfItAsks: boolean; kept: Map<SheetId, OwnFilter[]> }
+>();
+export const allOwnFilters = ({ ownFilters }: StateOfOwnFilters): OwnFilter[] => [...ownFilters.values()].flat();
+export const ownFilterByKey = (state: StateOfOwnFilters, key: string): OwnFilter | null =>
+  allOwnFilters(state).find((ownFilter) => ownFilter.key === key) ?? null;
+export const nextOwnFilterKey = (state: StateOfOwnFilters): string =>
+  String(1 + Math.max(0, ...allOwnFilters(state).map(({ key }) => Number(key))));
 export const lookStampOfWorkbook = ({
-  workbookChangeCount: workbookChangeCount,
-  formulasWorkedOutCount: formulasWorkedOutCount,
-}: Dynamic) => workbookChangeCount + formulasWorkedOutCount;
-export const columnLabelOfFilterTable = (reads: WorkbookReads, { table: { sheetId: sheetId }, columns: columns }: Dynamic, c?: Dynamic) =>
+  workbookChangeCount,
+  formulasWorkedOutCount,
+}: LookStampOfState): number => workbookChangeCount + formulasWorkedOutCount;
+export const columnLabelOfFilterTable = (reads: WorkbookReads, { table: { sheetId }, columns }: TableToFilter, c: ColumnId): RuleColumn =>
   columnLabelOf(
     reads,
     sheetId,
-    columns.find((column?: Dynamic) => column.c === c) ?? {
-      c: c,
+    columns.find((column) => column.c === c) ?? {
+      c,
       name: null,
     },
   );
 export const NUMBER_ROW_SEARCH_LIMIT = 50;
-export const isFilterTableEmpty = ({ table: table }: Dynamic) => table.runs.length === 0;
-export const cutsRowGroup = (rows?: Dynamic, rowGroups?: Dynamic) =>
-  rowGroups.some((rowGroup?: Dynamic) => rowGroup.count > 1 && spanCutsOwnRowOrder(rows, rowGroup));
-export const isOwnFilterSortable = (reads: WorkbookReads, ownFilter?: Dynamic) =>
+export const isFilterTableEmpty = ({ table }: Pick<FilterTable, 'table'>): boolean => table.runs.length === 0;
+export const cutsRowGroup = (rows: LineSpan, rowGroups: GroupOnGrid[]): boolean =>
+  rowGroups.some((rowGroup) => rowGroup.count > 1 && spanCutsOwnRowOrder(rows, rowGroup));
+export const isOwnFilterSortable = (reads: WorkbookReads, ownFilter: TableToFilter): boolean =>
   isFilterTableEmpty(ownFilter) && canSortOwnFilterTable(reads, ownFilter);
-export const saidOfSortBy = (reads: WorkbookReads, ownFilter: Dynamic, [firstBy, ...thenBy]: Dynamic) => [
+export const saidOfSortBy = (reads: WorkbookReads, ownFilter: TableToFilter, [firstBy, ...thenBy]: SortKeyOfColumn[]): SaidOfSortColumn[] => [
   saidOfSortColumn(reads, ownFilter, firstBy),
-  ...thenBy.map((by?: Dynamic) => saidOfSortColumn(reads, ownFilter, by)),
+  ...thenBy.map((by) => saidOfSortColumn(reads, ownFilter, by)),
 ];
-export const NO_ROWS_OUT_OF_VIEW = new (Set as Dynamic)();
-export const rowsOutOfViewByOwnFiltersOn = ({ rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters }: Dynamic, sheetId?: Dynamic) =>
-  rowsOutOfViewByOwnFilters.get(sheetId) ?? NO_ROWS_OUT_OF_VIEW;
-export const sortedRowsOfOwnFilters = (ownFilters?: Dynamic) =>
-  ownFilters.find(({ sort: sort }: Dynamic) => sort !== null)?.sort?.rows ?? null;
-export const isSameIdSet = (ids?: Dynamic, otherIds?: Dynamic) =>
-  ids.size === otherIds.size && [...ids].every((id?: Dynamic) => otherIds.has(id));
-export const ownFiltersInForceCache = new (WeakMap as Dynamic)();
-export const filterOnKnownColumns = (reads: WorkbookReads, sheetId?: Dynamic, filter?: Dynamic) =>
-  keepFilterClausesWhereColumns(filter, (columnId?: Dynamic) => reads.columnIndexOf(sheetId, columnId) !== null);
-export const isSameByJson = (value?: Dynamic, otherValue?: Dynamic) => JSON.stringify(value) === JSON.stringify(otherValue);
-export const haveFilterColumnsChanged = (found?: Dynamic, ownFilter?: Dynamic) =>
+export const NO_ROWS_OUT_OF_VIEW = new Set<RowId>();
+export const rowsOutOfViewByOwnFiltersOn = (
+  { rowsOutOfViewByOwnFilters }: Pick<PageState, 'rowsOutOfViewByOwnFilters'>,
+  sheetId: SheetId,
+): Set<RowId> => rowsOutOfViewByOwnFilters.get(sheetId) ?? NO_ROWS_OUT_OF_VIEW;
+export const sortedRowsOfOwnFilters = (ownFilters: readonly Pick<OwnFilter, 'sort'>[]): IdRun[] | null =>
+  ownFilters.find(({ sort }) => sort !== null)?.sort?.rows ?? null;
+export const isSameIdSet = (ids: ReadonlySet<string>, otherIds: ReadonlySet<string>): boolean =>
+  ids.size === otherIds.size && [...ids].every((id) => otherIds.has(id));
+export const ownFiltersInForceCache = new WeakMap<
+  OwnFilter[],
+  { order: LineIndex | undefined; frozenRowCount: number | undefined; outOfView: Set<RowId>; areSo: boolean }
+>();
+export const filterOnKnownColumns = (reads: WorkbookReads, sheetId: SheetId, filter: Filter): Filter | null =>
+  keepFilterClausesWhereColumns(filter, (columnId) => reads.columnIndexOf(sheetId, columnId) !== null);
+/** Whether two values read the same once written as JSON. */
+export const isSameByJson = <Compared>(value: Compared, otherValue: Compared): boolean => JSON.stringify(value) === JSON.stringify(otherValue);
+export const haveFilterColumnsChanged = (found: Pick<FilterTable, 'cellTable'>, ownFilter: Pick<FilterTable, 'cellTable' | 'columns'>): boolean =>
   found.cellTable.firstColumn !== ownFilter.cellTable.firstColumn &&
   found.cellTable.lastColumn !== ownFilter.cellTable.lastColumn &&
   ![found.cellTable.firstColumn, found.cellTable.lastColumn].every(
-    (columnId?: Dynamic) => ownFilter.columns.some(({ c: c }: Dynamic) => c === columnId),
+    (columnId) => ownFilter.columns.some(({ c }) => c === columnId),
   );
 export const ownFilterFromAnswer = (
-  state: Dynamic,
+  state: LookStampOfState & StateOfOwnFilters,
   reads: WorkbookReads,
-  key: Dynamic,
-  { found: found, filter: filter, rows: rows }: Dynamic,
-  sort?: Dynamic,
-) => ({
+  key: string,
+  { found, filter, rows }: OwnFilterAnswered,
+  sort: OwnFilterSort | null,
+): OwnFilter => ({
   ...found,
-  key: key,
-  filter: filter,
-  rows: rows,
-  sort: sort,
+  key,
+  filter,
+  rows,
+  sort,
+  namedViewInHand: ownFilterByKey(state, key)?.namedViewInHand ?? null,
   unanswered: null,
   lines: filter === null ? [] : describeFilterLines(reads, found, filter),
   lookedAtAsOf: lookStampOfWorkbook(state),
 });
 export const NEVER_LOOKED_AT = -1;
-export const withOwnFilterNotice = (state?: Dynamic, notice?: Dynamic) => ({
+export const withOwnFilterNotice = (state: PageState, notice: Notice): PageState => ({
   ...state,
-  notice: notice,
+  notice,
 });
-export const noticeFilterNotWorkedOut = (state?: Dynamic, why?: Dynamic) =>
+export const noticeFilterNotWorkedOut = (state: PageState, why: WhyRowsNotNow | 'hasNoRecord'): PageState =>
   withOwnFilterNotice(
     state,
     why === 'hasNoRecord'
@@ -805,47 +1114,50 @@ export const noticeFilterNotWorkedOut = (state?: Dynamic, why?: Dynamic) =>
         }
       : {
           kind: 'ownFilterNotWorkedOut',
-          why: why,
+          why,
         },
   );
-export const replaceOwnFilter = (state: Dynamic, { key: key, table: table }: Dynamic, replacement?: Dynamic) =>
-  ownFiltersOfSheet(state, table.sheetId).flatMap((ownFilter?: Dynamic) => (ownFilter.key === key ? (replacement ?? []) : ownFilter));
-export const withOwnSort = (ownFilter?: Dynamic, sort?: Dynamic) =>
+export const replaceOwnFilter = (state: StateOfOwnFilters, { key, table }: Pick<OwnFilter, 'key' | 'table'>, replacement: OwnFilter | null): OwnFilter[] =>
+  ownFiltersOfSheet(state, table.sheetId).flatMap((ownFilter) => (ownFilter.key === key ? (replacement ?? []) : ownFilter));
+export const withOwnSort = (ownFilter: OwnFilter, sort: OwnFilterSort | null): OwnFilter =>
   ownFilter.sort === sort
     ? ownFilter
     : {
         ...ownFilter,
-        sort: sort,
+        sort,
       };
-export const heldOwnFilterSnapshot = (state?: Dynamic, held?: Dynamic) => ({
-  held: held,
-  others: ownFiltersOfSheet(state, held.table.sheetId).filter((ownFilter?: Dynamic) => ownFilter !== held),
+export const heldOwnFilterSnapshot = (
+  state: Pick<PageState, 'ownFilters' | 'rowsOutOfViewByOwnFilters'>,
+  held: OwnFilter,
+): HeldOwnFilterSnapshot => ({
+  held,
+  others: ownFiltersOfSheet(state, held.table.sheetId).filter((ownFilter) => ownFilter !== held),
   rowsOutOfView: rowsOutOfViewByOwnFiltersOn(state, held.table.sheetId),
 });
-export const isSameOwnFilterLook = (ownFilter?: Dynamic, other?: Dynamic) =>
+export const isSameOwnFilterLook = (ownFilter: OwnFilter, other: OwnFilter): boolean =>
   ownFilter.key === other.key &&
   ownFilter.filter === other.filter &&
   JSON.stringify(ownFilter.rows?.rowsOutOfView) === JSON.stringify(other.rows?.rowsOutOfView);
 export const missesRowOutOfViewInArea = (
-  state: Dynamic,
+  state: Pick<PageState, 'rowsOutOfViewByOwnFilters'>,
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  rowIdsStillOut: Dynamic,
-  { topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic,
-) =>
-  [...rowsOutOfViewByOwnFiltersOn(state, sheetId)].some((rowId?: Dynamic) => {
-    let rowIndex = rowIdsStillOut.has(rowId) ? null : reads.rowIndexOf(sheetId, rowId);
+  sheetId: SheetId,
+  rowIdsStillOut: ReadonlySet<RowId>,
+  { topRowIndex, rowCount }: Pick<CellArea, 'topRowIndex' | 'rowCount'>,
+): boolean =>
+  [...rowsOutOfViewByOwnFiltersOn(state, sheetId)].some((rowId) => {
+    const rowIndex = rowIdsStillOut.has(rowId) ? null : reads.rowIndexOf(sheetId, rowId);
     return rowIndex !== null && rowIndex >= topRowIndex && rowIndex < topRowIndex + rowCount;
   });
-export const refreshStaleOwnFilters = (state: PageState, reads: ReadsWithTextMeasurer, sheetId?: Dynamic) =>
-  ownFiltersOfSheet(state, sheetId).some(({ lookedAtAsOf: lookedAtAsOf }: Dynamic) => lookedAtAsOf !== lookStampOfWorkbook(state))
+export const refreshStaleOwnFilters = (state: PageState, reads: ReadsWithTextMeasurer, sheetId: SheetId): PageState =>
+  ownFiltersOfSheet(state, sheetId).some(({ lookedAtAsOf }) => lookedAtAsOf !== lookStampOfWorkbook(state))
     ? lookAgainAtOwnFilters(state, reads, 'look', sheetId)
     : state;
-export const indexRangeOfArea = ({ topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic) => ({
+export const indexRangeOfArea = ({ topRowIndex, rowCount }: Pick<CellArea, 'topRowIndex' | 'rowCount'>): TableIndexRun => ({
   first: topRowIndex,
   last: topRowIndex + rowCount - 1,
 });
-export const addOwnFilterForTable = (state: PageState, reads: ReadsWithTextMeasurer, filterTable?: Dynamic) =>
+export const addOwnFilterForTable = (state: PageState, reads: ReadsWithTextMeasurer, filterTable: FilterTable): PageState =>
   addOwnFilter(
     state,
     reads,

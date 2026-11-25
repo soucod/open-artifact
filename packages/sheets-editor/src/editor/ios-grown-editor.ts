@@ -1,10 +1,26 @@
-import type { Dynamic } from '../dynamic.ts';
 import { fontPointsToPixels, nextLineHeight } from '../grid/cell-metrics-values.ts';
-import { entryFontStyle } from '../grid/cell-drawing.ts';
+import { entryFontStyle } from '../grid/cell-drawing.tsx';
+import type { CellFont } from '../grid/cell-drawing.tsx';
+/** Where the entry box stands and how it is laid out, in pixels, before it is grown on iOS. */
+export interface EntryBoxStyle {
+  left: number;
+  top: number;
+  width?: number;
+  height?: number;
+  minWidth?: number;
+  maxWidth?: number;
+  paddingTop?: number;
+  paddingBottom?: number;
+  clipPath?: string;
+  lineHeightInPixels?: number;
+  '--sheet-clear-left-of-text'?: string;
+  '--sheet-clear-right-of-text'?: string;
+  '--sheet-entry-scale'?: string;
+}
 export function entryEditorStyle(
-  { left: boxLeft, top: boxTop, lineHeightInPixels: lineHeightInPixels, ...box }: Dynamic,
-  format?: Dynamic,
-  isFormula?: Dynamic,
+  { left: boxLeft, top: boxTop, lineHeightInPixels, ...box }: EntryBoxStyle,
+  format: CellFont,
+  isFormula: boolean,
 ) {
   let fontPixels = fontPointsToPixels(format.size);
   let lineHeight = lineHeightInPixels ?? nextLineHeight(format.size);
@@ -26,7 +42,7 @@ export function entryEditorStyle(
     maxWidth: grownEditorPixels(box.maxWidth),
     paddingTop: grownEditorPixels(box.paddingTop),
     paddingBottom: grownEditorPixels(box.paddingBottom),
-    clipPath: box.clipPath?.replace(PIXEL_LENGTH_PATTERN, (match?: Dynamic, pixels?: Dynamic) => grownEditorPixels(Number(pixels)) ?? ''),
+    clipPath: box.clipPath?.replace(PIXEL_LENGTH_PATTERN, (match: string, pixels: string) => grownEditorPixels(Number(pixels)) ?? ''),
     fontSize: grownEditorPixels(fontPixels),
     lineHeight: grownEditorPixels(lineHeight),
     '--sheet-editor-grown-on-ios': String(iosGrowth),
@@ -41,7 +57,7 @@ export function entryEditorStyle(
     }),
   };
 }
-export function entryEditorLineStyle(lineHeight?: Dynamic, format?: Dynamic) {
+export function entryEditorLineStyle(lineHeight: number, format: CellFont) {
   let {
     left: droppedLeft,
     top: droppedTop,
@@ -59,6 +75,6 @@ export function entryEditorLineStyle(lineHeight?: Dynamic, format?: Dynamic) {
   return lineStyle;
 }
 export const IOS_UNZOOMED_FONT_SIZE = 16;
-export const grownEditorPixels = (pixels?: Dynamic) =>
+export const grownEditorPixels = (pixels: number | undefined): string | undefined =>
   pixels === undefined ? undefined : `calc(${pixels}px * var(--sheet-editor-grown, 1))`;
 export const PIXEL_LENGTH_PATTERN = /(-?[\d.]+)px/g;

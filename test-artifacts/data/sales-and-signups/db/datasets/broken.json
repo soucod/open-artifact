@@ -1,0 +1,1 @@
+{"title":"Broken source","description":"A tool that always fails.","source":{"kind":"call","connector":"sales","tool":"broken","args":{}}}

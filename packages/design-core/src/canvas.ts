@@ -17,10 +17,11 @@ export const MAX_BOARD_SIZE = 8000;
 /** Gap between frames in a row, and between rows. */
 export const ROW_GAP = 80;
 export const COLUMN_GAP = 120;
-/** Most pages, notes, guides per board. */
+/** Most pages, and guides per board. */
 export const MAX_PAGES = 40;
-export const MAX_NOTES = 999;
 export const MAX_GUIDES = 6;
+/** Largest index an agent should write, in UTF-8 bytes. Notes have no count limit; this bounds them. */
+export const MAX_INDEX_BYTES = 1024 * 1024;
 /** How deep note groups may nest (see `note-groups.ts`). */
 export const MAX_NOTE_GROUPS = 8;
 
@@ -225,7 +226,7 @@ export function normalizeCanvas(input: unknown): Canvas {
   const notes: Record<string, CanvasNote> = {};
   if (isRecord(raw.notes)) {
     for (const [id, note] of Object.entries(raw.notes)) {
-      if (!isRecord(note) || Object.keys(notes).length >= MAX_NOTES) continue;
+      if (!isRecord(note)) continue;
       const { groups: rawGroups, ...rest } = note;
       const groups = normalizeNoteGroups(rawGroups);
       const x = finite(note.x, 0);

@@ -73,6 +73,8 @@ export interface LocalAsk {
   activity?: string;
   /** The comment thread it was sent from. */
   thread?: string;
+  /** Put in the agent's conversation for the person to send there (a `delivered` that waits on them). */
+  drafted?: boolean;
 }
 
 interface AsksState {
@@ -209,7 +211,7 @@ export async function askAgent(input: AskInput): Promise<AgentSendResult | undef
   });
   const current = useAsks.getState().asks.get(key);
   // A claim may already have arrived while the send was in flight.
-  if (current && current.status === 'sending') patchAsk(key, { status: askStatusAfterSend(result) });
+  if (current && current.status === 'sending') patchAsk(key, { status: askStatusAfterSend(result), ...(result.status === 'delivered' && result.drafted ? { drafted: true } : {}) });
   reportResult(result);
   for (const listener of [...sentListeners]) listener(useAsks.getState().asks.get(key) ?? ask);
   return result;
@@ -245,8 +247,9 @@ export async function sendThreadToAgent(thread: CommentThread, target: AskTarget
   try {
     const sent = await comments.sendToAgent(thread.id);
     noteThreadChanged(sent);
-    if (useAsks.getState().asks.get(key)?.status === 'sending') patchAsk(key, { status: threadAskStatus(sent) ?? 'queued' });
-    toast.add(agentResultMessage({ status: sent.agent?.status === 'delivered' ? 'delivered' : 'queued' }, 'this board', useAgent.getState()));
+    const drafted = sent.agent?.status === 'delivered' && sent.agent.drafted === true;
+    if (useAsks.getState().asks.get(key)?.status === 'sending') patchAsk(key, { status: threadAskStatus(sent) ?? 'queued', ...(drafted ? { drafted: true } : {}) });
+    toast.add(agentResultMessage({ status: sent.agent?.status === 'delivered' ? 'delivered' : 'queued', ...(drafted ? { drafted: true as const } : {}) }, 'this board', useAgent.getState()));
     const ask = useAsks.getState().asks.get(key);
     if (ask) for (const listener of [...sentListeners]) listener(ask);
     return true;

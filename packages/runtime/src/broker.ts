@@ -65,8 +65,8 @@ export const BROKERED_METHODS: { readonly [K in CapabilityName]: readonly string
   user: ['me'],
   agent: ['send', 'status'],
   room: ['self', 'presence', 'peers', 'emit'],
-  downloads: ['save'],
-  db: ['get', 'list', 'write'],
+  downloads: ['save', 'check'],
+  db: ['get', 'list', 'listing', 'write'],
   comments: ['list', 'create', 'reply', 'edit', 'react', 'setResolved', 'move', 'remove', 'sendToAgent'],
   history: ['list', 'files', 'read', 'readBytes', 'diff', 'restore', 'dismissNotice'],
   doc: ['session', 'read', 'call', 'history', 'version', 'restore', 'importFile', 'exportFile'],
@@ -86,7 +86,7 @@ export const BROKERED_EVENTS = {
   db: { onChange: 'change' },
   comments: { onChange: 'threads' },
   history: { onChange: 'change' },
-  sheet: { onFrame: 'frame' },
+  sheet: { onFrame: 'frame', onWalkthrough: 'walkthrough' },
   doc: { onFrame: 'frame' },
 } as const satisfies Partial<Record<CapabilityName, Readonly<Record<string, string>>>>;
 
@@ -324,6 +324,7 @@ export function createShellProvider(options: ShellProviderOptions = {}): Capabil
         const ns: DbCapability = {
           get: (path) => c('get', [path]),
           list: (collection) => c('list', [collection]),
+          listing: (collection) => c('listing', [collection]),
           write: (writes) => c('write', [writes]),
           onChange: (listener) => listen('db', BROKERED_EVENTS.db.onChange, listener),
         };
@@ -352,6 +353,7 @@ export function createShellProvider(options: ShellProviderOptions = {}): Capabil
           widget: (request) => c('widget', [request]),
           importFile: (file, name) => c('importFile', [file, name], true),
           onFrame: (listener) => listen('sheet', BROKERED_EVENTS.sheet.onFrame, listener),
+          onWalkthrough: (listener) => listen('sheet', BROKERED_EVENTS.sheet.onWalkthrough, listener),
         };
         return ns;
       }
@@ -383,7 +385,8 @@ export function createShellProvider(options: ShellProviderOptions = {}): Capabil
         return ns;
       }
       case 'downloads': {
-        const ns: DownloadsCapability = { save: (file) => c('save', [file], true) };
+        // The Shell says when its host saves in this browser (a cloud host): the page then sends every role's files.
+        const ns: DownloadsCapability = { save: (file) => c('save', [file], true), ...(config.browser === true ? { browser: true, check: () => c('check') } : {}) };
         return ns;
       }
       case 'mcp': {

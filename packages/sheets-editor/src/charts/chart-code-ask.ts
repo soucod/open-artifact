@@ -1,41 +1,73 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cleanTextForAgent, isPromptDataTooLong } from '../agent/prompt-text.ts';
-export function pickTellingRowsForAgent([rowCount, columnCount]: Dynamic, kindOfCell?: Dynamic) {
-  let columnIndices = Array.from<Dynamic, Dynamic>(
+import type { ChartInputs } from '../chart-frame/messages.ts';
+
+/** What a cell holds, as far as picking the rows to tell the agent goes. */
+export type KindOfCellForAgent = 'number' | 'nothing' | 'somethingElse';
+/** The rows past the first ones worth telling the agent: the last that hold a number, and a few between with gaps. */
+export interface TellingRows {
+  last: number[];
+  withGaps: number[];
+}
+/** A row told to the agent: its place from the top, counting from 1, and the texts of its cells. */
+export interface RowToldToAgent {
+  row: number;
+  texts: string[];
+}
+/** Cells told to the agent: how many rows there are, the texts of the first rows, and the telling rows further down. */
+export interface CellsToldToAgent {
+  rowCount: number;
+  firstRows: string[][];
+  lastRows: RowToldToAgent[];
+  rowsWithGaps: RowToldToAgent[];
+}
+/** What the agent is asked for a chart's code: the instructions, and the code and cells as JSON. */
+export interface ChartCodeAsk {
+  words: string;
+  data: string;
+}
+/** The cells a new chart is drawn from, and the stock program it starts as. */
+export interface CellsForNewChart extends CellsToldToAgent {
+  program: string;
+}
+export function pickTellingRowsForAgent(
+  [rowCount, columnCount]: readonly [number, number],
+  kindOfCell: (rowIndex: number, columnIndex: number) => KindOfCellForAgent,
+): TellingRows {
+  let columnIndices = Array.from(
     {
       length: Math.min(columnCount, CHART_ASK_MAX_COLUMNS),
     },
-    (input?: Dynamic, columnIndex?: Dynamic) => columnIndex,
+    (_cell, columnIndex) => columnIndex,
   );
-  let kindsByRow = new (Map as Dynamic)();
-  let kindsOfRow = (rowIndex?: Dynamic) => {
-    let kinds = kindsByRow.get(rowIndex) ?? columnIndices.map((columnIndex?: Dynamic) => kindOfCell(rowIndex, columnIndex));
+  let kindsByRow = new Map<number, KindOfCellForAgent[]>();
+  let kindsOfRow = (rowIndex: number) => {
+    let kinds = kindsByRow.get(rowIndex) ?? columnIndices.map((columnIndex) => kindOfCell(rowIndex, columnIndex));
     kindsByRow.set(rowIndex, kinds);
     return kinds;
   };
-  let lastRows: Dynamic = [];
-  for (let rowIndex: Dynamic = rowCount - 1; rowIndex >= CHART_ASK_FIRST_ROWS && lastRows.length < CHART_ASK_LAST_ROWS; rowIndex -= 1)
+  let lastRows: number[] = [];
+  for (let rowIndex = rowCount - 1; rowIndex >= CHART_ASK_FIRST_ROWS && lastRows.length < CHART_ASK_LAST_ROWS; rowIndex -= 1)
     if (kindsOfRow(rowIndex).includes('number')) lastRows.unshift(rowIndex);
   if (lastRows.length === 0)
-    for (let rowIndex: Dynamic = Math.max(rowCount - CHART_ASK_LAST_ROWS, CHART_ASK_FIRST_ROWS); rowIndex < rowCount; rowIndex += 1)
+    for (let rowIndex = Math.max(rowCount - CHART_ASK_LAST_ROWS, CHART_ASK_FIRST_ROWS); rowIndex < rowCount; rowIndex += 1)
       lastRows.push(rowIndex);
-  let rowsBelowFirst = Array.from<Dynamic, Dynamic>(
+  let rowsBelowFirst = Array.from(
     {
       length: Math.max(Math.min(CHART_ASK_FIRST_ROWS, rowCount) - 1, 0),
     },
-    (input?: Dynamic, index?: Dynamic) => index + 1,
+    (_row, index) => index + 1,
   );
   let columnsNeverBlank = columnIndices.filter(
-    (columnIndex?: Dynamic) => rowsBelowFirst.every((rowIndex?: Dynamic) => kindsOfRow(rowIndex)[columnIndex] !== 'nothing'),
+    (columnIndex) => rowsBelowFirst.every((rowIndex) => kindsOfRow(rowIndex)[columnIndex] !== 'nothing'),
   );
-  let numberRows: Dynamic = [];
-  let mixedRowsWithGaps: Dynamic = [];
-  for (let rowIndex: Dynamic = 1; rowIndex < (lastRows[0] ?? rowCount); rowIndex += 1) {
+  let numberRows: number[] = [];
+  let mixedRowsWithGaps: number[] = [];
+  for (let rowIndex = 1; rowIndex < (lastRows[0] ?? rowCount); rowIndex += 1) {
     if (numberRows.length === CHART_ASK_GAP_ROWS) break;
     let rowKinds = kindsOfRow(rowIndex);
     if (!rowKinds.includes('number')) continue;
     if (rowKinds.includes('somethingElse')) {
-      if (columnsNeverBlank.some((columnIndex?: Dynamic) => rowKinds[columnIndex] === 'nothing')) mixedRowsWithGaps.push(rowIndex);
+      if (columnsNeverBlank.some((columnIndex) => rowKinds[columnIndex] === 'nothing')) mixedRowsWithGaps.push(rowIndex);
       continue;
     }
     if (rowIndex < CHART_ASK_FIRST_ROWS)
@@ -46,42 +78,48 @@ export function pickTellingRowsForAgent([rowCount, columnCount]: Dynamic, kindOf
     numberRows.push(rowIndex);
   }
   let withGaps = [...numberRows, ...mixedRowsWithGaps.slice(0, CHART_ASK_GAP_ROWS - numberRows.length)];
-  withGaps.sort((left?: Dynamic, right?: Dynamic) => left - right);
+  withGaps.sort((left, right) => left - right);
   return {
     last: lastRows,
-    withGaps: withGaps,
+    withGaps,
   };
 }
-export function chartCodeRequest(code?: Dynamic, inputs?: Dynamic, systemWords?: Dynamic, asked?: Dynamic, mostUnits?: Dynamic) {
+export function chartCodeRequest(
+  code: string,
+  inputs: Readonly<Record<string, CellsToldToAgent>>,
+  systemWords: string,
+  asked: string,
+  mostUnits: number,
+): ChartCodeAsk | null {
   let askText = cleanTextForAgent(asked, mostUnits).trim();
   if (askText === '') return null;
-  let clipRows = (rows?: Dynamic) =>
+  let clipRows = (rows: readonly string[][]) =>
     rows.map(
-      (rowTexts?: Dynamic) =>
-        rowTexts.slice(0, CHART_ASK_MAX_COLUMNS).map((text?: Dynamic) => (text.length <= CHART_ASK_MAX_TEXT_LENGTH ? text : null)),
+      (rowTexts) =>
+        rowTexts.slice(0, CHART_ASK_MAX_COLUMNS).map((text) => (text.length <= CHART_ASK_MAX_TEXT_LENGTH ? text : null)),
     );
-  let clipRowList = (rowList?: Dynamic) =>
+  let clipRowList = (rowList: readonly RowToldToAgent[]) =>
     rowList.map(
-      ({ row: row, texts: texts }: Dynamic) => ({
-        row: row,
+      ({ row, texts }) => ({
+        row,
         texts: clipRows([texts])[0],
       }),
     );
-  let requestWith = (withMoreRows?: Dynamic) => ({
+  let requestWith = (withMoreRows: boolean): ChartCodeAsk => ({
     words: `${systemWords}
 
 The person asks: ${JSON.stringify(askText)}`,
     data: JSON.stringify({
-      code: code,
+      code,
       inputs: Object.fromEntries(
         Object.entries(inputs).map(
-          ([inputName, { rowCount: rowCount, firstRows: firstRows, lastRows: lastRows, rowsWithGaps: rowsWithGaps }]: Dynamic) => {
+          ([inputName, { rowCount, firstRows, lastRows, rowsWithGaps }]) => {
             let clippedLastRows = clipRowList(lastRows.slice(-CHART_ASK_LAST_ROWS));
             let clippedRowsWithGaps = clipRowList(rowsWithGaps.slice(0, CHART_ASK_GAP_ROWS));
             return [
               inputName,
               {
-                rowCount: rowCount,
+                rowCount,
                 firstRows: clipRows(firstRows.slice(0, CHART_ASK_FIRST_ROWS)),
                 ...(withMoreRows &&
                   clippedLastRows.length > 0 && {
@@ -103,7 +141,7 @@ The person asks: ${JSON.stringify(askText)}`,
   let shortRequest = requestWith(false);
   return isPromptDataTooLong(shortRequest) ? null : shortRequest;
 }
-export function readChartCodeAnswer(answer?: Dynamic) {
+export function readChartCodeAnswer(answer: unknown): string | null {
   let code = typeof answer === 'object' && answer !== null && 'code' in answer ? answer.code : null;
   if (typeof code !== 'string' || code.length > CHART_CODE_MAX_LENGTH) return null;
   return /^\s*export\s+default\b/.test(code) ? code.trim() : null;
@@ -140,28 +178,28 @@ export const CHART_ASK_GAP_ROWS = 6;
 export const CHART_ASK_MAX_COLUMNS = 12;
 export const CHART_ASK_MAX_TEXT_LENGTH = 60;
 export const CHART_CODE_MAX_LENGTH = 40000;
-export const chartEditRequest = ({ code: code, inputs: inputs }: Dynamic, asked?: Dynamic, mostUnits?: Dynamic) =>
+export const chartEditRequest = ({ code, inputs }: { code: string; inputs: ChartInputs }, asked: string, mostUnits: number): ChartCodeAsk | null =>
   chartCodeRequest(
     code,
     Object.fromEntries(
-      Object.entries(inputs).map(([inputName, rows]: Dynamic) => {
+      Object.entries(inputs).map(([inputName, rows]) => {
         let { last: lastRows, withGaps: rowsWithGaps } = pickTellingRowsForAgent(
           [rows.length, rows[0]?.length ?? 0],
-          (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+          (rowIndex, columnIndex): KindOfCellForAgent => {
             let cell = rows[rowIndex]?.[columnIndex];
             if (typeof cell?.value === 'number') return 'number';
             return cell === undefined || cell.text === '' ? 'nothing' : 'somethingElse';
           },
         );
-        let rowEntry = (rowIndex?: Dynamic) => ({
+        let rowEntry = (rowIndex: number): RowToldToAgent => ({
           row: rowIndex + 1,
-          texts: (rows[rowIndex] ?? []).map(({ text: text }: Dynamic) => text),
+          texts: (rows[rowIndex] ?? []).map(({ text }) => text),
         });
         return [
           inputName,
           {
             rowCount: rows.length,
-            firstRows: rows.slice(0, CHART_ASK_FIRST_ROWS).map((row?: Dynamic) => row.map(({ text: text }: Dynamic) => text)),
+            firstRows: rows.slice(0, CHART_ASK_FIRST_ROWS).map((row) => row.map(({ text }) => text)),
             lastRows: lastRows.map(rowEntry),
             rowsWithGaps: rowsWithGaps.map(rowEntry),
           },
@@ -172,11 +210,11 @@ export const chartEditRequest = ({ code: code, inputs: inputs }: Dynamic, asked?
     asked,
     mostUnits,
   );
-export const newChartRequest = ({ program: program, ...rows }: Dynamic, asked?: Dynamic, mostUnits?: Dynamic) =>
+export const newChartRequest = ({ program, ...rows }: CellsForNewChart, asked: string | null, mostUnits: number): ChartCodeAsk | null =>
   chartCodeRequest(
     program,
     {
-      rows: rows,
+      rows,
     },
     `${CHART_CODE_SYSTEM_PROMPT}
 
@@ -184,5 +222,5 @@ ${NEW_CHART_PROMPT}`,
     asked ?? CHOOSE_CHART_KIND_ASK,
     mostUnits,
   );
-export const isForChatAnswer = (answer?: Dynamic) =>
+export const isForChatAnswer = (answer: unknown): boolean =>
   typeof answer === 'object' && answer !== null && 'forChat' in answer && answer.forChat === true;

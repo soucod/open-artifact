@@ -1,0 +1,1 @@
+{"title":"Support tickets","description":"Tickets from the help desk.","source":{"kind":"call","connector":"sales","tool":"list_tickets","args":{}}}

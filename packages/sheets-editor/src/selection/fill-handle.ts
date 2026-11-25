@@ -1,6 +1,6 @@
 import type { Edit } from '@open-artifact/sheets-core';
 import type { CellId, WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { FilledByFingerOffer, PageState } from '../state/initial-state.ts';
 import type { PageContext, PointerPressed } from '../state/event-reducer.ts';
 import type { PageTransition } from '../state/transitions.ts';
 import type { AutoscrollDirection, GridPoint, LinesAxisName, LinesUnderFrozen, PaneRect, SpanOnScreen } from '../grid/geometry.ts';
@@ -68,7 +68,7 @@ export function fillHandleBox(state: PageState, reads: ReadsWithTextMeasurer, is
   if (state.otherRanges.length > 0) return null;
   let area = selectedArea(state, reads);
   if (area === null) return null;
-  let { across: across, down: down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
+  let { across, down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
   if (!isSpanEndInSight(across) || !isSpanEndInSight(down)) return null;
   let [right, bottom] = [across.end, down.end];
   return {
@@ -82,7 +82,7 @@ export function fillHandleBox(state: PageState, reads: ReadsWithTextMeasurer, is
 export function isPointOnFillHandle(
   state: PageState,
   point: GridPoint,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: FillContext,
+  { reads, refusalOfEveryEdit }: FillContext,
   isByFinger: boolean = false,
 ): boolean {
   let handle = fillHandleBox(state, reads, refusalOfEveryEdit !== null, isByFinger ? FILL_HANDLE_TOUCH_SIZE : FILL_HANDLE_SIZE);
@@ -112,15 +112,15 @@ export function startFillDragByFinger(state: PageState, tap: PointerPressed, wor
     ...state,
     dragging: {
       kind: 'filling',
-      pressedAt: pressedAt,
+      pressedAt,
       pointedAt: null,
       isMoreAcross: false,
-      tap: tap,
-      grip: grip,
+      tap,
+      grip,
     } satisfies FillingDrag,
   };
 }
-export function linesPastFrozen(offset: number, edgeIndex: number, { frozenCount: frozenCount, under: under }: LinesUnderFrozen): number {
+export function linesPastFrozen(offset: number, edgeIndex: number, { frozenCount, under }: LinesUnderFrozen): number {
   if (offset === 0) return 0;
   let [first, last] = offset > 0 ? [edgeIndex + 1, edgeIndex + offset] : [edgeIndex + offset, edgeIndex - 1];
   let frozenOverlap = Math.min(last, frozenCount + under - 1) - Math.max(first, frozenCount) + 1;
@@ -128,7 +128,7 @@ export function linesPastFrozen(offset: number, edgeIndex: number, { frozenCount
 }
 export function grownFillArea(
   area: CellArea,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition,
+  { rowIndex, columnIndex }: CellPosition,
   isMoreAcross: boolean,
   frozen: FrozenOfAxes,
 ): CellArea | null {
@@ -192,7 +192,7 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
   let frame = layoutOfView(state, reads);
   let area: CellArea | null = selectedArea(state, reads);
   if (state.dragging?.kind !== 'filling' || area === null) return state;
-  let { across: across, down: down } = rangeSpansOnScreen(area, state, frame, state);
+  let { across, down } = rangeSpansOnScreen(area, state, frame, state);
   let isMoreAcross =
     distanceOutsideSpan(point.x - ROW_HEADER_WIDTH, visibleSpanStart(across), across.end) >
     distanceOutsideSpan(point.y - COLUMN_HEADER_HEIGHT, visibleSpanStart(down), down.end);
@@ -205,8 +205,8 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
   let fromRow = isPointerOverFrozenRows(point, frame) ? shownLineAtOrBefore(frame.rowEdges, topRow - 1) : topRow;
   let rowsAbove = {
     of: () => area,
-    fromRow: fromRow,
-    grownSoFar: grownSoFar,
+    fromRow,
+    grownSoFar,
   };
   let target: CellPosition = isGrowingUp
     ? {
@@ -218,11 +218,11 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
     let gripPoint = clampPointToCells(point, layoutForNarrowTouch(state));
     let pointed = cellUnderPointer(gripPoint, state, frame, state, grownSoFar);
     let cell = cellInSight(pointed, state, frame);
-    let rowsAbove2 = {
+    let rowsAboveTop = {
       ...rowsAbove,
       fromRow: topRow,
     };
-    return isGrowingUp ? pointedPositionClearOfStuckHeaders(cell, rowsAbove2, state, reads, frame) : cell;
+    return isGrowingUp ? pointedPositionClearOfStuckHeaders(cell, rowsAboveTop, state, reads, frame) : cell;
   };
   let fillTarget: CellPosition = state.dragging.grip === null ? target : fillTargetCellForGrip(gripCell(), pointedCell, area, isMoreAcross, frozen);
   let pointedAt = reads.cellIdAt(state.sheetId, fillTarget.rowIndex, fillTarget.columnIndex);
@@ -230,8 +230,8 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
     ...state,
     dragging: {
       ...state.dragging,
-      pointedAt: pointedAt,
-      isMoreAcross: isMoreAcross,
+      pointedAt,
+      isMoreAcross,
     },
   };
   let fillArea = fillAreaOfDrag(next, reads);
@@ -249,10 +249,10 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
           },
           'pointer',
         );
-  let pointedAt2 = state.dragging.pointedAt;
-  return pointedAt2 !== null &&
+  let pointedAtBefore = state.dragging.pointedAt;
+  return pointedAtBefore !== null &&
     pointedAt !== null &&
-    isSameCell(pointedAt2, pointedAt) &&
+    isSameCell(pointedAtBefore, pointedAt) &&
     isMoreAcross === state.dragging.isMoreAcross &&
     scrolled.scrollLeft === state.scrollLeft &&
     scrolled.scrollTop === state.scrollTop
@@ -261,7 +261,7 @@ export function moveFillDrag(state: PageState, point: GridPoint, reads: ReadsWit
 }
 export function dragFillHandle(state: PageState, point: GridPoint, reads: ReadsWithTextMeasurer): PageState {
   if (state.dragging?.kind !== 'filling') return state;
-  let { tap: tap, grip: grip } = state.dragging;
+  let { tap, grip } = state.dragging;
   let distance = tap === null ? 0 : Math.hypot(point.x - tap.x, point.y - tap.y);
   if (tap !== null && distance < DRAG_START_DISTANCE / state.zoom) return state;
   let started = tap === null ? state : startFillDrag(state, tap, grip);
@@ -312,8 +312,8 @@ export function fillCellsEdit(
     return {
       kind: 'fillCells',
       source: sourceRange,
-      linesToFill: linesToFill,
-      filledCells: filledCells,
+      linesToFill,
+      filledCells,
     };
   }
   let rows = shownRowRunsOfSpan(state, reads, state.sheetId, {
@@ -327,9 +327,9 @@ export function fillCellsEdit(
         source: sourceRange,
         linesToFill: {
           kind: 'rows',
-          rows: rows,
+          rows,
         },
-        filledCells: filledCells,
+        filledCells,
       };
 }
 export function areaAddedByFill(area: CellArea, grown: CellArea): CellArea {
@@ -352,7 +352,7 @@ export function areaAddedByFill(area: CellArea, grown: CellArea): CellArea {
 }
 export function finishFill(
   state: PageState,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: FillContext,
+  { reads, refusalOfEveryEdit }: FillContext,
   grown: CellArea | null,
 ): PageTransition {
   let stopped = withoutFillDrag(state);
@@ -371,7 +371,7 @@ export function finishFill(
         asked: 'fill',
       },
     });
-  let undoOffer =
+  let undoOffer: FilledByFingerOffer | null =
     state.dragging?.kind === 'filling' && state.dragging.grip !== null
       ? {
           kind: 'filledByFinger',
@@ -383,7 +383,7 @@ export function finishFill(
     select: filled,
     foundBy: 'fillHandle',
     done: 'filled',
-    undoOffer: undoOffer,
+    undoOffer,
   });
 }
 export function fillDownToTableEnd(state: PageState, workbook: FillContext): PageTransition {
@@ -490,14 +490,14 @@ export const startFillDrag = (state: PageState, point: GridPoint, grip: GridPoin
     pointedAt: null,
     isMoreAcross: false,
     tap: null,
-    grip: grip,
+    grip,
   } satisfies FillingDrag,
 });
 export const offsetOutsideSpan = (index: number, start: number, count: number): number =>
   index < start ? index - start : Math.max(0, index - (start + count - 1));
 export const distanceOutsideSpan = (position: number, start: number, end: number): number =>
   Math.max(start - position, position - end, 0);
-export const visibleSpanStart = ({ start: start, showFrom: showFrom }: Pick<SpanOnScreen, 'start' | 'showFrom'>): number =>
+export const visibleSpanStart = ({ start, showFrom }: Pick<SpanOnScreen, 'start' | 'showFrom'>): number =>
   showFrom === 0 ? start : Math.max(start, showFrom);
 export const pointLessGrip = (point: GridPoint, grip: GridPoint | null): GridPoint => ({
   x: point.x - (grip?.x ?? 0),

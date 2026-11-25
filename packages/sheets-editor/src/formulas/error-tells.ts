@@ -1,4 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CauseCell, CauseOfError, CellAt, ErrorValue, SpillContents } from '@open-artifact/sheets-core';
+import type { ErrorTell } from '../messages/formula-errors.ts';
+import type { CauseOfErrorSaid, CellId } from '../model/workbook.ts';
+import type { CellPosition } from '../selection/model.ts';
+import type { ErrorExplained } from '../state/initial-state.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { resolvePlaceArea } from '../agent/changes-by-agent.ts';
 import { spanOfIndexes } from '../model/a1-references.ts';
@@ -7,37 +11,64 @@ import { sheetPrefixForFormula } from './references.ts';
 import { readsAsStored } from '../model/workbook.ts';
 import { findFormulaFault } from './typed-faults.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function errorCodeOfCell(cell?: Dynamic) {
+/** A cell to read the error of, as `cellValueOf` reads it. */
+export type CellWithErrorToRead = Parameters<typeof cellValueOf>[0];
+/**
+ * A cause of a formula's error to explain: one the engine tells, or one of the kinds it may yet tell, which are
+ * explained when they come.
+ */
+export type CauseOfErrorToExplain =
+  | CauseOfError
+  | { kind: 'holdsANestedSubtotal'; cell: CauseCell }
+  | { kind: 'noSuchCell'; address: string }
+  | { kind: 'severalCellsForOneValue'; function: string; argument: string | null }
+  | { kind: 'operandsOfDifferentSizes' }
+  | { kind: 'noSuchColumnToSortBy'; function: string; range: string; columns: number; column: number }
+  | { kind: 'sortOrderIsNotRead'; function: string; order: string }
+  | { kind: 'functionCodeSkipsHiddenRows'; function: string; functionCode: number; codeThatCountsHiddenRows: number }
+  | { kind: 'argumentIsNoReference'; function: string; argument: string }
+  | { kind: 'wordIsNotRead'; function: string; word: string }
+  | { kind: 'pivotTotalsNothing' | 'pivotWithColumnsTotalsSeveral' };
+/** A cause that lies in another cell. */
+export type CauseAtCell = Extract<CauseOfErrorToExplain, { cell: CauseCell }>;
+/** A cell a formula's error comes from, where it is, and how the formula's sheet writes it. */
+export interface CellWrittenFor {
+  cellId: CellId;
+  at: CellPosition;
+  written: string;
+}
+export function errorCodeOfCell(cell: CellWithErrorToRead): ErrorValue | null {
   let value = cellValueOf(cell);
   return value?.kind === 'error' ? value.value : null;
 }
-export function showsRealError(cell?: Dynamic) {
+export function showsRealError(cell: CellWithErrorToRead): boolean {
   let errorCode = errorCodeOfCell(cell);
   return errorCode !== null && errorCode !== '#TIMEOUT!';
 }
-export function explainFilledCellsInTheWay(reads: WorkbookReads, formulaCell?: Dynamic, bottomRight?: Dynamic) {
-  let { sheetId: sheetId } = formulaCell;
+/** Why an array cannot spill when two filled cells or more are in its way, or `null` when only one is. */
+export function explainFilledCellsInTheWay(reads: WorkbookReads, formulaCell: CellId, bottomRight: CellAt): ErrorTell | null {
+  let { sheetId } = formulaCell;
   let cells = {
     topLeft: {
       r: formulaCell.rowId,
       c: formulaCell.columnId,
     },
-    bottomRight: bottomRight,
+    bottomRight,
   };
   let spillArea =
     resolvePlaceArea(
       {
-        sheetId: sheetId,
-        cells: cells,
+        sheetId,
+        cells,
       },
       reads,
     )?.area ?? null;
   let inTheWay = (spillArea === null ? [] : reads.filledCellsIn(sheetId, spillArea))
-    .filter(({ rowId: rowId, columnId: columnId }: Dynamic) => rowId !== formulaCell.rowId || columnId !== formulaCell.columnId)
-    .flatMap((input?: Dynamic) => reads.positionOfCell(input) ?? []);
+    .filter(({ rowId, columnId }) => rowId !== formulaCell.rowId || columnId !== formulaCell.columnId)
+    .flatMap((cellId) => reads.positionOfCell(cellId) ?? []);
   if (inTheWay.length < 2) return null;
-  let rowSpan = spanOfIndexes(inTheWay.map(({ rowIndex: rowIndex }: Dynamic) => rowIndex));
-  let columnSpan = spanOfIndexes(inTheWay.map(({ columnIndex: columnIndex }: Dynamic) => columnIndex));
+  let rowSpan = spanOfIndexes(inTheWay.map(({ rowIndex }) => rowIndex));
+  let columnSpan = spanOfIndexes(inTheWay.map(({ columnIndex }) => columnIndex));
   let [topRow, leftColumn] = [rowSpan.firstIndex, columnSpan.firstIndex];
   if (topRow === spillArea?.topRowIndex && leftColumn === spillArea.leftColumnIndex) {
     if (inTheWay.length > MAX_FEW_CELLS_IN_THE_WAY)
@@ -46,8 +77,7 @@ export function explainFilledCellsInTheWay(reads: WorkbookReads, formulaCell?: D
         count: inTheWay.length,
       };
     inTheWay.sort(
-      (input?: Dynamic, options?: Dynamic) =>
-        input.rowIndex === options.rowIndex ? input.columnIndex - options.columnIndex : input.rowIndex - options.rowIndex,
+      (one, other) => (one.rowIndex === other.rowIndex ? one.columnIndex - other.columnIndex : one.rowIndex - other.rowIndex),
     );
     return {
       cause: 'fewFilledCellsOnTwoSidesInTheWay',
@@ -68,14 +98,18 @@ export function explainFilledCellsInTheWay(reads: WorkbookReads, formulaCell?: D
     ),
   };
 }
-export function explainBlockedSpill(reads: WorkbookReads, formulaCell: Dynamic, { by: by, wouldFillTo: wouldFillTo }: Dynamic) {
-  let { sheetId: sheetId } = formulaCell;
+export function explainBlockedSpill(
+  reads: WorkbookReads,
+  formulaCell: CellId,
+  { by, wouldFillTo }: Extract<SpillContents, { kind: 'blocked' }>,
+): ErrorTell | null {
+  let { sheetId } = formulaCell;
   if (by.kind === 'endOfSheet')
     return {
       cause: 'sheetEndsTooSoon',
     };
   let position = reads.positionOfCell({
-    sheetId: sheetId,
+    sheetId,
     rowId: by.cell.r,
     columnId: by.cell.c,
   });
@@ -96,33 +130,37 @@ export function explainBlockedSpill(reads: WorkbookReads, formulaCell: Dynamic, 
       };
   }
 }
-export function cellWrittenFor(reads: WorkbookReads, formulaCell: Dynamic, { sheetId: sheetId, cell: { r: rowId, c: columnId } }: Dynamic) {
-  let cellId = {
-    sheetId: sheetId,
-    rowId: rowId,
-    columnId: columnId,
+export function cellWrittenFor(
+  reads: WorkbookReads,
+  formulaCell: CellId,
+  { sheetId, cell: { r: rowId, c: columnId } }: CauseCell,
+): CellWrittenFor | null {
+  let cellId: CellId = {
+    sheetId,
+    rowId,
+    columnId,
   };
   let position = reads.positionOfCell(cellId);
   if (position === null) return null;
   let address = addressOfPosition(position);
   if (sheetId === formulaCell.sheetId)
     return {
-      cellId: cellId,
+      cellId,
       at: position,
       written: address,
     };
-  let sheetName = reads.listSheets().find((input?: Dynamic) => input.sheetId === sheetId)?.name;
+  let sheetName = reads.listSheets().find((summary) => summary.sheetId === sheetId)?.name;
   if (sheetName === undefined) return null;
   return {
-    cellId: cellId,
+    cellId,
     at: position,
     written: `${sheetPrefixForFormula(sheetName)}${address}`,
   };
 }
-export function explainCauseAtCell(reads: WorkbookReads, formulaCell: Dynamic, { kind: kind, cell: cell }: Dynamic) {
+export function explainCauseAtCell(reads: WorkbookReads, formulaCell: CellId, { kind, cell }: CauseAtCell): ErrorTell | null {
   let written = cellWrittenFor(reads, formulaCell, cell);
   if (written === null) return null;
-  let { cellId: cellId, at: position, written: address } = written;
+  let { cellId, at: position, written: address } = written;
   switch (kind) {
     case 'showsTheSameError':
       return {
@@ -173,21 +211,26 @@ export function explainCauseAtCell(reads: WorkbookReads, formulaCell: Dynamic, {
           cause: 'textInArithmetic',
           cell: address,
         };
-      let toRow = cellWrittenFor(reads, formulaCell, {
+      let spilledFrom = cellWrittenFor(reads, formulaCell, {
         sheetId: cellId.sheetId,
         cell: shown.from,
       });
-      return toRow === null
+      return spilledFrom === null
         ? null
         : {
             cause: 'spilledTextInArithmetic',
             cell: address,
-            from: toRow.written,
+            from: spilledFrom.written,
           };
     }
   }
 }
-export function explainCauseOfError(reads: WorkbookReads, formulaCell?: Dynamic, errorCode?: Dynamic, cause?: Dynamic) {
+export function explainCauseOfError(
+  reads: WorkbookReads,
+  formulaCell: CellId,
+  errorCode: ErrorValue,
+  cause: CauseOfErrorToExplain,
+): ErrorTell | null {
   switch (cause.kind) {
     case 'showsTheSameError':
     case 'isBlankAndDividedBy':
@@ -282,20 +325,20 @@ export function explainCauseOfError(reads: WorkbookReads, formulaCell?: Dynamic,
         hasSeveralConditions: cause.hasSeveralConditions,
       };
     case 'conditionsDoNotFitTheRange': {
-      let { function: tell, range: range, condition: condition, canBeARow: canBeARow } = cause;
+      let { function: functionName, range, condition, canBeARow } = cause;
       return cause.hasSeveralConditions
         ? {
             cause: 'conditionsOfAnotherSize',
-            name: tell,
-            range: range,
-            canBeARow: canBeARow,
+            name: functionName,
+            range,
+            canBeARow,
           }
         : {
             cause: 'includeOfAnotherSize',
-            name: tell,
+            name: functionName,
             include: condition,
-            range: range,
-            canBeARow: canBeARow,
+            range,
+            canBeARow,
           };
     }
     case 'rangesOfDifferentSizes':
@@ -303,6 +346,11 @@ export function explainCauseOfError(reads: WorkbookReads, formulaCell?: Dynamic,
         cause: cause.kind,
         name: cause.function,
       };
+    case 'wordIsNotRead':
+      return { cause: cause.kind, name: cause.function, word: cause.word };
+    case 'pivotTotalsNothing':
+    case 'pivotWithColumnsTotalsSeveral':
+      return { cause: cause.kind };
     case 'noSuchColumnToSortBy':
       return {
         cause: cause.kind,
@@ -332,28 +380,29 @@ export function explainCauseOfError(reads: WorkbookReads, formulaCell?: Dynamic,
       };
   }
 }
-export function explainErrorPassedOn(reads: WorkbookReads, formulaCell: Dynamic, { cause: cause, passedOnFrom: passedOnFrom }: Dynamic) {
+/** Why a formula shows the error of a cell it uses, when that cell has it from one further back. */
+export function explainErrorPassedOn(reads: WorkbookReads, formulaCell: CellId, { cause, passedOnFrom }: CauseOfErrorSaid): ErrorTell | null {
   if (cause?.kind !== 'showsTheSameError' || passedOnFrom === null) return null;
   let [causeCell, fromCell] = [cellWrittenFor(reads, formulaCell, cause.cell), cellWrittenFor(reads, formulaCell, passedOnFrom)];
   if (fromCell === null || fromCell.written === causeCell?.written) return null;
-  let tell = {
+  let tell: ErrorTell = {
     cause: 'comesFromACellFurtherBack',
     cell: fromCell.written,
   };
   return isTellShortEnough(tell) ? tell : null;
 }
-export function explainCellError(readsSeen?: Dynamic, cell?: Dynamic) {
+export function explainCellError(readsSeen: WorkbookReads, cell: CellId): ErrorExplained | null {
   let reads = readsAsStored(readsSeen);
   let shown = reads.cellOnShowIn(cell);
   let errorCode = errorCodeOfCell(shown);
   if (shown === null || errorCode === null) return null;
   if (errorCode === '#TIMEOUT!') return TIMEOUT_ERROR_TELL;
-  let cacheOfReads = ERROR_TELL_CACHE.get(reads) ?? new (Map as Dynamic)();
+  let cacheOfReads = ERROR_TELL_CACHE.get(reads) ?? new Map<string, ErrorExplained>();
   ERROR_TELL_CACHE.set(reads, cacheOfReads);
   let cached = cacheOfReads.get(cellKeyOf(cell));
   if (cached !== undefined) return cached;
-  let tell: Dynamic = null;
-  let isTellStale: Dynamic = false;
+  let tell: ErrorTell | null = null;
+  let isTellStale = false;
   if ('input' in shown && shown.input.kind === 'formula' && shown.formulaText !== undefined) {
     if (shown.spill?.kind === 'blocked') tell = explainBlockedSpill(reads, cell, shown.spill);
     else if (errorCode === '#ERROR!')
@@ -380,12 +429,12 @@ export function explainCellError(readsSeen?: Dynamic, cell?: Dynamic) {
 }
 export const MAX_TELL_TEXT_LENGTH = 32;
 export const UNTELLABLE_CHAR_PATTERN = /["“”„‟«»＂″‶〝〞〟\p{C}\p{Zl}\p{Zp}]/u;
-export const isTellShortEnough = (tell?: Dynamic) =>
+export const isTellShortEnough = (tell: ErrorTell): boolean =>
   Object.entries(tell).every(
-    ([key, value]: Dynamic) =>
+    ([key, value]: [string, unknown]) =>
       key === 'cause' || typeof value !== 'string' || (value.length <= MAX_TELL_TEXT_LENGTH && !UNTELLABLE_CHAR_PATTERN.test(value)),
   );
-export const addressOfPosition = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+export const addressOfPosition = ({ rowIndex, columnIndex }: CellPosition): string =>
   areaToA1AsStored(
     {
       topRowIndex: rowIndex,
@@ -396,9 +445,9 @@ export const addressOfPosition = ({ rowIndex: rowIndex, columnIndex: columnIndex
     null,
   );
 export const MAX_FEW_CELLS_IN_THE_WAY = 3;
-export const cellKeyOf = ({ sheetId: sheetId, rowId: rowId, columnId: columnId }: Dynamic) => `${sheetId}/${rowId}/${columnId}`;
-export const ERROR_TELL_CACHE = new (WeakMap as Dynamic)();
-export const TIMEOUT_ERROR_TELL = {
+export const cellKeyOf = ({ sheetId, rowId, columnId }: CellId): string => `${sheetId}/${rowId}/${columnId}`;
+export const ERROR_TELL_CACHE = new WeakMap<WorkbookReads, Map<string, ErrorExplained>>();
+export const TIMEOUT_ERROR_TELL: ErrorExplained = {
   code: '#TIMEOUT!',
   tell: null,
 };

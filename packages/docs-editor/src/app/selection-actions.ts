@@ -2,7 +2,7 @@
 import type { ComponentType } from 'react';
 import { create } from 'zustand';
 
-export type SelectionActionKey = 'editWithAgent' | 'comment' | 'react';
+export type SelectionActionKey = 'comment' | 'react';
 
 /** One extra button of the selection toolbar. */
 export interface SelectionAction {

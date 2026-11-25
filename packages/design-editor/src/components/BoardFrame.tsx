@@ -28,12 +28,14 @@ export interface BoardFrameProps {
   onNavigate?: (path: string) => void;
   /** Keep the frame transparent until its board boots (a snapshot is drawn under it). */
   hideUntilBooted?: boolean;
+  /** Keep the frame running but out of sight (a resting artboard, drawn from its snapshot). */
+  hidden?: boolean;
 }
 
 /** Absolute URLs the frame document needs. */
 const urls = () => ({ runtime: new URL('support.js', location.href).toString(), project: new URL('project/', location.href).toString() });
 
-export function BoardFrame({ path, mode, width, height, interactive, onNavigate, hideUntilBooted = false }: BoardFrameProps) {
+export function BoardFrame({ path, mode, width, height, interactive, onNavigate, hideUntilBooted = false, hidden = false }: BoardFrameProps) {
   const ref = useRef<HTMLIFrameElement>(null);
   const sent = useRef<string | null>(null);
   const liveMode = useRef(mode);
@@ -142,7 +144,7 @@ export function BoardFrame({ path, mode, width, height, interactive, onNavigate,
       data-board={path}
       sandbox="allow-scripts allow-same-origin allow-popups"
       className="block border-0 bg-white"
-      style={{ width, height, pointerEvents: interactive ? 'auto' : 'none', ...(hideUntilBooted && !booted ? { opacity: 0 } : {}) }}
+      style={{ width, height, pointerEvents: interactive ? 'auto' : 'none', ...(hideUntilBooted && !booted ? { opacity: 0 } : {}), ...(hidden ? { visibility: 'hidden' } : {}) }}
     />
   );
 }

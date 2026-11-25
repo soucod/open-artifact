@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import { isEntryUntouched } from '../formulas/reference-pointing.ts';
@@ -9,31 +8,61 @@ import { normalizeLineBreaks, trimTrailingNewlines, flattenEnteredText } from '.
 import { isOneLineEditor } from '../state/transitions.ts';
 import { textWithMarkSignsRead } from './entry-looks.ts';
 import { linkOfAddressPastedOverWords } from '../links/links-in-entry.ts';
-export let isPastingIntoEntry: Dynamic;
-export function forgetCaretPlacement(box?: Dynamic, mode?: Dynamic) {
+import type { EntryEditorElement } from '../dom/entry-editor.ts';
+import type { EditingMode, PageMode } from '../state/transitions.ts';
+import type { SheetController } from '../state/controller.ts';
+import type { AddressPastedOverWords, CaretInEntry } from '../state/event-reducer.ts';
+import type { KeyAct } from '../keys/key-acts.ts';
+import type { PageView } from '../view/page-view.ts';
+/** A box an entry is typed in: the cell's editor, or a text field. */
+export type EntryBox = HTMLInputElement | HTMLTextAreaElement | EntryEditorElement;
+/** The boxes an entry can be typed in: in the cell and in the formula bar. */
+export interface EntryBoxes {
+  cell: React.RefObject<EntryBox | null>;
+  formulaBar: React.RefObject<HTMLTextAreaElement | null>;
+}
+/** The controller as the entry boxes use it. */
+export type EntryBoxStore = Pick<SheetController, 'getView' | 'dispatch' | 'subscribe' | 'mayAnEntryOpenOrEnd'>;
+/** A caret kept as its start and end. */
+export type CaretEnds = [number | null, number | null];
+/** The caret last seen in a box, with the text it was in; no caret when it is to be found again. */
+export interface CaretRemembered {
+  text: string;
+  at: CaretEnds | null;
+}
+/** The caret in an entry, and whether it was put there by hand rather than left where the page put it. */
+export interface CaretInEntryPlaced extends CaretInEntry {
+  isPlacedByHand?: true;
+}
+/** A listener the entry boxes add to their document, with the event it hears. */
+type DocumentListener = [type: string, listener: (event: Event) => void];
+/** A write of text into an entry box. */
+export type WriteInEntry = Extract<KeyAct, { kind: 'writeInEntry' }>;
+export let isPastingIntoEntry: boolean;
+export function forgetCaretPlacement(box: EntryBox, mode: PageMode): void {
   if (isEntryUntouched(mode))
     caretMemory.set(box, {
       text: box.value,
       at: null,
     });
 }
-export function isCaretWhereLeft(box?: Dynamic, mode?: Dynamic) {
-  let { value: text, selectionStart: selectionStart, selectionEnd: selectionEnd } = box;
+export function isCaretWhereLeft(box: EntryBox, mode: PageMode): boolean {
+  let { value: text, selectionStart, selectionEnd } = box;
   let remembered = caretMemory.get(box);
-  let defaultCaret = isEntryUntouched(mode) ? [selectionStart, selectionEnd] : [text.length, text.length];
+  let defaultCaret: CaretEnds = isEntryUntouched(mode) ? [selectionStart, selectionEnd] : [text.length, text.length];
   let caret = remembered?.text === text ? remembered.at : defaultCaret;
   let isUnmoved = selectionStart === caret?.[0] && selectionEnd === caret[1];
   caretMemory.set(box, {
-    text: text,
+    text,
     at: isUnmoved ? caret : null,
   });
   return isUnmoved;
 }
-export function caretInEntryPatch(mode?: Dynamic, boxes?: Dynamic) {
+export function caretInEntryPatch(mode: PageMode, boxes: EntryBoxes): { caretInEntry?: CaretInEntryPlaced } {
   let box = typingBoxOf(mode, boxes);
-  let { selectionStart = null, selectionEnd = null } = box ?? {};
+  let { selectionStart = null, selectionEnd = null }: Partial<Pick<EntryBox, 'selectionStart' | 'selectionEnd'>> = box ?? {};
   if (box === null || selectionStart === null || selectionEnd === null) return {};
-  let caret = {
+  let caret: CaretInEntry = {
     start: selectionStart,
     end: selectionEnd,
     text: box.value,
@@ -48,15 +77,15 @@ export function caretInEntryPatch(mode?: Dynamic, boxes?: Dynamic) {
         },
   };
 }
-export function giveEntryBoxOfItsOwn(store: Dynamic, { cell: cell }: Dynamic) {
-  let { mode: mode } = store.getView();
+export function giveEntryBoxOfItsOwn(store: Omit<EntryBoxStore, 'subscribe'>, { cell }: Pick<EntryBoxes, 'cell'>): void {
+  let { mode } = store.getView();
   let cellBox = cell.current;
   if (mode.kind !== 'editing' || mode.isInBoxOfOneLine !== true || cellBox === null) return;
   if (composingBoxes.has(cellBox) || store.mayAnEntryOpenOrEnd()) return;
   let ownerDocument = cellBox.ownerDocument;
   let isFocused = cellBox === ownerDocument.activeElement;
   if (isFocused && !ownerDocument.hasFocus()) return;
-  let { selectionStart: selectionStart, selectionEnd: selectionEnd } = cellBox;
+  let { selectionStart, selectionEnd } = cellBox;
   ReactDOM.flushSync(
     () =>
       store.dispatch({
@@ -65,15 +94,15 @@ export function giveEntryBoxOfItsOwn(store: Dynamic, { cell: cell }: Dynamic) {
   );
   if (isFocused && cell.current !== cellBox) cell.current?.setSelectionRange(selectionStart, selectionEnd);
 }
-export function giveEntryBoxToFormat(store?: Dynamic, boxes?: Dynamic) {
-  let { mode: mode } = store.getView();
+export function giveEntryBoxToFormat(store: Omit<EntryBoxStore, 'subscribe'>, boxes: EntryBoxes): void {
+  let { mode } = store.getView();
   let box = typingBoxOf(mode, boxes);
   if (mode.kind !== 'editing' || box === null) return;
   if (doesFormatNeedOwnBox(mode.typingIn, box)) giveEntryBoxOfItsOwn(store, boxes);
 }
-export function writeIntoBox(box?: Dynamic, text?: Dynamic, caretAt?: Dynamic) {
+export function writeIntoBox(box: EntryBox, text: string, caretAt?: number): void {
   let oldText = box.value;
-  let { from: from, to: to, written: written } = diffTexts(oldText, text, caretAt);
+  let { from, to, written } = diffTexts(oldText, text, caretAt);
   if (isEntryEditor(box)) return box.replaceText(from, to, written);
   let scrollFromEnd = box.scrollWidth - box.scrollLeft;
   box.setSelectionRange(from, to);
@@ -90,30 +119,30 @@ export function writeIntoBox(box?: Dynamic, text?: Dynamic, caretAt?: Dynamic) {
     box.scrollTop = box.scrollHeight;
 }
 export function createWrittenTextLog() {
-  let writes = new (Set as Dynamic)();
+  let writes = new Set<string>();
   return {
-    wrote: (before?: Dynamic, after?: Dynamic) => void writes.add(JSON.stringify([before, after])),
-    has: (direction?: Dynamic, before?: Dynamic, after?: Dynamic) =>
+    wrote: (before: string, after: string): void => void writes.add(JSON.stringify([before, after])),
+    has: (direction: 'undo' | 'redo', before: string, after: string): boolean =>
       writes.has(JSON.stringify(direction === 'undo' ? [after, before] : [before, after])),
     clear: () => writes.clear(),
   };
 }
-export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaBar }: Dynamic) {
+export function useEntryBoxes(store: EntryBoxStore, { cell, formulaBar }: EntryBoxes): (write: WriteInEntry) => void {
   let [writtenLog] = React.useState(createWrittenTextLog);
   React.useEffect(() => {
     let ownerDocument = formulaBar.current?.ownerDocument;
-    let lastPointed: Dynamic = null;
-    let typingBox: Dynamic = null;
+    let lastPointed: PageView['pointedReference'] = null;
+    let typingBox: EntryBox | null = null;
     let unsubscribe = store.subscribe(() => {
-      let { pointedReference: pointedReference, mode: mode } = store.getView();
+      let { pointedReference, mode } = store.getView();
       let box = typingBoxOf(mode, {
-        cell: cell,
-        formulaBar: formulaBar,
+        cell,
+        formulaBar,
       });
       if (box !== typingBox) writtenLog.clear();
       if (box !== typingBox && typingBox !== null) caretMemory.delete(typingBox);
       if (box === null) {
-        for (let { current: boxElement } of [cell, formulaBar] as Dynamic) if (boxElement !== null) caretMemory.delete(boxElement);
+        for (let { current: boxElement } of [cell, formulaBar]) if (boxElement !== null) caretMemory.delete(boxElement);
       }
       typingBox = box;
       if (pointedReference === lastPointed) return;
@@ -126,9 +155,9 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
       box.setSelectionRange(pointedReference.end, pointedReference.end);
       rememberCaretAtEnd(box);
     });
-    let textBeforeInput: Dynamic = '';
-    let onBeforeInput = (event?: Dynamic) => {
-      let { target: target } = event;
+    let textBeforeInput = '';
+    let onBeforeInput = (event: Event) => {
+      let { target } = event;
       if (target === typingBox && typingBox !== null) textBeforeInput = typingBox.value;
       if (
         event instanceof InputEvent &&
@@ -139,8 +168,8 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
       )
         event.preventDefault();
     };
-    let pasteAddressOverWords = (box?: Dynamic, link?: Dynamic) => {
-      let { value: value, selectionEnd: selectionEnd } = box;
+    let pasteAddressOverWords = (box: EntryEditorElement | HTMLTextAreaElement, link: Pick<AddressPastedOverWords, 'address' | 'start' | 'end'>) => {
+      let { value, selectionEnd } = box;
       store.dispatch({
         kind: 'addressPastedOverWords',
         ...link,
@@ -151,17 +180,17 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
     };
     let defaultView = ownerDocument?.defaultView ?? null;
     let pasteKeys = defaultView === null ? null : createPasteKeyTracker(defaultView);
-    let replaceAndReadSigns = (editor?: Dynamic, text?: Dynamic) => {
-      let { selectionStart: selectionStart } = editor;
+    let replaceAndReadSigns = (editor: EntryEditorElement, text: string) => {
+      let { selectionStart } = editor;
       editor.replaceText(selectionStart, editor.selectionEnd, text);
       if (store.getView().grid.doesEntryReadSigns)
         editor.readSigns(selectionStart, selectionStart + text.length, pasteKeys?.isWithoutFormatting() !== true);
     };
-    let listeners = [
+    let listeners: DocumentListener[] = [
       ['beforeinput', onBeforeInput],
       [
         'paste',
-        (event?: Dynamic) => {
+        (event) => {
           let box = entryEditorOf(event.target);
           if (box === null || (box !== cell.current && box !== formulaBar.current)) return;
           if (store.getView().mode.kind !== 'editing' && box === cell.current) return;
@@ -175,9 +204,9 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
             !composingBoxes.has(box)
           )
             giveEntryBoxOfItsOwn(store, {
-              cell: cell,
+              cell,
             });
-          let { mode: mode } = store.getView();
+          let { mode } = store.getView();
           let flatText = mode.kind === 'editing' && isOneLineEditor(mode) ? flattenEnteredText(text) : trimTrailingNewlines(text);
           let barReadingSigns =
             pasteKeys?.isWithoutFormatting() === true && box === formulaBar.current && store.getView().grid.doesEntryReadSigns
@@ -191,9 +220,11 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
                   flatText,
                   barReadingSigns.value.slice(barReadingSigns.selectionEnd ?? 0),
                 );
-          let activeElement = ownerDocument?.activeElement;
+          // The listeners are added only to a document that is there.
+          let activeElement = ownerDocument?.activeElement as Element | null;
           let isBarActive = activeElement instanceof HTMLTextAreaElement && activeElement === formulaBar.current;
-          let activeBox = isEntryEditor(activeElement) || isBarActive ? activeElement : null;
+          // isBarActive holds only for the formula bar's text area.
+          let activeBox = isEntryEditor(activeElement) || isBarActive ? (activeElement as EntryEditorElement | HTMLTextAreaElement) : null;
           let linkOverWords =
             activeBox !== null &&
             store.getView().doesKeyOpenLinkForm &&
@@ -230,13 +261,13 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
       ],
       [
         'input',
-        (event?: Dynamic) => {
+        (event) => {
           let inputType = event instanceof InputEvent ? event.inputType : null;
-          for (let { current: boxElement } of [cell, formulaBar] as Dynamic)
+          for (let { current: boxElement } of [cell, formulaBar])
             if (boxElement !== null && boxElement === event.target) rememberCaretAtEnd(boxElement);
           if (event.target !== typingBox || typingBox === null) return;
           if (inputType !== 'historyUndo' && inputType !== 'historyRedo') return;
-          let direction = inputType === 'historyUndo' ? 'undo' : 'redo';
+          let direction: 'undo' | 'redo' = inputType === 'historyUndo' ? 'undo' : 'redo';
           if (writtenLog.has(direction, textBeforeInput, typingBox.value))
             typingBox.setSelectionRange(typingBox.selectionEnd, typingBox.selectionEnd);
         },
@@ -249,27 +280,27 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
       ],
       [
         'contextmenu',
-        ({ target: target }: Dynamic) => {
+        ({ target }) => {
           if (entryEditorOf(target) === typingBox && typingBox !== null && isEntryUntouched(store.getView().mode)) caretMemory.delete(typingBox);
         },
       ],
-      ['compositionstart', ({ target: target }: Dynamic) => void (target !== null && composingBoxes.add(entryEditorOf(target) ?? target))],
-      ['compositionend', ({ target: target }: Dynamic) => void (target !== null && composingBoxes.delete(entryEditorOf(target) ?? target))],
+      ['compositionstart', ({ target }) => void (target !== null && composingBoxes.add(entryEditorOf(target) ?? target))],
+      ['compositionend', ({ target }) => void (target !== null && composingBoxes.delete(entryEditorOf(target) ?? target))],
     ];
-    for (let [type, listener] of listeners as Dynamic) ownerDocument?.addEventListener(type, listener, true);
+    for (let [type, listener] of listeners) ownerDocument?.addEventListener(type, listener, true);
     return () => {
       unsubscribe();
       pasteKeys?.stop();
-      for (let [type, listener] of listeners as Dynamic) ownerDocument?.removeEventListener(type, listener, true);
+      for (let [type, listener] of listeners) ownerDocument?.removeEventListener(type, listener, true);
     };
   }, [store, cell, formulaBar, writtenLog]);
   return React.useCallback(
-    ({ text: text, caretAt: caretAt, typingIn: typingIn }: Dynamic) => {
+    ({ text, caretAt, typingIn }: WriteInEntry) => {
       let box = (
         {
-          cell: cell,
-          formulaBar: formulaBar,
-        } as Dynamic
+          cell,
+          formulaBar,
+        }
       )[typingIn].current;
       if (box === null || box !== box.ownerDocument.activeElement || box.value === text) return;
       writtenLog.wrote(box.value, text);
@@ -280,21 +311,24 @@ export function useEntryBoxes(store: Dynamic, { cell: cell, formulaBar: formulaB
     [cell, formulaBar, writtenLog],
   );
 }
-export const typingBoxOf = (mode?: Dynamic, boxes?: Dynamic) => (mode.kind === 'editing' ? boxes[mode.typingIn].current : null);
-export const composingBoxes = new (WeakSet as Dynamic)();
+export const typingBoxOf = (mode: PageMode, boxes: EntryBoxes): EntryBox | null => (mode.kind === 'editing' ? boxes[mode.typingIn].current : null);
+export const composingBoxes = new WeakSet<EventTarget>();
 isPastingIntoEntry = false;
-export const isPastingIntoEntryNow = () => isPastingIntoEntry;
-export const caretMemory = new (WeakMap as Dynamic)();
-export const rememberCaretAtEnd = (box?: Dynamic) =>
+export const isPastingIntoEntryNow = (): boolean => isPastingIntoEntry;
+export const caretMemory = new WeakMap<EntryBox, CaretRemembered>();
+export const rememberCaretAtEnd = (box: EntryBox): void =>
   void caretMemory.set(box, {
     text: box.value,
     at: [box.selectionEnd, box.selectionEnd],
   });
 export const giveEntryBoxOfItsOwnAlias = giveEntryBoxOfItsOwn;
-export const doesFormatNeedOwnBox = (typingIn: Dynamic, { selectionStart: selectionStart, selectionEnd: selectionEnd }: Dynamic) =>
+export const doesFormatNeedOwnBox = (
+  typingIn: EditingMode['typingIn'],
+  { selectionStart, selectionEnd }: Pick<EntryBox, 'selectionStart' | 'selectionEnd'>,
+): boolean =>
   typingIn === 'formulaBar' || selectionStart !== selectionEnd;
 export const PASTE_LINES_LEFT_TO_BROWSER = 50;
-export const isPasteLeftToBrowser = (pasted?: Dynamic, text?: Dynamic, isCaretAtEnd?: Dynamic) =>
+export const isPasteLeftToBrowser = (pasted: string, text: string, isCaretAtEnd: boolean): boolean =>
   text === pasted ||
   (isCaretAtEnd &&
     text.split(`

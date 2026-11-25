@@ -1,6 +1,6 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { FindView } from '../view/page-view.ts';
 import { translateMessage } from './messages.ts';
-export function findMatchCounterText({ count: count, isCapped: isCapped, at: at }: Dynamic) {
+export function findMatchCounterText({ count, isCapped, at }: Pick<FindView, 'count' | 'isCapped' | 'at'>): string {
   if (at === null && count > 0)
     return isCapped
       ? translateMessage(
@@ -9,7 +9,7 @@ export function findMatchCounterText({ count: count, isCapped: isCapped, at: at 
             id: 'Rxin/NZUDF',
           },
           {
-            count: count,
+            count,
           },
         )
       : String(count);
@@ -21,7 +21,7 @@ export function findMatchCounterText({ count: count, isCapped: isCapped, at: at 
         },
         {
           at: at ?? 0,
-          count: count,
+          count,
         },
       )
     : translateMessage(
@@ -31,11 +31,11 @@ export function findMatchCounterText({ count: count, isCapped: isCapped, at: at 
         },
         {
           at: at ?? 0,
-          count: count,
+          count,
         },
       );
 }
-export function findMatchHeardAs({ count: count, isCapped: isCapped, at: at, cell: cell, shown: shown }: Dynamic) {
+export function findMatchHeardAs({ count, isCapped, at, cell, shown }: Pick<FindView, 'count' | 'isCapped' | 'at' | 'cell' | 'shown'>): string {
   if (count === 0) return findBarMessages.noMatches();
   if (at === null)
     return isCapped
@@ -45,7 +45,7 @@ export function findMatchHeardAs({ count: count, isCapped: isCapped, at: at, cel
             id: 'YOSM40CxnE',
           },
           {
-            count: count,
+            count,
           },
         )
       : translateMessage(
@@ -54,7 +54,7 @@ export function findMatchHeardAs({ count: count, isCapped: isCapped, at: at, cel
             id: 'Q1nX2g7C+W',
           },
           {
-            count: count,
+            count,
           },
         );
   return isCapped
@@ -64,10 +64,10 @@ export function findMatchHeardAs({ count: count, isCapped: isCapped, at: at, cel
           id: 'lja8oqQTRX',
         },
         {
-          at: at,
-          count: count,
-          cell: cell,
-          shown: shown,
+          at,
+          count,
+          cell,
+          shown,
         },
       )
     : translateMessage(
@@ -76,10 +76,10 @@ export function findMatchHeardAs({ count: count, isCapped: isCapped, at: at, cel
           id: 'TCkgeNsG1X',
         },
         {
-          at: at,
-          count: count,
-          cell: cell,
-          shown: shown,
+          at,
+          count,
+          cell,
+          shown,
         },
       );
 }
@@ -180,23 +180,23 @@ export const findBarMessages = {
       id: 'ZaXupTffZD',
     }),
 };
-export const selectedCellsScopeLabel = (cells?: Dynamic) =>
+export const selectedCellsScopeLabel = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Selected cells ({cells})',
       id: 'i88OuJg/Bg',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const searchInButtonLabel = (chosen?: Dynamic) =>
+export const searchInButtonLabel = (chosen: string): string =>
   translateMessage(
     {
       defaultMessage: 'Search in: {chosen}',
       id: 'sm0Pl92YNe',
     },
     {
-      chosen: chosen,
+      chosen,
     },
   );

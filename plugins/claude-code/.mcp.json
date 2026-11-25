@@ -2,7 +2,8 @@
   "mcpServers": {
     "open-artifact": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/skills/open-artifact/scripts/open-artifact.mjs", "mcp", "--harness", "claude-code"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/skills/open-artifact/scripts/open-artifact.mjs", "mcp", "--harness", "claude-code"],
+      "env": { "OPEN_ARTIFACT_PLUGIN_REMOTE": "${user_config.remote}" }
     }
   }
 }

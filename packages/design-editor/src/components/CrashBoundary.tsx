@@ -1,45 +1,17 @@
 /**
- * Keeps a render error in the editor from blanking the page. The subtree
- * below it is replaced by a card that says the canvas could not load and
- * offers a reload; the error still reaches the console (and any
- * `window.onerror` listener) through `reportError`.
+ * The editor's crash fallback: the canvas could not load, with a reload.
  *
  * Nothing in the project is lost: edits are saved as they are made, so a
  * reload reopens the design where it was.
  */
 
-import { Component, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { RotateCw, TriangleAlert } from 'lucide-react';
-import { Button } from '@open-artifact/ui';
+import { Button, CrashBoundary as Boundary } from '@open-artifact/ui';
 
-interface CrashBoundaryProps {
-  children: ReactNode;
-}
-
-export class CrashBoundary extends Component<CrashBoundaryProps, { crashed: boolean }> {
-  override state = { crashed: false };
-
-  static getDerivedStateFromError(): { crashed: boolean } {
-    return { crashed: true };
-  }
-
-  /** New children after a crash (a remote change, a page switch) get another try. */
-  override componentDidUpdate(previous: CrashBoundaryProps, previousState: { crashed: boolean }): void {
-    if (previousState.crashed && this.state.crashed && previous.children !== this.props.children) this.setState({ crashed: false });
-  }
-
-  override componentDidCatch(error: unknown): void {
-    try {
-      if (typeof reportError === 'function') reportError(error);
-      else console.error(error);
-    } catch {
-      // Reporting must never throw out of the boundary.
-    }
-  }
-
-  override render(): ReactNode {
-    return this.state.crashed ? <CrashCard /> : this.props.children;
-  }
+/** Shows {@link CrashCard} when `children` fail to render. */
+export function CrashBoundary({ children }: { children: ReactNode }): ReactNode {
+  return <Boundary fallback={<CrashCard />}>{children}</Boundary>;
 }
 
 /** The fallback: what happened and how to recover. */

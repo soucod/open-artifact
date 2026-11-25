@@ -137,7 +137,7 @@ fn quotient(a: Option<&Brought>, b: Option<&Brought>) -> Option<Brought> {
 }
 
 /// What a sum brings of what its numbers bring: a sum of dates is no date, of times a duration.
-fn summed(b: Option<Brought>) -> Option<Brought> {
+pub(crate) fn summed(b: Option<Brought>) -> Option<Brought> {
     match class(b.as_ref()) {
         Class::Date | Class::DateAndTime => None,
         Class::Time => Some(Brought::new(Kind::Duration, DURATION)),

@@ -5,7 +5,7 @@
  * same store (`useContextMenu`).
  *
  * - On items (also the selection bar's More actions): open link, rename a
- *   section, table rows and columns, lock; cut, copy, paste, duplicate;
+ *   section, table rows and columns and heat maps, lock; cut, copy, paste, duplicate;
  *   layer order, group, ungroup, tidy up; delete; ask the agent (when one
  *   is connected).
  * - On the empty board: paste, select all, fit the board, add a note here,
@@ -24,11 +24,13 @@ import {
   planUngroupSelection,
   type BoardContent,
   type ElementId,
+  type TableAxis,
 } from '@open-artifact/whiteboard-core';
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { surfaceRef } from '../canvas/BoardSurface.tsx';
 import { linkDisplayUrl, openBoardLink } from '../elements/links.ts';
 import { screenToBoard, type Point } from '../lib/camera.ts';
+import { TABLE_HEAT_LABELS, takesRowHeat } from '../lib/table-heat.ts';
 import { isApplePlatform, modKey } from '../lib/tools.ts';
 import { useContextMenu, type MenuCell, type MenuKind } from '../selection/menu-store.ts';
 import {
@@ -54,6 +56,7 @@ import { useAgent } from '../services/agent.ts';
 import { EMPTY_BOARD_MESSAGE, LOCKED_MESSAGE, READ_ONLY_MESSAGE } from '../services/announce.ts';
 import { INTERNAL_PASTE_ONLY_MESSAGE, canPasteFromMenu, copySelectionCommand, pasteFromMenu } from '../services/clipboard.ts';
 import { selectEverything, isTypingTarget } from '../services/keyboard.ts';
+import { setTableLineHeat, toggleTableLineHeat } from '../services/table-edits.ts';
 import { contentBounds, fitBoard, viewCenter } from '../services/navigation.ts';
 import { useAsk } from '../state/ask.ts';
 import { useBoard } from '../state/board.ts';
@@ -65,7 +68,9 @@ import { elementIdAt } from '../tools/gesture.ts';
 import { createNoteAt, placeElement } from '../tools/place.ts';
 import { TOUCH_LONG_PRESS_MS, movedPastTouchSlop } from '../tools/touch.ts';
 import { ChromeMenuItem, ChromeMenuSeparator, POPUP } from './chrome.tsx';
-import { selectionLinks, severalLinksMessage } from './selection-links.ts';
+import { useCoarsePointer } from './hooks.ts';
+import { selectionLinks } from './selection-links.ts';
+import { severalLinksMessage } from '../lib/link-card.ts';
 
 /* ------------------------------------------------------------------------ */
 /* Opening                                                                  */
@@ -187,6 +192,7 @@ type ItemCommand =
   | 'rename'
   | 'lock'
   | TableCellCommand
+  | TableHeatCommand
   | 'cut'
   | 'copy'
   | 'paste'
@@ -198,6 +204,16 @@ type ItemCommand =
   | 'tidy'
   | 'delete'
   | 'ask';
+
+/** Heat map commands on a table cell: turn its column's or row's heat map on or off, or remove it. */
+type TableHeatCommand = 'heat-cols' | 'heat-rows' | 'heat-cols-off' | 'heat-rows-off';
+
+const TABLE_HEAT_COMMANDS: readonly TableHeatCommand[] = ['heat-cols', 'heat-rows', 'heat-cols-off', 'heat-rows-off'];
+
+/** The axis a heat map command works on. */
+function heatCommandAxis(command: TableHeatCommand): TableAxis {
+  return command.startsWith('heat-rows') ? 'rows' : 'cols';
+}
 
 /** Commands of the board menu. */
 type BoardCommand = 'paste' | 'select-all' | 'fit' | 'add-note' | 'ask';
@@ -227,7 +243,7 @@ function itemRefusals(
   if (ask) refusals.ask = ask;
   if (!facts.editable) {
     for (const command of ['rename', 'lock', 'cut', 'paste', 'duplicate', 'front', 'back', 'group', 'ungroup', 'tidy', 'delete'] as const) refusals[command] = READ_ONLY_MESSAGE;
-    for (const command of ['row-above', 'row-below', 'row-delete', 'col-left', 'col-right', 'col-delete'] as const) refusals[command] = READ_ONLY_MESSAGE;
+    for (const command of ['row-above', 'row-below', 'row-delete', 'col-left', 'col-right', 'col-delete', ...TABLE_HEAT_COMMANDS] as const) refusals[command] = READ_ONLY_MESSAGE;
     return refusals;
   }
   if (arrowsOnly) {
@@ -254,9 +270,10 @@ function itemRefusals(
         const reason = cellRefusals ? cellRefusals[command] : LOCKED_MESSAGE;
         if (reason) refusals[command] = reason;
       }
+      if (isElementLocked(table)) for (const command of TABLE_HEAT_COMMANDS) refusals[command] = LOCKED_MESSAGE;
     } else {
       // The table went away under the open menu (a peer deleted it).
-      for (const command of ['row-above', 'row-below', 'row-delete', 'col-left', 'col-right', 'col-delete'] as const) refusals[command] = TABLE_GONE_MESSAGE;
+      for (const command of ['row-above', 'row-below', 'row-delete', 'col-left', 'col-right', 'col-delete', ...TABLE_HEAT_COMMANDS] as const) refusals[command] = TABLE_GONE_MESSAGE;
     }
   }
   return refusals;
@@ -284,6 +301,17 @@ function runItemCommand(command: ItemCommand, cell: MenuCell | null, board: Poin
     case 'col-delete':
       if (cell) runTableCellCommand(cell.table, cell, command);
       return;
+    case 'heat-cols':
+    case 'heat-rows':
+    case 'heat-cols-off':
+    case 'heat-rows-off': {
+      if (!cell) return;
+      const axis = heatCommandAxis(command);
+      const line = axis === 'rows' ? cell.row : cell.col;
+      if (command.endsWith('-off')) setTableLineHeat(cell.table, axis, line, '');
+      else toggleTableLineHeat(cell.table, axis, line);
+      return;
+    }
     case 'cut':
     case 'copy':
       copySelectionCommand(command);
@@ -384,6 +412,7 @@ function ItemMenuItems({ cell, board }: { cell: MenuCell | null; board: Point | 
   const content = useBoard((state) => state.board.content);
   const agentAvailable = useAgent((state) => state.available);
   const keysOn = usePreferences((state) => state.letterKeys);
+  const coarse = useCoarsePointer();
   const editable = canEditBoard();
   const idSet = useMemo(() => new Set(ids), [ids]);
   const selected = useMemo(() => content.elements.filter((element) => idSet.has(element.id)), [content, idSet]);
@@ -408,6 +437,22 @@ function ItemMenuItems({ cell, board }: { cell: MenuCell | null; board: Point | 
     />
   );
   const lockItem = item('lock', locked ? 'Unlock' : 'Lock', keyLabel('L', { mod: true, shift: true }));
+  const table = cell ? content.elements.find((element) => element.id === cell.table) : undefined;
+  const heatItems: ReactNode[] = [];
+  if (cell && table?.type === 'table') {
+    const axes: readonly TableAxis[] = takesRowHeat(table, cell.row) ? ['cols', 'rows'] : ['cols'];
+    const heatOn = (axis: TableAxis): boolean => table.heat?.[axis]?.[axis === 'rows' ? cell.row : cell.col] !== undefined;
+    for (const axis of axes) {
+      const command: TableHeatCommand = axis === 'rows' ? 'heat-rows' : 'heat-cols';
+      const refusal = refusals[command];
+      heatItems.push(
+        <ChromeMenuItem key={command} checked={heatOn(axis)} onSelect={run(command)} disabled={refusal !== undefined} {...(refusal !== undefined ? { title: refusal } : {})}>
+          {TABLE_HEAT_LABELS.toggle(axis)}
+        </ChromeMenuItem>,
+      );
+    }
+    for (const axis of axes.filter(heatOn)) heatItems.push(item(axis === 'rows' ? 'heat-rows-off' : 'heat-cols-off', TABLE_HEAT_LABELS.remove(axis)));
+  }
 
   const first: ReactNode[] = [];
   if (link !== undefined) {
@@ -415,7 +460,7 @@ function ItemMenuItems({ cell, board }: { cell: MenuCell | null; board: Point | 
       <CommandItem
         key="open-link"
         label="Open link"
-        refusal={links.length > 1 ? severalLinksMessage() : undefined}
+        refusal={links.length > 1 ? severalLinksMessage(coarse) : undefined}
         onSelect={run('open-link')}
         {...(links.length === 1 ? { description: linkDisplayUrl(link) } : {})}
       />,
@@ -433,6 +478,7 @@ function ItemMenuItems({ cell, board }: { cell: MenuCell | null; board: Point | 
           item('col-right', 'Insert column right'),
           item('col-delete', 'Delete column'),
         ],
+        heatItems,
         [lockItem],
       ]
     : [[...first, lockItem]];

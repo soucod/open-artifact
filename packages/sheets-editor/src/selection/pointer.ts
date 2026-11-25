@@ -87,7 +87,7 @@ export interface TappingDrag {
   over: CellId | null;
   isOnActiveCell: boolean;
 }
-/** The row or column whose size a drag changes. Made by grid/resize-lines.ts, not typed yet; it should be declared there. */
+/** The row or column whose size a drag changes. Made by grid/resize-lines.ts. */
 export type LineToResize = { isA: 'row'; rowId: RowId } | { isA: 'column'; columnId: ColumnId };
 /** A drag that changes the size of a row or column. */
 export interface ResizingDrag {
@@ -152,7 +152,7 @@ export function extendSelectionToPosition(state: PageState, reads: ReadsWithText
   let scrolled = scrollToShowPosition(unwalked, reads, position, axes, 'pointer');
   return scrolled.scrollLeft !== unwalked.scrollLeft || scrolled.scrollTop !== unwalked.scrollTop ? scrolled : unwalked;
 }
-export function takeOutWhileDragging(state: PageState, reads: ReadsWithTextMeasurer, { from: from, ranges: ranges }: TakeOutOfDrag, position: CellPosition): PageState {
+export function takeOutWhileDragging(state: PageState, reads: ReadsWithTextMeasurer, { from, ranges }: TakeOutOfDrag, position: CellPosition): PageState {
   let cellId = reads.cellIdAt(state.sheetId, position.rowIndex, position.columnIndex);
   let lastRange = ranges.at(-1);
   let area =
@@ -188,10 +188,10 @@ export function cellIdUnderPointer(state: PageState, reads: ReadsWithTextMeasure
 }
 export function rememberLastPresses(state: PageState, before: PageState, message: PageEvent, reads: ReadsWithTextMeasurer): PageState {
   let [earlierPress, lastPress] = state.lastPresses;
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = state;
+  let { scrollLeft, scrollTop } = state;
   if (message.kind === 'pointerPressed') {
     let cellId = cellIdUnderPointer(before, reads, message);
-    let { x: x, y: y } = message;
+    let { x, y } = message;
     let viewThen: GridScroll = {
       scrollLeft: before.scrollLeft,
       scrollTop: before.scrollTop,
@@ -200,13 +200,13 @@ export function rememberLastPresses(state: PageState, before: PageState, message
       cellId === null
         ? null
         : {
-            cellId: cellId,
-            x: x,
-            y: y,
-            viewThen: viewThen,
+            cellId,
+            x,
+            y,
+            viewThen,
             viewAfter: {
-              scrollLeft: scrollLeft,
-              scrollTop: scrollTop,
+              scrollLeft,
+              scrollTop,
             },
           };
     let isLateMouse = message.isToldOfLate === true && !message.isByFinger;
@@ -235,8 +235,8 @@ export function cellOfDoublePress(state: PageState, reads: ReadsWithTextMeasurer
     !isSameScroll(earlierPress.viewThen, state)
   ) || reads.positionOfCell(earlierPress.cellId) === null
     ? {
-        state: state,
-        cellId: cellId,
+        state,
+        cellId,
       }
     : {
         state: {
@@ -266,7 +266,12 @@ export function whatPointerWasOver(point: PagePoint | null, state: PageState, re
     entryCell: state.mode.kind === 'editing' ? state.activeCell : null,
   };
 }
-export function stampWhatPointerWasOver(message: PageEvent, state: PageState, reads: ReadsWithTextMeasurer): PageEvent {
+/** The event, carrying what lay under the pointer when it happened (only press events read it back). */
+export function stampWhatPointerWasOver(
+  message: PageEvent,
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+): PageEvent | (PageEvent & { madeOver: PointerWasOver }) {
   let point = pointOfPressMessage(message);
   return (point === null && !('isOnBoxOfEntry' in message)) || 'madeOver' in message
     ? message
@@ -289,7 +294,7 @@ export function viewForLateMessage(message: QueuedEvent, state: PageState, reads
   return isSamePointerTarget(madeOver, whatPointerWasOver(point, viewThen, reads)) ? viewThen : state;
 }
 export function selectLinesFromHeader(state: PageState, reads: ReadsWithTextMeasurer, header: HeaderHit, isFromActiveCell: boolean) {
-  let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(state, reads);
+  let { rowCount, columnCount } = layoutOfView(state, reads);
   let activePosition = reads.positionOfCell(state.activeCell);
   let from: CellPosition =
     isFromActiveCell && activePosition !== null
@@ -331,26 +336,26 @@ export function selectLinesFromHeader(state: PageState, reads: ReadsWithTextMeas
     ...selection,
     dragging: {
       kind: 'selecting',
-      what: what,
+      what,
     } satisfies SelectingDrag,
   };
 }
 export function pressWithModifier(state: PageState, target: GridHit, reads: ReadsWithTextMeasurer) {
   if (target.kind === 'corner') return null;
   if (target.kind !== 'cell') {
-    let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(state, reads);
+    let { rowCount, columnCount } = layoutOfView(state, reads);
     let lineArea: CellArea =
       target.kind === 'rowHeader'
         ? {
             topRowIndex: target.rowIndex,
             leftColumnIndex: 0,
             rowCount: 1,
-            columnCount: columnCount,
+            columnCount,
           }
         : {
             topRowIndex: 0,
             leftColumnIndex: target.columnIndex,
-            rowCount: rowCount,
+            rowCount,
             columnCount: 1,
           };
     let isWholeLine = (area: CellArea) => (target.kind === 'rowHeader' ? area.columnCount === columnCount : area.rowCount === rowCount);
@@ -382,7 +387,7 @@ export function pressWithModifier(state: PageState, target: GridHit, reads: Read
       dragging: {
         kind: 'selecting',
         what: 'cells',
-        takesOut: takesOut,
+        takesOut,
       } satisfies SelectingDrag,
     };
   }
@@ -398,11 +403,11 @@ export function selectionAtPointer(state: PageState, reads: ReadsWithTextMeasure
   let hit = hitTestGrid(pointer, state, layoutOfView(state, reads));
   if (hit === null) return null;
   if (hit.kind === 'cell') return reads.cellIdAt(state.sheetId, hit.rowIndex, hit.columnIndex);
-  let { activeCell: activeCell, selectionCorner: selectionCorner } =
+  let { activeCell, selectionCorner } =
     hit.kind === 'corner' ? selectAllCells(state, reads) : selectLinesFromHeader(state, reads, hit, false);
   return {
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
+    activeCell,
+    selectionCorner,
     rangeWalked: null,
   };
 }
@@ -450,7 +455,7 @@ export function pointerPressedOnGrid(state: PageState, pointer: PointerPressed, 
   if (freezeDrag !== null) return withNoEffects(freezeDrag);
   let resizeLine = resizeLineUnderPointer(state, pointer, context);
   if (resizeLine === null) {
-    let { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit } = context;
+    let { reads, refusalOfEveryEdit } = context;
     let hit = hitTestGrid(pointer, state, layoutOfView(state, reads));
     let isOnHeader = hit?.kind === 'rowHeader' || hit?.kind === 'columnHeader';
     let moveDrag =
@@ -490,7 +495,7 @@ export function pointerPressedOnGrid(state: PageState, pointer: PointerPressed, 
 export function isActiveCellFullyInSight(state: PageState, reads: ReadsWithTextMeasurer): boolean {
   let area = mergedAreaOrCellOf(reads, state.activeCell);
   if (area === null) return false;
-  let { across: across, down: down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
+  let { across, down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
   return isSpanFullyInSight(across) && isSpanFullyInSight(down);
 }
 export function startTapping(state: PageState, message: PageEvent, context: PageContext) {
@@ -513,7 +518,7 @@ export function startTapping(state: PageState, message: PageEvent, context: Page
       kind: 'tapping',
       tap: message,
       over: cellId,
-      isOnActiveCell: isOnActiveCell,
+      isOnActiveCell,
     } satisfies TappingDrag,
   };
 }
@@ -560,7 +565,7 @@ export function fingerAutoscrollDirection(state: PageState, pointer: GridPoint, 
         ? 1
         : Math.min(0, Math.sign((pastVertical?.y ?? pointer.y) - pointer.y));
   let across = Math.sign((pastHorizontal?.x ?? pointer.x) - pointer.x);
-  let { rows: rows, columns: columns } = scrollPositionInLines(state, layout);
+  let { rows, columns } = scrollPositionInLines(state, layout);
   let isOverFrozenRows = rows.under > 0 && y < frozenRowsHeight(layout);
   let isOverFrozenColumns = columns.under > 0 && x < frozenColumnsWidth(layout);
   let isBelowFrozenRows = area.topRowIndex >= layout.frozenRowCount;
@@ -585,7 +590,7 @@ export function dragSelectingByFinger(state: PageState, pointer: PointerDragged,
   let nextTimes = Math.min(timesAtEdge + 1, FINGER_AUTOSCROLL_DELAY_TICKS + 1);
   let timesNow = pointer.isHeldStill !== true ? timesAtEdge : isAtEdge ? nextTimes : 0;
   let step = timesNow > FINGER_AUTOSCROLL_DELAY_TICKS ? FINGER_AUTOSCROLL_STEP : 0;
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = state;
+  let { scrollLeft, scrollTop } = state;
   let wantedScroll: GridScroll = {
     scrollLeft: scrollLeft + direction.across * step,
     scrollTop: scrollTop + direction.down * step,
@@ -593,8 +598,8 @@ export function dragSelectingByFinger(state: PageState, pointer: PointerDragged,
   let scroll: GridScroll =
     step === 0
       ? {
-          scrollLeft: scrollLeft,
-          scrollTop: scrollTop,
+          scrollLeft,
+          scrollTop,
         }
       : clampScrollKeepingReach(state, wantedScroll, layout, state);
   let selecting = {
@@ -607,7 +612,7 @@ export function dragSelectingByFinger(state: PageState, pointer: PointerDragged,
       timesAtEdge: timesNow,
     } satisfies SelectingDrag,
   };
-  let { rows: rows, columns: columns } = scrollPositionInLines(selecting, layout);
+  let { rows, columns } = scrollPositionInLines(selecting, layout);
   let selectionArea = rows.under + columns.under > 0 ? (selectionAreaAndKind(selecting, reads)?.area ?? null) : null;
   let cell = cellUnderPointer(clampPointToCells(pointer, narrowLayout), selecting, layout, narrowLayout, selectionArea);
   let position = pointedPositionClearOfStuckHeaders(
@@ -630,7 +635,7 @@ export function pointerDraggedOnGrid(state: PageState, pointer: PointerDragged, 
   if (state.dragging?.kind === 'pointing') return dragPointedReference(state, pointer, reads);
   if (state.dragging === null || state.mode.kind === 'editing') return state;
   if (state.dragging.kind === 'tapping') {
-    let { tap: tap, isOnActiveCell: isOnActiveCell } = state.dragging;
+    let { tap, isOnActiveCell } = state.dragging;
     let distance = Math.hypot(pointer.x - tap.x, pointer.y - tap.y);
     if (!isOnActiveCell || distance < DRAG_START_DISTANCE / state.zoom) return state;
     let pressAtTap: PressOnGrid = {
@@ -665,7 +670,7 @@ export function pointerDraggedOnGrid(state: PageState, pointer: PointerDragged, 
     );
   }
   if (state.dragging.kind === 'resizing') {
-    let { line: line, sizeAtPress: sizeAtPress, pointerAtPress: pointerAtPress } = state.dragging;
+    let { line, sizeAtPress, pointerAtPress } = state.dragging;
     let moved = (line.isA === 'row' ? pointer.y : pointer.x) - pointerAtPress;
     let isSizeUnchanged = state.dragging.sizeInPixels === sizeAtPress;
     let slop = state.dragging.isByFinger === true ? DRAG_START_DISTANCE / state.zoom : DRAG_SLOP;
@@ -684,7 +689,7 @@ export function pointerDraggedOnGrid(state: PageState, pointer: PointerDragged, 
   if (state.dragging.kind === 'movingLines') return dragMovingLines(state, state.dragging, pointer, reads);
   if (state.dragging.kind === 'movingColumnsOfTable') return dragMovingColumnsOfTable(state, state.dragging, pointer, reads);
   if (state.dragging.kind === 'movingCells') {
-    let { press: press, landing: landing } = state.dragging;
+    let { press, landing } = state.dragging;
     let distance = Math.hypot(pointer.x - press.x, pointer.y - press.y);
     if (landing === null && distance < DRAG_SLOP) return state;
     return dragMovingCells(state, state.dragging, pointer, reads);
@@ -692,32 +697,32 @@ export function pointerDraggedOnGrid(state: PageState, pointer: PointerDragged, 
   if (state.dragging.kind === 'movingPlacedView') return dragPlacedView(state, state.dragging, pointer, reads);
   if (state.dragging.kind === 'sizingPlacedView') return sizePlacedView(state, state.dragging, pointer, reads);
   if (state.dragging.kind === 'freezing') {
-    let { what: what, pressedAt: pressedAt, count: count } = state.dragging;
+    let { what, pressedAt, count } = state.dragging;
     let moved = what === 'rows' ? pointer.y - pressedAt.y : pointer.x - pressedAt.x;
     if (count === null && Math.abs(moved) < DRAG_SLOP) return state;
     return dragFreezeTo(state, state.dragging, pointer, reads);
   }
   if (state.dragging.kind === 'filling') {
-    let { pressedAt: pressedAt, pointedAt: pointedAt } = state.dragging;
+    let { pressedAt, pointedAt } = state.dragging;
     let distance = Math.hypot(pointer.x - pressedAt.x, pointer.y - pressedAt.y);
     if (pointedAt === null && distance < DRAG_SLOP) return state;
     return pointer.isHeldStill === true ? autoScrollFillDrag(state, pointer, reads) : dragFillHandle(state, pointer, reads);
   }
   if (state.dragging.isByFinger === true) return dragSelectingByFinger(state, pointer, reads);
   let layout = layoutOfView(state, reads);
-  let { what: what, takesOut: takesOut } = state.dragging;
+  let { what, takesOut } = state.dragging;
   let pointerPushed = pointer.isHeldStill === true ? pushPointerPastRightEdge(state, what, pointer, reads) : pointer;
   let axes: AxesToShow = {
     rows: what !== 'columns',
     columns: what !== 'rows',
   };
-  let { rows: rows, columns: columns } = scrollPositionInLines(state, layout);
+  let { rows, columns } = scrollPositionInLines(state, layout);
   let grownArea = takesOut === undefined ? selectionAreaAndKind(state, reads)?.area : mergedAreaOrCellOf(reads, takesOut.from);
   let grownSoFar = rows.under + columns.under > 0 ? (grownArea ?? null) : null;
   let position = dragPositionClearOfStuckHeaders(pointerPushed, state, reads, layout, {
     of: what === 'cells' ? columnSpanAt : what,
     fromRow: rowIndexOfActiveCell(state, reads, takesOut?.from),
-    grownSoFar: grownSoFar,
+    grownSoFar,
   });
   if (takesOut !== undefined) return takeOutWhileDragging(state, reads, takesOut, position);
   let positionToShow: PositionToShow = {

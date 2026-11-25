@@ -149,7 +149,7 @@ export let ROW_NUMBER_DIGITS_UNDER_HANDLE: number;
 export function edgeStripsOfArea(area: CellArea, table: TableOfStrip | null, state: PageState, layout: GridLayout): MoveGrabStrip[] {
   if (selectionKindOf(area, layout) !== 'cells') return [];
   if (area.rowCount === layout.rowCount && area.columnCount === layout.columnCount) return [];
-  let { across: across, down: down } = rangeSpansOnScreen(area, state, layout, state);
+  let { across, down } = rangeSpansOnScreen(area, state, layout, state);
   if (!isSpanInSight(across) || !isSpanInSight(down)) return [];
   let outset = table === null ? null : 1 / Math.min(state.zoom, 1);
   let [wholeAcross, wholeDown] = [wholeEdgeStrip(across, outset), wholeEdgeStrip(down, outset)];
@@ -166,8 +166,8 @@ export function edgeStripsOfArea(area: CellArea, table: TableOfStrip | null, sta
         ? []
         : [
             {
-              side: side,
-              table: table,
+              side,
+              table,
               left: acrossStrip.from,
               top: downStrip.from,
               width: acrossStrip.to - acrossStrip.from,
@@ -188,7 +188,7 @@ export function moveGrabStrips(state: PageState, reads: ReadsWithTextMeasurer, i
       ? (tables ?? tablesToOutline(state, reads))
       : []
     ).flatMap(
-      ({ key: key, area: area, comesLater: comesLater }: TableToOutline) =>
+      ({ key, area, comesLater }: TableToOutline) =>
         comesLater !== null ||
         areaGrownOverMerges(reads, state.sheetId, area) !== area ||
         cutsTableHeaderOrFooter(area, state.sheetId, reads) ||
@@ -197,8 +197,8 @@ export function moveGrabStrips(state: PageState, reads: ReadsWithTextMeasurer, i
           : edgeStripsOfArea(
               area,
               {
-                key: key,
-                area: area,
+                key,
+                area,
               },
               state,
               layout,
@@ -208,9 +208,9 @@ export function moveGrabStrips(state: PageState, reads: ReadsWithTextMeasurer, i
   ];
 }
 export function tableHandleBox(
-  { across: across, down: down }: SpansOfArea,
+  { across, down }: SpansOfArea,
   firstRowHeight: number,
-  { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex }: Pick<CellArea, 'topRowIndex' | 'leftColumnIndex'>,
+  { topRowIndex, leftColumnIndex }: Pick<CellArea, 'topRowIndex' | 'leftColumnIndex'>,
 ): TableHandleBox {
   let centredInset = Math.ceil((firstRowHeight - 1 - TABLE_HANDLE_HEIGHT) / 2);
   let isAtRowNumbers = leftColumnIndex === 0 && across.start === 0;
@@ -218,9 +218,9 @@ export function tableHandleBox(
   return {
     left: across.start - 1 - (isAtRowNumbers ? TABLE_HANDLE_NARROW_GAP : TABLE_HANDLE_GAP) - width,
     top: Math.max(down.showFrom, Math.max(down.start, down.showFrom) + Math.min(centredInset, TABLE_HANDLE_TOP_INSET)),
-    width: width,
+    width,
     height: TABLE_HANDLE_HEIGHT,
-    isAtRowNumbers: isAtRowNumbers,
+    isAtRowNumbers,
     rowNumberUnder: isAtRowNumbers && String(topRowIndex + 1).length > ROW_NUMBER_DIGITS_UNDER_HANDLE ? topRowIndex + 1 : null,
   };
 }
@@ -234,7 +234,7 @@ export function tableHandles(tables: readonly TableToOutline[], state: PageState
   };
   let stripTables = new Map(
     moveGrabStrips(unscrolledState, reads, isEditRefused, tables).flatMap(
-      ({ table: table }): [string, TableOfStrip][] => (table === null ? [] : [[table.key, table]]),
+      ({ table }): [string, TableOfStrip][] => (table === null ? [] : [[table.key, table]]),
     ),
   );
   if (stripTables.size === 0) return [];
@@ -246,8 +246,8 @@ export function tableHandles(tables: readonly TableToOutline[], state: PageState
   );
   let boxesToAvoid = [
     ...tables.map(
-      ({ key: key, area: area }) => ({
-        key: key,
+      ({ key, area }) => ({
+        key,
         box: nearBoxOf(area),
       }),
     ),
@@ -264,25 +264,25 @@ export function tableHandles(tables: readonly TableToOutline[], state: PageState
     return area === null ? [] : [boxOfSpans(spansOf(area))];
   });
   return [...stripTables.values()].flatMap((table): TableHandle[] => {
-    let { across: across, down: down } = spansOf(table.area);
+    let { across, down } = spansOf(table.area);
     let firstRowDown = spansOf({
       ...table.area,
       rowCount: 1,
     }).down;
-    let headerKept = (down.start < down.showFrom ? stuckHeaders.find(({ key: key }) => key === table.key) : null) ?? null;
+    let headerKept = (down.start < down.showFrom ? stuckHeaders.find(({ key }) => key === table.key) : null) ?? null;
     let {
       isAtRowNumbers: isOverRowNumbers,
-      rowNumberUnder: rowNumberUnder,
+      rowNumberUnder,
       ...box
     } = tableHandleBox(
       {
-        across: across,
-        down: down,
+        across,
+        down,
       },
       firstRowDown.end - firstRowDown.start,
       table.area,
     );
-    let { left: left, top: top } = box;
+    let { left, top } = box;
     if ((headerKept !== null && headerKept.top < headerKept.showFrom) || top + TABLE_HANDLE_HEIGHT > down.showTo) return [];
     if (headerKept === null && firstRowDown.end <= down.showFrom) return [];
     if (isOverRowNumbers && headerKept?.areRowNumbersItsOwn === false) return [];
@@ -295,17 +295,17 @@ export function tableHandles(tables: readonly TableToOutline[], state: PageState
     let near = nearBoxOf(table.area);
     let wayThere = {
       ...near,
-      left: left,
+      left,
       width: near.left - left,
     };
     return [
       {
-        table: table,
+        table,
         ...box,
-        near: near,
-        wayThere: wayThere,
-        isOverRowNumbers: isOverRowNumbers,
-        rowNumberUnder: rowNumberUnder,
+        near,
+        wayThere,
+        isOverRowNumbers,
+        rowNumberUnder,
         isBesideHeaderKept: headerKept !== null,
       },
     ];
@@ -313,13 +313,13 @@ export function tableHandles(tables: readonly TableToOutline[], state: PageState
 }
 export function tableHandleUnderPointer(pointer: GridPoint, grid: GridOfTableHandles, heldKey: string | null): string | null {
   let [x, y] = [pointer.x - grid.body.left, pointer.y - grid.body.top];
-  let held = grid.handlesOfTables.find(({ table: table }) => table.key === heldKey);
+  let held = grid.handlesOfTables.find(({ table }) => table.key === heldKey);
   if (held !== undefined && isPointInBox(x, y, held)) return heldKey;
   if (grid.areCellsHeld) return null;
   if (held !== undefined && isPointInBox(x, y, held.wayThere)) return heldKey;
-  return grid.handlesOfTables.find(({ near: near }) => isPointInBox(x, y, near))?.table.key ?? null;
+  return grid.handlesOfTables.find(({ near }) => isPointInBox(x, y, near))?.table.key ?? null;
 }
-export function gripOffsetInSpan({ start: start, end: end, showFrom: showFrom, showTo: showTo }: StartAndEnd & ShownStretch, position: number): number {
+export function gripOffsetInSpan({ start, end, showFrom, showTo }: StartAndEnd & ShownStretch, position: number): number {
   let [from, to] = [Math.max(start, showFrom), Math.min(end, showTo)];
   let snap = Math.min(MOVE_CELLS_SNAP, (to - from) / 2);
   return clampNumber(position, from + snap, to - snap);
@@ -327,7 +327,7 @@ export function gripOffsetInSpan({ start: start, end: end, showFrom: showFrom, s
 export function handleUnderPress(
   state: PageState,
   press: PointerPressed,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ): TableHandle | undefined {
   if (press.onHandleOfTable === undefined || press.isByFinger || press.isToldOfLate === true) return;
   if ((press.isShiftHeld || press.isModifierHeld === true) && press.x < ROW_HEADER_WIDTH) return;
@@ -339,7 +339,7 @@ export function handleUnderPress(
 export function startMovingCells(
   state: PageState,
   press: PointerPressed,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ) {
   let isModified = press.isShiftHeld || press.isModifierHeld === true;
   let isOnHandleOverCells = press.onHandleOfTable !== undefined && press.x >= ROW_HEADER_WIDTH;
@@ -348,17 +348,17 @@ export function startMovingCells(
   let [x, y] = [press.x - ROW_HEADER_WIDTH, press.y - COLUMN_HEADER_HEIGHT];
   let isHeaderKept = press.madeOver?.headerKept !== undefined;
   let stripsUnderPress = moveGrabStrips(state, reads, refusalOfEveryEdit !== null).filter(
-    ({ table: table, left: left, top: top, width: width, height: height }) =>
+    ({ table, left, top, width, height }) =>
       !(isHeaderKept && table !== null) && x >= left && x < left + width && y >= top && y < top + height,
   );
   let selectionArea: CellArea | null = selectedArea(state, reads);
   let strip =
     stripsUnderPress.find(
-      ({ table: table }) => table !== null && !(selectionArea !== null && isAreaWithin(table.area, selectionArea)),
+      ({ table }) => table !== null && !(selectionArea !== null && isAreaWithin(table.area, selectionArea)),
     ) ?? stripsUnderPress.at(-1);
   let handle = handleUnderPress(state, press, {
-    reads: reads,
-    refusalOfEveryEdit: refusalOfEveryEdit,
+    reads,
+    refusalOfEveryEdit,
   });
   let held = handle ?? (isModified ? undefined : strip);
   if (held === undefined) return null;
@@ -376,7 +376,7 @@ export function startMovingCells(
   let selection: CellSelection | null = area === null ? null : selectionOfArea(view, reads, area);
   if (area === null || selection === null) return null;
   let layout = layoutOfView(view, reads);
-  let { across: across, down: down } = rangeSpansOnScreen(area, view, layout, view);
+  let { across, down } = rangeSpansOnScreen(area, view, layout, view);
   let cellPressed = cellUnderPointer(
     {
       x: ROW_HEADER_WIDTH + clampNumber(x, across.start + (handle === undefined ? 0 : 1), across.end - 1),
@@ -391,7 +391,7 @@ export function startMovingCells(
     ...view,
     dragging: {
       kind: 'movingCells',
-      press: press,
+      press,
       heldBy: handle !== undefined ? 'handle' : held.table === null ? 'edge' : 'outline',
       first: selection.activeCell,
       last: selection.selectionCorner,
@@ -427,7 +427,7 @@ export function autoscrollMovingCells<P extends GridPoint>(state: PageState, poi
   return autoscrollPointPastEdge(pointerAlongRows, state, isMovingRight ? 'right' : 'left') ?? pointerAlongRows;
 }
 export function isHeldBackFromNext(
-  { own: own, soFar: soFar, next: next, held: held }: MoveAlongAxis,
+  { own, soFar, next, held }: MoveAlongAxis,
   pointerMoved: number,
   spanOfRun: (run: LineSpan) => SpanOnScreen,
   zoom: number,
@@ -435,12 +435,12 @@ export function isHeldBackFromNext(
 ): boolean {
   let [firstIndex, endIndex] = next > own ? [own + held + 1, next + held + 1] : [next + held, own + held];
   let shownSizeOf = (run: LineSpan): number => {
-    let { start: start, end: end, showFrom: showFrom, showTo: showTo } = spanOfRun(run);
+    let { start, end, showFrom, showTo } = spanOfRun(run);
     return next > own ? Math.min(end, showTo) - Math.max(start, showFrom) : Math.min(end - start, Math.max(end, showFrom));
   };
   let shownSize = Math.max(
     shownSizeOf({
-      firstIndex: firstIndex,
+      firstIndex,
       count: endIndex - firstIndex,
     }),
     pull === null
@@ -454,12 +454,12 @@ export function isHeldBackFromNext(
   return soFar === own && next !== own && isWithinSnap;
 }
 export function dragMovingCells(state: PageState, drag: MovingCellsDrag, pointer: Pick<PointerDragged, 'x' | 'y' | 'isHeldStill'>, reads: ReadsWithTextMeasurer) {
-  let { heldAt: heldAt } = drag;
+  let { heldAt } = drag;
   let heldArea = areaStillHeld(state, reads, drag);
   if (heldArea === null) return cancelMovingCells(state, drag, reads);
   let landingArea = landingAreaOfMove(state, reads, drag);
   let pointerScrolled = pointer.isHeldStill === true ? autoscrollMovingCells(state, pointer, heldArea, landingArea) : pointer;
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex } = landingArea ?? heldArea;
+  let { topRowIndex, leftColumnIndex } = landingArea ?? heldArea;
   let grownSoFar = areaOfPosition({
     rowIndex: topRowIndex + heldAt.rowsDown,
     columnIndex: leftColumnIndex + heldAt.columnsAcross,
@@ -486,7 +486,7 @@ export function dragMovingCells(state: PageState, drag: MovingCellsDrag, pointer
         columnCount: heldArea.columnCount,
       }),
       fromRow: bottomOfStuckHeadersInSheet(state, reads, heldArea, layout) === null ? -1 : heldArea.topRowIndex + heldAt.rowsDown,
-      grownSoFar: grownSoFar,
+      grownSoFar,
     });
   let pointerAtPress = {
     x: drag.press.x - (state.scrollLeft - drag.scrollAtPress.scrollLeft),
@@ -554,15 +554,15 @@ export function dragMovingCells(state: PageState, drag: MovingCellsDrag, pointer
     scrolled.scrollLeft === state.scrollLeft;
   let isOnRestedCell = drag.restedOn !== null && isAtLanding(drag.restedOn);
   if (isUnchanged && (isOffCells || isOnRestedCell)) return state;
-  let { heldStillAt: heldStillAt } = drag;
+  let { heldStillAt } = drag;
   let isNearHeldStill = heldStillAt !== null && Math.hypot(pointer.x - heldStillAt.x, pointer.y - heldStillAt.y) < HOLD_STILL_DISTANCE;
   if (isUnchanged && pointer.isHeldStill !== true && (heldStillAt === null || isNearHeldStill)) return state;
   let isHeldStillHere = isUnchanged && pointer.isHeldStill === true;
   let hasRested = isHeldStillHere && isNearHeldStill;
   let nextDrag: MovingCellsDrag = {
     ...drag,
-    landing: landing,
-    isOffCells: isOffCells,
+    landing,
+    isOffCells,
     heldStillAt:
       isHeldStillHere && !hasRested
         ? {
@@ -579,7 +579,7 @@ export function dragMovingCells(state: PageState, drag: MovingCellsDrag, pointer
     dragging: nextDrag,
   };
 }
-export function areaStillHeld(state: PageState, reads: WorkbookReads, { first: first, last: last }: Pick<MovingCellsDrag, 'first' | 'last'>): CellArea | null {
+export function areaStillHeld(state: PageState, reads: WorkbookReads, { first, last }: Pick<MovingCellsDrag, 'first' | 'last'>): CellArea | null {
   let area: CellArea | null = selectedArea(state, reads);
   let selection: CellSelection | null = area === null ? null : selectionOfArea(state, reads, area);
   return selection !== null && isSameCell(selection.activeCell, first) && isSameCell(selection.selectionCorner, last) ? area : null;
@@ -595,14 +595,14 @@ export function landingAreaOfMove(state: PageState, reads: WorkbookReads, drag: 
   };
   return isSameArea(landingArea, heldArea) ? null : landingArea;
 }
-export function noteTableLeftItsPlace(state: PageState) {
-  let { dragging: dragging } = state;
+export function noteTableLeftItsPlace(state: PageState): PageState {
+  let { dragging } = state;
   if (dragging?.kind !== 'movingCells' || !isHeldByHandleAtRowNumbers(dragging)) return state;
   let {
-    landing: landing,
-    first: first,
-    hasTableLeftItsPlace: hasTableLeftItsPlace,
-    hasTableLeftItsColumns: hasTableLeftItsColumns,
+    landing,
+    first,
+    hasTableLeftItsPlace,
+    hasTableLeftItsColumns,
   } = dragging;
   let hasLeftPlace = hasTableLeftItsPlace !== true && isMoveLandingElsewhere(dragging);
   let hasLeftColumns = hasTableLeftItsColumns !== true && landing !== null && landing.columnId !== first.columnId;
@@ -618,7 +618,7 @@ export function noteTableLeftItsPlace(state: PageState) {
     },
   };
 }
-export function cancelMovingCells(state: PageState, { scrollAtPress: scrollAtPress }: Pick<MovingCellsDrag, 'scrollAtPress'>, reads: ReadsWithTextMeasurer): PageState {
+export function cancelMovingCells(state: PageState, { scrollAtPress }: Pick<MovingCellsDrag, 'scrollAtPress'>, reads: ReadsWithTextMeasurer): PageState {
   let view = clampScrollOfView(
     {
       ...state,
@@ -640,13 +640,13 @@ export function cellsReplacedByMove(state: PageState, reads: WorkbookReads): Cel
     ? null
     : {
         cells: areaToA1AsStored(landingArea, ownRowOrderOfSheet(reads, state.sheetId)),
-        count: count,
+        count,
       };
 }
 export function dropMovedCells(
   state: PageState,
   drag: MovingCellsDrag,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ): PageTransition {
   let view = cancelMovingCells(state, drag, reads);
   if (drag.landing === null || landingAreaOfMovingCells(state, reads) === null) {
@@ -677,7 +677,7 @@ export function dropMovedCells(
     },
     {
       kind: 'moveCells',
-      cells: cells,
+      cells,
       toSheetId: state.sheetId,
       toTopLeft: cellRefOf(drag.landing),
       ...landingRows,
@@ -705,7 +705,7 @@ export function dropMovedCells(
   );
 }
 export function holdMoveAtRowNumbers(state: PageState, event: PageEvent) {
-  let { dragging: dragging } = state;
+  let { dragging } = state;
   return event.kind === 'pointerDragged' &&
     dragging?.kind === 'movingCells' &&
     isHeldByHandleAtRowNumbers(dragging) &&
@@ -728,10 +728,10 @@ export function dropMoveWait(state: PageState) {
   let { waitsAt: _waitsAt, ...dragging } = state.dragging;
   return {
     ...state,
-    dragging: dragging,
+    dragging,
   };
 }
-export function dragToWaitedRowOnRelease({ dragging: dragging }: Pick<PageState, 'dragging'>, event: PageEvent): PointerDragged | null {
+export function dragToWaitedRowOnRelease({ dragging }: Pick<PageState, 'dragging'>, event: PageEvent): PointerDragged | null {
   let waitsAt =
     event.kind === 'pointerReleased' && event.isPointerLost !== true && dragging?.kind === 'movingCells' && dragging.hasTableLeftItsPlace !== true
       ? dragging.waitsAt
@@ -755,11 +755,11 @@ export function pressToMoveCellsOutOfTable(state: PageState, event: PageEvent, r
 }
 export const EDGE_GRAB_WIDTH = 3;
 export const EDGE_GRAB_SCALE = 1;
-export const clipSpanToSight = (from: number, to: number, { showFrom: showFrom, showTo: showTo }: ShownStretch): StretchInSight => ({
+export const clipSpanToSight = (from: number, to: number, { showFrom, showTo }: ShownStretch): StretchInSight => ({
   from: Math.max(from, showFrom),
   to: Math.min(to, showTo),
 });
-export const edgeGrabInset = ({ start: start, end: end }: StartAndEnd, outset: number | null): number =>
+export const edgeGrabInset = ({ start, end }: StartAndEnd, outset: number | null): number =>
   outset === null ? Math.min(EDGE_GRAB_WIDTH, (end - start) / 4) : EDGE_GRAB_SCALE * outset;
 export const edgeGrabOutset = (outset: number | null): number => outset ?? 1 + EDGE_GRAB_WIDTH;
 export const startEdgeStrip = (span: SpanOnScreen, outset: number | null): StretchInSight | null =>
@@ -777,11 +777,11 @@ export const endEdgeStrip = (span: SpanOnScreen, outset: number | null, frozenSi
 export const wholeEdgeStrip = (span: SpanOnScreen, outset: number | null): StretchInSight =>
   clipSpanToSight(span.start - edgeGrabOutset(outset), span.end + (outset === null ? EDGE_GRAB_WIDTH : 0), span);
 export const cutsTableHeaderOrFooter = (
-  { topRowIndex: topRowIndex, rowCount: rowCount, leftColumnIndex: leftColumnIndex, columnCount: columnCount }: CellArea,
+  { topRowIndex, rowCount, leftColumnIndex, columnCount }: CellArea,
   sheetId: SheetId,
   reads: WorkbookReads,
 ): boolean =>
-  reads.cellTablesDeclaredIn(sheetId).some(({ liveCellTable: liveCellTable }) => {
+  reads.cellTablesDeclaredIn(sheetId).some(({ liveCellTable }) => {
     let firstColumnIndex = reads.columnIndexOf(sheetId, liveCellTable.firstColumn);
     let lastColumnIndex = reads.columnIndexOf(sheetId, liveCellTable.lastColumn);
     if (firstColumnIndex === null || lastColumnIndex === null) return true;
@@ -799,10 +799,10 @@ export const cutsTableHeaderOrFooter = (
             ],
     );
     let touchesHeaderOrFooter = headerAndFooterRows.some(
-      ({ first: first, last: last }) => first === null || last === null || (topRowIndex <= last && topRowIndex + rowCount > first),
+      ({ first, last }) => first === null || last === null || (topRowIndex <= last && topRowIndex + rowCount > first),
     );
     let coversHeaderAndFooter = headerAndFooterRows.every(
-      ({ first: first, last: last }) => first !== null && last !== null && topRowIndex <= first && topRowIndex + rowCount > last,
+      ({ first, last }) => first !== null && last !== null && topRowIndex <= first && topRowIndex + rowCount > last,
     );
     return touchesHeaderOrFooter && !(coversAllColumns && coversHeaderAndFooter);
   });
@@ -810,7 +810,7 @@ export const cutsTableHeaderOrFooter = (
 export const TABLE_HANDLE_TOP_INSET = 3;
 export const TABLE_HANDLE_REACH = 1 + TABLE_HANDLE_GAP + TABLE_HANDLE_WIDTH;
 [TABLE_HANDLE_NARROW_WIDTH, TABLE_HANDLE_NARROW_GAP, ROW_NUMBER_DIGITS_UNDER_HANDLE] = [13, 1, 2];
-export const boxOfSpans = ({ across: across, down: down }: SpansOfArea, growStart: number = 0, growEnd: number = 0): PaneRect => {
+export const boxOfSpans = ({ across, down }: SpansOfArea, growStart: number = 0, growEnd: number = 0): PaneRect => {
   let [acrossClip, downClip] = [
     clipSpanToSight(across.start - growStart, across.end + growEnd, across),
     clipSpanToSight(down.start - growStart, down.end + growEnd, down),
@@ -827,7 +827,7 @@ export const doBoxesIntersect = (box: PaneRect, otherBox: PaneRect): boolean =>
   otherBox.left < box.left + box.width &&
   box.top < otherBox.top + otherBox.height &&
   otherBox.top < box.top + box.height;
-export const isPointInBox = (x: number, y: number, { left: left, top: top, width: width, height: height }: PaneRect): boolean =>
+export const isPointInBox = (x: number, y: number, { left, top, width, height }: PaneRect): boolean =>
   x >= left && x < left + width && y >= top && y < top + height;
 export const clampNumber = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
 export const clampGripAcrossZones = (zoneEdges: readonly number[], pressAt: number, grip: number, pointerAt: number): number =>
@@ -837,38 +837,38 @@ export const clampGripAcrossZones = (zoneEdges: readonly number[], pressAt: numb
     return isPressPastEdge ? Math.max(position, edge) : Math.min(position, edge - 1);
   }, pointerAt - grip);
 export const pointerForMovingCells = (
-  { x: x, y: y }: GridPoint,
-  { press: press, grip: grip }: Pick<MovingCellsDrag, 'press' | 'grip'>,
+  { x, y }: GridPoint,
+  { press, grip }: Pick<MovingCellsDrag, 'press' | 'grip'>,
   layout: GridLayout,
-  { gridWidth: gridWidth, gridHeight: gridHeight }: Pick<PageState, 'gridWidth' | 'gridHeight'>,
+  { gridWidth, gridHeight }: Pick<PageState, 'gridWidth' | 'gridHeight'>,
 ): GridPoint => ({
   x: clampGripAcrossZones([ROW_HEADER_WIDTH, ROW_HEADER_WIDTH + frozenColumnsWidth(layout), gridWidth], press.x, grip.x, x),
   y: clampGripAcrossZones([COLUMN_HEADER_HEIGHT, COLUMN_HEADER_HEIGHT + frozenRowsHeight(layout), gridHeight], press.y, grip.y, y),
 });
 export const MOVE_CELLS_SNAP = 8;
 export const HOLD_STILL_DISTANCE = 3;
-export const columnZoneOfDrag = ({ heldBy: heldBy }: Pick<MovingCellsDrag, 'heldBy'>, view: Pick<PageState, 'gridWidth'>): [number, number] =>
+export const columnZoneOfDrag = ({ heldBy }: Pick<MovingCellsDrag, 'heldBy'>, view: Pick<PageState, 'gridWidth'>): [number, number] =>
   heldBy === 'handle' ? [0, ROW_HEADER_WIDTH + cellsAreaWidth(view)] : [ROW_HEADER_WIDTH, cellsAreaWidth(view)];
-export const landingAreaOfMovingCells = ({ dragging: dragging, ...rest }: PageState, reads: WorkbookReads): CellArea | null =>
+export const landingAreaOfMovingCells = ({ dragging, ...rest }: PageState, reads: WorkbookReads): CellArea | null =>
   dragging?.kind !== 'movingCells' || dragging.isOffCells
     ? null
     : landingAreaOfMove(
         {
           ...rest,
-          dragging: dragging,
+          dragging,
         },
         reads,
         dragging,
       );
-export const isHeldByHandleAtRowNumbers = ({ press: press }: Pick<MovingCellsDrag, 'press'>): boolean =>
+export const isHeldByHandleAtRowNumbers = ({ press }: Pick<MovingCellsDrag, 'press'>): boolean =>
   press.onHandleOfTable !== undefined && press.x < ROW_HEADER_WIDTH;
 export const leastPullAcrossForHandle = (drag: Pick<MovingCellsDrag, 'press'>): number =>
   isHeldByHandleAtRowNumbers(drag) ? ROW_HEADER_WIDTH - drag.press.x + 2 * ROW_NUMBERS_HANDLE_SLACK : 0;
-export const isMoveLandingElsewhere = ({ landing: landing, first: first }: Pick<MovingCellsDrag, 'landing' | 'first'>): boolean =>
+export const isMoveLandingElsewhere = ({ landing, first }: Pick<MovingCellsDrag, 'landing' | 'first'>): boolean =>
   landing !== null && !isSameCell(landing, first);
 export const ROW_NUMBERS_HANDLE_SLACK = 16;
 export const cellUnderPress = (point: GridPoint, view: PageState, reads: ReadsWithTextMeasurer): CellId | null => {
-  let { rowIndex: rowIndex, columnIndex: columnIndex } = cellUnderPointer(point, view, layoutOfView(view, reads), view);
+  let { rowIndex, columnIndex } = cellUnderPointer(point, view, layoutOfView(view, reads), view);
   return reads.cellIdAt(view.sheetId, rowIndex, columnIndex);
 };
 export const withoutMoveReplacedOffer = (before: PageState, state: PageState, event: PageEvent): PageState =>

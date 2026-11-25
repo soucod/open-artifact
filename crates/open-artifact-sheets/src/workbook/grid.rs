@@ -1,18 +1,19 @@
-//! How `setCells` writes its cells (format 39 on): as a list of cells, each with its ids (`cells`), or, when it sets
-//! 32 cells or more, as a grid (`grid`): the rows and columns that hold a cell set, each as its base and runs of
+//! How `setCells` writes its cells: as a list of cells, each with its ids (`cells`), or as a grid (`grid`, format 39
+//! onward): the rows and columns that hold a cell set, each as its base and runs of
 //! numbers (`[first, count]`), and the inputs row by row. An input is written bare when it is a number, a text or a
 //! true or false (`5.0`, `"x"`, `true`), `null` when the cell is emptied, `[]` where no cell is set (a hole), and as
-//! itself otherwise (a formula, a dropdown option, people, text with looks).
+//! itself for a dropdown option, people or text with looks. Formulas use a shared dictionary in format 46.
 //!
 //! A grid is spelled one way only: bases in order (as strings), each base once, its runs in order, apart (a run that
 //! goes on where the one before ends is one run) and of at least one number; every row as long as there are
-//! columns; no row or column of holes; nothing written as an object that could be written bare. Any
-//! other spelling is refused as unreadable, and a grid of fewer than 32 cells is read (none is written).
+//! columns; no row or column of holes; nothing written as an object that could be written bare. Any other
+//! spelling is refused as unreadable.
 //!
 //! The rows and columns are in the order of their ids (base, then number), not as they stand on the sheet.
 
 use std::fmt;
 
+use hashbrown::HashSet;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,24 @@ use super::load::CellToSet;
 use super::Input;
 use crate::ids::split_id;
 
-/// The fewest cells written as a grid.
+pub(super) mod formulas;
+use formulas::{Formula, Formulas};
+
+/// The usual minimum for a grid. A large list of formulas can qualify earlier.
 pub const LEAST_CELLS_OF_A_GRID: usize = 32;
+
+/// Whether a cell edit needs its encoding chosen or has already been sized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellForm {
+    Auto,
+    /// Keep the list under the edit's size budget, then consider a grid.
+    ListUnlessLarge,
+    List,
+    Grid,
+}
+
+mod cost;
+pub(crate) use cost::{listed_cell_bytes, written, GridPlan};
 
 /// The rows and columns of a grid, the cells' places in it, in the order they are written: `None` when no grid can
 /// name these cells (an id with no number, or a cell set twice).
@@ -51,12 +68,9 @@ impl<'a> Shape<'a> {
         let place = |lines: &[(&str, u32)], id: &(&str, u32)| lines.binary_search(id).unwrap();
         let places: Vec<(usize, usize)> =
             rows.iter().zip(&columns).map(|(r, c)| (place(&row_lines, r), place(&column_lines, c))).collect();
-        let mut seen = vec![false; row_lines.len() * column_lines.len()];
-        for &(i, j) in &places {
-            let at = i * column_lines.len() + j;
-            if std::mem::replace(&mut seen[at], true) {
-                return None;
-            }
+        let mut seen = HashSet::with_capacity(places.len());
+        if !places.iter().all(|&place| seen.insert(place)) {
+            return None;
         }
         Some(Shape { rows: row_lines, columns: column_lines, places })
     }
@@ -86,7 +100,8 @@ struct LineOut<'a> {
 /// One slot of a grid as written.
 pub enum Slot<'a> {
     Hole,
-    Cell(&'a Option<Input>),
+    Cell(Option<&'a Input>),
+    Formula(usize),
 }
 
 impl Serialize for Slot<'_> {
@@ -98,6 +113,11 @@ impl Serialize for Slot<'_> {
             Slot::Cell(Some(Input::Text { value })) => s.serialize_str(value),
             Slot::Cell(Some(Input::Boolean { value })) => s.serialize_bool(*value),
             Slot::Cell(Some(input)) => input.serialize(s),
+            Slot::Formula(f) => {
+                let mut map = s.serialize_map(Some(1))?;
+                map.serialize_entry("f", f)?;
+                map.end()
+            }
         }
     }
 }
@@ -113,6 +133,7 @@ impl Serialize for Lines<'_> {
 struct Row<'a> {
     slots: &'a [Option<usize>],
     cells: &'a [CellToSet],
+    formulas: &'a [Option<usize>],
 }
 
 impl Serialize for Row<'_> {
@@ -120,7 +141,10 @@ impl Serialize for Row<'_> {
         let mut seq = s.serialize_seq(Some(self.slots.len()))?;
         for slot in self.slots {
             match slot {
-                Some(k) => seq.serialize_element(&Slot::Cell(&self.cells[*k].input))?,
+                Some(k) => match self.formulas[*k] {
+                    Some(f) => seq.serialize_element(&Slot::Formula(f))?,
+                    None => seq.serialize_element(&Slot::Cell(self.cells[*k].input.as_ref()))?,
+                },
                 None => seq.serialize_element(&Slot::Hole)?,
             }
         }
@@ -132,17 +156,20 @@ struct Inputs<'a> {
     slots: &'a [Option<usize>],
     width: usize,
     cells: &'a [CellToSet],
+    formulas: &'a [Option<usize>],
 }
 
 impl Serialize for Inputs<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_seq(self.slots.chunks(self.width.max(1)).map(|slots| Row { slots, cells: self.cells }))
+        s.collect_seq(self.slots.chunks(self.width.max(1)).map(|slots| Row {
+            slots, cells: self.cells, formulas: self.formulas
+        }))
     }
 }
 
 struct GridOut<'a> {
     cells: &'a [CellToSet],
-    shape: Shape<'a>,
+    shape: &'a Shape<'a>,
 }
 
 impl Serialize for GridOut<'_> {
@@ -152,44 +179,72 @@ impl Serialize for GridOut<'_> {
         for (k, &(i, j)) in self.shape.places.iter().enumerate() {
             slots[i * width + j] = Some(k);
         }
-        let mut map = s.serialize_map(Some(3))?;
+        let mut formulas = Formulas::default();
+        let mut formula_slots = vec![None; self.cells.len()];
+        if uses_formula_dictionary(self.cells) {
+            for (at, &k) in slots.iter().enumerate().filter_map(|(at, slot)| slot.as_ref().map(|k| (at, k))) {
+                if let Some(Input::Formula { formula }) = &self.cells[k].input {
+                    formula_slots[k] = formulas.index(formula, self.shape.rows[at / width], self.shape.columns[at % width]);
+                }
+            }
+        }
+        let mut map = s.serialize_map(Some(3 + usize::from(!formulas.entries.is_empty())))?;
         map.serialize_entry("rows", &Lines(&lines_written(&self.shape.rows)))?;
         map.serialize_entry("columns", &Lines(&lines_written(&self.shape.columns)))?;
-        map.serialize_entry("inputs", &Inputs { slots: &slots, width, cells: self.cells })?;
+        if !formulas.entries.is_empty() {
+            map.serialize_entry("formulas", &formulas.entries)?;
+        }
+        map.serialize_entry("inputs", &Inputs { slots: &slots, width, cells: self.cells, formulas: &formula_slots })?;
         map.end()
     }
 }
 
-/// Whether these cells are written as a grid (unless the operation is `listed`, see `set_cells`).
-pub fn is_grid(cells: &[CellToSet]) -> bool {
-    cells.len() >= LEAST_CELLS_OF_A_GRID && Shape::of(cells).is_some()
+/// Whether the write uses a grid.
+pub fn is_grid(sheet_id: &str, cells: &[CellToSet], form: CellForm) -> bool {
+    match form {
+        CellForm::List | CellForm::ListUnlessLarge => false,
+        CellForm::Grid => true,
+        CellForm::Auto => (cells.len() >= LEAST_CELLS_OF_A_GRID || uses_formula_dictionary(cells))
+            && GridPlan::of(sheet_id, cells, None).is_whole_grid(),
+    }
 }
 
-/// `setCells` as written (its `kind` aside): `sheetId`, then its cells as `cells` or `grid`. A grid is written
-/// only from what types, pastes, fills or copies cells (and their undoing); clearing, formatting, merging and moving
-/// cells write a list however many cells they set (`listed`). Read back, an operation is `listed` when it was
-/// written as a list.
+fn grid_shape<'a>(sheet_id: &str, cells: &'a [CellToSet], form: CellForm) -> Option<Shape<'a>> {
+    if is_grid(sheet_id, cells, form) { Shape::of(cells) } else { None }
+}
+
+pub(super) fn uses_formula_dictionary(cells: &[CellToSet]) -> bool {
+    let mut formulas = cells.iter().filter_map(|cell| match &cell.input {
+        Some(Input::Formula { formula }) => Some(formula),
+        _ => None,
+    }).peekable();
+    formulas.peek().is_some() && formulas.all(Formula::can_write)
+}
+
+/// `setCells` as written (its `kind` aside): `sheetId`, then its cells as `cells` or `grid`. A grid is written from
+/// what types, pastes, fills or copies cells (and their undoing). Dropdown conversions start with a list and consider
+/// a grid when the whole edit exceeds its budget. Read back, an operation keeps the form it was written in.
 pub mod set_cells {
     use super::*;
 
-    pub fn serialize<S: Serializer>(sheet_id: &String, cells: &[CellToSet], listed: &bool, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(sheet_id: &String, cells: &[CellToSet], form: &CellForm, s: S) -> Result<S::Ok, S::Error> {
         let mut map = s.serialize_map(Some(2))?;
         map.serialize_entry("sheetId", sheet_id)?;
-        match (!*listed && cells.len() >= LEAST_CELLS_OF_A_GRID).then(|| Shape::of(cells)).flatten() {
-            Some(shape) => map.serialize_entry("grid", &GridOut { cells, shape })?,
+        match grid_shape(sheet_id, cells, *form) {
+            Some(shape) => map.serialize_entry("grid", &GridOut { cells, shape: &shape })?,
             None => map.serialize_entry("cells", cells)?,
         }
         map.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<(String, Vec<CellToSet>, bool), D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<(String, Vec<CellToSet>, CellForm), D::Error> {
         d.deserialize_map(SetCellsVisitor)
     }
 
     struct SetCellsVisitor;
 
     impl<'de> Visitor<'de> for SetCellsVisitor {
-        type Value = (String, Vec<CellToSet>, bool);
+        type Value = (String, Vec<CellToSet>, CellForm);
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.write_str("setCells")
@@ -201,8 +256,8 @@ pub mod set_cells {
             while let Some(key) = map.next_key::<String>()? {
                 match key.as_str() {
                     "sheetId" if sheet_id.is_none() => sheet_id = Some(map.next_value::<String>()?),
-                    "cells" if cells.is_none() => cells = Some((map.next_value::<Vec<CellToSet>>()?, true)),
-                    "grid" if cells.is_none() => cells = Some((map.next_value::<GridIn>()?.cells, false)),
+                    "cells" if cells.is_none() => cells = Some((map.next_value::<Vec<CellToSet>>()?, CellForm::List)),
+                    "grid" if cells.is_none() => cells = Some((map.next_value::<GridIn>()?.cells, CellForm::Auto)),
                     "sheetId" => return Err(de::Error::duplicate_field("sheetId")),
                     "cells" | "grid" => return Err(de::Error::custom("cells written twice")),
                     other => {
@@ -212,8 +267,8 @@ pub mod set_cells {
                 }
             }
             let sheet_id = sheet_id.ok_or_else(|| de::Error::missing_field("sheetId"))?;
-            let (cells, listed) = cells.ok_or_else(|| de::Error::missing_field("cells"))?;
-            Ok((sheet_id, cells, listed))
+            let (cells, form) = cells.ok_or_else(|| de::Error::missing_field("cells"))?;
+            Ok((sheet_id, cells, form))
         }
     }
 }
@@ -224,8 +279,8 @@ pub mod form {
 
     pub fn serialize<S: Serializer>(cells: &[CellToSet], s: S) -> Result<S::Ok, S::Error> {
         let mut map = s.serialize_map(Some(1))?;
-        match (cells.len() >= LEAST_CELLS_OF_A_GRID).then(|| Shape::of(cells)).flatten() {
-            Some(shape) => map.serialize_entry("grid", &GridOut { cells, shape })?,
+        match grid_shape("", cells, CellForm::Auto) {
+            Some(shape) => map.serialize_entry("grid", &GridOut { cells, shape: &shape })?,
             None => map.serialize_entry("cells", cells)?,
         }
         map.end()
@@ -276,6 +331,7 @@ struct LineIn {
 enum SlotIn {
     Hole,
     Cell(Option<Input>),
+    Formula(usize),
 }
 
 impl<'de> Deserialize<'de> for SlotIn {
@@ -323,12 +379,18 @@ impl<'de> Visitor<'de> for SlotVisitor {
         }
     }
     fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<SlotIn, A::Error> {
-        let input = Input::deserialize(de::value::MapAccessDeserializer::new(map))?;
-        match input {
-            Input::Number { .. } | Input::Text { .. } | Input::Boolean { .. } => {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Index { f: usize }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Object { Formula(Index), Input(Input) }
+        match Object::deserialize(de::value::MapAccessDeserializer::new(map))? {
+            Object::Formula(Index { f }) => Ok(SlotIn::Formula(f)),
+            Object::Input(Input::Number { .. } | Input::Text { .. } | Input::Boolean { .. }) => {
                 Err(de::Error::custom("an input written as an object that is written bare"))
             }
-            input => Ok(SlotIn::Cell(Some(input))),
+            Object::Input(input) => Ok(SlotIn::Cell(Some(input))),
         }
     }
 }
@@ -345,19 +407,26 @@ impl<'de> Deserialize<'de> for GridIn {
         struct Raw {
             rows: Vec<LineIn>,
             columns: Vec<LineIn>,
+            #[serde(default, deserialize_with = "super::layout::written::not_null")]
+            formulas: Option<Vec<Formula>>,
             inputs: InputsIn,
         }
         let raw = Raw::deserialize(d)?;
-        let rows = ids(&raw.rows).ok_or_else(|| de::Error::custom("rows not spelled the one way"))?;
-        let columns = ids(&raw.columns).ok_or_else(|| de::Error::custom("columns not spelled the one way"))?;
+        let formulas = raw.formulas.as_deref();
+        if formulas.is_some_and(|entries| entries.is_empty() || entries.iter().collect::<HashSet<_>>().len() != entries.len()) {
+            return Err(de::Error::custom("a formula dictionary has one entry for each formula"));
+        }
         let inputs = raw.inputs.0;
+        let rows = ids(&raw.rows, inputs.len()).ok_or_else(|| de::Error::custom("rows not spelled the one way"))?;
+        let columns = ids(&raw.columns, inputs.first().map_or(0, Vec::len))
+            .ok_or_else(|| de::Error::custom("columns not spelled the one way"))?;
         let fits = inputs.len() == rows.len() && inputs.iter().all(|row| row.len() == columns.len());
         let mut row_set = vec![false; rows.len()];
         let mut column_set = vec![false; columns.len()];
         if fits {
             for (i, row) in inputs.iter().enumerate() {
                 for (j, slot) in row.iter().enumerate() {
-                    if let SlotIn::Cell(_) = slot {
+                    if !matches!(slot, SlotIn::Hole) {
                         row_set[i] = true;
                         column_set[j] = true;
                     }
@@ -368,12 +437,29 @@ impl<'de> Deserialize<'de> for GridIn {
             return Err(de::Error::custom("a grid not spelled the one way"));
         }
         let mut cells = Vec::new();
+        let mut used = vec![false; formulas.map_or(0, <[Formula]>::len)];
         for (i, row) in inputs.into_iter().enumerate() {
             for (j, slot) in row.into_iter().enumerate() {
-                if let SlotIn::Cell(input) = slot {
-                    cells.push(CellToSet { r: rows[i].clone(), c: columns[j].clone(), input });
-                }
+                let (r, c) = (&rows[i], &columns[j]);
+                let input = match slot {
+                    SlotIn::Hole => continue,
+                    SlotIn::Cell(Some(Input::Formula { .. })) if formulas.is_some() => {
+                        return Err(de::Error::custom("a formula with a dictionary is written by index"));
+                    }
+                    SlotIn::Cell(input) => input,
+                    SlotIn::Formula(f) => {
+                        let formula = formulas.and_then(|formulas| formulas.get(f))
+                            .and_then(|formula| formula.read(split_id(r)?, split_id(c)?))
+                            .ok_or_else(|| de::Error::custom("unreadable grid formula"))?;
+                        used[f] = true;
+                        Some(Input::Formula { formula })
+                    }
+                };
+                cells.push(CellToSet { r: r.clone(), c: c.clone(), input });
             }
+        }
+        if used.contains(&false) {
+            return Err(de::Error::custom("the dictionary holds a formula the grid doesn't use"));
         }
         Ok(GridIn { cells })
     }
@@ -388,7 +474,7 @@ impl<'de> Deserialize<'de> for InputsIn {
 }
 
 /// The ids of lines as a grid spells them, or `None` when not spelled the one way.
-fn ids(lines: &[LineIn]) -> Option<Vec<String>> {
+fn ids(lines: &[LineIn], expected: usize) -> Option<Vec<String>> {
     if lines.is_empty() || lines.windows(2).any(|w| w[0].base >= w[1].base) {
         return None;
     }
@@ -399,7 +485,9 @@ fn ids(lines: &[LineIn]) -> Option<Vec<String>> {
         }
         let mut end: Option<u64> = None;
         for &(first, count) in &line.runs {
-            if count == 0 || end.is_some_and(|e| first as u64 <= e) {
+            if count == 0 || first.checked_add(count - 1).is_none() || end.is_some_and(|e| first as u64 <= e)
+                || out.len().checked_add(count as usize)? > expected
+            {
                 return None;
             }
             end = Some(first as u64 + count as u64);

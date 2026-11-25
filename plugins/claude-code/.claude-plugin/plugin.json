@@ -1,9 +1,17 @@
 {
   "name": "open-artifact",
   "displayName": "Open Artifact",
-  "version": "0.9.2",
-  "description": "Make slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs and design systems as local files that open in one page where you view, edit and comment. /open-artifact <type> <what to make>. Comments you send from the page come back to Claude.",
+  "version": "0.14.6",
+  "description": "Make slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs, animated films, design systems and free HTML pages as local files that open in one page where you view, edit and comment. /open-artifact <type> <what to make>. Comments you send from the page come back to Claude.",
   "author": { "name": "Open Artifact" },
   "license": "Apache-2.0",
-  "keywords": ["artifacts", "slides", "design", "whiteboard", "sheets", "spreadsheet", "data", "dashboard", "docs", "document", "mcp"]
+  "keywords": ["artifacts", "slides", "design", "whiteboard", "page", "sheets", "spreadsheet", "data", "dashboard", "docs", "document", "motion", "animation", "video", "mcp"],
+  "userConfig": {
+    "remote": {
+      "type": "string",
+      "title": "Open Artifact server",
+      "description": "Optional. The address of an Open Artifact server to publish to instead of keeping artifacts only on this computer, such as https://artifacts.example.com or http://192.168.1.20:4900. Leave empty for local only. Takes effect when the Open Artifact daemon next starts.",
+      "default": ""
+    }
+  }
 }

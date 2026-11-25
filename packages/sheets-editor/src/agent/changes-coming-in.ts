@@ -1,127 +1,183 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
 import { CHANGE_HOLD_BASE_MS, CHANGE_HOLD_MAX_GROWTH_MS, CHANGE_HOLD_PER_CELL_MS, CHANGE_HOLD_TAIL_MS } from './changes-by-agent.ts';
-import { ariaIndex } from '../grid/cell-drawing.ts';
-import { NO_CELLS_AS_BEFORE } from '../grid/grid-drawing.ts';
+import { ariaIndex } from '../grid/cell-drawing.tsx';
+import { NO_CELLS_AS_BEFORE } from '../grid/grid-drawing.tsx';
+import type { CellAsBefore, DrawnCell, DrawnRow } from '../grid/grid-drawing.tsx';
 import { LINES_SLIDE_ANIMATION_ID } from '../grid/lines-slide.ts';
 import { DEFAULT_CELL_FORMAT } from '../model/cell-format.ts';
 import { cellColorsOfFormat } from '../format/cell-colors.ts';
-export function openingSteps(items?: Dynamic, options?: Dynamic) {
-  return items.flatMap((input?: Dynamic, options2?: Dynamic) => {
-    let value = items[options2 + 1];
-    if (value === undefined) return [];
-    let value2 = value.neededAfterMs - input.neededAfterMs;
-    let value3 = Math.min(value.neededAfterMs, Math.max(CHANGE_HOLD_BASE_MS, STEP_DURATION_SHARE * value2));
+import type { PaneRect } from '../grid/geometry.ts';
+import type { DrawnBox } from '../grid/view-boxes.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { ShiftOfView } from '../state/controller.ts';
+/** A mark on the cells the agent changed, as the grid draws it. */
+export interface ChangeMarkDrawn {
+  key: string;
+  revision: number;
+  box: DrawnBox;
+  area: CellArea;
+  /** The box of the change's own cells, when the mark took in changes close by. */
+  ownBox: PaneRect | null;
+  /** The box the mark had before it grew to take this change in. */
+  grewFrom: PaneRect | null;
+  joinedRevisions: number[];
+}
+/** Of the drawn grid, what the changes of the agent come in over. */
+export interface GridOfChangesComingIn {
+  rows: readonly DrawnRow[];
+  marksOnChangesByAgent: readonly ChangeMarkDrawn[];
+  yetToGlide: ShiftOfView | null;
+  latestRevisionByAgent: number;
+  changesAskedFor: number;
+}
+/** How far the room of a mark is to reach, and by when. */
+export interface ReachNeeded {
+  size: number;
+  neededAfterMs: number;
+}
+/** A step the room of a mark opens by: how far, from when, and for how long. */
+export interface OpeningStep {
+  opensBy: number;
+  beginsAfterMs: number;
+  takesMs: number;
+}
+/** A cell whose new text comes in, and when. */
+export interface CellComingIn {
+  rowNumber: number;
+  columnNumber: number;
+  comesAfterMs: number;
+}
+/** How a change of the agent comes in: the steps its room opens by, the cells as their text comes, and the cells kept as before until then. */
+export interface ComingInPlan {
+  stepsRight: OpeningStep[];
+  stepsDown: OpeningStep[];
+  cells: CellComingIn[];
+  cellsAsBefore: CellAsBefore[];
+}
+/** The cells kept as before, and the grid they were worked out for. */
+interface CellsAsBeforeHeld {
+  drawn: GridOfChangesComingIn;
+  cellsAsBefore: readonly CellAsBefore[];
+}
+/** A padding of a mark's room that opens, and the steps it opens by. */
+type OpeningPart = [padding: 'paddingRight' | 'paddingBottom', steps: OpeningStep[]];
+export function openingSteps(reaches: ReachNeeded[], wholeSize: number): OpeningStep[] {
+  return reaches.flatMap((reach, index) => {
+    let nextReach = reaches[index + 1];
+    if (nextReach === undefined) return [];
+    let gapMs = nextReach.neededAfterMs - reach.neededAfterMs;
+    let takesMs = Math.min(nextReach.neededAfterMs, Math.max(CHANGE_HOLD_BASE_MS, STEP_DURATION_SHARE * gapMs));
     return [
       {
-        opensBy: (options2 + 2 === items.length ? options : value.size) - input.size,
-        beginsAfterMs: value.neededAfterMs - value3,
-        takesMs: value3,
+        opensBy: (index + 2 === reaches.length ? wholeSize : nextReach.size) - reach.size,
+        beginsAfterMs: nextReach.neededAfterMs - takesMs,
+        takesMs,
       },
     ];
   });
 }
-export function comingInPlan(mark?: Dynamic, rows?: Dynamic, cellsBefore?: Dynamic) {
-  let { revision: value, box: value2, area: value3, grewFrom: value4 } = mark;
-  let value5 = mark.ownBox ?? value2;
-  let mapped = rows
-    .filter((input?: Dynamic) => isInChangeSpan(input.rowNumber, value3.topRowIndex, value3.rowCount))
+export function comingInPlan(mark: ChangeMarkDrawn, rows: readonly DrawnRow[], cellsBefore: Map<string, DrawnCell>): ComingInPlan | null {
+  let { revision, box, area, grewFrom } = mark;
+  let ownBox = mark.ownBox ?? box;
+  let rowsInChange = rows
+    .filter((row) => isInChangeSpan(row.rowNumber, area.topRowIndex, area.rowCount))
     .map(
-      (input?: Dynamic) => ({
-        row: input,
-        cells: input.cells.filter((input2?: Dynamic) => isInChangeSpan(input2.columnNumber, value3.leftColumnIndex, value3.columnCount)),
+      (row) => ({
+        row,
+        cells: row.cells.filter((cell) => isInChangeSpan(cell.columnNumber, area.leftColumnIndex, area.columnCount)),
       }),
     );
-  let value6 = mapped[0];
-  if (value6 === undefined || value6.cells.length === 0) return null;
-  let value7 = mapped.reduce((input: Dynamic, { cells: cells }: Dynamic) => input + cells.length, 0);
-  let value8 = Math.min(CHANGE_HOLD_MAX_GROWTH_MS, value7 * CHANGE_HOLD_PER_CELL_MS) / mapped.length;
-  let value9 = value4 === null || (value4.left === value2.left && value4.top === value2.top);
-  let value10 = value4 !== null && value9 && (value4.width < value2.width || value4.height < value2.height) ? CHANGE_HOLD_BASE_MS : 0;
-  let value11 = (input?: Dynamic, options?: Dynamic) =>
-    value10 + value8 * (input + clampToSize(options.left - value5.left, value5.width) / value5.width);
+  let firstRow = rowsInChange[0];
+  if (firstRow === undefined || firstRow.cells.length === 0) return null;
+  let cellCount = rowsInChange.reduce((count, { cells }) => count + cells.length, 0);
+  let msPerRow = Math.min(CHANGE_HOLD_MAX_GROWTH_MS, cellCount * CHANGE_HOLD_PER_CELL_MS) / rowsInChange.length;
+  let growsFromSameCorner = grewFrom === null || (grewFrom.left === box.left && grewFrom.top === box.top);
+  let growthHoldMs =
+    grewFrom !== null && growsFromSameCorner && (grewFrom.width < box.width || grewFrom.height < box.height) ? CHANGE_HOLD_BASE_MS : 0;
+  let comesAfterMs = (rowInChange: number, cell: Pick<DrawnCell, 'left'>) =>
+    growthHoldMs + msPerRow * (rowInChange + clampToSize(cell.left - ownBox.left, ownBox.width) / ownBox.width);
   return {
-    stepsRight: !value9
+    stepsRight: !growsFromSameCorner
       ? []
       : openingSteps(
           withGrownFrom(
-            value4?.width,
-            value6.cells.map(
-              (input?: Dynamic) => ({
-                size: clampToSize(input.left + input.width - value2.left, value2.width),
-                neededAfterMs: value11(0, input),
+            grewFrom?.width,
+            firstRow.cells.map(
+              (cell) => ({
+                size: clampToSize(cell.left + cell.width - box.left, box.width),
+                neededAfterMs: comesAfterMs(0, cell),
               }),
             ),
           ),
-          value2.width,
+          box.width,
         ),
-    stepsDown: !value9
+    stepsDown: !growsFromSameCorner
       ? []
       : openingSteps(
           withGrownFrom(
-            value4?.height,
-            mapped.map(
-              ({ row: row }: Dynamic, options?: Dynamic) => ({
-                size: clampToSize(row.top + row.height - value2.top, value2.height),
-                neededAfterMs: value10 + value8 * options,
+            grewFrom?.height,
+            rowsInChange.map(
+              ({ row }, rowInChange) => ({
+                size: clampToSize(row.top + row.height - box.top, box.height),
+                neededAfterMs: growthHoldMs + msPerRow * rowInChange,
               }),
             ),
           ),
-          value2.height,
+          box.height,
         ),
-    cells: mapped.flatMap(
-      ({ row: row, cells: cells }: Dynamic, options?: Dynamic) =>
+    cells: rowsInChange.flatMap(
+      ({ row, cells }, rowInChange) =>
         cells
-          .filter((input?: Dynamic) => input.text !== '' && cellsBefore.get(cellKeyInRow(row, input))?.text !== input.text)
+          .filter((cell) => cell.text !== '' && cellsBefore.get(cellKeyInRow(row, cell))?.text !== cell.text)
           .map(
-            (input?: Dynamic) => ({
+            (cell) => ({
               rowNumber: row.rowNumber,
-              columnNumber: input.columnNumber,
-              comesAfterMs: value11(options, input),
+              columnNumber: cell.columnNumber,
+              comesAfterMs: comesAfterMs(rowInChange, cell),
             }),
           ),
     ),
-    cellsAsBefore: mapped.flatMap(
-      ({ row: row, cells: cells }: Dynamic, options?: Dynamic) =>
-        cells.flatMap((input?: Dynamic) => {
-          let value12 = cellsBefore.get(cellKeyInRow(row, input)) ?? blankDrawnCell(input);
-          if (!(value12.text !== '' && value12.text !== input.text) && cellLooksKey(value12) === cellLooksKey(input)) return [];
-          let value13 = value11(options, input);
+    cellsAsBefore: rowsInChange.flatMap(
+      ({ row, cells }, rowInChange) =>
+        cells.flatMap((cell) => {
+          let cellBefore = cellsBefore.get(cellKeyInRow(row, cell)) ?? blankDrawnCell(cell);
+          if (!(cellBefore.text !== '' && cellBefore.text !== cell.text) && cellLooksKey(cellBefore) === cellLooksKey(cell)) return [];
+          let goesAfterMs = comesAfterMs(rowInChange, cell);
           return [
             {
               keyOfMark: mark.key,
-              revision: value,
+              revision,
               rowKey: row.key,
-              cell: value12,
-              goesAfterMs: value13,
+              cell: cellBefore,
+              goesAfterMs,
             },
           ];
         }),
     ),
   };
 }
-export function scrollKeyOfRows({ rows: rows }: Dynamic) {
-  let frozenBottom = (Math.max as Dynamic)(0, ...rows.flatMap((row?: Dynamic) => (row.isFrozen ? row.top + row.height : [])));
-  let match = rows.find(({ isFrozen: isFrozen, top: top, height: height }: Dynamic) => !isFrozen && top + height > frozenBottom);
-  let cells = match?.cells ?? [];
-  let frozenRight = (Math.max as Dynamic)(
+export function scrollKeyOfRows({ rows }: Pick<GridOfChangesComingIn, 'rows'>): string {
+  let frozenBottom = Math.max(0, ...rows.flatMap((row) => (row.isFrozen ? row.top + row.height : [])));
+  let firstRowScrolled = rows.find(({ isFrozen, top, height }) => !isFrozen && top + height > frozenBottom);
+  let cells = firstRowScrolled?.cells ?? [];
+  let frozenRight = Math.max(
     0,
-    ...cells.flatMap((cell?: Dynamic) => (cell.frozenBy === 'column' ? cell.left + cell.width : [])),
+    ...cells.flatMap((cell) => (cell.frozenBy === 'column' ? cell.left + cell.width : [])),
   );
-  let value = cells.find(
-    ({ left: left, width: width, frozenBy: frozenBy }: Dynamic) => frozenBy !== 'column' && left + width > frozenRight,
+  let firstCellScrolled = cells.find(
+    ({ left, width, frozenBy }) => frozenBy !== 'column' && left + width > frozenRight,
   );
-  return [match?.rowNumber, match?.top, value?.columnNumber, value?.left].join();
+  return [firstRowScrolled?.rowNumber, firstRowScrolled?.top, firstCellScrolled?.columnNumber, firstCellScrolled?.left].join();
 }
-export function movedByGlideAlone(drawn?: Dynamic, before?: Dynamic) {
+export function movedByGlideAlone(drawn: GridOfChangesComingIn, before: GridOfChangesComingIn): boolean {
   let [{ x: glideX, y: glideY }, { x: glideXBefore, y: glideYBefore }] = [drawn.yetToGlide ?? NO_GLIDE, before.yetToGlide ?? NO_GLIDE];
-  let rowsBefore = new (Map as Dynamic)(before.rows.map((row?: Dynamic) => [row.key, row]));
-  let row = drawn.rows.find(({ key: key, isFrozen: isFrozen }: Dynamic) => !isFrozen && rowsBefore.get(key)?.isFrozen === false);
+  let rowsBefore = new Map(before.rows.map((row): [string, DrawnRow] => [row.key, row]));
+  let row = drawn.rows.find(({ key, isFrozen }) => !isFrozen && rowsBefore.get(key)?.isFrozen === false);
   let rowBefore = row === undefined ? undefined : rowsBefore.get(row.key);
   if (row === undefined || rowBefore === undefined) return false;
-  let cellsBefore = new (Map as Dynamic)(rowBefore.cells.map((cell?: Dynamic) => [cell.key, cell]));
+  let cellsBefore = new Map(rowBefore.cells.map((cell): [string, DrawnCell] => [cell.key, cell]));
   let cell = row.cells.find(
-    ({ key: key, frozenBy: frozenBy }: Dynamic) =>
+    ({ key, frozenBy }) =>
       frozenBy !== 'column' && cellsBefore.has(key) && cellsBefore.get(key)?.frozenBy !== 'column',
   );
   let cellBefore = cell === undefined ? undefined : cellsBefore.get(cell.key);
@@ -134,60 +190,66 @@ export function movedByGlideAlone(drawn?: Dynamic, before?: Dynamic) {
     isWithinHalfPixel(cell.left - glideX, cellBefore.left - glideXBefore)
   );
 }
-export function marksMovedOrResized(input?: Dynamic, options?: Dynamic) {
-  let isGlideAlone = (input.yetToGlide !== null || options.yetToGlide !== null) && movedByGlideAlone(input, options);
-  let value = !isGlideAlone && scrollKeyOfRows(input) !== scrollKeyOfRows(options);
-  let [glide, glideBefore] = [input.yetToGlide ?? NO_GLIDE, options.yetToGlide ?? NO_GLIDE];
-  let staysPut = (edge?: Dynamic, edgeBefore?: Dynamic, axis?: Dynamic, shownEdge?: Dynamic) =>
+export function marksMovedOrResized(drawn: GridOfChangesComingIn, before: GridOfChangesComingIn): ChangeMarkDrawn[] {
+  let isGlideAlone = (drawn.yetToGlide !== null || before.yetToGlide !== null) && movedByGlideAlone(drawn, before);
+  let hasScrolled = !isGlideAlone && scrollKeyOfRows(drawn) !== scrollKeyOfRows(before);
+  let [glide, glideBefore] = [drawn.yetToGlide ?? NO_GLIDE, before.yetToGlide ?? NO_GLIDE];
+  let staysPut = (edge: number, edgeBefore: number, axis: keyof ShiftOfView, shownEdge: number) =>
     isWithinHalfPixel(edge - glide[axis], edgeBefore - glideBefore[axis]) || (isWithinHalfPixel(edge, edgeBefore) && edge <= shownEdge);
-  return input.marksOnChangesByAgent.filter(({ key: key, box: box }: Dynamic) => {
-    let value2 = options.marksOnChangesByAgent.find((input2?: Dynamic) => input2.key === key)?.box;
-    if (value2 === undefined) return false;
-    if (!isGlideAlone) return value || value2.width !== box.width || value2.height !== box.height;
-    let { showsIn: showsIn } = box;
+  return drawn.marksOnChangesByAgent.filter(({ key, box }) => {
+    let boxBefore = before.marksOnChangesByAgent.find((markBefore) => markBefore.key === key)?.box;
+    if (boxBefore === undefined) return false;
+    if (!isGlideAlone) return hasScrolled || boxBefore.width !== box.width || boxBefore.height !== box.height;
+    let { showsIn } = box;
     return (
-      !staysPut(box.left + box.width, value2.left + value2.width, 'x', showsIn.left + showsIn.width) ||
-      !staysPut(box.top + box.height, value2.top + value2.height, 'y', showsIn.top + showsIn.height)
+      !staysPut(box.left + box.width, boxBefore.left + boxBefore.width, 'x', showsIn.left + showsIn.width) ||
+      !staysPut(box.top + box.height, boxBefore.top + boxBefore.height, 'y', showsIn.top + showsIn.height)
     );
   });
 }
-export function animateComingIn(element?: Dynamic, options?: Dynamic, context?: Dynamic, value?: Dynamic, extra?: Dynamic) {
-  let animatedParts = [
-    ['paddingRight', context.stepsRight],
-    ['paddingBottom', context.stepsDown],
+export function animateComingIn(
+  container: ParentNode,
+  markKey: string,
+  plan: ComingInPlan,
+  cellsComing: Set<Element>,
+  runningByCell: Map<Element, Animation[]>,
+): void {
+  let animatedParts: OpeningPart[] = [
+    ['paddingRight', plan.stepsRight],
+    ['paddingBottom', plan.stepsDown],
   ];
-  for (let value2 of roomsOfChangeMark(element, options) as Dynamic)
-    for (let [value3, value4] of animatedParts as Dynamic)
-      for (let { opensBy: value5, beginsAfterMs: value6, takesMs: value7 } of value4 as Dynamic)
-        value2.animate(
+  for (let room of roomsOfChangeMark(container, markKey))
+    for (let [padding, steps] of animatedParts)
+      for (let { opensBy, beginsAfterMs, takesMs } of steps)
+        room.animate(
           {
-            [value3]: [`${value5}px`, '0px'],
+            [padding]: [`${opensBy}px`, '0px'],
           },
           {
-            delay: value6,
-            duration: value7,
+            delay: beginsAfterMs,
+            duration: takesMs,
             fill: 'backwards',
             easing: CHANGE_STEP_EASING,
             composite: 'add',
           },
         );
-  let entries = new (Map as Dynamic)();
-  for (let { rowNumber: value2, columnNumber: value3, comesAfterMs: value4 } of context.cells as Dynamic) {
-    if (!entries.has(value2)) {
-      let element2 = element.querySelector(`.sheet-rows > .sheet-row[aria-rowindex="${ariaIndex(value2)}"]`);
-      entries.set(value2, [...(element2?.children ?? [])]);
+  let cellsByRowNumber = new Map<number, Element[]>();
+  for (let { rowNumber, columnNumber, comesAfterMs } of plan.cells) {
+    if (!cellsByRowNumber.has(rowNumber)) {
+      let rowElement = container.querySelector(`.sheet-rows > .sheet-row[aria-rowindex="${ariaIndex(rowNumber)}"]`);
+      cellsByRowNumber.set(rowNumber, [...(rowElement?.children ?? [])]);
     }
-    let value5 = entries
-      .get(value2)
-      ?.find((element2?: Dynamic) => element2.getAttribute('aria-colindex') === `${ariaIndex(value3)}`);
-    if (value5 === undefined || value.has(value5)) continue;
-    value.add(value5);
-    for (let value7 of (extra.get(value5) ?? []) as Dynamic) value7.finish();
-    let value6 = value5.querySelectorAll('.sheet-text-that-runs-on .sheet-link-among-text');
-    let mapped = [value5, ...value5.children, ...value6].map(
-      (input?: Dynamic) =>
-        input.animate(
-          input === value5 || input.matches('.sheet-text-that-runs-on')
+    let cellElement = cellsByRowNumber
+      .get(rowNumber)
+      ?.find((element) => element.getAttribute('aria-colindex') === `${ariaIndex(columnNumber)}`);
+    if (cellElement === undefined || cellsComing.has(cellElement)) continue;
+    cellsComing.add(cellElement);
+    for (let running of runningByCell.get(cellElement) ?? []) running.finish();
+    let linksAmongText = cellElement.querySelectorAll('.sheet-text-that-runs-on .sheet-link-among-text');
+    let animations = [cellElement, ...cellElement.children, ...linksAmongText].map(
+      (part) =>
+        part.animate(
+          part === cellElement || part.matches('.sheet-text-that-runs-on')
             ? [
                 {
                   color: 'transparent',
@@ -198,118 +260,122 @@ export function animateComingIn(element?: Dynamic, options?: Dynamic, context?: 
                 opacity: [0, 1],
               },
           {
-            delay: value4,
+            delay: comesAfterMs,
             duration: CHANGE_HOLD_TAIL_MS,
             fill: 'backwards',
             easing: 'ease-out',
           },
         ),
     );
-    extra.set(value5, mapped);
+    runningByCell.set(cellElement, animations);
   }
-  for (let value2 of element.querySelectorAll(`.sheet-cell-as-before[data-mark="${options}"]`) as Dynamic)
-    value2.animate(
+  for (let cellAsBefore of container.querySelectorAll<HTMLElement>(`.sheet-cell-as-before[data-mark="${markKey}"]`))
+    cellAsBefore.animate(
       {
         visibility: ['visible', 'visible'],
       },
-      Number(value2.dataset.goesAfterMs),
+      Number(cellAsBefore.dataset.goesAfterMs),
     );
 }
-export function cellsAsBeforeOf(input?: Dynamic, options?: Dynamic) {
-  let marksOnChangesByAgent = input.marksOnChangesByAgent;
-  let matches = marksOnChangesByAgent.filter((input2?: Dynamic) => input2.revision > options.drawn.latestRevisionByAgent);
-  if (options.cellsAsBefore.length === 0 && matches.length === 0) return NO_CELLS_AS_BEFORE;
-  let value = drawnCellsByKey(input.rows);
-  let value2 =
-    input.changesAskedFor === options.drawn.changesAskedFor
-      ? options.cellsAsBefore.filter(
-          (input2?: Dynamic) =>
+export function cellsAsBeforeOf(drawn: GridOfChangesComingIn, held: CellsAsBeforeHeld): readonly CellAsBefore[] {
+  let marksOnChangesByAgent = drawn.marksOnChangesByAgent;
+  let newMarks = marksOnChangesByAgent.filter((mark) => mark.revision > held.drawn.latestRevisionByAgent);
+  if (held.cellsAsBefore.length === 0 && newMarks.length === 0) return NO_CELLS_AS_BEFORE;
+  let cellsNow = drawnCellsByKey(drawn.rows);
+  let keptCellsAsBefore =
+    drawn.changesAskedFor === held.drawn.changesAskedFor
+      ? held.cellsAsBefore.filter(
+          (cellAsBefore) =>
             marksOnChangesByAgent.some(
-              ({ revision: revision, joinedRevisions: joinedRevisions }: Dynamic) =>
-                revision === input2.revision || joinedRevisions.includes(input2.revision),
-            ) && value.has(cellAsBeforeKey(input2)),
+              ({ revision, joinedRevisions }) =>
+                revision === cellAsBefore.revision || joinedRevisions.includes(cellAsBefore.revision),
+            ) && cellsNow.has(cellAsBeforeKey(cellAsBefore)),
         )
       : [];
-  if (matches.length === 0) return value2.length === 0 ? NO_CELLS_AS_BEFORE : value2;
-  let value3 = drawnCellsByKey(options.drawn.rows);
-  let value4 = matches.flatMap((input2?: Dynamic) => comingInPlan(input2, input.rows, value3)?.cellsAsBefore ?? []);
-  return [...new (Map as Dynamic)([...value2, ...value4].map((input2?: Dynamic) => [cellAsBeforeKey(input2), input2])).values()];
+  if (newMarks.length === 0) return keptCellsAsBefore.length === 0 ? NO_CELLS_AS_BEFORE : keptCellsAsBefore;
+  let cellsBefore = drawnCellsByKey(held.drawn.rows);
+  let newCellsAsBefore = newMarks.flatMap((mark) => comingInPlan(mark, drawn.rows, cellsBefore)?.cellsAsBefore ?? []);
+  return [
+    ...new Map(
+      [...keptCellsAsBefore, ...newCellsAsBefore].map((cellAsBefore): [string, CellAsBefore] => [cellAsBeforeKey(cellAsBefore), cellAsBefore]),
+    ).values(),
+  ];
 }
-export function useCellsAsBefore(drawn?: Dynamic) {
-  let [state, setState] = React.useState({
-    drawn: drawn,
+export function useCellsAsBefore(drawn: GridOfChangesComingIn): readonly CellAsBefore[] {
+  let [held, setHeld] = React.useState<CellsAsBeforeHeld>({
+    drawn,
     cellsAsBefore: NO_CELLS_AS_BEFORE,
   });
-  if (state.drawn !== drawn)
-    setState({
-      drawn: drawn,
-      cellsAsBefore: cellsAsBeforeOf(drawn, state),
+  if (held.drawn !== drawn)
+    setHeld({
+      drawn,
+      cellsAsBefore: cellsAsBeforeOf(drawn, held),
     });
-  return state.cellsAsBefore;
+  return held.cellsAsBefore;
 }
-export function useChangesComingIn(containerRef?: Dynamic, drawn?: Dynamic) {
+export function useChangesComingIn(containerRef: React.RefObject<HTMLElement | null>, drawn: GridOfChangesComingIn): void {
   let previousDrawnRef = React.useRef(drawn);
-  let runningByKey = React.useRef(new (Map as Dynamic)());
+  let runningByCell = React.useRef(new Map<Element, Animation[]>());
   React.useLayoutEffect(() => {
-    let current = previousDrawnRef.current;
+    let drawnBefore = previousDrawnRef.current;
     previousDrawnRef.current = drawn;
-    let current2 = containerRef.current;
-    if (current2 === null) return;
+    let container = containerRef.current;
+    if (container === null) return;
     try {
-      let value = drawn.changesAskedFor !== current.changesAskedFor;
-      let value2 = (value ? drawn.marksOnChangesByAgent : marksMovedOrResized(drawn, current))
-        .flatMap(({ key: key }: Dynamic) => roomsOfChangeMark(current2, key))
-        .flatMap((input?: Dynamic) => input.getAnimations().filter(({ id: id }: Dynamic) => id !== LINES_SLIDE_ANIMATION_ID));
-      for (let value4 of value2 as Dynamic) value4.finish();
-      let matches = [...runningByKey.current].filter(
-        ([, input]: Dynamic) => value || input.every((input2?: Dynamic) => input2.playState === 'finished'),
+      let isAskedAnew = drawn.changesAskedFor !== drawnBefore.changesAskedFor;
+      let animationsToFinish = (isAskedAnew ? drawn.marksOnChangesByAgent : marksMovedOrResized(drawn, drawnBefore))
+        .flatMap(({ key }) => roomsOfChangeMark(container, key))
+        .flatMap((room) => room.getAnimations().filter(({ id }) => id !== LINES_SLIDE_ANIMATION_ID));
+      for (let animation of animationsToFinish) animation.finish();
+      let cellsDone = [...runningByCell.current].filter(
+        ([, animations]) => isAskedAnew || animations.every((animation) => animation.playState === 'finished'),
       );
-      for (let [value4, value5] of matches as Dynamic) {
-        for (let value6 of value5 as Dynamic) value6.finish();
-        runningByKey.current.delete(value4);
+      for (let [cellElement, animations] of cellsDone) {
+        for (let animation of animations) animation.finish();
+        runningByCell.current.delete(cellElement);
       }
-      let matches2 = drawn.marksOnChangesByAgent.filter((input?: Dynamic) => input.revision > current.latestRevisionByAgent);
-      if (matches2.length === 0 || current2.ownerDocument.hidden) return;
-      if (current2.ownerDocument.defaultView?.matchMedia('(prefers-reduced-motion:reduce)')?.matches !== false) return;
-      let value3 = drawnCellsByKey(current.rows);
-      let values = new (Set as Dynamic)();
-      matches2.reverse();
-      for (let value4 of matches2 as Dynamic) {
-        let value5 = comingInPlan(value4, drawn.rows, value3);
-        if (value5 !== null) animateComingIn(current2, value4.key, value5, values, runningByKey.current);
+      let newMarks = drawn.marksOnChangesByAgent.filter((mark) => mark.revision > drawnBefore.latestRevisionByAgent);
+      if (newMarks.length === 0 || container.ownerDocument.hidden) return;
+      if (container.ownerDocument.defaultView?.matchMedia('(prefers-reduced-motion:reduce)')?.matches !== false) return;
+      let cellsBefore = drawnCellsByKey(drawnBefore.rows);
+      let cellsComing = new Set<Element>();
+      newMarks.reverse();
+      for (let mark of newMarks) {
+        let plan = comingInPlan(mark, drawn.rows, cellsBefore);
+        if (plan !== null) animateComingIn(container, mark.key, plan, cellsComing, runningByCell.current);
       }
-    } catch (value: Dynamic) {
-      Promise.reject(value);
+    } catch (fault) {
+      Promise.reject(fault);
     }
   });
 }
 export const STEP_DURATION_SHARE = 0.8;
 export const CHANGE_STEP_EASING = 'cubic-bezier(0.65, 0, 0.35, 1)';
-export const isInChangeSpan = (input?: Dynamic, options?: Dynamic, context?: Dynamic) =>
-  input > options && input <= options + context;
-export const clampToSize = (input?: Dynamic, options?: Dynamic) => Math.max(0, Math.min(input, options));
-export const cellKeyInRow = (input?: Dynamic, options?: Dynamic) => `${input.key} ${options.key}`;
-export const cellLooksKey = (input?: Dynamic) =>
+export const isInChangeSpan = (lineNumber: number, startIndex: number, count: number): boolean =>
+  lineNumber > startIndex && lineNumber <= startIndex + count;
+export const clampToSize = (offset: number, size: number): number => Math.max(0, Math.min(offset, size));
+export const cellKeyInRow = (row: Pick<DrawnRow, 'key'>, cell: Pick<DrawnCell, 'key'>): string => `${row.key} ${cell.key}`;
+export const cellLooksKey = (cell: DrawnCell): string =>
   JSON.stringify([
-    input.textColor,
+    cell.textColor,
     {
-      ...input.format,
+      ...cell.format,
       border: null,
     },
-    input.pill,
-    input.opensDropdownList,
-    input.opensPeopleList,
-    input.checkbox,
-    input.isPerson,
-    input.avatarUrl,
-    input.otherPeople,
-    input.linkUrl,
-    input.linkDrawnAs,
-    input.mergedRowCount,
-    input.mergedColumnCount,
+    cell.pill,
+    cell.opensDropdownList,
+    cell.opensPeopleList,
+    cell.checkbox,
+    cell.isPerson,
+    cell.avatarUrl,
+    cell.otherPeople,
+    cell.linkUrl,
+    cell.linkDrawnAs,
+    cell.mergedRowCount,
+    cell.mergedColumnCount,
   ]);
-export const blankDrawnCell = (input?: Dynamic) => ({
-  ...input,
+export const blankDrawnCell = (cell: DrawnCell): DrawnCell => ({
+  ...cell,
   text: '',
   spokenText: null,
   textColor: null,
@@ -332,26 +398,26 @@ export const blankDrawnCell = (input?: Dynamic) => ({
   partsWithLinks: [],
   listLines: [],
 });
-export const drawnCellsByKey = (input?: Dynamic) =>
-  new (Map as Dynamic)(
-    input.flatMap((input2?: Dynamic) => input2.cells.map((input3?: Dynamic) => [cellKeyInRow(input2, input3), input3])),
+export const drawnCellsByKey = (rows: readonly DrawnRow[]): Map<string, DrawnCell> =>
+  new Map(
+    rows.flatMap((row) => row.cells.map((cell): [string, DrawnCell] => [cellKeyInRow(row, cell), cell])),
   );
-export const withGrownFrom = (input?: Dynamic, options?: Dynamic) =>
-  input === undefined
-    ? options
+export const withGrownFrom = (grownFromSize: number | undefined, reaches: ReachNeeded[]): ReachNeeded[] =>
+  grownFromSize === undefined
+    ? reaches
     : [
         {
-          size: input,
+          size: grownFromSize,
           neededAfterMs: 0,
         },
-        ...options.filter(({ size: size }: Dynamic) => size > input),
+        ...reaches.filter(({ size }) => size > grownFromSize),
       ];
-export const roomsOfChangeMark = (input?: Dynamic, options?: Dynamic) => [
-  ...input.querySelectorAll(`.sheet-room-of-change-by-agent[data-mark="${options}"]`),
+export const roomsOfChangeMark = (container: ParentNode, markKey: string): Element[] => [
+  ...container.querySelectorAll(`.sheet-room-of-change-by-agent[data-mark="${markKey}"]`),
 ];
-export const cellAsBeforeKey = (input?: Dynamic) => `${input.rowKey} ${input.cell.key}`;
-export const isWithinHalfPixel = (value?: Dynamic, other?: Dynamic) => Math.abs(value - other) < 0.5;
-export const NO_GLIDE = {
+export const cellAsBeforeKey = (cellAsBefore: Pick<CellAsBefore, 'rowKey' | 'cell'>): string => `${cellAsBefore.rowKey} ${cellAsBefore.cell.key}`;
+export const isWithinHalfPixel = (value: number, other: number): boolean => Math.abs(value - other) < 0.5;
+export const NO_GLIDE: ShiftOfView = {
   x: 0,
   y: 0,
 };

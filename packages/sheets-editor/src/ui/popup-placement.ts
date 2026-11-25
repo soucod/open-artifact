@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 export const CELL_POPUP_SIDE_OFFSETS = {
   right: 6,
   under: 2,

@@ -13,6 +13,11 @@
  * deletes it), and the engine's load checks them. They are logged in the format version the engine records them in
  * itself: 30, or 33 when a placement has an offset (what the page's own moves record).
  *
+ * An interactive panel is a view too, with one element of kind "interactive" and no placement: it fills a tab of its
+ * own, which names it in its settings (`interactive`). Its element lists the inputs the panel's controls may write
+ * (`writes`), each with the values its cells held when the panel was made, which a reset brings back. addInteractive
+ * writes it (setViews, then setSheetSettings), logged in format version 47; the agent's chart edits leave it alone.
+ *
  * An input keeps the ids of the corners it was given. A read gives where it lies now: as it lies between its corners,
  * or, when a corner's row or column was deleted, between where the corners were, worked out in a session that applied
  * every edit (a load leaves deleted cells out) and then brought those rows and columns back.
@@ -22,7 +27,7 @@ import { a1 } from './addresses.ts';
 import { type EngineMessage, isObject } from './engine.ts';
 import { AgentError } from './errors.ts';
 import type { ChartEdits, EditContext } from './edits.ts';
-import { checkKeys, type ChartView, pickSheet, type Placement, type Run, type SheetContents, SheetView, type WorkbookContents } from './workbook.ts';
+import { checkKeys, type ChartView, type WritableCell, pickSheet, type Placement, type Run, type SheetContents, SheetView, type WorkbookContents } from './workbook.ts';
 
 /** The widgets a chart may name: a widget by its id, or null when the Sheet has none by that id. */
 export interface WidgetLookup {
@@ -32,7 +37,17 @@ export interface WidgetLookup {
 /** The format version the engine records views and placements in; with an offset, the newer one. */
 export const CHART_FORMAT_VERSION = 30;
 export const OFFSET_FORMAT_VERSION = 33;
+/** The format version the engine records an interactive panel's view and its tab's setting in. */
+export const INTERACTIVE_FORMAT_VERSION = 47;
+/** The most views a workbook holds: charts and interactive panels together. */
 export const MAX_CHARTS = 200;
+/** The most cells one interactive panel may write, over all its writable inputs. */
+export const MAX_WRITABLE_CELLS = 1000;
+/** The data source the page fills for a panel's controls: no input may take its name. */
+export const INTERACTIVE_SOURCE = 'interactive';
+const INTERACTIVE_KEYS = ['sheet', 'name', 'caption', 'widget', 'inputs', 'writable'];
+/** What a writable cell may hold besides nothing: a value typed in, not a formula, a date or a person. */
+const WRITABLE_KINDS = new Set(['number', 'text', 'boolean']);
 const MAX_INPUTS = 32;
 /** The engine's limits (describeSharedCode): a placement's sides and its offset from its cell. */
 const MIN_SIDE = 40;
@@ -48,6 +63,8 @@ const CHART_KEYS = ['name', 'caption', 'widget', 'inputs', 'sheet', 'topLeft', '
 
 type ViewEntry = { viewId: string; view: ChartView };
 type PlacementEntry = NonNullable<SheetContents['placements']>[number];
+type ViewElement = ChartView['elements'][number];
+type ViewInput = ViewElement['inputs'][number];
 
 /** The workbook with some deleted rows and columns brought back (null when that can't be done): see the header. */
 export type Undeleted = (ops: EngineMessage[]) => WorkbookContents | null;
@@ -78,6 +95,22 @@ export class ChartReader {
 
   views(): ViewEntry[] {
     return this.workbook.views ?? [];
+  }
+
+  /** The interactive panel a tab shows, as readInteractive gives it, or null when the tab is not one. */
+  interactiveOf(sheet: SheetView): EngineMessage | null {
+    const viewId = sheet.contents.interactive;
+    const entry = viewId ? this.views().find((v) => v.viewId === viewId) : undefined;
+    const element = entry?.view.elements.find((e) => e.kind === 'interactive');
+    if (!entry || !element) return null;
+    return {
+      interactiveId: entry.viewId,
+      name: entry.view.name,
+      caption: element.embed.caption,
+      widget: widgetOf(element.embed.ref),
+      inputs: element.inputs.map((input) => ({ name: input.name, cells: this.cellsOf(input.range) })),
+      writable: (element.writes ?? []).map((w) => w.input),
+    };
   }
 
   /** Each chart that lies over a sheet, in the order of its placements: {chartId, chart}. */
@@ -119,7 +152,7 @@ export class ChartReader {
   }
 
   /** Where an input lies now, as {sheet, range}; null when all its cells are deleted. */
-  cellsOf(range: ChartView['elements'][number]['inputs'][number]['range']): { sheet: string; range: string } | null {
+  cellsOf(range: ViewInput['range']): { sheet: string; range: string } | null {
     const sheet = this.sheets.find((s) => s.sheetId === range.sheetId);
     if (!sheet) return null;
     const rows = this.span(sheet, 'rows', range.topLeft.r, range.bottomRight.r);
@@ -176,15 +209,16 @@ interface Made {
   placement: Placement;
 }
 
-/** addChart, setChart and deleteChart (applyEdits calls them for its chart edits). */
+/** addChart, setChart, deleteChart and addInteractive (applyEdits calls them for its chart edits). */
 export function chartEdits(host: ChartHost): ChartEdits {
   const reader = (sheets: SheetView[]) => new ChartReader(host.context.read(), sheets, host.undeleted);
   const versionOf = (placement: Placement | null) => (placement?.offsetFromAnchorCell ? OFFSET_FORMAT_VERSION : CHART_FORMAT_VERSION);
 
-  /** The chart as it is given, checked, in the engine's terms; `now` is the chart it replaces (setChart). */
-  function made(chart: unknown, sheets: SheetView[], now: { viewId: string; view: ChartView; sheet: SheetView; entry: PlacementEntry; read: EngineMessage; reader: ChartReader } | null): Made {
-    if (!isObject(chart)) throw new AgentError('unreadableEdit', `chart is {${CHART_KEYS.join(', ')}, offsetFromAnchorCell?}.`);
-    checkKeys({ ...chart, kind: 'chart' }, CHART_KEYS, ['offsetFromAnchorCell']);
+  /**
+   * What a chart and an interactive panel both give: the name and caption, the widget and the inputs, checked, in the
+   * engine's terms. `now` is the view they replace (setChart); its inputs given as the read gave them keep their corners.
+   */
+  function parts(chart: EngineMessage, sheets: SheetView[], now: { viewId: string; view: ChartView; read: EngineMessage } | null): { name: string; caption: string; widget: string; inputs: ViewInput[] } {
     const { name, caption } = chart;
     if (typeof name !== 'string' || name.trim() === '') throw new AgentError('viewHasNoName', 'name is what a screen reader calls the chart: some words, not "".');
     if (typeof caption !== 'string') throw new AgentError('unreadableEdit', 'caption is a string, "" for none.');
@@ -219,6 +253,14 @@ export function chartEdits(host: ChartHost): ChartEdits {
       const b = of.range(input.cells.range, `inputs[${i}].cells.range`);
       return { name: inputName, range: { sheetId: of.sheetId, topLeft: { r: of.rowIds[b.top]!, c: of.columnIds[b.left]! }, bottomRight: { r: of.rowIds[b.bottom]!, c: of.columnIds[b.right]! } } };
     });
+    return { name, caption, widget, inputs };
+  }
+
+  /** The chart as it is given, checked, in the engine's terms; `now` is the chart it replaces (setChart). */
+  function made(chart: unknown, sheets: SheetView[], now: { viewId: string; view: ChartView; sheet: SheetView; entry: PlacementEntry; read: EngineMessage; reader: ChartReader } | null): Made {
+    if (!isObject(chart)) throw new AgentError('unreadableEdit', `chart is {${CHART_KEYS.join(', ')}, offsetFromAnchorCell?}.`);
+    checkKeys({ ...chart, kind: 'chart' }, CHART_KEYS, ['offsetFromAnchorCell']);
+    const { name, caption, widget, inputs } = parts(chart, sheets, now);
 
     const sheet = pickSheet(sheets, chart.sheet);
     const corner = sheet.range(chart.topLeft, 'topLeft');
@@ -263,7 +305,78 @@ export function chartEdits(host: ChartHost): ChartEdits {
     return { ...view, at, reader: read };
   }
 
+  /**
+   * The cells a panel may write, input by input, each with what it holds now (the values a reset brings back). Only a
+   * blank cell or a plain number, text or boolean typed in is writable.
+   */
+  function writesOf(writable: unknown, inputs: ViewInput[], sheets: SheetView[]): NonNullable<ViewElement['writes']> {
+    if (!Array.isArray(writable) || new Set(writable).size !== writable.length) {
+      throw new AgentError('unreadableEdit', 'writable is a list of input names, each named once: [] when the controls only read.');
+    }
+    const byName = new Map(inputs.map((input) => [input.name, input]));
+    const filledOf = new Map<string, Map<string, ReturnType<SheetView['filled']>[number]>>();
+    let total = 0;
+    return writable.map((given: unknown) => {
+      const input = typeof given === 'string' ? byName.get(given) : undefined;
+      if (!input) throw new AgentError('unknownInput', `writable names ${JSON.stringify(given)}, which is none of this panel's inputs.`);
+      const { sheetId, topLeft, bottomRight } = input.range;
+      const source = sheets.find((s) => s.sheetId === sheetId)!;
+      const [top, bottom] = [source.rowIndex(topLeft.r)!, source.rowIndex(bottomRight.r)!];
+      const [left, right] = [source.columnIndex(topLeft.c)!, source.columnIndex(bottomRight.c)!];
+      total += (bottom - top + 1) * (right - left + 1);
+      if (total > MAX_WRITABLE_CELLS) throw new AgentError('tooManyCells', `The writable inputs of one panel cover at most ${MAX_WRITABLE_CELLS.toLocaleString('en-US')} cells together.`);
+      let filled = filledOf.get(sheetId);
+      if (!filled) {
+        filled = new Map(source.filled().map((f) => [`${f.row},${f.column}`, f]));
+        filledOf.set(sheetId, filled);
+      }
+      const saved: WritableCell[] = [];
+      for (let row = top; row <= bottom; row++) {
+        for (let column = left; column <= right; column++) {
+          const f = filled.get(`${row},${column}`);
+          const held = f?.cell.input;
+          if (f && (f.spilled || !isObject(held) || !WRITABLE_KINDS.has(String(held.kind)))) {
+            throw new AgentError('cannotWriteInteractiveCell', `${source.name}!${a1(row, column)} holds a formula, a spilled value or a value of another kind: a writable cell is blank or holds a plain number, text or boolean.`, { cell: `${source.name}!${a1(row, column)}` });
+          }
+          const value = f && isObject(held) ? { kind: String(held.kind), value: held.value } : null;
+          saved.push({ r: source.rowIds[row]!, c: source.columnIds[column]!, value });
+        }
+      }
+      return { input: input.name, saved };
+    });
+  }
+
   return {
+    addInteractive(panel: unknown, sheets: SheetView[]): void {
+      if (!isObject(panel)) throw new AgentError('unreadableEdit', `interactive is {${INTERACTIVE_KEYS.join(', ')}}.`);
+      checkKeys({ ...panel, kind: 'interactive' }, INTERACTIVE_KEYS);
+      const tab = pickSheet(sheets, panel.sheet);
+      if (tab.contents.interactive || tab.filledBlock() || tab.contents.placements?.length) {
+        throw new AgentError('sheetNotBlank', `Sheet "${tab.name}" already holds cells, charts or a panel: an interactive panel takes a blank tab of its own (addSheet one first).`);
+      }
+      if (reader(sheets).views().length >= MAX_CHARTS) throw new AgentError('tooManyViews', `A workbook holds ${MAX_CHARTS} views, charts and interactive panels together.`);
+      const { name, caption, widget, inputs } = parts(panel, sheets, null);
+      if (inputs.some((input) => input.name === INTERACTIVE_SOURCE)) {
+        throw new AgentError('inputNameNotAllowed', `"${INTERACTIVE_SOURCE}" is the name of the source the page gives the panel's controls: name the input otherwise.`);
+      }
+      for (const input of inputs) {
+        const source = sheets.find((s) => s.sheetId === input.range.sheetId);
+        if (input.range.sheetId === tab.sheetId || source?.contents.interactive) {
+          throw new AgentError('sheetIsAnInteractive', `Input "${input.name}" lies on an interactive panel's tab: a panel's inputs are cells of the tabs that hold the data.`);
+        }
+      }
+      const writes = writesOf(panel.writable, inputs, sheets);
+      const viewId = `viw_${host.newIdCode()}.0`;
+      const elementId = `vel_${host.newIdCode()}.0`;
+      host.apply(
+        [
+          { kind: 'setViews', views: [{ viewId, view: { name, elements: [{ kind: 'interactive', elementId, embed: { ref: `node/${widget}`, caption }, inputs, writes }] } }] },
+          { kind: 'setSheetSettings', sheets: [{ sheetId: tab.sheetId, settings: { interactive: viewId } }] },
+        ],
+        INTERACTIVE_FORMAT_VERSION,
+      );
+    },
+
     add(chart: unknown, sheets: SheetView[]): void {
       const charts = reader(sheets).views().length;
       if (charts >= MAX_CHARTS) throw new AgentError('tooManyViews', `A workbook holds ${MAX_CHARTS} charts.`);
@@ -282,6 +395,9 @@ export function chartEdits(host: ChartHost): ChartEdits {
 
     set(chartId: unknown, chart: unknown, sheets: SheetView[]): boolean {
       const found = find(chartId, sheets);
+      if (found.view.elements.some((e) => e.kind === 'interactive')) {
+        throw new AgentError('unknownChart', `${found.viewId} is an interactive panel, not a chart: setChart leaves it alone.`);
+      }
       if (!found.at) throw new AgentError('unknownChart', `Chart ${String(chartId)} lies over no sheet.`);
       const { sheet, entry } = found.at;
       const read = found.reader.chart(found.view, sheet, entry);
@@ -302,6 +418,9 @@ export function chartEdits(host: ChartHost): ChartEdits {
 
     remove(chartId: unknown, sheets: SheetView[]): void {
       const found = find(chartId, sheets);
+      if (found.view.elements.some((e) => e.kind === 'interactive')) {
+        throw new AgentError('unknownChart', `${found.viewId} is an interactive panel, not a chart: deleteChart leaves it, and the person removes it in the page.`);
+      }
       const ops: EngineMessage[] = [];
       if (found.at) ops.push({ kind: 'setPlacements', sheetId: found.at.sheet.sheetId, placements: [{ placementId: found.at.entry.placementId, placement: null }] });
       ops.push({ kind: 'setViews', views: [{ viewId: found.viewId, view: null }] });

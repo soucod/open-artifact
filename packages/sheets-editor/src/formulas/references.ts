@@ -1,27 +1,80 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, Reference, SheetId } from '@open-artifact/sheets-core';
+import type { SheetSummary } from '../model/workbook.ts';
+import type { CellArea, CellPosition } from '../selection/model.ts';
 import { areaAsSeen, areasAsSeen } from '../model/a1-references.ts';
-export function execStickyAt(pattern?: Dynamic, text?: Dynamic, position?: Dynamic) {
+/** A run of text between quotes, from the opening quote to after the closing one (or to the end, where none closes it). */
+export interface QuotedSpan {
+  start: number;
+  end: number;
+  isClosed: boolean;
+}
+/** A sheet's name written before `!`, and where the text after the `!` starts. */
+export interface SheetPrefix {
+  name: string;
+  end: number;
+}
+/** One end of a reference as written (`$B$2`, `B` or `2`), perhaps after a sheet's name; `''` for a part not written. */
+export interface WrittenReferenceEnd {
+  sheetName: string | null;
+  start: number;
+  end: number;
+  dollarOfColumn: string;
+  letters: string;
+  dollarOfRow: string;
+  digits: string;
+}
+/** The rows or columns a written reference spans: `count` of them from `first`, or all from `first` on where `count` is `null`. */
+export interface WrittenLineSpan {
+  first: number;
+  count: number | null;
+}
+/** A reference as written in a formula's text, and where it is in it. */
+export interface WrittenReference {
+  start: number;
+  end: number;
+  sheetName: string | null;
+  otherSheetName: string | null;
+  ends: [WrittenReferenceEnd] | [WrittenReferenceEnd, WrittenReferenceEnd];
+  rows: WrittenLineSpan;
+  columns: WrittenLineSpan;
+}
+/** What reads as a reference at a place in a formula: where it ends, and the reference (`null` for one that names no lines). */
+export interface ReferenceParsed {
+  end: number;
+  reference: WrittenReference | null;
+}
+export interface FormulaReferencesFound {
+  references: WrittenReference[];
+  quoted: QuotedSpan[];
+}
+/** A written reference on its sheet: the area it covers as seen, and that area in pieces of rows as stored. */
+export interface ResolvedReference {
+  sheet: SheetSummary;
+  area: CellArea;
+  pieces: CellArea[];
+}
+export function execStickyAt(pattern: RegExp, text: string, position: number): RegExpExecArray | null {
   pattern.lastIndex = position;
   return pattern.exec(text);
 }
-export function quotedSpanAt(text?: Dynamic, start?: Dynamic, quote?: Dynamic) {
-  let position: Dynamic = start + 1;
+export function quotedSpanAt(text: string, start: number, quote: string): QuotedSpan {
+  let position = start + 1;
   while (position < text.length)
     if (text[position] !== quote) position += 1;
     else if (text[position + 1] === quote) position += 2;
     else
       return {
-        start: start,
+        start,
         end: position + 1,
         isClosed: true,
       };
   return {
-    start: start,
+    start,
     end: text.length,
     isClosed: false,
   };
 }
-export function sheetPrefixAt(text?: Dynamic, start?: Dynamic) {
+export function sheetPrefixAt(text: string, start: number): SheetPrefix | null {
   let isQuoted = text[start] === "'";
   let nameEnd = isQuoted ? quotedSpanAt(text, start, "'").end : start + (execStickyAt(SHEET_NAME_AT, text, start)?.[0].length ?? 0);
   if (nameEnd === start || text[nameEnd] !== '!') return null;
@@ -30,25 +83,25 @@ export function sheetPrefixAt(text?: Dynamic, start?: Dynamic) {
     end: nameEnd + 1,
   };
 }
-export function cellReferencePartsAt(text?: Dynamic, start?: Dynamic) {
+export function cellReferencePartsAt(text: string, start: number): WrittenReferenceEnd | null {
   let sheetPrefix = sheetPrefixAt(text, start);
   let match = execStickyAt(A1_REFERENCE_AT, text, sheetPrefix?.end ?? start);
   if (match === null) return null;
   let [matchedText, cellColumnDollar, cellLetters, cellRowDollar, cellDigits, ...otherGroups] = match;
-  let [columnDollar, columnLetters2, rowDollar, rowDigits] = otherGroups;
-  let [letters, digits] = [cellLetters ?? columnLetters2 ?? '', cellDigits ?? rowDigits ?? ''];
+  let [columnDollar, columnLetters, rowDollar, rowDigits] = otherGroups;
+  let [letters, digits] = [cellLetters ?? columnLetters ?? '', cellDigits ?? rowDigits ?? ''];
   if (columnLettersToBigInt(letters) > MAX_REFERENCE_INDEX || BigInt(digits) > MAX_REFERENCE_INDEX) return null;
   return {
     sheetName: sheetPrefix?.name ?? null,
     start: match.index,
     end: match.index + matchedText.length,
     dollarOfColumn: cellColumnDollar ?? columnDollar ?? '',
-    letters: letters,
+    letters,
     dollarOfRow: cellRowDollar ?? rowDollar ?? '',
-    digits: digits,
+    digits,
   };
 }
-export function parseReferenceAt(formula?: Dynamic, start?: Dynamic) {
+export function parseReferenceAt(formula: string, start: number): ReferenceParsed | null {
   let firstEnd = cellReferencePartsAt(formula, start);
   if (firstEnd === null) return null;
   let secondEnd = formula[firstEnd.end] === ':' ? cellReferencePartsAt(formula, firstEnd.end + 1) : null;
@@ -63,24 +116,24 @@ export function parseReferenceAt(formula?: Dynamic, start?: Dynamic) {
       end: lastEnd,
       reference: null,
     };
-  let parsed = {
-    start: start,
+  let parsed: WrittenReference = {
+    start,
     end: lastEnd,
     sheetName: firstEnd.sheetName,
     otherSheetName: otherEnd?.sheetName ?? null,
     ends: otherEnd === null ? [firstEnd] : [firstEnd, otherEnd],
-    rows: rows,
-    columns: columns,
+    rows,
+    columns,
   };
   return {
     end: lastEnd,
     reference: parsed,
   };
 }
-export function commaDecimalsToDots(formula?: Dynamic) {
-  let result: Dynamic = '';
-  let lastChar: Dynamic;
-  let index: Dynamic = 0;
+export function commaDecimalsToDots(formula: string): string {
+  let withDots = '';
+  let lastChar: string | undefined;
+  let index = 0;
   while (index < formula.length) {
     let char = formula.charAt(index);
     let numberText =
@@ -94,17 +147,17 @@ export function commaDecimalsToDots(formula?: Dynamic) {
           ? quotedSpanAt(formula, index, char).end
           : Math.max(endOfNameChars(formula, index), index + 1);
     let piece = formula.slice(index, pieceEnd);
-    result += numberText === undefined ? piece : piece.replace(',', '.');
+    withDots += numberText === undefined ? piece : piece.replace(',', '.');
     lastChar = LAST_NON_SPACE_CHAR.exec(piece)?.[0] ?? lastChar;
     index = pieceEnd;
   }
-  return result;
+  return withDots;
 }
-export function findFormulaReferences(formula?: Dynamic, decimalSign?: Dynamic) {
+export function findFormulaReferences(formula: string, decimalSign: DecimalSignName): FormulaReferencesFound {
   let dotted = decimalSign === 'comma' ? commaDecimalsToDots(formula) : formula;
-  let references: Dynamic = [];
-  let quoted: Dynamic = [];
-  let index: Dynamic = 0;
+  let references: WrittenReference[] = [];
+  let quoted: QuotedSpan[] = [];
+  let index = 0;
   while (index < dotted.length) {
     let parsed = parseReferenceAt(dotted, index);
     let char = dotted[index];
@@ -121,30 +174,30 @@ export function findFormulaReferences(formula?: Dynamic, decimalSign?: Dynamic) 
     }
   }
   return {
-    references: references,
-    quoted: quoted,
+    references,
+    quoted,
   };
 }
-export function formulaMatchesOutsideReferences(formula?: Dynamic, pattern?: Dynamic, decimalSign?: Dynamic) {
+export function formulaMatchesOutsideReferences(formula: string, pattern: RegExp, decimalSign: DecimalSignName): boolean {
   if (!pattern.test(formula)) return false;
-  let { references: references, quoted: quoted } = findFormulaReferences(formula, decimalSign);
+  let { references, quoted } = findFormulaReferences(formula, decimalSign);
   let spans = [...references, ...quoted];
-  spans.sort((a?: Dynamic, b2?: Dynamic) => b2.start - a.start);
+  spans.sort((one, other) => other.start - one.start);
   return pattern.test(
-    spans.reduce((text: Dynamic, { start: start, end: end }: Dynamic) => `${text.slice(0, start)},${text.slice(end)}`, formula),
+    spans.reduce((text, { start, end }) => `${text.slice(0, start)},${text.slice(end)}`, formula),
   );
 }
-export function lineCountWithin({ first: first, count: count }: Dynamic, lineCount?: Dynamic) {
+export function lineCountWithin({ first, count }: WrittenLineSpan, lineCount: number): number | null {
   let spanCount = count ?? lineCount - first;
   return spanCount > 0 && first + spanCount <= lineCount ? spanCount : null;
 }
 export function resolveFormulaReference(
-  { sheetName: sheetName, otherSheetName: otherSheetName, rows: rows, columns: columns }: Dynamic,
-  ownSheetId?: Dynamic,
-  sheets?: Dynamic,
-) {
+  { sheetName, otherSheetName, rows, columns }: WrittenReference,
+  ownSheetId: SheetId,
+  sheets: readonly SheetSummary[],
+): ResolvedReference | null {
   let sheet =
-    sheetName === null ? sheets.find(({ sheetId: sheetId }: Dynamic) => sheetId === ownSheetId) : findSheetNamed(sheetName, sheets);
+    sheetName === null ? sheets.find(({ sheetId }) => sheetId === ownSheetId) : findSheetNamed(sheetName, sheets);
   let isSameSheet = otherSheetName === null || findSheetNamed(otherSheetName, sheets) === sheet;
   if (sheet === undefined || !isSameSheet) return null;
   let rowCount = lineCountWithin(rows, sheet.rowCount);
@@ -153,27 +206,27 @@ export function resolveFormulaReference(
   let area = {
     topRowIndex: rows.first,
     leftColumnIndex: columns.first,
-    rowCount: rowCount,
-    columnCount: columnCount,
+    rowCount,
+    columnCount,
   };
-  let { ownRowOrder: ownRowOrder } = sheet;
+  let { ownRowOrder } = sheet;
   return {
-    sheet: sheet,
+    sheet,
     area: areaAsSeen(area, ownRowOrder),
     pieces: areasAsSeen(area, ownRowOrder),
   };
 }
 export function formulaHasMoreReferencesThan(
-  formula?: Dynamic,
-  decimalSign?: Dynamic,
-  ownSheetId?: Dynamic,
-  sheets?: Dynamic,
-  knownReferences?: Dynamic,
-) {
+  formula: string,
+  decimalSign: DecimalSignName,
+  ownSheetId: SheetId,
+  sheets: readonly SheetSummary[],
+  knownReferences: readonly Reference[],
+): boolean {
   let resolved = findFormulaReferences(formula, decimalSign).references.filter(
-    (reference?: Dynamic) => resolveFormulaReference(reference, ownSheetId, sheets) !== null,
+    (reference) => resolveFormulaReference(reference, ownSheetId, sheets) !== null,
   );
-  let knownWholeLines = knownReferences.filter(({ kind: kind }: Dynamic) => kind === 'columns' || kind === 'rows');
+  let knownWholeLines = knownReferences.filter(({ kind }) => kind === 'columns' || kind === 'rows');
   return resolved.length > knownReferences.length || resolved.filter(isWholeLineReference).length > knownWholeLines.length;
 }
 export const NAME_CHARS_AT = /[A-Za-z0-9_.$\u0080-\uffff]*/y;
@@ -187,19 +240,19 @@ export const A1_REFERENCE_AT = /(\$?)([A-Za-z]+)(\$?)([1-9][0-9]*)|(\$?)([A-Za-z
 export const REFERENCE_CALL_BRACKET_AT = /[ \t\n\r]*\(/y;
 export const COLUMN_LETTER_RADIX = 26n;
 export const MAX_REFERENCE_INDEX = 2n ** 64n - 1n;
-export const endOfNameChars = (text?: Dynamic, start?: Dynamic) =>
+export const endOfNameChars = (text: string, start: number): number =>
   start + (execStickyAt(NAME_CHARS_AT, text, start)?.[0].length ?? 0);
-export const columnLettersToBigInt = (letters?: Dynamic) =>
-  Array.from<Dynamic>(letters.toUpperCase()).reduce(
-    (total?: Dynamic, letter?: Dynamic) => ((total * COLUMN_LETTER_RADIX) as Dynamic) + BigInt(letter.charCodeAt(0) - 64),
+export const columnLettersToBigInt = (letters: string): bigint =>
+  Array.from<string>(letters.toUpperCase()).reduce(
+    (total: bigint, letter) => total * COLUMN_LETTER_RADIX + BigInt(letter.charCodeAt(0) - 64),
     0n,
   );
-export const rowIndexOfReferenceEnd = ({ digits: digits }: Dynamic) => (digits === '' ? null : Number(digits) - 1);
-export const columnIndexOfReferenceEnd = ({ letters: letters }: Dynamic) =>
+export const rowIndexOfReferenceEnd = ({ digits }: WrittenReferenceEnd): number | null => (digits === '' ? null : Number(digits) - 1);
+export const columnIndexOfReferenceEnd = ({ letters }: WrittenReferenceEnd): number | null =>
   letters === '' ? null : Number(columnLettersToBigInt(letters)) - 1;
-export const endsReferenceAt = (formula?: Dynamic, index?: Dynamic) =>
+export const endsReferenceAt = (formula: string, index: number): boolean =>
   endOfNameChars(formula, index) === index && execStickyAt(REFERENCE_CALL_BRACKET_AT, formula, index) === null;
-export const lineSpanOfEnds = (oneIndex?: Dynamic, otherIndex?: Dynamic) =>
+export const lineSpanOfEnds = (oneIndex: number | null, otherIndex: number | null): WrittenLineSpan =>
   oneIndex === null || otherIndex === null
     ? {
         first: oneIndex ?? otherIndex ?? 0,
@@ -209,17 +262,17 @@ export const lineSpanOfEnds = (oneIndex?: Dynamic, otherIndex?: Dynamic) =>
         first: Math.min(oneIndex, otherIndex),
         count: Math.abs(oneIndex - otherIndex) + 1,
       };
-export const sheetPrefixForFormula = (sheetName?: Dynamic) =>
+export const sheetPrefixForFormula = (sheetName: string): string =>
   execStickyAt(SHEET_NAME_AT, sheetName, 0)?.[0] === sheetName ? `${sheetName}!` : `'${sheetName.replaceAll("'", "''")}'!`;
-export const lowerCaseAsciiLetters = (text?: Dynamic) =>
-  text.replaceAll(/[A-Z]/g, (letter?: Dynamic) => letter.toLowerCase());
-export const findSheetNamed = (name?: Dynamic, sheets?: Dynamic) =>
-  sheets.find((sheet?: Dynamic) => sheet.name === name) ??
-  sheets.find((sheet?: Dynamic) => lowerCaseAsciiLetters(sheet.name) === lowerCaseAsciiLetters(name));
-export const isWholeLineReference = ({ rows: rows, columns: columns }: Dynamic) => rows.count === null || columns.count === null;
-export const isIndexInLineSpan = (index: Dynamic, { first: first, count: count }: Dynamic) =>
+export const lowerCaseAsciiLetters = (text: string): string =>
+  text.replaceAll(/[A-Z]/g, (letter) => letter.toLowerCase());
+export const findSheetNamed = (name: string, sheets: readonly SheetSummary[]): SheetSummary | undefined =>
+  sheets.find((sheet) => sheet.name === name) ??
+  sheets.find((sheet) => lowerCaseAsciiLetters(sheet.name) === lowerCaseAsciiLetters(name));
+export const isWholeLineReference = ({ rows, columns }: WrittenReference): boolean => rows.count === null || columns.count === null;
+export const isIndexInLineSpan = (index: number, { first, count }: WrittenLineSpan): boolean =>
   index >= first && (count === null || index < first + count);
 export const referenceCoversCell = (
-  { rows: rows, columns: columns }: Dynamic,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic,
-) => isIndexInLineSpan(rowIndex, rows) && isIndexInLineSpan(columnIndex, columns);
+  { rows, columns }: WrittenReference,
+  { rowIndex, columnIndex }: CellPosition,
+): boolean => isIndexInLineSpan(rowIndex, rows) && isIndexInLineSpan(columnIndex, columns);

@@ -11,7 +11,7 @@
  * that page is still sending. Without IndexedDB nothing is kept and the page works as it would without the log.
  */
 import { getDocs } from '../app/store.ts';
-import { committed, openStore, settle } from './idb.ts';
+import { committed, openStore } from './idb.ts';
 
 type Json = Record<string, unknown>;
 
@@ -242,14 +242,18 @@ export function indexedDbWalStore(name = WAL_DB): WalStore {
       const range = IDBKeyRange.bound([doc, tab], [doc, tab, []]);
       let take: WalEntry[] = [];
       const read = store.getAll(range);
-      // The moves are asked for in the read's own callback, so the read and the moves are one transaction.
-      read.onsuccess = () => {
-        const plan = claimPlan(read.result as WalEntry[], life, alive, now);
-        take = plan.take;
-        for (const key of plan.drop) store.delete(key);
-        for (const entry of take) store.put(entry);
-      };
-      await settle(read).catch(() => undefined);
+      // The moves are asked for in the read's own callback, so the read and the moves are one transaction. (Not
+      // `settle(read)`: it sets the read's onsuccess too, and the moves would never be asked for.)
+      await new Promise<void>((resolve, reject) => {
+        read.onsuccess = () => {
+          const plan = claimPlan(read.result as WalEntry[], life, alive, now);
+          take = plan.take;
+          for (const key of plan.drop) store.delete(key);
+          for (const entry of take) store.put(entry);
+          resolve();
+        };
+        read.onerror = () => reject(read.error ?? new Error('IndexedDB request failed'));
+      }).catch(() => undefined);
       await done;
       return take;
     },

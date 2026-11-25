@@ -44,12 +44,35 @@ function liveRegion(): HTMLElement | null {
   return region;
 }
 
+/** Longest announcement read out, in characters (longer ones are cut at a word). */
+export const MAX_ANNOUNCEMENT_CHARS = 200;
+
+/** A message as read out: whitespace collapsed, and cut before {@link MAX_ANNOUNCEMENT_CHARS} at a word boundary with "…". */
+export function clipAnnouncement(message: string, max = MAX_ANNOUNCEMENT_CHARS): string {
+  const text = message.split(/\s+/).filter(Boolean).join(' ');
+  const points = Array.from(text);
+  if (points.length <= max) return text;
+  const room = points.slice(0, max - 1).join('');
+  const wholeWords = room.replace(/\s+\S*$/, '');
+  return (wholeWords === '' ? room : wholeWords) + '…';
+}
+
+let announcedAt: number | undefined;
+
+/** When the last announcement was made (epoch ms), if ever. */
+export function lastAnnouncedAt(): number | undefined {
+  return announcedAt;
+}
+
 /**
  * Speaks a message to screen readers. The region is cleared first so the
  * same message said twice is read twice.
  */
-export function announce(message: string | null | undefined): void {
-  if (!message) return;
+export function announce(text: string | null | undefined): void {
+  if (!text) return;
+  const message = clipAnnouncement(text);
+  if (message === '') return;
+  announcedAt = Date.now();
   for (const listener of listeners) listener(message);
   const element = liveRegion();
   if (!element) return;

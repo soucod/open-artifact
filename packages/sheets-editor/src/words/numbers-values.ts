@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { phrasesMeaning } from './tokens.ts';
 export const NUMBER_COMPARISON_PHRASES = [
   ...phrasesMeaning('greaterThan', 'over, above, more than, greater than, bigger than, larger than, higher than, >'),

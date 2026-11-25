@@ -75,7 +75,7 @@ export function createLineIndex(runs: readonly IdRun[]): LineIndex {
     total += run.count;
   }
   for (let sameBase of runsByBase.values()) sameBase.sort((oneRun: PlacedRun, otherRun: PlacedRun) => oneRun.first - otherRun.first);
-  let stretchesOf = ({ base: base, first: first, count: count }: IdRun): LineSpan[] => {
+  let stretchesOf = ({ base, first, count }: IdRun): LineSpan[] => {
     let runsOfBase = runsByBase.get(base) ?? [];
     let stretches: LineSpan[] = [];
     for (
@@ -99,15 +99,15 @@ export function createLineIndex(runs: readonly IdRun[]): LineIndex {
     count: total,
     idAt(index: number) {
       if (!Number.isInteger(index) || index < 0 || index >= total) return null;
-      let run = lastAtOrBefore(placedRuns, ({ startIndex: startIndex }: PlacedRun) => startIndex, index);
+      let run = lastAtOrBefore(placedRuns, ({ startIndex }: PlacedRun) => startIndex, index);
       return run === undefined ? null : `${run.base}.${run.first + index - run.startIndex}`;
     },
     indexOf(lineId: string) {
       let parsed = parseLineId(lineId);
       return parsed === null ? null : (stretchesOf(parsed)[0]?.firstIndex ?? null);
     },
-    stretchesOf: stretchesOf,
-    runsIn({ firstIndex: firstIndex, count: count }: LineSpan) {
+    stretchesOf,
+    runsIn({ firstIndex, count }: LineSpan) {
       let runsWithin: IdRun[] = [];
       for (
         let index = Math.max(0, countAtOrBelow(placedRuns, (run: PlacedRun) => run.startIndex, firstIndex) - 1);
@@ -237,8 +237,8 @@ export function ownRowOrderFrom(stored: LineIndex, rows: readonly IdRun[], store
     ...stored.runsIn({ firstIndex: end, count: stored.count - end }),
   ]);
   return {
-    stored: stored,
-    seen: seen,
+    stored,
+    seen,
     firstIndex: first.firstIndex,
     count: end - first.firstIndex,
   };
@@ -248,8 +248,8 @@ export const lastAtOrBefore = <T>(items: readonly T[], keyOf: (item: T) => numbe
 export const LINE_ID_NUMBER_PATTERN = /^(?:0|[1-9]\d*)$/;
 export const ownRowOrderOfSheet = (reads: WorkbookReads, sheetId: string): OwnRowOrder | null =>
   reads.listSheets().find((sheet) => sheet.sheetId === sheetId)?.ownRowOrder ?? null;
-export const lastIndexOfSpan = ({ firstIndex: firstIndex, count: count }: LineSpan): number => firstIndex + count - 1;
-export const spanCutsOwnRowOrder = (order: OwnRowOrder, span: LineSpan): boolean =>
+export const lastIndexOfSpan = ({ firstIndex, count }: LineSpan): number => firstIndex + count - 1;
+export const spanCutsOwnRowOrder = (order: LineSpan, span: LineSpan): boolean =>
   span.firstIndex <= lastIndexOfSpan(order) &&
   lastIndexOfSpan(span) >= order.firstIndex &&
   (span.firstIndex > order.firstIndex || lastIndexOfSpan(span) < lastIndexOfSpan(order));

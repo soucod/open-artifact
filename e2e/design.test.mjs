@@ -12,6 +12,7 @@ import { it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { createTypeServer } from '../packages/type-server/src/server.ts';
 import { buttonNamed, clickOn, editorSuite, startWait, textIn, typeInto } from './lib/editor.mjs';
+import { blockFont } from './lib/font.mjs';
 import { png, until } from './lib/http.mjs';
 import { copyFixture, fixtures, repoRoot, tmpDir } from './lib/target.mjs';
 
@@ -40,6 +41,51 @@ async function withDesignShell(ctx, root, ready, check) {
       await check(page);
     } finally { await page.close(); }
   } finally { await run('daemon', 'stop'); }
+}
+
+// An artboard whose first line, "....", is set in the block font (lib/font.mjs) from the project's own files, through an
+// inline @font-face: a solid bar from (20, 20) to (180, 60) in INK. In a fallback font the dots sit at the foot of the
+// line and the top of it stays PAPER. With `han`, the font also draws 2000 ideographs and the bar is "丂丂丂丂" (U+4E02,
+// which no list counter makes), so a picture of it carries a subset of the font.
+const INK = [200, 20, 50];
+const PAPER = [255, 247, 214];
+function webFontBoard(root, entry = {}, { han = false } = {}) {
+  copyFixture('design', root);
+  fs.mkdirSync(path.join(root, 'project/fonts'));
+  fs.writeFileSync(path.join(root, 'project/fonts/Block.ttf'), blockFont('Block', { han }));
+  const index = canvasOf(root);
+  Object.assign(index.boards['Main.dc.html'], { title: 'Web font', ...entry });
+  fs.writeFileSync(path.join(root, 'project/canvas.json'), JSON.stringify(index));
+  const template = `<x-dc><helmet><style>
+    @font-face{font-family:"Block";src:url("fonts/Block.ttf") format("truetype")}
+    body{margin:0}
+  </style></helmet><div style="width:880px;height:560px;background:rgb(${PAPER});position:relative">
+    <p id="block" style="position:absolute;left:20px;top:20px;margin:0;font:40px/40px Block,monospace;color:rgb(${INK})">${han ? '丂丂丂丂' : '....'}</p>
+    <p style="position:absolute;left:20px;top:100px;margin:0;font:16px sans-serif">Set in a web font</p></div></x-dc>`;
+  const file = path.join(root, BOARD);
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/<x-dc>[\s\S]*?<\/x-dc>/, template));
+}
+// The artboard's frame loaded the block font (so a picture without it lost it on the way).
+const WEB_FONT_LOADED = `[...(document.querySelector('iframe[data-board="Main.dc.html"]')?.contentDocument?.fonts ?? [])].some(face => face.family.replace(/["']/g, '') === 'Block' && face.status === 'loaded')`;
+// Whether a pixel is nearly a colour (JPEG moves it a little).
+const near = (pixel, colour) => pixel.every((value, i) => Math.abs(value - colour[i]) <= 24);
+// Pixels of a picture (a `source` expression for an image: a URL in quotes, or an element), at points given at 1×.
+const pixelsOf = (page, source, points, scale = 1) => page.evaluate(`(async () => {
+  let image = ${source};
+  if (typeof image === 'string') { const url = image; image = new Image(); image.src = url; }
+  await image.decode();
+  const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+  const g = canvas.getContext('2d'); g.drawImage(image, 0, 0);
+  return { width: canvas.width, height: canvas.height, pixels: ${JSON.stringify(points)}.map(([x, y]) => [...g.getImageData(x * ${scale}, y * ${scale}, 1, 1).data].slice(0, 3)) };
+})()`);
+// The first page of an exported PDF: its picture is stored as the JPEG it was drawn as.
+function pdfPagePicture(file) {
+  const pdf = fs.readFileSync(file);
+  const at = pdf.indexOf('/DCTDecode');
+  assert.ok(at > 0, 'the PDF holds no JPEG page');
+  const length = Number(/\/Length (\d+)/.exec(pdf.subarray(at, at + 200).toString('latin1'))?.[1]);
+  const start = pdf.indexOf('stream\n', at) + 'stream\n'.length;
+  return `'data:image/jpeg;base64,${pdf.subarray(start, start + length).toString('base64')}'`;
 }
 
 async function shellExport(page, label) {
@@ -250,6 +296,33 @@ editorSuite({
       } finally { await shell.close(); }
     });
 
+    it('readable links open an artboard on its page, or run it, and settle on the page link', T, async () => {
+      const { url } = await ctx.openNew('design-place-links', (_ctx, root) => {
+        copyFixture('design', root);
+        const index = canvasOf(root);
+        index.pages = [{ id: 'first', name: 'First page' }, { id: 'review', name: 'Review page' }];
+        index.boards['Main.dc.html'].page = 'review';
+        fs.writeFileSync(path.join(root, 'project/canvas.json'), JSON.stringify(index));
+      });
+      const browser = await ctx.browser();
+      const onPage = name => `document.querySelector('button[aria-label^="Pages:"]')?.innerText.includes(${JSON.stringify(name)})`;
+      const shell = await browser.load(url + '#artboard-main', { ready: onPage('Review page') });
+      try {
+        assert.ok(await shell.waitFor(onPage('Review page')), 'opened the artboard\'s page');
+        assert.ok(await shell.waitFor("window === top && location.hash === '#page=review'"), 'the address names the page');
+        assert.ok(await shell.waitFor(`document.querySelector('[data-board-title="Main.dc.html"] .text-accent')`), 'the artboard is selected');
+        assert.deepEqual(shell.problems, []);
+      } finally { await shell.close(); }
+      const playing = await browser.load(url + '#play-main-dc-html', { ready: onPage('Review page') });
+      try {
+        assert.ok(await playing.waitFor(buttonNamed('Stop playing')), 'the artboard runs on the canvas');
+      } finally { await playing.close(); }
+      const unknown = await browser.load(url + '#artboard-nowhere', { ready: onPage('First page') });
+      try {
+        assert.ok(await unknown.waitFor(onPage('First page')), 'an unknown name opens the canvas as usual');
+      } finally { await unknown.close(); }
+    });
+
     it('guest links open the global comment controls with the guest role', T, async () => {
       const root = tmpDir('design-guest-frame');
       copyFixture('design', root);
@@ -384,6 +457,106 @@ editorSuite({
       });
     });
     
+    it('PNG and PDF exports draw an artboard in its web font', T, async () => {
+      const browser = await ctx.browser();
+      fs.mkdirSync(ctx.downloads, { recursive: true });
+      await browser.downloadsTo(ctx.downloads);
+      const menuItem = text => `[...document.querySelectorAll('[role=menuitem]')].find(item => item.textContent.trim().endsWith(${JSON.stringify(text)}) && item.getAttribute('aria-disabled') !== 'true')`;
+      // Inside the bar at both ends, and the paper under it.
+      const points = [[30, 26], [170, 26], [30, 80]];
+      const exported = async (page, item, name) => {
+        const file = path.join(ctx.downloads, name);
+        fs.rmSync(file, { force: true });
+        await clickOn(page, buttonNamed('Export'));
+        assert.ok(await page.waitFor(menuItem(item)), `the Export menu lists ${item}`);
+        await clickOn(page, menuItem(item), item);
+        assert.ok(await until(() => fs.existsSync(file) && fs.statSync(file).size > 0, 30000), `${name} was not saved: ${fs.readdirSync(ctx.downloads)}`);
+        return file;
+      };
+      const focus = async url => {
+        const page = await browser.load(new URL('index.html', url).href, { ready: `document.querySelector('[data-board-title="Main.dc.html"]')`, settle: 800 });
+        assert.ok(await page.waitFor(WEB_FONT_LOADED, 20000), 'the artboard loaded its web font');
+        await clickOn(page, `document.querySelector('[data-board-title="Main.dc.html"] button[aria-label="Focus"], [data-board-title="Main.dc.html"] button[aria-label="Play full screen"]')`, 'Focus');
+        assert.ok(await page.waitFor(buttonNamed('Back to canvas')), 'the focused view opened');
+        return page;
+      };
+
+      const { url } = await ctx.openNew('web-font-export', (_ctx, root) => webFontBoard(root));
+      const page = await focus(url);
+      try {
+        const png = await exported(page, 'Selected artboard, 1×', 'Web font.png');
+        const image = await pixelsOf(page, `'data:image/png;base64,${fs.readFileSync(png).toString('base64')}'`, points);
+        assert.deepEqual(image, { width: 880, height: 560, pixels: [INK, INK, PAPER] }, 'the PNG lost the web font');
+        // A PDF page is the artboard at 2×.
+        const pdf = await pixelsOf(page, pdfPagePicture(await exported(page, 'Selected artboard', 'Web font.pdf')), points, 2);
+        assert.equal(pdf.width, 1760);
+        assert.ok(near(pdf.pixels[0], INK) && near(pdf.pixels[1], INK) && near(pdf.pixels[2], PAPER), `the PDF lost the web font: ${JSON.stringify(pdf.pixels)}`);
+        assert.deepEqual(page.problems, []);
+      } finally { await page.close(); }
+
+      // A Flow artboard is cut into paper pages, each rebuilt as SVG shapes: those carry the font too.
+      const flow = await ctx.openNew('web-font-flow', (_ctx, root) => webFontBoard(root, { print: 'flow', paper: 'letter' }));
+      const paged = await focus(flow.url);
+      try {
+        const pdf = await pixelsOf(paged, pdfPagePicture(await exported(paged, 'Selected artboard', 'Web font.pdf')), points, 2);
+        assert.ok(near(pdf.pixels[0], INK) && near(pdf.pixels[1], INK) && near(pdf.pixels[2], PAPER), `the paged PDF lost the web font: ${JSON.stringify(pdf.pixels)}`);
+        assert.deepEqual(paged.problems, []);
+      } finally { await paged.close(); }
+    });
+
+    it('zoomed out, an artboard shows a sharp snapshot in its web font, and keeps its frame for zooming back in', T, async () => {
+      const { url } = await ctx.openNew('web-font-snapshot', (_ctx, root) => webFontBoard(root));
+      // The DOM canvas shows a snapshot as an image the test can read (the engine draws it into its own canvas).
+      const page = await (await ctx.browser()).load(new URL('index.html?open_artifact_engine=off', url).href, { ready: 'window.__openArtifactLive', settle: 0 });
+      const live = expression => `(live => ${expression})(window.__openArtifactLive())`;
+      const frame = `document.querySelector('iframe[data-board="Main.dc.html"]')`;
+      const snapshot = `document.querySelector('[data-board="Main.dc.html"] img[data-board-snapshot]')`;
+      const zoomUntil = async (deltaY, done) => {
+        for (let i = 0; i < 120 && !(await page.evaluate(live(done))); i++) await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 720, y: 450, deltaX: 0, deltaY, modifiers: 2 });
+        assert.ok(await page.evaluate(live(done)), `the canvas did not zoom: ${JSON.stringify(await page.evaluate(live('live.camera')))}`);
+      };
+      try {
+        assert.ok(await page.waitFor(WEB_FONT_LOADED, 20000), 'the artboard loaded its web font');
+        assert.ok(await page.waitFor(live('live.snapshots === 1 && live.live.length === 1 && live.resting.length === 0'), 20000), 'the live artboard got its snapshot');
+        const booted = await page.evaluate(`${frame}.contentWindow.performance.timeOrigin`);
+
+        // Below 30 % the snapshot stands for the artboard; its frame rests behind it.
+        await zoomUntil(12, 'live.camera.zoom < 0.25');
+        assert.ok(await page.waitFor(`${live('live.resting.length === 1')} && ${snapshot}?.complete`, 10000), 'the artboard did not go to its snapshot');
+        assert.equal(await page.evaluate(`getComputedStyle(${frame}).visibility`), 'hidden', 'the resting frame is hidden');
+        // At the artboard's own size (880 × 560 is small enough), in the web font.
+        assert.deepEqual((await pixelsOf(page, snapshot, [[30, 26], [170, 26], [30, 80]])).width, 880);
+        const { pixels } = await pixelsOf(page, snapshot, [[30, 26], [170, 26], [30, 80]]);
+        assert.ok(near(pixels[0], INK) && near(pixels[1], INK) && near(pixels[2], PAPER), `the snapshot lost the web font: ${JSON.stringify(pixels)}`);
+
+        // Back in: the same frame shows again, nothing loaded a second time.
+        await zoomUntil(-12, 'live.camera.zoom > 0.4');
+        assert.ok(await page.waitFor(`${live('live.resting.length === 0 && live.live.length === 1')} && !${snapshot}`, 10000), 'the frame did not take over again');
+        assert.equal(await page.evaluate(`getComputedStyle(${frame}).visibility`), 'visible');
+        assert.equal(await page.evaluate(`${frame}.contentWindow.performance.timeOrigin`), booted, 'the artboard booted again');
+        assert.deepEqual(page.problems, []);
+      } finally { await page.close(); }
+    });
+
+    it('zoomed out, an artboard set in a big CJK web font shows its snapshot in a subset of the font', T, async () => {
+      const { url } = await ctx.openNew('web-font-subset', (_ctx, root) => webFontBoard(root, {}, { han: true }));
+      const page = await (await ctx.browser()).load(new URL('index.html?open_artifact_engine=off', url).href, { ready: 'window.__openArtifactLive', settle: 0 });
+      const live = expression => `(live => ${expression})(window.__openArtifactLive())`;
+      const snapshot = `document.querySelector('[data-board="Main.dc.html"] img[data-board-snapshot]')`;
+      try {
+        assert.ok(await page.waitFor(WEB_FONT_LOADED, 20000), 'the artboard loaded its web font');
+        assert.ok(await page.waitFor(live('live.snapshots === 1'), 20000), 'the artboard got its snapshot');
+        for (let i = 0; i < 120 && !(await page.evaluate(live('live.camera.zoom < 0.25'))); i++) await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 720, y: 450, deltaX: 0, deltaY: 12, modifiers: 2 });
+        assert.ok(await page.waitFor(`${live('live.resting.length === 1')} && ${snapshot}?.complete`, 10000), 'the artboard did not go to its snapshot');
+        // The ideographs of the bar are in the subset: a solid bar, as on the page.
+        const { pixels } = await pixelsOf(page, snapshot, [[30, 26], [170, 26], [30, 80]]);
+        assert.ok(near(pixels[0], INK) && near(pixels[1], INK) && near(pixels[2], PAPER), `the snapshot lost the web font: ${JSON.stringify(pixels)}`);
+        const fonts = await page.evaluate(live('live.fonts'));
+        assert.ok(fonts.subsets >= 1, `the font was not inlined as a subset: ${JSON.stringify(fonts)}`);
+        assert.deepEqual(page.problems, []);
+      } finally { await page.close(); }
+    });
+
     it('pastes foreign artboards with their display names and connected imports', T, async () => {
       const { root, url } = await ctx.openNew('paste-artboards');
       const original = fs.readFileSync(path.join(root, BOARD), 'utf8');
@@ -421,12 +594,13 @@ editorSuite({
       }
     });
 
+    const throwing = (ctx_, root) => {
+      copyFixture('design', root);
+      const board = path.join(root, BOARD);
+      fs.writeFileSync(board, fs.readFileSync(board, 'utf8').replace("return { accent: this.props.accent ?? '#666666' };", "throw new Error('e2e board error');"));
+    };
+
     it('a board that throws shows its error, and "Ask agent to fix" sends it', { timeout: 120000 }, async () => {
-      const throwing = (ctx_, root) => {
-        copyFixture('design', root);
-        const board = path.join(root, BOARD);
-        fs.writeFileSync(board, fs.readFileSync(board, 'utf8').replace("return { accent: this.props.accent ?? '#666666' };", "throw new Error('e2e board error');"));
-      };
       const { root, url } = await ctx.openNew('throwing', throwing);
       const w = await startWait(ctx, root, 90);
       // A board that throws draws nothing: the page is ready once it shows the board's error.
@@ -442,6 +616,40 @@ editorSuite({
         assert.deepEqual(page.problems, []);
       } finally {
         w.child.kill('SIGTERM');
+        await page.close();
+      }
+    });
+
+    it('"1 error" lists the artboards with errors and asks for all of them; a closed notice leaves a mark that brings it back', { timeout: 120000 }, async () => {
+      const { root, url } = await ctx.openNew('throwing-list', throwing);
+      const notice = `document.querySelector('[data-error-notice="Main.dc.html"]')`;
+      const mark = `document.querySelector('[data-error-mark="Main.dc.html"]')`;
+      const page = await (await ctx.browser()).load(new URL('index.html', url).href, { ready: `Boolean(${notice})`, settle: 1000, ignore: [/e2e board error/] });
+      let w = null;
+      try {
+        // The notice under the artboard, and the count at the top right.
+        assert.match(await page.evaluate(`${notice}.textContent`), /1 error/);
+        assert.ok(await page.evaluate(`Boolean(${buttonNamed('1 error on 1 artboard')})`), 'no "1 error" at the top right');
+
+        // Closing the notice leaves a mark in the artboard's name strip; the mark brings it back.
+        await clickOn(page, buttonNamed('Dismiss error notice on artboard Main'));
+        assert.ok(await page.waitFor(`!${notice} && Boolean(${mark})`, 5000), 'the notice did not close into a mark');
+        await clickOn(page, mark);
+        assert.ok(await page.waitFor(`Boolean(${notice}) && !${mark}`, 5000), 'the mark did not bring the notice back');
+
+        // The list names the artboard and its message, and asks for all of them.
+        await clickOn(page, buttonNamed('1 error on 1 artboard'));
+        assert.ok(await page.waitFor(`${textIn('Artboards with errors')} && [...document.querySelectorAll('[role="menu"]')].some(m => m.textContent.includes('e2e board error'))`, 5000), 'the list shows no error');
+        w = await startWait(ctx, root, 90);
+        await clickOn(page, `[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find(b => b.textContent.trim() === 'Ask agent to fix')`, 'the list\'s "Ask agent to fix"');
+        const { code, stdout } = await w.done;
+        assert.equal(code, 0, stdout);
+        assert.match(stdout, /^\[Artifact edit request sent to agent\] Ask agent to fix$/m);
+        assert.match(stdout, /Fix the errors in Main\.dc\.html\./);
+        assert.match(stdout, /\[\w+\] e2e board error/, 'each message goes with its kind in brackets');
+        assert.deepEqual(page.problems, []);
+      } finally {
+        w?.child.kill('SIGTERM');
         await page.close();
       }
     });
@@ -487,6 +695,143 @@ editorSuite({
         assert.equal(Object.keys(canvasOf(root).notes).length, 0);
         assert.deepEqual(page.problems, []);
       } finally { await page.close(); }
+    });
+
+    it('property fields: font search, Enter keeps focus, ⌘Z undoes; a linked element shows its link; menus fit a short window', T, async () => {
+      const { root, url } = await ctx.openNew('fields', (_ctx, root) => {
+        copyFixture('design', root);
+        const board = path.join(root, BOARD);
+        fs.writeFileSync(board, fs.readFileSync(board, 'utf8').replace('</p>', '</p><a href="https://example.com/docs?ref=1" style="font-size: 24px">Read the docs</a>'));
+      });
+      const page = await (await ctx.browser()).load(new URL('index.html', url).href, { ready: textIn('Smoke canvas'), settle: 800 });
+      const mod = { meta: process.platform === 'darwin', ctrl: process.platform !== 'darwin' };
+      const pointAt = selector => page.evaluate(`(() => {
+        const frame = document.querySelector('iframe[data-board="Main.dc.html"]');
+        const rect = frame.getBoundingClientRect();
+        const box = frame.contentDocument.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+        const zoom = rect.width / frame.offsetWidth;
+        return [rect.left + (box.left + box.width / 2) * zoom, rect.top + (box.top + box.height / 2) * zoom];
+      })()`);
+      const boardText = () => fs.readFileSync(path.join(root, BOARD), 'utf8');
+      try {
+        // A linked element shows a card with its address; an unlinked one shows none.
+        await page.hover(...await pointAt('a'));
+        assert.ok(await page.waitFor(`document.querySelector('[data-hover-link]')?.innerText.includes('example.com/docs')`), 'the link card shows');
+        assert.ok(await page.evaluate(`!!document.querySelector('[data-hover-link] [aria-label="Open https://example.com/docs?ref=1"]')`));
+        await page.hover(...await pointAt('p'));
+        assert.ok(await page.waitFor(`!document.querySelector('[data-hover-link]')`, 5000), 'the card goes once the pointer leaves the link');
+
+        await page.click(...await pointAt('h1'));
+        await clickOn(page, buttonNamed('Properties'));
+        assert.ok(await page.waitFor(buttonNamed('Font')), 'the properties panel shows the text fields');
+        await clickOn(page, buttonNamed('Font'));
+        assert.ok(await page.waitFor(`document.activeElement?.getAttribute('aria-label') === 'Search fonts'`));
+        await page.type('Helv');
+        assert.ok(await page.waitFor(`(() => { const shown = [...document.querySelectorAll('[role=option]')]; return shown.length === 1 && /helv/i.test(shown[0].textContent); })()`), 'the search narrows the list');
+        await page.press('Enter');
+        assert.ok(await until(() => /<h1 style=.[^>]*font-family:[^;>]*Helvetica Neue/.test(boardText()), 10000), 'the font searched for is saved');
+
+        const size = `document.querySelector('input[aria-label="Font size"]')`;
+        await clickOn(page, size);
+        await page.evaluate(`${size}.select()`);
+        await page.type('40');
+        await page.press('Enter');
+        assert.ok(await until(() => /<h1 style=.[^>]*font-size: 40px/.test(boardText()), 10000), 'Enter commits the size');
+        assert.ok(await page.waitFor(`document.activeElement === ${size}`), 'Enter keeps the field focused');
+        await page.press('z', mod);
+        assert.ok(await until(() => !/font-size: 40px/.test(boardText()), 10000), '⌘Z in the committed field undoes the edit');
+        assert.ok(await until(() => /font-family:[^;>]*Helvetica Neue/.test(boardText()), 2000), 'only the last edit is undone');
+
+        await page.press('Escape');
+        await page.cdp('Emulation.setDeviceMetricsOverride', { width: 1000, height: 273, deviceScaleFactor: 1, mobile: false });
+        await page.waitFor('innerHeight === 273');
+        const inBoard = await page.evaluate(`(() => {
+          const rect = document.querySelector('iframe[data-board="Main.dc.html"]').getBoundingClientRect();
+          const top = Math.max(rect.top, 0), bottom = Math.min(rect.bottom, innerHeight);
+          return [Math.max(rect.left, 0) + 40, (top + bottom) / 2];
+        })()`);
+        await page.rightClick(...inBoard);
+        const menu = `document.querySelector('[role=menu]')`;
+        assert.ok(await page.waitFor(menu));
+        const fit = await page.evaluate(`(() => { const el = ${menu}; return { bottom: el.getBoundingClientRect().bottom, top: el.getBoundingClientRect().top, overflow: getComputedStyle(el).overflowY, scrolls: el.scrollHeight > el.clientHeight }; })()`);
+        assert.ok(fit.top >= -1 && fit.bottom <= 274, JSON.stringify(fit));
+        assert.equal(fit.overflow, 'auto');
+        assert.ok(fit.scrolls, 'the long menu scrolls inside the short window');
+        await page.cdp('Emulation.clearDeviceMetricsOverride', {});
+        assert.deepEqual(page.problems, []);
+      } finally { await page.close(); }
+    });
+
+    it('an artboard link selects the artboard, and Shift+Cmd+C copies it as a PNG', T, async () => {
+      const { url } = await ctx.openNew('copy-png');
+      const editor = new URL('index.html', url);
+      const page = await (await ctx.browser()).load(editor.href + '#artboard-main', { ready: `document.querySelector('[data-board-title="Main.dc.html"] .text-accent')`, settle: 800 });
+      try {
+        assert.equal(await page.evaluate('location.hash'), '');
+        await page.cdp('Browser.grantPermissions', { origin: editor.origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+        await page.press('c', { meta: process.platform === 'darwin', ctrl: process.platform !== 'darwin', shift: true });
+        assert.ok(await page.waitFor(textIn('Copied as PNG'), 20000), 'the copy finished');
+        const types = await page.evaluate('navigator.clipboard.read().then(items => items.flatMap(item => item.types))');
+        assert.deepEqual(types, ['image/png']);
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('without a Shell, the focused artboard has its own Export menu', T, async () => {
+      const { url } = await ctx.openNew('focused-export');
+      const browser = await ctx.browser();
+      // The host saves exports to the Downloads folder; a browser download lands there too.
+      const dir = ctx.downloads;
+      fs.mkdirSync(dir, { recursive: true });
+      await browser.downloadsTo(dir);
+      const pngs = () => fs.readdirSync(dir).filter(name => name.endsWith('.png'));
+      const before = pngs().length;
+      const page = await browser.load(new URL('index.html', url).href, { ready: textIn('Smoke canvas'), settle: 800 });
+      try {
+        await clickOn(page, `document.querySelector('[data-board-title="Main.dc.html"] button[aria-label="Focus"], [data-board-title="Main.dc.html"] button[aria-label="Play full screen"]')`, 'Focus');
+        assert.ok(await page.waitFor(buttonNamed('Back to canvas')), 'the focused view opened');
+        await clickOn(page, buttonNamed('Export'));
+        const item = `[...document.querySelectorAll('[role=menuitem]')].find(item => item.textContent.includes('Selected artboard, 1×') && item.getAttribute('aria-disabled') !== 'true')`;
+        assert.ok(await page.waitFor(item), 'the menu lists the PNG of this artboard');
+        await clickOn(page, item, 'PNG 1×');
+        assert.ok(await until(() => pngs().length > before, 30000), `no PNG saved: ${fs.readdirSync(dir)}`);
+        await clickOn(page, buttonNamed('Back to canvas'));
+        assert.ok(await page.waitFor(`!(${buttonNamed('Export')})`), 'the canvas has no Export menu');
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('where the browser keeps the clipboard from the framed editor, the Shell copies the PNG', T, async () => {
+      const { url } = await ctx.openNew('copy-png-shell');
+      const browser = await ctx.browser();
+      const shell = await browser.load(url + '#artboard-main', { ready: `document.querySelector('[data-board-title="Main.dc.html"] .text-accent')` });
+      const frame = `document.querySelector('iframe[name="open-artifact-shell"]')`;
+      try {
+        assert.ok(await shell.waitFor(`document.querySelector('[data-board-title="Main.dc.html"] .text-accent')`), 'the artboard is selected');
+        await shell.cdp('Browser.grantPermissions', { origin: new URL(url).origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+        // Act like a browser that refuses framed pages whatever the frame's allow says.
+        await shell.evaluate(`(() => {
+          const win = ${frame}.contentWindow;
+          win.refused = 0;
+          const refuse = async () => { win.refused++; throw new win.DOMException('Write permission denied.', 'NotAllowedError'); };
+          win.navigator.clipboard.write = refuse;
+          win.navigator.clipboard.writeText = refuse;
+          win.focus();
+        })()`);
+        await shell.evaluate('navigator.clipboard.writeText("before")');
+        await shell.press('c', { meta: process.platform === 'darwin', ctrl: process.platform !== 'darwin', shift: true });
+        assert.ok(await shell.waitFor(textIn('Copied as PNG'), 20000), 'the copy finished');
+        assert.equal(await shell.evaluate(`${frame}.contentWindow.refused`), 1, 'the editor tried the clipboard itself first');
+        const types = await shell.evaluate('navigator.clipboard.read().then(items => items.flatMap(item => item.types))');
+        assert.deepEqual(types, ['image/png']);
+        const size = await shell.evaluate(`navigator.clipboard.read().then(items => items[0].getType('image/png')).then(blob => blob.size)`);
+        assert.ok(size > 1000, `a real image (${size} bytes)`);
+        assert.deepEqual(shell.problems, []);
+      } finally { await shell.close(); }
     });
 
     it('Pages → Add page writes the page to canvas.json', T, async () => {

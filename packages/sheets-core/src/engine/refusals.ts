@@ -38,6 +38,7 @@ export type OpRefusal =
   | 'viewNamedTwice'
   | 'viewInUse'
   | 'unknownView'
+  | 'namedViewNamedTwice'
   | 'placementNamedTwice'
   | 'cellTableNamedTwice'
   | 'rangeAlreadyMerged'
@@ -83,15 +84,93 @@ export type QueueRefusal =
   | 'opIdInUse'
   /** Rows, columns or sheets moved (by a move or a sort) among other edits of one request. */
   | 'moveAmongSeveralEdits'
-  /** The edit would leave the workbook holding more cells than it may (200 000). */
+  /** The edit would leave the workbook holding more cells than it may (500 000). */
   | 'tooManyCells';
+
+/**
+ * Why a pivot table edit (`insertPivotTable`, `changePivotTable`) is refused,
+ * besides an unknown sheet, row or column. `readValuesToFilterPivotTableBy`
+ * refuses with `pivotTableSourceHasNoHeader` and `pivotTableSourceHasNoRecords`.
+ */
+export type PivotTableRefusal =
+  /** The new sheet's name cannot be a sheet's. */
+  | 'sheetNameNotAllowed'
+  | 'noPivotTableAtTheCell'
+  /** No table of the source sheet has its header on the source's header row. */
+  | 'pivotTableSourceHasNoHeader'
+  | 'pivotTableColumnNotOfSource'
+  | 'pivotTableWouldReadItself'
+  | 'pivotTableWouldTouchATable'
+  /** A cell where the pivot table would go is not empty. */
+  | 'pivotTableCellsInTheWay'
+  /** It would spill past the sheet's last row or column. */
+  | 'tooManyRows'
+  | 'tooManyColumns'
+  | 'pivotTableFormulaInTheWay'
+  | 'pivotTableWouldBeReadByAnother'
+  | 'pivotTableTooLarge'
+  | 'pivotTableWithColumnsTakesOneValue'
+  | 'pivotTableSourceHasNoRecords'
+  | 'pivotTableSourceHasSectionsOrSubtotals'
+  /** The source's records cannot be told apart (merged cells among them, or the header again). */
+  | 'pivotTableSourceRecordsNotClear'
+  | 'pivotTableTotalNeedsNumbers'
+  | 'pivotTablePeriodNeedsDates'
+  | 'pivotTableFilterValueCannotBeWritten';
+
+/** Why an edit is refused for an interactive view, or for a sheet that shows one. */
+export type InteractiveRefusal =
+  /** No sheet shows the view as an interactive one. */
+  | 'unknownInteractive'
+  /** A cell written is not one the view keeps a value for. */
+  | 'cellIsNotTheInteractives'
+  /** A cell written holds more than a plain value. */
+  | 'cellHoldsMoreThanAValue'
+  | 'valueDoesNotFitCell'
+  | 'textTooLong'
+  /** Saving the inputs' values would make the view too large. */
+  | 'interactiveSavesTooMuch'
+  /** An edit would change the grid of a sheet that shows an interactive view. */
+  | 'sheetIsAnInteractive'
+  /** A placement would show an interactive view: a sheet shows one in place of its grid instead. */
+  | 'viewIsAnInteractive'
+  /** The sheet setting `interactive` names a view with no interactive element. */
+  | 'viewIsNoInteractive'
+  /** The sheet setting `interactive` set on a sheet that holds cells. */
+  | 'sheetForInteractiveIsNotEmpty';
+
+/** Why `moveColumnsOfCells` is refused, besides an unknown sheet, row or column. */
+export type MoveColumnsOfCellsRefusal =
+  /** A column moved, or the one to move after, is not among the cells. */
+  | 'movedColumnOutsideTheCells'
+  | 'mergedRangeAmongMovedColumnsOfCells'
+  | 'columnOutOfSightAmongMovedColumnsOfCells'
+  | 'spilledValuesAmongMovedColumnsOfCells';
+
+/** Why `saveNamedView` or `removeNamedView` is refused, besides an unknown sheet or column. */
+export type NamedViewRefusal =
+  | 'nameOfNamedViewNotAllowed'
+  | 'nameOfNamedViewTaken'
+  | 'tooManyNamedViews'
+  | 'unknownNamedView'
+  | 'tooManyTestsInNamedView'
+  | 'tooManyKeysInNamedView'
+  | 'namedViewTooLarge'
+  | 'valueInNamedViewNotAllowed';
 
 /**
  * Every refusal the engine is known to answer with. Edits and reads add
  * refusals of their own (`unknownSheet`, `sheetNameTaken`, `noCellsToSort`, …);
  * those are told as plain strings where their kinds are not listed here.
  */
-export type Refusal = OpRefusal | TakeBackRefusal | QueueRefusal;
+export type Refusal =
+  | OpRefusal
+  | TakeBackRefusal
+  | QueueRefusal
+  | PivotTableRefusal
+  | InteractiveRefusal
+  | MoveColumnsOfCellsRefusal
+  | NamedViewRefusal;
 
 /** A refused request. */
 export interface Refused<R extends string = string> {

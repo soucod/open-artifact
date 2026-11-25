@@ -42,10 +42,8 @@ export type { Point, Rect };
 /** A camera: the board point at the viewport's top-left and the zoom. */
 export type Camera = CameraState;
 
-/** Smallest zoom (5%). */
+/** Smallest zoom (5%), whatever the viewport's width or the pointer. */
 export const MIN_ZOOM = 0.05;
-/** Smallest zoom of the compact (narrow or touch) layout. */
-export const MIN_COMPACT_ZOOM = 0.6;
 /** Largest zoom (800%). */
 export const MAX_ZOOM = 8;
 /** "Fit" never zooms in past 100%. */
@@ -77,6 +75,16 @@ export function nextZoomStep(zoom: number, direction: 1 | -1, min = MIN_ZOOM, ma
  */
 export function fitRect(rect: Rect, width: number, height: number, options: FitOptions = {}): Camera {
   return fitRectIn(rect, width, height, { ...options, minZoom: options.minZoom ?? MIN_ZOOM, maxZoom: options.maxZoom ?? MAX_FIT_ZOOM });
+}
+
+/** How long a camera glide takes, ms. */
+export const CAMERA_GLIDE_MS = 220;
+
+/** The camera `t` (0–1) of the way through a glide from `from` to `to`, easing out. */
+export function glideCameraAt(from: Camera, to: Camera, t: number): Camera {
+  const along = Math.min(1, Math.max(0, t));
+  const eased = 1 - (1 - along) ** 3;
+  return { x: from.x + (to.x - from.x) * eased, y: from.y + (to.y - from.y) * eased, zoom: from.zoom + (to.zoom - from.zoom) * eased };
 }
 
 /* -------------------------------------------------------------------------- */

@@ -13,6 +13,22 @@ export interface KeyLike {
   repeat: boolean;
 }
 
+/** The fields of a keyboard event that tell an input method is composing. */
+export interface ComposingLike {
+  isComposing?: boolean;
+  keyCode?: number;
+}
+
+/**
+ * True while an input method composes (Chinese, Japanese, Korean…): the
+ * Enter or Escape it sees picks or drops the candidate, so a field must not
+ * also commit or cancel on it. Safari reports the end of a composition as
+ * key code 229 with `isComposing` already false.
+ */
+export function isComposingKey(event: ComposingLike): boolean {
+  return Boolean(event.isComposing) || event.keyCode === 229;
+}
+
 /** True for an auto-repeated Enter or Space. */
 export function isRepeatedActivation(event: KeyLike): boolean {
   return event.repeat && (event.key === 'Enter' || event.key === ' ');

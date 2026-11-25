@@ -1,6 +1,5 @@
-import type { Dynamic } from '../dynamic.ts';
-export function yieldF6ToToasts(target?: Dynamic, shouldYield?: Dynamic) {
-  target.addEventListener('keydown', (event?: Dynamic) => {
+export function yieldF6ToToasts(target: Window, shouldYield: () => boolean) {
+  target.addEventListener('keydown', (event) => {
     if (event.key === 'F6' && shouldYield()) event.stopImmediatePropagation();
   });
 }

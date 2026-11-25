@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lunch vote</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; }
+  #status { color: #555; }
+</style>
+</head>
+<body>
+<h1>Lunch vote</h1>
+<p id="status">Starting…</p>
+<ul id="votes"></ul>
+<script>
+  // Top level of a classic script, as a page written for claude.ai does: window.claude is configurable, so this runs.
+  const claude = window.claude;
+  (async () => {
+    const status = document.getElementById('status');
+    const db = await claude.use('db');
+    if (!db) {
+      status.textContent = 'no db';
+      return;
+    }
+    const votes = db.collection('votes');
+    votes.onSnapshot((snap) => {
+      document.getElementById('votes').innerHTML = snap.docs.map((d) => `<li data-vote="${d.id}">${d.data().choice}</li>`).join('');
+    });
+    await votes.doc('first').set({ choice: 'noodles', at: 1 });
+    status.textContent = 'voted';
+  })().catch((err) => {
+    document.getElementById('status').textContent = `failed: ${err.code || err.message}`;
+  });
+</script>
+<output id="modules"></output>
+<script type="module">
+  import db from '/_/openartifact:db';
+  import use, { at } from '/_/openartifact:use';
+  const output = document.getElementById('modules');
+  try {
+    const granted = await use('db');
+    if (db !== granted || granted !== at('db')) throw new Error('unstable database reference');
+    if (db.available) {
+      const ref = db.collection('module_checks').doc('first');
+      const stop = ref.onSnapshot(() => {});
+      stop();
+      await ref.set({ choice: 'rice' });
+      output.textContent = ref.path;
+    } else {
+      const room = at('room');
+      const stop = room.on('vote', () => {}, () => { output.textContent = 'cancelled listener fired'; });
+      stop();
+      try { await room.emit('vote', {}); } catch (error) { output.textContent = error.code; }
+    }
+  } catch (error) { output.textContent = String(error); }
+</script>
+</body>
+</html>

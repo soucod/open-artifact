@@ -5,7 +5,7 @@ import { Download } from 'lucide-react';
 import { type ReactNode } from 'react';
 import { maybeSession } from '../app/session.ts';
 import { useDocs } from '../app/store.ts';
-import { type ExportChoice, exportDoc, exportKey } from './export.ts';
+import { type ExportChoice, exportDoc, exportKey, mayExportDoc } from './export.ts';
 import { FORMAT_NAMES, defaultPaper } from './words.ts';
 import { useTopBar } from './store.ts';
 
@@ -47,7 +47,7 @@ function Formats({ scope, several }: { scope: ExportChoice['scope']; several: bo
 export function ExportMenu(): ReactNode {
   const ready = useDocs(state => state.phase.kind === 'ready');
   const tabs = useDocs(state => state.project?.files.length ?? 0);
-  if (!ready || maybeSession()?.viewer.role !== 'owner') return null;
+  if (!ready || !maybeSession() || !mayExportDoc()) return null;
   return (
     <ChromeMenu
       align="end"

@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/wasm-data-rules",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "Data rule patterns compiled from crates/open-artifact-data-rules to WebAssembly (generated/, built by scripts/build-wasm.mjs), loaded synchronously.",

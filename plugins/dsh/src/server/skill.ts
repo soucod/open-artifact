@@ -1,93 +1,70 @@
 /**
  * The `/open-artifact` skill. A person types `/open-artifact slides a deck about our Q3 results` (or a tile of the Open
  * Artifact page puts it in a new session's input): DSH loads a user-invocable skill whose name is a `/name` word of
- * what the person sends, so the agent reads skills/open-artifact/SKILL.md, which says the next word is the type and how
- * to make one with the Artifact tool, followed by the types the daemon has installed now.
+ * what the person sends. Its text is the daemon's rendering for DSH (`skill.get`, which ends with the types installed
+ * now), else the kit's own (`renderSkill` falls back to it while the daemon is away or older).
+ *
+ * The candidate's `path` still names a real file: the build writes `skills/open-artifact/SKILL.md` from the protocol's
+ * template ({@link SKILL_RENDER}, no installed types), a build output git ignores. The registry reads the skill through
+ * `get`, which renders it fresh each time; the file is there for whatever reads the `path` itself.
  */
-import { readFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { TypeView } from '@open-artifact/protocol';
 import type { DshSkillCandidate, DshSkillProvider } from './dsh.ts';
 
 /** The skill's name: the `/open-artifact` word. */
 export const SKILL_NAME = 'open-artifact';
+
+/** How the skill is rendered for DSH (with the config's `agentName` added at run time; the build's file says `Agent`). */
+export const SKILL_RENDER = { command: SKILL_NAME, tools: 'native', opens: 'host' } as const;
+
+/** The SKILL.md the build writes and the candidate's `path` names, under the plugin folder. */
+export const skillFile = (packageRoot: string): string => join(packageRoot, 'skills', SKILL_NAME, 'SKILL.md');
 /** The registry's rank for packaged skills (`BUNDLED_SKILL_RANK` in @deepseek-ai/dsh-skill). */
 export const BUNDLED_SKILL_RANK = 600;
 
-const DESCRIPTION =
-  'Make a new artifact of one Open Artifact type (design, slides, whiteboard, data, sheets, docs, design-system, …) with the Artifact tool. Usage: /open-artifact <type> <what to make>.';
-
-/** One installed type, as the skill lists it. */
-export interface SkillType {
-  id: string;
-  title: string;
-  description?: string;
-}
-
-/** The types a new artifact can be made of: installed, on, runnable. */
-export function creatableTypes(types: readonly Partial<TypeView>[]): SkillType[] {
-  return types
-    .filter((t) => typeof t.id === 'string' && t.enabled !== false && t.runnable !== false && !t.shadowedBy && !t.problems?.length)
-    .map((t) => ({ id: t.id!, title: t.title || t.id!, ...(t.description ? { description: t.description } : {}) }));
-}
-
-/** SKILL.md without its front matter. */
-export function skillBody(raw: string): string {
-  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(raw);
-  return (match ? raw.slice(match[0].length) : raw).trim();
-}
-
-/** The section after the SKILL.md: the installed types, or how to find them when the daemon could not say. */
-export function typesSection(types: readonly SkillType[] | null): string {
-  if (types === null) {
-    return '## Installed types\n\nThe list could not be read just now: call `Artifact {action: "quickstart", intent: "<the type id>"}` to see the installed types.';
-  }
-  if (types.length === 0) return '## Installed types\n\nNone is installed: tell the person, and do not make one.';
-  const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
-  const firstSentence = (text: string) => {
-    const end = flat(text).search(/[.!?。！？](\s|$)/);
-    return end >= 0 ? flat(text).slice(0, end + 1) : flat(text);
-  };
-  const lines = types.map((t) => `- \`${t.id}\`: ${flat(t.title)}${t.description ? `. ${firstSentence(t.description)}` : ''}`);
-  return `## Installed types\n\n${lines.join('\n')}`;
+/** A rendered skill, as far as the provider reads one. */
+export interface RenderedSkill {
+  description: string;
+  body: string;
 }
 
 /** Options of {@link skillProvider}. */
 export interface SkillProviderOptions {
-  /** The plugin folder, which holds skills/open-artifact/SKILL.md. */
+  /** The plugin folder: the candidate's `path` and `resourceBase` are under it. */
   packageRoot: string;
-  /** The daemon's types; a throw lists none and says how to find them. */
-  types(signal?: AbortSignal): Promise<readonly Partial<TypeView>[]>;
+  /** Renders the skill now (the daemon's, else the kit's). */
+  render(signal?: AbortSignal): Promise<RenderedSkill>;
+  /** The description listed before any rendering (the kit's). */
+  description: string;
   /** The provider's name in the registry. */
   provider?: string;
 }
 
-/** The skill provider DSH's skill registry takes. */
-export function skillProvider({ packageRoot, types, provider = 'dsh-open-artifact' }: SkillProviderOptions): DshSkillProvider {
+/**
+ * The skill provider DSH's skill registry takes. The candidate's `path` is the SKILL.md the build wrote; the registry
+ * reads the skill through `get`, which renders it each time, so the types it lists are the ones installed now.
+ */
+export function skillProvider({ packageRoot, render, description, provider = 'dsh-open-artifact' }: SkillProviderOptions): DshSkillProvider {
   const directory = join(packageRoot, 'skills', SKILL_NAME);
-  const candidate: DshSkillCandidate = {
+  let listed = description;
+  const candidate = (): DshSkillCandidate => ({
     name: SKILL_NAME,
-    description: DESCRIPTION,
+    description: listed,
     invocation: { modelInvocable: false, userInvocable: true },
     provider,
     source: 'bundled',
     rank: BUNDLED_SKILL_RANK,
-    path: join(directory, 'SKILL.md'),
+    path: skillFile(packageRoot),
     resourceBase: { kind: 'directory', path: directory.split(sep).join('/') },
-  };
+  });
   return {
     name: provider,
-    list: () => Promise.resolve([candidate]),
+    list: () => Promise.resolve([candidate()]),
     async get(asked, options) {
-      const { rank: _rank, ...summary } = asked.name === SKILL_NAME ? asked : candidate;
-      const raw = await readFile(candidate.path, { encoding: 'utf8', ...(options?.signal ? { signal: options.signal } : {}) });
-      let listed: SkillType[] | null;
-      try {
-        listed = creatableTypes(await types(options?.signal));
-      } catch {
-        listed = null;
-      }
-      return { ...summary, content: `${skillBody(raw)}\n\n${typesSection(listed)}\n` };
+      const skill = await render(options?.signal);
+      listed = skill.description || listed;
+      const { rank: _rank, ...summary } = asked.name === SKILL_NAME ? asked : candidate();
+      return { ...summary, description: listed, content: `${skill.body.trim()}\n` };
     },
   };
 }

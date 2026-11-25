@@ -22,3 +22,25 @@ export function isTextField(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   return Boolean(element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName)));
 }
+
+/**
+ * The next focus index inside a toolbar for Arrow keys, Home and End: arrows step and wrap,
+ * Home and End jump to the first and last items, and other keys return null.
+ */
+export function getToolbarKeyTarget(key: string, index: number, count: number): number | null {
+  if (count <= 0 || index < 0 || index >= count) return null;
+  switch (key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      return (index + 1) % count;
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      return (index - 1 + count) % count;
+    case 'Home':
+      return 0;
+    case 'End':
+      return count - 1;
+    default:
+      return null;
+  }
+}

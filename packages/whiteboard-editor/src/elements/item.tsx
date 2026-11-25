@@ -2,14 +2,12 @@
  * What every element view puts on its root node: the attributes that make
  * it an item of the list of board items (its spoken description and its
  * place in reading order) and the hooks tools find it by
- * (`data-wb-id`, `data-wb-type`, `data-wb-locked`), plus the chip that
- * marks elements the agent made.
+ * (`data-wb-id`, `data-wb-type`, `data-wb-locked`).
  */
 
-import { Bot } from 'lucide-react';
 import type { BoardElement, ElementId } from '@open-artifact/whiteboard-core';
 import { boardListItemProps, describeElement, type BoardListItemProps } from './describe.ts';
-import { useBoardDerived, useIsFeatured } from './hooks.ts';
+import { useBoardDerived } from './hooks.ts';
 import { useElementView } from './view-state.ts';
 
 /** The root attributes of an element view. */
@@ -46,20 +44,4 @@ export function useItemProps(element: BoardElement): ElementItemProps {
     ...(element.locked ? { 'data-wb-locked': true as const } : {}),
     ...(lifted ? { 'data-wb-lifted': true as const } : {}),
   };
-}
-
-/**
- * A small "Agent" chip at the top-left corner of an element the agent
- * made, shown while the element is selected alone or hovered. It keeps its
- * screen size at any zoom.
- */
-export function AgentChip({ element }: { element: BoardElement }) {
-  const featured = useIsFeatured(element.id);
-  if (!('by' in element) || element.by !== 'agent' || !featured) return null;
-  return (
-    <span className="wb-by-chip" data-wb-chrome="" aria-hidden="true">
-      <Bot size={12} strokeWidth={2} />
-      Agent
-    </span>
-  );
 }

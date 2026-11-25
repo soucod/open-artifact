@@ -22,29 +22,29 @@ export interface CellOpened {
 
 export function parseKeptPlaceCell(kept: unknown, sheetId: SheetId): CellId | null {
   if (!isPlaceRecord(kept) || kept.sheetId !== sheetId) return null;
-  let { rowId: rowId, columnId: columnId } = kept;
+  let { rowId, columnId } = kept;
   return typeof rowId === 'string' && typeof columnId === 'string'
     ? {
-        sheetId: sheetId,
-        rowId: rowId,
-        columnId: columnId,
+        sheetId,
+        rowId,
+        columnId,
       }
     : null;
 }
 export function parseScrollForLessRoom(kept: unknown): ScrollForLessRoom | null {
   if (!isPlaceRecord(kept)) return null;
-  let { from: from, end: end, at: at } = kept;
+  let { from, end, at } = kept;
   return typeof from === 'number' && typeof end === 'number' && typeof at === 'number'
     ? {
-        from: from,
-        end: end,
-        at: at,
+        from,
+        end,
+        at,
       }
     : null;
 }
 export function parseKeptPlace(kept: unknown): SavedPlace | null {
   if (!isPlaceRecord(kept)) return null;
-  let { sheetId: sheetId, scrollLeft: scrollLeft, scrollTop: scrollTop } = kept;
+  let { sheetId, scrollLeft, scrollTop } = kept;
   if (typeof sheetId !== 'string' || typeof scrollLeft !== 'number' || typeof scrollTop !== 'number') return null;
   let activeCell = parseKeptPlaceCell(kept.activeCell, sheetId);
   let selectionCorner = parseKeptPlaceCell(kept.selectionCorner, sheetId);
@@ -53,7 +53,7 @@ export function parseKeptPlace(kept: unknown): SavedPlace | null {
   let keptScrollForLessRoom = kept.scrolledForLessRoom;
   let scrolledForLessRoom = isPlaceRecord(keptScrollForLessRoom)
     ? {
-        sheetId: sheetId,
+        sheetId,
         across: parseScrollForLessRoom(keptScrollForLessRoom.across),
         down: parseScrollForLessRoom(keptScrollForLessRoom.down),
       }
@@ -61,14 +61,14 @@ export function parseKeptPlace(kept: unknown): SavedPlace | null {
   return activeCell === null || selectionCorner === null
     ? null
     : {
-        sheetId: sheetId,
-        activeCell: activeCell,
-        selectionCorner: selectionCorner,
-        scrollLeft: scrollLeft,
-        scrollTop: scrollTop,
-        lines: lines,
-        density: density,
-        scrolledForLessRoom: scrolledForLessRoom,
+        sheetId,
+        activeCell,
+        selectionCorner,
+        scrollLeft,
+        scrollTop,
+        lines,
+        density,
+        scrolledForLessRoom,
       };
 }
 export function tryOrNull<T>(read: () => T): T | null {
@@ -86,22 +86,22 @@ export function takeSheetLastOpenedByViewer(storages: KeptPlaceStorages): SheetI
   browserStorage.removeItem(KEPT_PLACE_KEY);
   let kept: unknown = json === null ? null : JSON.parse(json);
   if (!isPlaceRecord(kept) || kept.viewer !== viewer) return null;
-  let { sheetId: sheetId, openedUnpainted: openedUnpainted } = kept;
+  let { sheetId, openedUnpainted } = kept;
   if (typeof sheetId !== 'string' || typeof openedUnpainted !== 'number') return null;
   if (!(openedUnpainted >= 0 && openedUnpainted < MAX_UNPAINTED_OPENS_OF_KEPT_FILTERS)) return null;
   return (
     browserStorage.setItem(
       KEPT_PLACE_KEY,
       JSON.stringify({
-        viewer: viewer,
+        viewer,
         openedUnpainted: openedUnpainted + 1,
-        sheetId: sheetId,
+        sheetId,
       }),
     ),
     sheetId
   );
 }
-export function resetTabPlace({ findTabs: findTabs }: Pick<KeptPlaceStorages, 'findTabs'>): void {
+export function resetTabPlace({ findTabs }: Pick<KeptPlaceStorages, 'findTabs'>): void {
   tryOrNull(() => findTabs().removeItem(KEPT_PLACE_KEY));
   tryOrNull(() => findTabs().setItem(KEPT_PLACE_KEY, NO_KEPT_PLACE));
 }
@@ -117,7 +117,7 @@ export function takePlaceToOpenOn(
   let sheetToOpen = sheetOfNewLink ?? (json === null ? tryOrNull(() => takeSheetLastOpenedByViewer(storages)) : null);
   let toOpenOn: SavedPlace | null = savedPlaceForLinkedSheet(reads, sheetToOpen, tabsPlace);
   return {
-    toOpenOn: toOpenOn,
+    toOpenOn,
     isTabsOwn: tabsPlace !== null && toOpenOn === tabsPlace,
   };
 }
@@ -128,7 +128,7 @@ export function forgetKeptPlace(storages: KeptPlaceStorages): void {
 export function keepPlaceAcrossReloads(
   storages: KeptPlaceStorages,
   store: Pick<SheetController, 'place' | 'subscribe'>,
-  after: (callback: () => void) => void,
+  after: (run: () => void) => void,
   isTabsOwn: boolean,
   cellOpened: CellOpened | null = null,
 ): () => void {
@@ -137,9 +137,9 @@ export function keepPlaceAcrossReloads(
   let noteSheetForViewer = (sheetId: SheetId): void => {
     if (viewer === null || storages.viewer() !== viewer) return;
     let json = JSON.stringify({
-      viewer: viewer,
+      viewer,
       openedUnpainted: 0,
-      sheetId: sheetId,
+      sheetId,
     });
     if (tryOrNull(() => storages.findBrowsers().getItem(KEPT_PLACE_KEY)) === json) return;
     tryOrNull(() => storages.findBrowsers().removeItem(KEPT_PLACE_KEY));

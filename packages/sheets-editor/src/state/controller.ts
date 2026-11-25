@@ -6,12 +6,13 @@ import type { CellArea, CellPosition } from '../selection/model.ts';
 import type { LineSpan } from '../model/line-ids.ts';
 import type { PageState, ScrollsForLessRoom } from './initial-state.ts';
 import type { ChartCardOpening, WhyNothingToChart } from '../selection/table-select.ts';
-import type { EditQueuedOutcome, EditsDropped } from '../store/workbook-sync.ts';
-import type { ChartNodesCopiedFor, PageEvent } from './event-reducer.ts';
+import type { EditsDropped } from '../store/workbook-sync.ts';
+import type { ChartNodesCopiedFor, OwnFiltersBroughtBack, PageEvent } from './event-reducer.ts';
+import type { OwnViewShownAsApplied } from '../tables/filter-messages.ts';
 import type { PageEffect, PageTransition } from './transitions.ts';
 import type { CauseOfWorkbookChange, OpenedWorkbook } from '../engine/worker-workbook.ts';
 import type { askToDescribeChartsForXlsx, ChartsForXlsx } from '../export/xlsx-chart-descriptions.ts';
-import type { createAgentSampler } from '../agent/sampling.ts';
+import type { AgentSampler, createAgentSampler } from '../agent/sampling.ts';
 import type { ColorPickerChoices, PageView, ViewOnlyBecause } from '../view/page-view.ts';
 import { findSheetById, layoutOfView } from '../grid/layout.ts';
 import { fullShownTextOfCell, numberFormatOfCell, readsAsStored } from '../model/workbook.ts';
@@ -52,6 +53,8 @@ import { makeAskForCommands } from '../ui/ask-for-commands.ts';
 import { areasOfAllRanges } from '../selection/several-ranges.ts';
 import { exampleOfChoice } from '../format/number-format-choices.ts';
 import { presenceFlagsAtPointer } from '../presence/flags-at-pointer.ts';
+import type { RoomPresence } from '../presence/room.ts';
+import type { WrappedTextPart } from '../grid/wrapped-rows.ts';
 import { errorCountInArea } from '../formulas/fix/errors-offer.ts';
 import { areaToChart, whyNothingToChart, areTablesForChartPending, whatChartCardOpensOn } from '../selection/table-select.ts';
 import { placeChartForArea } from '../charts/placement.ts';
@@ -66,16 +69,18 @@ import { ownFiltersWithoutKey, ownFilterKeyNotDrawnYet } from '../tables/own-fil
 import { linesOnShowOf } from '../grid/cards-place.ts';
 import { showSheetPointedIn } from '../formulas/sheet-pointed-in.ts';
 import { isKeyWritingInEntry } from '../keys/key-acts.ts';
+import { pivotTypingToEnter } from '../tables/pivot-tables.ts';
+import { withPivotTablesOutOfDate } from './pivot-tables-out-of-date.ts';
 export function throwCollectedErrors(errors: readonly unknown[]): void {
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw AggregateError(errors, 'more than one error in one dispatch');
 }
-export function valuesOfCopiedCellsAnswer({ values: values, copiedCellsAsText: copiedCellsAsText }: CellsToCopyAnswer): ValuesOfCopiedCells | null {
+export function valuesOfCopiedCellsAnswer({ values, copiedCellsAsText }: CellsToCopyAnswer): ValuesOfCopiedCells | null {
   if (values.kind === 'notWritten') return null;
   if ((values.kind as string) !== 'written' && copiedCellsAsText === null) return null;
   return {
     copiedCellsAsAnswered: copiedCellsAsText,
-    values: values,
+    values,
   };
 }
 export function trimAreaToUsedCells(reads: WorkbookReads, sheetId: SheetId, area: CellArea): CellArea {
@@ -83,24 +88,19 @@ export function trimAreaToUsedCells(reads: WorkbookReads, sheetId: SheetId, area
   let reachesLastRow = area.topRowIndex + area.rowCount === sheet?.rowCount;
   let reachesLastColumn = area.leftColumnIndex + area.columnCount === sheet?.columnCount;
   if (!reachesLastRow && !reachesLastColumn) return area;
-  let rowCount = 1;
-  let columnCount = 1;
-  for (let cellId of reads.cellsOnShowIn(sheetId, area)) {
-    let position = reads.positionOfCell(cellId);
-    if (position === null) continue;
-    rowCount = Math.max(rowCount, position.rowIndex - area.topRowIndex + 1);
-    columnCount = Math.max(columnCount, position.columnIndex - area.leftColumnIndex + 1);
-  }
+  let shownArea = reads.areaOnShowIn(sheetId, area);
+  let rowCount = shownArea === null ? 1 : shownArea.topRowIndex + shownArea.rowCount - area.topRowIndex;
+  let columnCount = shownArea === null ? 1 : shownArea.leftColumnIndex + shownArea.columnCount - area.leftColumnIndex;
   return {
     ...area,
     rowCount: reachesLastRow ? rowCount : area.rowCount,
     columnCount: reachesLastColumn ? columnCount : area.columnCount,
   };
 }
-export function copyCornersForEffect(reads: WorkbookReads, { sheetId: sheetId, area: area, rowsLeftOut: rowsLeftOut }: AreaToCopy): CopyCorners | null {
+export function copyCornersForEffect(reads: WorkbookReads, { sheetId, area, rowsLeftOut }: AreaToCopy): CopyCorners | null {
   let [topLeft, bottomRight] = cornerCellsOfArea(reads, {
-    sheetId: sheetId,
-    area: area,
+    sheetId,
+    area,
   });
   let rowLines = reads.linesOf(sheetId)?.rows;
   if (topLeft === null || bottomRight === null || rowLines === undefined) return null;
@@ -108,23 +108,13 @@ export function copyCornersForEffect(reads: WorkbookReads, { sheetId: sheetId, a
 }
 export function buildClipboardContentForCopy(
   reads: WorkbookReads,
-  { sheetId: sheetId, area: area, rowsLeftOut: rowsLeftOut }: AreaToCopy,
+  { sheetId, area, rowsLeftOut }: AreaToCopy,
   corners: CopyCorners | null,
   trimToContent: boolean,
 ): ClipboardContent {
   let cellsToCopy = corners === null ? null : reads.cellsToCopy(...corners);
-  let { rowCount: rowCount, columnCount: columnCount } = cellsToCopy ?? trimAreaToUsedCells(reads, sheetId, area);
-  let rowIndexesLeftOut = new Set<number>(
-    rowsLeftOut.flatMap(
-      ({ firstIndex: firstIndex, count: count }) =>
-        Array.from<unknown, number>(
-          {
-            length: count,
-          },
-          (unused, offset) => firstIndex + offset,
-        ),
-    ),
-  );
+  let { rowCount, columnCount } = cellsToCopy ?? trimAreaToUsedCells(reads, sheetId, area);
+  let rowIndexesLeftOut = indexesOfRuns(rowsLeftOut);
   let rowIndexes: number[] = [];
   let isRowInCopy = (rowIndex: number) =>
     cellsToCopy === null ? rowIndex < area.topRowIndex + rowCount : rowIndexes.length < rowCount && rowIndex < area.topRowIndex + area.rowCount;
@@ -136,8 +126,8 @@ export function buildClipboardContentForCopy(
       rowIndexesLeftOut.size === 0
         ? null
         : reads.mergedAreaAt(sheetId, {
-            rowIndex: rowIndex,
-            columnIndex: columnIndex,
+            rowIndex,
+            columnIndex,
           });
     if (mergedArea === null || mergedArea.leftColumnIndex !== columnIndex) return reads.cellIdAt(sheetId, rowIndex, columnIndex);
     for (let aboveRowIndex = mergedArea.topRowIndex; aboveRowIndex < rowIndex; aboveRowIndex += 1)
@@ -179,7 +169,7 @@ export function buildClipboardContentForCopy(
       cellTextToCopy(reads.cellOnShowIn(cellId), patternOf(cellId) ?? shownTextOfCell(cellId, answeredCell), reads.decimalSign),
   );
   let hasNumbersNotShownWhole =
-    cellsToCopy?.cells.some(({ isNumberShownWhole: isNumberShownWhole }) => isNumberShownWhole === false) === true;
+    cellsToCopy?.cells.some(({ isNumberShownWhole }) => isNumberShownWhole === false) === true;
   let cellsTakenAsDates: CellPosition[] = [];
   let exactTexts = !hasNumbersNotShownWhole
     ? shownTexts
@@ -203,14 +193,19 @@ export function buildClipboardContentForCopy(
   let trimmedSize = trimToContent ? trimmedCopySize(reads, sheetId, area, shownTexts) : null;
   let trimmedTexts = shownTexts.slice(0, trimmedSize?.rowCount).map((texts) => texts.slice(0, trimmedSize?.columnCount));
   let cellLooks = () => {
-    if (trimmedSize === null) return null;
+    if (trimmedSize === null || (trimmedTexts.length === 1 && trimmedTexts[0]?.length === 1)) return null;
     let areGridlinesHidden = findSheetById(reads, sheetId)?.areGridlinesHidden === true;
     let trimmedColumnCount = trimmedTexts[0]?.length ?? 0;
     if (trimmedTexts.length * trimmedColumnCount > MAX_COPY_HTML_LOOK_CELLS)
       return trimmedTexts.map((texts) => texts.map(() => (areGridlinesHidden ? '' : HTML_BORDERED_STYLE_ATTRIBUTE)));
     return copiedCellLooksTable(reads, sheetId, rowIndexes.slice(0, trimmedTexts.length), area.leftColumnIndex, trimmedColumnCount, areGridlinesHidden);
   };
-  return clipboardContentOf(
+  let areFormulasLeftOut =
+    cellsToCopy?.cells.some(({ row, column, textToPaste }) => {
+      let cellId = cellIdRows[row]?.[column] ?? null;
+      return cellId !== null && reads.cellOf(cellId)?.input.kind === 'formula' && !textToPaste.startsWith('=');
+    }) === true;
+  let content = clipboardContentOf(
     cellsToCopy?.copiedCellsAsText ?? null,
     cellsToCopy === null ? null : valuesOfCopiedCellsAnswer(cellsToCopy),
     cellsToCopy?.localeOfTexts ?? reads.locale,
@@ -230,17 +225,23 @@ export function buildClipboardContentForCopy(
           let cell = cellId === null ? null : reads.cellOf(cellId);
           if (cellId === null || cell?.input.kind !== 'richText') return [];
           let shownText = trimmedTexts[rowOffset]?.[columnOffset] ?? '';
-          let { parts: parts } = cellTextLinks(cell, reads.formatOf(cellId), shownText, null);
+          let { parts } = cellTextLinks(cell, reads.formatOf(cellId), shownText, null);
           return [
             {
               rowIndex: rowOffset,
               columnIndex: columnOffset,
-              parts: parts,
+              parts,
             },
           ];
         }),
     ),
   );
+  return areFormulasLeftOut
+    ? {
+        ...content,
+        areFormulasLeftOut,
+      }
+    : content;
 }
 export function trimmedCopySize(reads: WorkbookReads, sheetId: SheetId, area: CellArea, texts: readonly (readonly string[])[]): TrimmedCopySize {
   let sheet = findSheetById(reads, sheetId);
@@ -272,13 +273,13 @@ export function copiedCellLooksTable(
     let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
     if (cellId === null) return null;
     let look = drawnFormats.lookOf(cellId, {
-      rowIndex: rowIndex,
-      columnIndex: columnIndex,
+      rowIndex,
+      columnIndex,
     });
     let cellShown = reads.cellOnShowIn(cellId);
     let { textColor = null } = cellShown?.shown?.kind === 'text' ? cellShown.shown : {};
     return {
-      look: look,
+      look,
       alignment: shownHorizontalAlignment(look.format, cellValueOf(cellShown)),
       tint: textColor === null ? null : textColorNameOf(textColor),
     };
@@ -287,9 +288,9 @@ export function copiedCellLooksTable(
   let lastRowIndex = rowIndexes.at(-1) ?? firstRowIndex;
   let area = {
     topRowIndex: firstRowIndex,
-    leftColumnIndex: leftColumnIndex,
+    leftColumnIndex,
     rowCount: lastRowIndex - firstRowIndex + 1,
-    columnCount: columnCount,
+    columnCount,
   };
   let positionInRows = (rowIndex: number) => lowerBoundIndex(rowIndexes, rowIndex);
   return htmlCellAttributesOf(
@@ -413,7 +414,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     let answered = await answer;
     if (!isStopped) dispatch(toEvent(answered));
   };
-  let showCalculationAfterDelay = () => {
+  let showCalculationAfterDelay = (ofOwnView: OwnViewShownAsApplied | null = null) => {
     let timing = {
       isOver: false,
       isShown: false,
@@ -425,6 +426,9 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       if (calculationShownCount === 1)
         applyNow({
           kind: 'calculationBegan',
+          ...(ofOwnView !== null && {
+            ofOwnView,
+          }),
         });
     });
     return () => {
@@ -444,7 +448,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         if (!isOver && !isStopped)
           applyNow({
             kind: 'chartNodesLongInBeingCopied',
-            copiedFor: copiedFor,
+            copiedFor,
           });
       });
       return () => void (isOver = true);
@@ -480,7 +484,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     let asked: EventOf<'copyRefused'>['asked'] = chosen === 'cutChosen' ? 'cut' : 'copy';
     heldEvents.push({
       kind: 'copyRefused',
-      asked: asked,
+      asked,
       keyInstead: 'sameInAMoment',
     });
   };
@@ -531,7 +535,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
   let runEffect = (effect: PageEffect) => {
     switch (effect.kind) {
       case 'queueEdit': {
-        let { kind: kind, edit: edit, ifQueued: ifQueued, ...value3 } = effect;
+        let { kind, edit, ifQueued, ...restOfAct } = effect;
         let ifQueuedAfterChanges = selectionToQueue(ifQueued, edit, state, reads);
         let wheelTurnsAtQueue = wheelTurns;
         let lossOfFormulas = actThatMayLoseFormulas(edit, reads);
@@ -540,15 +544,15 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
             ? null
             : {
                 ...lossOfFormulas,
-                reads: reads,
+                reads,
               };
         return runAsyncEffect(
-          (answer) => workbook.queueEdit(edit, answer, value3),
+          (answer) => workbook.queueEdit(edit, answer, restOfAct),
           (outcome: EventOf<'editAnswered'>['outcome'], isChangedUnasked: boolean) => ({
             kind: 'editAnswered',
-            edit: edit,
-            ...value3,
-            outcome: outcome,
+            edit,
+            ...restOfAct,
+            outcome,
             ...(lossToTell !== null &&
               !isChangedUnasked && {
                 before: lossToTell,
@@ -566,29 +570,34 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       case 'declareCellTable':
         return workbook.queueEdit(effect, () => {});
       case 'undoOrRedo': {
-        let { kind: kind, ...value } = effect;
+        let { kind, ...value } = effect;
         return runAsyncEffect(
           (answer) => workbook.undoOrRedo(effect.direction, answer),
           (outcome: EventOf<'undoOrRedoAnswered'>['outcome']) => ({
             kind: 'undoOrRedoAnswered',
             ...value,
-            outcome: outcome,
+            outcome,
           }),
         );
       }
       case 'putOnClipboard': {
-        let { cutToken: cutToken } = effect;
+        let { cutToken } = effect;
         let corners = copyCornersForEffect(reads, effect);
-        if (corners !== null && workbook.readCellsToCopyAhead(...corners)) return refuseCopy(cutToken === null ? 'copyChosen' : 'cutChosen');
+        if (corners !== null && workbook.askForCopy(...corners)) return refuseCopy(cutToken === null ? 'copyChosen' : 'cutChosen');
         takeHeld((held) => !isRunEvent(held) && held.kind === 'copyRefused');
         let putCopy = (content: ClipboardContent) =>
           putOnClipboard({
             ...content,
-            cutToken: cutToken,
+            cutToken,
             ...(cutToken !== null && {
               valuesOfCopiedCells: null,
             }),
           });
+        let written = corners === null ? null : workbook.copyWritten(...corners);
+        if (written !== null) {
+          if ((putCopy(written.contents), written.whatTheLookThrew === null)) return;
+          throw Error(`in the look of a copy: ${written.whatTheLookThrew}`);
+        }
         let content: ClipboardContent;
         try {
           content = buildClipboardContentForCopy(reads, effect, corners, true);
@@ -600,7 +609,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       case 'putNothingOnClipboard':
         return putOnClipboard(EMPTY_CLIPBOARD_CONTENT);
       case 'workOutFormulasLeft': {
-        let { thenEvent: thenEvent } = effect;
+        let { thenEvent } = effect;
         try {
           workbook.workOutFormulasLeft();
         } finally {
@@ -635,7 +644,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           if (askOwedToAgent === askOwed && !isStopped)
             dispatch({
               kind: 'askOwedToAgentGivenUp',
-              by: by,
+              by,
             });
         };
         let askOwed: AskOwedToAgent = {
@@ -651,19 +660,19 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         askOwedToAgent = null;
         return;
       case 'findPeople': {
-        let { searchedFor: searchedFor } = effect;
+        let { searchedFor } = effect;
         return void dispatchWhenSettled(
           browser.people.search(searchedFor),
           (people) => ({
             kind: 'peopleFound',
-            searchedFor: searchedFor,
-            people: people,
+            searchedFor,
+            people,
           }),
         );
       }
       case 'copyChartNodes': {
         if (isStopped) return;
-        let { sources: sources, copiedFor: copiedFor } = effect;
+        let { sources, copiedFor } = effect;
         return runAsyncEffect(
           (answer) =>
             void browser.chartNodes.copy(sources).then((copies) => {
@@ -672,8 +681,8 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
             }),
           (copies: EventOf<'chartNodesCopied'>['copies']) => ({
             kind: 'chartNodesCopied',
-            copies: copies,
-            copiedFor: copiedFor,
+            copies,
+            copiedFor,
           }),
           true,
           noteSlowChartCopy(copiedFor.kind),
@@ -682,7 +691,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       case 'discardChartNodes':
         return browser.chartNodes.discard(effect.copies);
       case 'waitForPeople': {
-        let { searchedFor: searchedFor, key: key } = effect;
+        let { searchedFor, key } = effect;
         let goOnWithKey = (heldMeanwhile: HeldItem[] = []) => {
           if (peopleWait?.goOnWithKey !== goOnWithKey) return;
           peopleWait = null;
@@ -697,8 +706,8 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           drainQueues();
         };
         peopleWait = {
-          searchedFor: searchedFor,
-          goOnWithKey: goOnWithKey,
+          searchedFor,
+          goOnWithKey,
         };
         hasWaitedForPeople = true;
         let foundIndex = heldEvents.findIndex(
@@ -720,7 +729,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           (profiles) => ({
             kind: 'peopleLookedUp',
             askedAbout: effect.userIds,
-            profiles: profiles,
+            profiles,
           }),
         );
       case 'tellOthersOwnSelection':
@@ -732,7 +741,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           browser.copyLinkToSheet(effect.sheetId),
           (whyNot) => ({
             kind: 'sheetLinkCopyAnswered',
-            whyNot: whyNot,
+            whyNot,
           }),
         );
       case 'openCommentBox':
@@ -748,42 +757,42 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       case 'tellAgentWhatIsSelected':
         return browser.otherViewers.tellAgentWhatIsSelected(effect.selected);
       case 'askAgentAboutImport': {
-        let { askId: askId, asked: asked } = effect;
+        let { askId, asked } = effect;
         let tellWritten = (written: EventOf<'agentWroteOnAboutImport'>['written']) => {
           if (!isStopped)
             dispatch({
               kind: 'agentWroteOnAboutImport',
-              askId: askId,
-              written: written,
+              askId,
+              written,
             });
         };
         return void dispatchWhenSettled(
           browser.agentForImport.ask(asked, tellWritten),
           (reply) => ({
             kind: 'agentRepliedAboutImport',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'stopAskingAgentAboutImport':
         return browser.agentForImport.stop();
       case 'askAgentAboutConditionalFormats': {
-        let { askId: askId, asked: asked } = effect;
+        let { askId, asked } = effect;
         let replied = browser.agentForConditionalFormats.ask(asked, () => {});
         return void dispatchWhenSettled(
           replied,
           (reply) => ({
             kind: 'agentRepliedAboutConditionalFormats',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'stopAskingAgentAboutConditionalFormats':
         return browser.agentForConditionalFormats.stop();
       case 'askAgentWhichRowsAreAskedFor': {
-        let { askId: askId, asked: asked, isAtEnter: isAtEnter } = effect;
+        let { askId, asked, isAtEnter } = effect;
         let agent = browser.agentForRowsAskedFor;
         rowsAskAhead = null;
         let replied = isAtEnter ? agent.ask(asked, () => {}) : agent.askIfAllowed(asked);
@@ -791,25 +800,25 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           replied,
           (reply) => ({
             kind: 'agentRepliedWhichRowsAreAskedFor',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'askAgentAheadWhichRowsAreAskedFor': {
-        let { askId: askId, words: words } = effect;
+        let { askId, words } = effect;
         let rest = new Promise<RestOfRowsAsk>((tell) => {
           rowsAskAhead = {
-            askId: askId,
-            tell: tell,
+            askId,
+            tell,
           };
         });
         return void dispatchWhenSettled(
           browser.agentForRowsAskedFor.askAheadIfAllowed(words, rest),
           (reply) => ({
             kind: 'agentRepliedWhichRowsAreAskedFor',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
@@ -825,7 +834,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           browser.agentForConditionalFormats.isAvailable(),
           (isAvailable) => ({
             kind: 'agentForConditionalFormatsChecked',
-            isAvailable: isAvailable,
+            isAvailable,
           }),
         );
       case 'workOutFormulaRead': {
@@ -840,138 +849,143 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
           browser.agentForFormulas.isAvailable(),
           (isAvailable) => ({
             kind: 'agentForFormulasChecked',
-            isAvailable: isAvailable,
+            isAvailable,
           }),
         );
       case 'askAgentForAFormula': {
-        let { askId: askId, asked: asked } = effect;
+        let { askId, asked } = effect;
         let replied = browser.agentForFormulas.ask(asked, () => {});
         return void dispatchWhenSettled(
           replied,
           (reply) => ({
             kind: 'agentRepliedWithAFormula',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'askAgentForANumberFormat': {
-        let { askId: askId, asked: asked } = effect;
+        let { askId, asked } = effect;
         let replied = browser.agentForFormulas.ask(asked, () => {});
         return void dispatchWhenSettled(
           replied,
           (reply) => ({
             kind: 'agentRepliedWithANumberFormat',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'stopAskingAgentForAFormula':
         return browser.agentForFormulas.stop();
       case 'askAgentForAFix': {
-        let { askId: askId, asked: asked } = effect;
+        let { askId, asked } = effect;
         let replied = browser.agentForFixes.ask(asked, () => {}, true);
         return void dispatchWhenSettled(
           replied,
           (reply) => ({
             kind: 'agentRepliedWithAFix',
-            askId: askId,
-            reply: reply,
+            askId,
+            reply,
           }),
         );
       }
       case 'stopAskingAgentForFixes':
         return browser.agentForFixes.stop();
       case 'readVersions': {
-        let { askId: askId, before: before } = effect;
+        let { askId, before } = effect;
         return void dispatchWhenSettled(
           browser.versionHistory.versions(before),
           (read) => ({
             kind: 'versionsRead',
-            askId: askId,
-            read: read,
+            askId,
+            read,
           }),
         );
       }
       case 'lookAtVersion': {
-        let { askId: askId, revision: revision, pane: pane } = effect;
+        let { askId, revision, pane } = effect;
         return void dispatchWhenSettled(
           browser.versionLooks.lookAt(revision, pane, () => state),
           (whyNot) => ({
             kind: 'versionLookedAt',
-            askId: askId,
-            whyNot: whyNot,
+            askId,
+            whyNot,
           }),
         );
       }
       case 'endLookAtVersion':
         return browser.versionLooks.end(effect.pane, state, effect.thenRestore, effect.isByPerson === true);
       case 'readCellHistory': {
-        let { askId: askId, cell: cell, scope: scope } = effect;
+        let { askId, cell, scope } = effect;
         let isStillAwaited = () => isCellHistoryAwaiting(state, askId);
         return void dispatchWhenSettled(
           scope === 'row' ? browser.versionHistory.changesOfRow(cell, isStillAwaited) : browser.versionHistory.changesOfCell(cell, isStillAwaited),
           (read) => ({
             kind: 'cellHistoryRead',
-            askId: askId,
-            read: read,
+            askId,
+            read,
           }),
         );
       }
       case 'readEditsThatTakeBack': {
-        let { askId: askId, asked: asked, afterMs: afterMs } = effect;
+        let { askId, asked, afterMs } = effect;
         let readEdits = () => {
           if (isStopped || state.takingBack?.askId !== askId) return;
           dispatchWhenSettled(
             browser.versionHistory.editsThatTakeBack(asked),
             (read) => ({
               kind: 'editsThatTakeBackRead',
-              askId: askId,
-              read: read,
+              askId,
+              read,
             }),
           );
         };
         return afterMs === 0 ? readEdits() : browser.afterMs(afterMs, readEdits);
       }
       case 'seeRowsInOwnOrder': {
-        let { sheetId: sheetId, rows: rows, staysAt: staysAt } = effect;
+        let { sheetId, rows, staysAt } = effect;
         return runAsyncEffect<void>(
           (answer) => workbook.seeRowsInOwnOrder(sheetId, rows, answer),
           () => ({
             kind: 'ownRowOrderSeen',
-            sheetId: sheetId,
-            staysAt: staysAt,
+            sheetId,
+            staysAt,
           }),
+          true,
+          () => showCalculationAfterDelay(rows === null ? null : 'sort'),
         );
       }
       case 'queueEditsThatTakeBack': {
-        let { askId: askId, builtOnRevision: builtOnRevision, edits: edits, offerIfMade: offerIfMade } = effect;
+        let { askId, builtOnRevision, edits, offerIfMade } = effect;
         return runAsyncEffect(
           (answer) => workbook.queueEditsThatTakeBack(builtOnRevision, edits, answer),
           (outcome: EventOf<'takeBackAnswered'>['outcome']) => ({
             kind: 'takeBackAnswered',
-            askId: askId,
-            outcome: outcome,
-            offerIfMade: offerIfMade,
+            askId,
+            outcome,
+            offerIfMade,
           }),
         );
       }
     }
   };
-  let isWorkYetToReachWorkbook = (): boolean =>
+  let isWorkOnItsWayToWorkbook = (): boolean =>
     answersAwaitedCount > 0 ||
     isCopyBeingMade() ||
     effectsWaiting.some(isEffectAnEdit) ||
     heldEvents.some((held) => !isRunEvent(held)) ||
+    state.takingBack !== null;
+  let isWorkYetToReachWorkbook = (): boolean =>
+    isWorkOnItsWayToWorkbook() ||
     (state.mode.kind === 'editing' && !isEntryUnchanged(state, reads) && !peopleListOffersAgent(state, reads)) ||
     hasUnsavedDropdownEdits(state) ||
     hasRulesPaneWorkInProgress(state) ||
+    pivotTypingToEnter(state) !== null ||
     state.customNumberFormat?.typedIn === 'dialog' ||
     state.pasteThatWaits !== null ||
     (state.pickForWorkbook !== null && isWorkbookSettingChanged(state.pickForWorkbook)) ||
     state.importOfAFile !== null ||
-    state.takingBack !== null ||
     (state.sheetBeingRenamed !== null && state.sheetBeingRenamed.typed !== state.sheetBeingRenamed.nameWhenOpened);
   let doesLeaveLoseWork = (): boolean => isWorkYetToReachWorkbook() || hasRulesPaneRefusedRules(state);
   let notifiedState: PageState = state;
@@ -1049,7 +1063,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       deltaY: wheelEvent.deltaY - shift.y,
     };
   };
-  function glideViewAfterEvent(stateBefore: PageState, { kind: kind }: PageEvent) {
+  function glideViewAfterEvent(stateBefore: PageState, { kind }: PageEvent) {
     let moveOfView = {
       x: state.scrollLeft - stateBefore.scrollLeft,
       y: state.scrollTop - stateBefore.scrollTop,
@@ -1071,6 +1085,10 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     };
     return viewGlide.viewMovedBy(moveOfView, middleOfCells, state.zoom);
   }
+  let markPivotTablesOutOfDate = () => {
+    if (workbook.areFormulasLeft() || workbook.isAnswerAwaited()) return;
+    state = withPivotTablesOutOfDate(state, reads);
+  };
   let applyEvent = (queued: QueuedEvent, how: HowEventApplies): boolean => {
     let missedBefore = workbook.questionsMissedCount();
     let isWordOfChange = queued.kind === 'wordOfChange';
@@ -1150,6 +1168,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     wasAnswerMissed ||= isAnswerMissed;
     glideViewAfterEvent(stateBefore, eventApplied);
     explainErrorCellsAhead(state, reads);
+    markPivotTablesOutOfDate();
     return true;
   };
   function drainQueues() {
@@ -1237,11 +1256,11 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         ...event,
         isForNobody: true,
       };
-    return event.kind === 'placedViewActedOn' && (event.act as ActWithKind).kind === 'askForMenu'
+    return event.kind === 'placedViewActedOn' && event.act.kind === 'askForMenu'
       ? {
           ...event,
           act: {
-            ...(event.act as ActWithKind),
+            ...event.act,
             isForNobody: true,
           },
         }
@@ -1261,8 +1280,8 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     if (isTypedAheadRun(item) || (!isRunEvent(item) && asksForMenu(item))) {
       let [timesLeft, timesPressed] = [browser.keyboard.timesLeft(), browser.keyboard.timesPressed()];
       keyboardStampOf.set(item, {
-        timesLeft: timesLeft,
-        timesPressed: timesPressed,
+        timesLeft,
+        timesPressed,
       });
     }
     if (heldInsertAt === null) heldEvents.push(item);
@@ -1316,7 +1335,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
   function runOrHold(isHeld: boolean, run: () => void) {
     if (isHeld)
       holdBack({
-        run: run,
+        run,
         ifDropped: () => {},
         dispatchesNothing: true,
       });
@@ -1326,13 +1345,29 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
   let runWhenIdle = (run: () => void) => runOrHold(isWorkQueued() || isHeldWaiting() || isCopyBeingMade(), run);
   function runFilesAfterFormulas() {
     if (workbook.areFormulasLeft()) return;
-    for (let { run: run } of filesAfterFormulas.splice(0)) run();
+    for (let { run } of filesAfterFormulas.splice(0)) run();
   }
   let mayAnEntryOpenOrEnd = () => isHeldWaiting() || eventBeingDispatched !== null || mayEntryOpenOrEnd;
   let isAnyHeldDispatching = () =>
     heldEvents.some((held) => !isRunEvent(held) || (held.dispatchesNothing !== true && !isCopyRun(held)));
   let mayWhatACopyHoldsChange = () => isAnyHeldDispatching() || eventBeingDispatched !== null || mayEntryOpenOrEnd;
   let areReadsStale = () => reads !== latestReads();
+  function bringBackOwnFilters(event: OwnFiltersBroughtBack) {
+    let isSortKept = event.kept.some(({ sortBy }) => sortBy !== null);
+    let isFilterKept = event.kept.some(({ filter }) => filter !== null);
+    if (!workbook.isOnAnotherThread || !(isSortKept || isFilterKept)) return queueEvent(event);
+    let workIsOver = showCalculationAfterDelay(!isFilterKept ? 'sort' : isSortKept ? 'sortAndFilter' : 'filter');
+    try {
+      queueEvent(event);
+    } finally {
+      runWhenIdle(() =>
+        browser.afterMs(0, () => {
+          workIsOver();
+          drainUnlessStopped();
+        }),
+      );
+    }
+  }
   function dispatchHeld(event: PageEvent) {
     isEventInFlight = true;
     eventBeingDispatched = event;
@@ -1353,7 +1388,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
   let eventsAwaitingAnswers: PageEvent[] = [];
   let isIdle = () => !isWorkQueued() && !isHeldWaiting();
   function dispatchOffThread(event: PageEvent) {
-    eventsAwaitingAnswers = eventsAwaitingAnswers.filter(({ kind: kind }) => kind !== event.kind);
+    eventsAwaitingAnswers = eventsAwaitingAnswers.filter(({ kind }) => kind !== event.kind);
     let missedBefore = workbook.questionsMissedCount();
     try {
       reduceSheetsPage(state, event, readContext(reads));
@@ -1364,13 +1399,13 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
   function doesKeyEndEntry(event: PageEvent): boolean {
     if (event.kind !== 'keyPressed' || state.mode.kind !== 'editing') return false;
     try {
-      let result: PageTransition = reduceSheetsPage(state, event, {
+      let transition: PageTransition = reduceSheetsPage(state, event, {
         ...readContext(reads),
         wasEventHeld: true,
       });
       return (
-        result.state.mode.kind !== 'editing' ||
-        result.effects.some((effect) => effect.kind === 'queueEdit' && !effect.ifQueued.leavesEntryOpen)
+        transition.state.mode.kind !== 'editing' ||
+        transition.effects.some((effect) => effect.kind === 'queueEdit' && !effect.ifQueued.leavesEntryOpen)
       );
     } catch {
       return false;
@@ -1383,6 +1418,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       for (let held of takeHeld(isCopyRun)) if (isRunEvent(held)) held.ofCopy?.calledOff();
     }
     if (isMenuAskEvent(event)) return dispatchOffThread(event);
+    if (event.kind === 'ownFiltersBroughtBack') return bringBackOwnFilters(event);
     if (isAgentReplyEvent(event) || isEditsThatTakeBackRead(event)) return queueEvent(event);
     if (isNextEventHandledAtOnce()) return isCopyOrCutChosen(event) && wouldCopyWaitForCells() ? holdCopyOrCut(event.kind) : dispatchHeld(event);
     if (isCopyOrCutChosen(event) && heldEvents.some(isCopyRun)) return holdCopyOrCut(event.kind);
@@ -1416,7 +1452,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     receiveEvent(stampWhatPointerWasOver(event, state, reads));
   }
   function wouldCopyWaitForCells(): boolean {
-    let { effects: effects }: PageTransition = reduceSheetsPage(
+    let { effects }: PageTransition = reduceSheetsPage(
       state,
       {
         kind: 'copyChosen',
@@ -1426,7 +1462,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     return effects.some((effect) => {
       if (effect.kind !== 'putOnClipboard') return false;
       let corners = copyCornersForEffect(reads, effect);
-      return corners !== null && workbook.readCellsToCopyAhead(...corners);
+      return corners !== null && workbook.askForCopy(...corners);
     });
   }
   let prefetchedCopy: CopyPrefetch | null = null;
@@ -1444,8 +1480,8 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     )
       return;
     let prefetch: CopyPrefetch = {
-      reads: reads,
-      state: state,
+      reads,
+      state,
     };
     prefetchedCopy = prefetch;
     let hasSettled = browser.nowMs() - lastCopyPrefetchMs >= FIGURES_SETTLE_MS;
@@ -1518,7 +1554,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       of: changeOf,
       readsAfter: isTablesRead ? null : latestReads(),
       tablesRead: workbook.tablesRead(),
-      isUnasked: isUnasked,
+      isUnasked,
     });
     drainQueues();
   };
@@ -1533,24 +1569,26 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       queueWordOfChange('textMeasuredAnew', false);
     }),
     workbook.onEditsDropped(
-      ({ isPartKept: isPartKept, why: why }: EditsDropped) =>
+      ({ isPartKept, why }: EditsDropped) =>
         queueEvent({
           kind: 'editsDropped',
           ...(isPartKept && {
-            isPartKept: isPartKept,
+            isPartKept,
           }),
           ...(why !== null && {
-            why: why,
+            why,
           }),
         }),
     ),
     workbook.onSavingChanged(reportSaving),
     workbook.onFormulasLeftChanged(updateFormulasLeft),
     workbook.onTablesRead(() => queueWordOfChange('tablesRead', false)),
-    workbook.onCellsToCopyRead(() => void (heldEvents.some(isCopyRun) && drainQueues())),
+    workbook.onCopyWritten(() => void (heldEvents.some(isCopyRun) && drainQueues())),
     workbook.onAnswersCame(() => {
       if (wasAnswerMissed) eventsWaiting.push(WORKBOOK_CHANGED_WORD);
       wasAnswerMissed = false;
+      drainQueues();
+      markPivotTablesOutOfDate();
       drainQueues();
     }),
     workbook.onCauseOfErrorCame(
@@ -1564,7 +1602,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       (selections) =>
         dispatch({
           kind: 'selectionsOfOthersChanged',
-          selections: selections,
+          selections,
           atMs: browser.nowMs(),
         }),
     ),
@@ -1601,7 +1639,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       viewCache.doesKeyAwaitEndOfEntry !== doesKeyAwaitEndOfEntry ||
       viewCache.view.viewOnlyBecause !== refusal
     ) {
-      let { x: x, y: y } = shiftYetToGlide() ?? {
+      let { x, y } = shiftYetToGlide() ?? {
         x: 0,
         y: 0,
       };
@@ -1621,24 +1659,24 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         yetToGlide === null
           ? null
           : {
-              x: x,
-              y: y,
+              x,
+              y,
             },
         doesKeyAwaitEndOfEntry,
       );
       viewCache = {
-        state: state,
-        yetToGlide: yetToGlide,
-        drawn: drawn,
-        reads: reads,
+        state,
+        yetToGlide,
+        drawn,
+        reads,
         hasKeyInHandWaitedForPeople: hasWaitedForPeople,
-        doesKeyAwaitEndOfEntry: doesKeyAwaitEndOfEntry,
-        view: view,
+        doesKeyAwaitEndOfEntry,
+        view,
       };
     }
     return viewCache.view;
   }
-  function writeXlsxWithCharts(optionsSheetName: string, charts: readonly ChartOfXlsxFile[], fileTitle: string): Promise<XlsxFileOutcome> {
+  function writeXlsxWithCharts(optionsSheetName: string, charts: readonly ChartOfXlsxFile[], fileTitle: string | null): Promise<XlsxFileOutcome> {
     let [firstSheet] = reads.listSheets();
     let standardColors = listPaletteSwatches();
     let asked = {
@@ -1654,19 +1692,19 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       fileCancellers.delete(cancel);
       if (made === 'threw') return settle(made);
       if (made === null || firstSheet === undefined) return settle(null);
-      let { parts: parts, notCarriedOver: notCarriedOver } = made;
+      let { parts, notCarriedOver } = made;
       let filename = xlsxFileName(fileTitle, firstSheet.name);
       return settle({
-        filename: filename,
-        parts: parts,
+        filename,
+        parts,
         onSaved(went, url) {
           if (isStopped) return;
           dispatch({
             kind: 'xlsxFileSaved',
-            went: went,
-            filename: filename,
-            url: url,
-            notCarriedOver: notCarriedOver,
+            went,
+            filename,
+            url,
+            notCarriedOver,
           });
         },
       });
@@ -1674,17 +1712,18 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     return promise;
   }
   return {
-    dispatch: dispatch,
-    isEventUnfinished: isEventUnfinished,
-    isNextEventHandledAtOnce: isNextEventHandledAtOnce,
-    mayAnEntryOpenOrEnd: mayAnEntryOpenOrEnd,
-    mayWhatACopyHoldsChange: mayWhatACopyHoldsChange,
+    dispatch,
+    isEventUnfinished,
+    isNextEventHandledAtOnce,
+    mayAnEntryOpenOrEnd,
+    mayWhatACopyHoldsChange,
     isCopyOrCutYetToBeMade: () => heldEvents.some(isCopyRun),
+    isCopyOrCutAskedAgain: () => clipboardWrite !== null,
     onceEventsAreFinished(run, ifDropped = () => {}, howHeld) {
       if (isEventUnfinished())
         holdBack({
-          run: run,
-          ifDropped: ifDropped,
+          run,
+          ifDropped,
           ...(howHeld === 'asTypedAhead' && {
             isTypedAhead: true,
           }),
@@ -1698,12 +1737,13 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     onceWhatIsShownOfSelectionIsKnown(run) {
       if (isEventUnfinished() || !isSelectionShownKnown())
         holdBack({
-          run: run,
+          run,
           ifDropped: () => {},
         });
       else run();
     },
-    lookOnceEventsAreFinished: lookOnceEventsAreFinished,
+    lookOnceEventsAreFinished,
+    lookOnceAllIsTaken: runWhenIdle,
     dropWhatIsHeld: dropHeld,
     endWaitForPeople(how) {
       if (how === 'goOn' || peopleWait === null) return peopleWait?.goOnWithKey();
@@ -1717,7 +1757,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       return () => void agentAskedUnderAtListeners.delete(listener);
     },
     viewOnceEntryUnderAtIsDropped() {
-      let { peopleList: peopleList } = state;
+      let { peopleList } = state;
       if (peopleList === null || peopleList.isOfPeopleAlone) return null;
       let stateWithoutList: PageState = {
         ...state,
@@ -1726,7 +1766,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       let stateAskingAgent: PageState = selectionForAskingAgent(stateWithoutList, reads, peopleList.cellId);
       return pageViewOf(stateAskingAgent, reads, workbook.refusalOfEveryEdit(), false);
     },
-    getView: getView,
+    getView,
     whatColorPickerShows: () => colorPickerChoicesOf(state, reads),
     canAskForCommands: () => browser.agentForCommands.isAvailable(),
     askForCommands: makeAskForCommands(
@@ -1739,7 +1779,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       }),
     ),
     nameFlagsByPointer(pointer) {
-      let { grid: grid } = getView();
+      let { grid } = getView();
       return presenceFlagsAtPointer(pointer, viewCache?.drawn ?? state, reads, grid);
     },
     errorCountInSelection() {
@@ -1767,12 +1807,12 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       let area = areaToChart(state, reads);
       if (area === null || placeChartForArea(reads, state.sheetId, area) === null) return null;
       let held = heldAreaOf(reads, state.sheetId, area);
-      let sampleSize = [CHART_ASK_FIRST_ROWS, CHART_ASK_MAX_COLUMNS];
+      const sampleSize: readonly [number, number] = [CHART_ASK_FIRST_ROWS, CHART_ASK_MAX_COLUMNS];
       let sample = sampleOfAreaForChart(reads, state.sheetId, area, sampleSize);
       return held === null || sample === null
         ? null
         : {
-            held: held,
+            held,
             ...sample,
           };
     },
@@ -1787,22 +1827,23 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
       let answer = new Promise<ChartEditOutcome>((resolve) => void chartEditAnswers.set(askId, resolve));
       dispatch({
         kind: 'editOfChartAsked',
-        asked: asked,
-        askId: askId,
+        asked,
+        askId,
       });
       return answer;
     },
-    isWorkYetToReachWorkbook: isWorkYetToReachWorkbook,
-    doesLeaveLoseWork: doesLeaveLoseWork,
+    isWorkYetToReachWorkbook,
+    isWorkOnItsWayToWorkbook,
+    doesLeaveLoseWork,
     areFormulasLeft: () => workbook.areFormulasLeft(),
     isEntryOpen: () => state.mode.kind === 'editing',
     entryToKeep() {
-      let { mode: mode, activeCell: activeCell, peopleList: peopleList }: PageState = goBackToWords(state, reads);
+      let { mode, activeCell, peopleList }: PageState = goBackToWords(state, reads);
       if (mode.kind !== 'editing' || peopleList !== null) return null;
-      let { looksInHistory: looksInHistory, ...value5 } = mode;
+      let { looksInHistory, ...modeToKeep } = mode;
       return {
         cellId: activeCell,
-        mode: value5,
+        mode: modeToKeep,
       };
     },
     writeCsvFile(workbookTitle) {
@@ -1847,23 +1888,23 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     },
     place() {
       if (state.gridWidth === 0 || state.gridHeight === 0) return null;
-      let { sheetId: sheetId, activeCell: activeCell, selectionCorner: selectionCorner, scrollLeft: scrollLeft, scrollTop: scrollTop, density: density } = state;
+      let { sheetId, activeCell, selectionCorner, scrollLeft, scrollTop, density } = state;
       if (placeCache?.reads !== reads || !isSameCell(placeCache.activeCell, activeCell) || !isSameCell(placeCache.selectionCorner, selectionCorner))
         placeCache = {
-          reads: reads,
-          activeCell: activeCell,
-          selectionCorner: selectionCorner,
+          reads,
+          activeCell,
+          selectionCorner,
           lines: selectionLinesFingerprint(state, reads),
         };
-      let { lines: lines } = placeCache;
+      let { lines } = placeCache;
       return {
-        sheetId: sheetId,
-        activeCell: activeCell,
-        selectionCorner: selectionCorner,
-        scrollLeft: scrollLeft,
-        scrollTop: scrollTop,
-        lines: lines,
-        density: density,
+        sheetId,
+        activeCell,
+        selectionCorner,
+        scrollLeft,
+        scrollTop,
+        lines,
+        density,
         scrolledForLessRoom: scrolledForLessRoomToKeep(state),
       };
     },
@@ -1876,11 +1917,11 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
     linesOnShow: () => linesOnShowOf(state, reads),
     scrollOnShow() {
       if (state.gridWidth === 0 || state.gridHeight === 0) return null;
-      let { sheetId: sheetId, scrollLeft: scrollLeft, scrollTop: scrollTop } = showSheetPointedIn(state, reads);
+      let { sheetId, scrollLeft, scrollTop } = showSheetPointedIn(state, reads);
       return {
-        sheetId: sheetId,
-        scrollLeft: scrollLeft,
-        scrollTop: scrollTop,
+        sheetId,
+        scrollLeft,
+        scrollTop,
       };
     },
     viewStore,
@@ -1907,7 +1948,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         for (let answer of chartEditAnswers.values()) answer('unsure');
         for (let effect of effectsWaiting.splice(0)) if (isEffectAnEdit(effect)) runEffect(effect);
         for (let sheetId of state.ownRowOrders.keys()) workbook.seeRowsInOwnOrder(sheetId, null, () => {});
-        for (let { ifStoppedFirst: ifStoppedFirst } of filesAfterFormulas.splice(0)) ifStoppedFirst();
+        for (let { ifStoppedFirst } of filesAfterFormulas.splice(0)) ifStoppedFirst();
         browser.agentForImport.stop();
         browser.agentForConditionalFormats.stop();
         browser.agentForFormulas.stop();
@@ -1919,6 +1960,7 @@ export function createSheetController(workbook: OpenedWorkbook, browser: Browser
         browser.otherViewers.tellAgentWhatIsSelected({
           byAddress: null,
           chartId: null,
+          ownSort: null,
         });
         browser.otherViewers.tellWhomViewFollows(null);
       }
@@ -2009,10 +2051,10 @@ export const UNASKED_EVENT_KINDS: ReadonlySet<string> = new Set<string>([
 export const WORD_OFFER_EVENT_KINDS: ReadonlySet<string> = new Set<string>(['cellEntryTyped', 'wordsOfferedShown']);
 export const isAnswerThatEndsEntryAtOnce = (event: QueuedEvent): boolean =>
   event.kind === 'editAnswered' && event.ifQueued.endsEntryAtOnce === true;
-export const isAnswerToEditOrUndo = ({ kind: kind }: QueuedEvent): boolean =>
+export const isAnswerToEditOrUndo = ({ kind }: QueuedEvent): boolean =>
   kind === 'editAnswered' || kind === 'undoOrRedoAnswered' || kind === 'takeBackAnswered';
 export const isCopyOrCutChosen = (event: QueuedEvent): event is CopyOrCutChosen => event.kind === 'copyChosen' || event.kind === 'cutChosen';
-export const isTypingEvent = (event: PageEvent, { mode: mode }: PageState): boolean =>
+export const isTypingEvent = (event: PageEvent, { mode }: PageState): boolean =>
   (event.kind === 'editTextChanged' && mode.kind === 'editing') ||
   (event.kind === 'keyPressed' && isKeyWritingInEntry(mode, event)) ||
   event.kind === 'sheetNameTyped' ||
@@ -2020,8 +2062,9 @@ export const isTypingEvent = (event: PageEvent, { mode: mode }: PageState): bool
   event.kind === 'typedInListOfNumberFormats' ||
   isCopyOrCutChosen(event) ||
   (event.kind === 'dropdownEditorActedIn' && (event.act.kind === 'type' || event.act.kind === 'typeCells')) ||
-  (event.kind === 'conditionalFormatsActedIn' && (event.act as ActWithKind).kind === 'type') ||
+  (event.kind === 'conditionalFormatsActedIn' && event.act.kind === 'type') ||
   (event.kind === 'sortPaneActedIn' && event.act.kind === 'typeCells') ||
+  (event.kind === 'pivotTablePaneActedIn' && (event.act.kind === 'type' || event.act.kind === 'dropTyped')) ||
   (event.kind === 'sidePaneShut' && event.isGivenUp === true);
 export const isAgentReplyEvent = (event: PageEvent): boolean =>
   event.kind === 'agentRepliedAboutConditionalFormats' ||
@@ -2029,9 +2072,9 @@ export const isAgentReplyEvent = (event: PageEvent): boolean =>
   event.kind === 'agentRepliedWithAFix' ||
   event.kind === 'agentRepliedWhichRowsAreAskedFor' ||
   event.kind === 'ownFiltersLookedAtAgain' ||
-  event.kind === 'ownFiltersBroughtBack' ||
-  (event.kind === 'conditionalFormatsActedIn' && (event.act as ActWithKind).kind === 'previewRested');
-export const isMenuAskEvent = (event: PageEvent): boolean => event.kind === 'rulesSuggestedInMenu' || event.kind === 'tableToSortAsked';
+  (event.kind === 'conditionalFormatsActedIn' && event.act.kind === 'previewRested');
+export const isMenuAskEvent = (event: PageEvent): boolean =>
+  event.kind === 'rulesSuggestedInMenu' || event.kind === 'tableToSortAsked' || event.kind === 'whomSortsAreForAsked';
 export const isEditsThatTakeBackRead = (event: PageEvent): boolean => event.kind === 'editsThatTakeBackRead';
 export const WORKBOOK_CHANGED_WORD: WordOfChange = {
   kind: 'wordOfChange',
@@ -2041,11 +2084,11 @@ export const WORKBOOK_CHANGED_WORD: WordOfChange = {
   isUnasked: false,
 };
 export const wordOfChangeWithReads = (
-  { of: of, isUnasked: isUnasked, tablesRead: tablesRead }: WordOfChange,
+  { of, isUnasked, tablesRead }: WordOfChange,
   readsBefore: ReadsWithTextMeasurer,
 ): PageEvent => {
   let withTablesRead = tablesRead !== null && {
-    tablesRead: tablesRead,
+    tablesRead,
   };
   if (of === 'tablesRead')
     return {
@@ -2055,18 +2098,18 @@ export const wordOfChangeWithReads = (
   if (of === 'textMeasuredAnew')
     return {
       kind: of,
-      readsBefore: readsBefore,
+      readsBefore,
     };
   return of === 'workbookChanged'
     ? {
         kind: of,
-        readsBefore: readsBefore,
-        isUnasked: isUnasked,
+        readsBefore,
+        isUnasked,
         ...withTablesRead,
       }
     : {
         kind: of,
-        readsBefore: readsBefore,
+        readsBefore,
         ...withTablesRead,
       };
 };
@@ -2088,22 +2131,33 @@ export const dispatchesNothing = (event: HeldItem): boolean =>
       event.kind === 'copyRefused' ||
       event.kind === 'editOfChartAsked' ||
       event.kind === 'chartBeingMadeTold' ||
-      (event.kind === 'placedViewActedOn' && ((event.act as ActWithKind).kind === 'leave' || (event.act as ActWithKind).kind === 'select'));
-export const cornerCellsOfArea = (reads: WorkbookReads, { sheetId: sheetId, area: area }: Pick<AreaToCopy, 'sheetId' | 'area'>): [CellId | null, CellId | null] => [
+      (event.kind === 'placedViewActedOn' && (event.act.kind === 'leave' || event.act.kind === 'select'));
+export const cornerCellsOfArea = (reads: WorkbookReads, { sheetId, area }: Pick<AreaToCopy, 'sheetId' | 'area'>): [CellId | null, CellId | null] => [
   reads.cellIdAt(sheetId, area.topRowIndex, area.leftColumnIndex),
   reads.cellIdAt(sheetId, area.topRowIndex + area.rowCount - 1, area.leftColumnIndex + area.columnCount - 1),
 ];
 export const MAX_COPY_HTML_LOOK_CELLS = 2000;
 export const readsWithTextMeasurer = (
   reads: WorkbookReads,
-  { lineCountsOfWrappedTexts: lineCountsOfWrappedTexts, widthOfCharacters: widthOfCharacters }: TextMeasurer,
+  { lineCountsOfWrappedTexts, widthOfCharacters }: TextMeasurer,
 ): ReadsWithTextMeasurer => ({
   ...reads,
-  lineCountsOfWrappedTexts: lineCountsOfWrappedTexts,
-  widthOfCharacters: widthOfCharacters,
+  lineCountsOfWrappedTexts,
+  widthOfCharacters,
 });
 export const asksForMenu = (event: PageEvent): boolean =>
-  event.kind === 'menuAsked' || (event.kind === 'placedViewActedOn' && (event.act as ActWithKind).kind === 'askForMenu');
+  event.kind === 'menuAsked' || (event.kind === 'placedViewActedOn' && event.act.kind === 'askForMenu');
+export const indexesOfRuns = (runs: readonly LineSpan[]): Set<number> =>
+  new Set<number>(
+    runs.flatMap(({ firstIndex, count }) =>
+      Array.from<unknown, number>(
+        {
+          length: count,
+        },
+        (unused, offset) => firstIndex + offset,
+      ),
+    ),
+  );
 /** The event of a kind, picked out of every event the page hears. */
 type EventOf<Kind extends PageEvent['kind']> = Extract<PageEvent, { kind: Kind }>;
 /** The effect of a kind, picked out of every effect the page asks for. */
@@ -2116,8 +2170,9 @@ export interface TextToMeasure {
   font: FontToMeasure;
   widthInPixels: number;
   isFormulaTyped?: boolean;
-  parts?: readonly unknown[];
-  levelsInLists?: readonly unknown[];
+  parts?: readonly WrappedTextPart[];
+  /** The level of each line's list, `null` for a line in none. */
+  levelsInLists?: readonly (number | null)[];
   isStillTyped?: boolean;
 }
 /** How the browser measures texts as it draws them. */
@@ -2155,6 +2210,7 @@ export interface ClipboardContent {
   typed: string;
   text: string;
   html: string;
+  areFormulasLeftOut?: true;
 }
 /** How many rows and columns are left of a copy once it is trimmed to its used cells. */
 export interface TrimmedCopySize {
@@ -2269,7 +2325,7 @@ export type CellsHeldForChart = NonNullable<ReturnType<typeof heldAreaOf>>;
 /** The cells the agent is asked to chart: those held, and a sample of what they show. */
 export type CellsForChartByAgent = { held: CellsHeldForChart } & NonNullable<ReturnType<typeof sampleOfAreaForChart>>;
 /** How an ask to edit a chart came out. */
-export type ChartEditOutcome = { step: EditQueuedOutcome['step'] | null } | 'notMade' | 'full' | 'showsAnother' | 'unsure';
+export type ChartEditOutcome = { step: string | null } | 'notMade' | 'full' | 'showsAnother' | 'unsure';
 /** What the workbook answers when asked for an xlsx file. */
 export type XlsxFileMade = Pick<XlsxFileAnswer, 'parts' | 'notCarriedOver'> | 'threw' | null;
 /** A chart as an xlsx file is asked to carry it: the view it is placed by, and how the file's own kind of chart shows it. */
@@ -2284,13 +2340,13 @@ export interface XlsxFileToSave {
 export type XlsxFileOutcome = XlsxFileToSave | 'threw' | null;
 /** A csv file of a sheet. */
 export type CsvFileOfSheet = ReturnType<typeof csvFileOfSheet>;
-/** An agent the page asks, and can stop. */
-export interface AgentAskedByPage<Asked, Reply, Written = never> {
+/** An agent the page asks, and can stop. What it writes before it replies reaches `onWritten`, as `Written` when the page reads it. */
+export interface AgentAskedByPage<Asked, Reply, Written = unknown> {
   ask(asked: Asked, onWritten: (written: Written) => void, keepsOtherAsks?: boolean): Promise<Reply>;
   stop(): void;
 }
 /** An agent the page asks, which may not be there. */
-export interface AgentThatMayBeAway<Asked, Reply, Written = never> extends AgentAskedByPage<Asked, Reply, Written> {
+export interface AgentThatMayBeAway<Asked, Reply, Written = unknown> extends AgentAskedByPage<Asked, Reply, Written> {
   isAvailable(): Promise<boolean>;
 }
 /** The agent asked which rows are asked for, which can be asked ahead. */
@@ -2304,15 +2360,11 @@ export interface AgentForRowsAskedFor
 }
 /** The agent that describes charts for an xlsx file, and how it reads the charts. */
 export interface ChartDescribers {
-  agent: AgentAskedByPage<ReturnType<typeof askToDescribeChartsForXlsx>['asked'], Awaited<ReturnType<ReturnType<typeof createAgentSampler>['ask']>>>;
+  agent: AgentThatMayBeAway<ReturnType<typeof askToDescribeChartsForXlsx>['asked'], Awaited<ReturnType<ReturnType<typeof createAgentSampler>['ask']>>>;
   viewerAllowsAgent(): Promise<boolean>;
   codeOfChart(nodeId: string): Promise<string | null>;
   /** The charts the server can describe for an Excel file itself, by view id. */
   chartsForXlsx?: ChartsForXlsx;
-}
-/** An act told with an event, known by its kind. */
-interface ActWithKind {
-  kind: string;
 }
 /** What the controller needs of the browser and of the page around the sheet. */
 export interface BrowserSide extends TextMeasurer {
@@ -2334,12 +2386,7 @@ export interface BrowserSide extends TextMeasurer {
     viewer(): Promise<{ userId: EventOf<'viewerFound'>['userId'] } | null>;
   };
   offersUnderAt(): EventOf<'offersUnderAtRead'>['offers'];
-  otherViewers: {
-    tellOwnSelection(selection: EffectOf<'tellOthersOwnSelection'>['selection'] | null): void;
-    tellWhomViewFollows(tabKey: EffectOf<'tellOthersWhomViewFollows'>['tabKey'] | null): void;
-    tellAgentWhatIsSelected(selected: EffectOf<'tellAgentWhatIsSelected'>['selected']): void;
-    onSelectionsChanged(onChanged: (selections: EventOf<'selectionsOfOthersChanged'>['selections']) => void): () => void;
-  };
+  otherViewers: RoomPresence;
   agentForImport: AgentAskedByPage<
     EffectOf<'askAgentAboutImport'>['asked'],
     EventOf<'agentRepliedAboutImport'>['reply'],
@@ -2355,7 +2402,7 @@ export interface BrowserSide extends TextMeasurer {
     EventOf<'agentRepliedWithAFormula'>['reply']
   >;
   agentForFixes: AgentAskedByPage<EffectOf<'askAgentForAFix'>['asked'], EventOf<'agentRepliedWithAFix'>['reply']>;
-  agentForCommands: { isAvailable(): Promise<boolean>; stop(): void };
+  agentForCommands: Pick<AgentSampler, 'ask' | 'stop' | 'isAvailable'>;
   chartsAreDescribedBy: ChartDescribers;
   versionHistory: {
     versions(before: EffectOf<'readVersions'>['before']): Promise<EventOf<'versionsRead'>['read']>;
@@ -2393,10 +2440,12 @@ export interface SheetController {
   mayAnEntryOpenOrEnd(): boolean;
   mayWhatACopyHoldsChange(): boolean;
   isCopyOrCutYetToBeMade(): boolean;
+  isCopyOrCutAskedAgain(): boolean;
   onceEventsAreFinished(run: () => void, ifDropped?: () => void, howHeld?: 'asTypedAhead'): void;
   isMoreHeldBehind(run: () => void): boolean;
   onceWhatIsShownOfSelectionIsKnown(run: () => void): void;
   lookOnceEventsAreFinished(look: () => void): void;
+  lookOnceAllIsTaken(look: () => void): void;
   dropWhatIsHeld(): void;
   endWaitForPeople(how: 'goOn' | 'callOff'): void;
   noteInputMethodInUse(): void;
@@ -2418,12 +2467,13 @@ export interface SheetController {
   newChartOfCellsHeld(held: CellsHeldForChart): ReturnType<typeof placeChartForArea>;
   askForEditOfChart(asked: EventOf<'editOfChartAsked'>['asked']): Promise<ChartEditOutcome>;
   isWorkYetToReachWorkbook(): boolean;
+  isWorkOnItsWayToWorkbook(): boolean;
   doesLeaveLoseWork(): boolean;
   areFormulasLeft(): boolean;
   isEntryOpen(): boolean;
   entryToKeep(): EntryToKeep | null;
-  writeCsvFile(workbookTitle: string): Promise<CsvFileOfSheet | null>;
-  writeXlsxFile(optionsSheetName: string, withCharts: boolean, fileTitle: string): Promise<XlsxFileOutcome>;
+  writeCsvFile(workbookTitle: string | null): Promise<CsvFileOfSheet | null>;
+  writeXlsxFile(optionsSheetName: string, withCharts: boolean, fileTitle: string | null): Promise<XlsxFileOutcome>;
   place(): PlaceOfView | null;
   ownFilters(): PageState['ownFilters'];
   linesOnShow(): ReturnType<typeof linesOnShowOf>;

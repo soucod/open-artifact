@@ -1,5 +1,6 @@
 /**
- * Where a next item goes: beside an item (Mod+Return while typing), or at
+ * Where a next item goes: beside an item (Mod+Return while typing, or a
+ * click on one of its side dots, which also need room around them), or at
  * the free end of an arrow just drawn into empty board (the *next-item
  * offer*: the editor shows a faint item there that Return or a click adds,
  * joined to the arrow).
@@ -41,6 +42,27 @@ export function boxesNearlyTouch(a: Box, b: Box): boolean {
   );
 }
 
+/** Where `template` goes beside `box` on `side`, `gap` away, lined up with `fromBox` across that direction. */
+function spotBeside(fromBox: Box, box: Box, template: NextItem, side: ArrowSide): Box {
+  const gap = NEXT_ITEM_GAP[template.type];
+  const align = template.type === 'shape' ? 0.5 : 0;
+  return {
+    x: side === 'right' ? box.x + box.w + gap : side === 'left' ? box.x - template.w - gap : fromBox.x + (fromBox.w - template.w) * align,
+    y: side === 'bottom' ? box.y + box.h + gap : side === 'top' ? box.y - template.h - gap : fromBox.y + (fromBox.h - template.h) * align,
+    w: template.w,
+    h: template.h,
+  };
+}
+
+/** The boxes a next item placed from `fromBox` keeps clear of (not the frames `fromBox` sits in). */
+function nextItemObstacles(fromBox: Box, elements: readonly BoardElement[], measures?: ElementMeasures): Box[] {
+  return elements.flatMap((element) => {
+    if (NEXT_ITEM_IGNORED_TYPES.has(element.type)) return [];
+    const box = elementBounds(element, measures);
+    return box && !isCenteredInside(fromBox, box) ? [box] : [];
+  });
+}
+
 /**
  * Places `template` beside `from` on `side` (right by default), past
  * anything in the way: each time the spot would touch an item, it moves on
@@ -50,25 +72,55 @@ export function boxesNearlyTouch(a: Box, b: Box): boolean {
  */
 export function placeNextItemBeside<T extends NextItem>(from: BoardElement, template: T, elements: readonly BoardElement[], measures?: ElementMeasures, side: ArrowSide = 'right'): T {
   const fromBox = elementBounds(from, measures) ?? { x: 0, y: 0, w: 0, h: 0 };
-  const gap = NEXT_ITEM_GAP[template.type];
-  const align = template.type === 'shape' ? 0.5 : 0;
-  const placeAt = (box: Box): Box => ({
-    x: side === 'right' ? box.x + box.w + gap : side === 'left' ? box.x - template.w - gap : fromBox.x + (fromBox.w - template.w) * align,
-    y: side === 'bottom' ? box.y + box.h + gap : side === 'top' ? box.y - template.h - gap : fromBox.y + (fromBox.h - template.h) * align,
-    w: template.w,
-    h: template.h,
-  });
-  const obstacles = elements.flatMap((element) => {
-    if (NEXT_ITEM_IGNORED_TYPES.has(element.type)) return [];
-    const box = elementBounds(element, measures);
-    return box && !isCenteredInside(fromBox, box) ? [box] : [];
-  });
-  let spot = placeAt(fromBox);
+  const obstacles = nextItemObstacles(fromBox, elements, measures);
+  let spot = spotBeside(fromBox, fromBox, template, side);
   // Each step moves strictly away from `from`, so this ends after at most one step per obstacle.
   for (let blocked = obstacles.find((box) => boxesNearlyTouch(spot, box)); blocked; blocked = obstacles.find((box) => boxesNearlyTouch(spot, box))) {
-    spot = placeAt(blocked);
+    spot = spotBeside(fromBox, blocked, template, side);
   }
   return { ...template, x: spot.x, y: spot.y };
+}
+
+/**
+ * Where the item a click on `from`'s `side` dot adds goes: right beside
+ * `from` on that side when the spot is clear, else right below `from`, else
+ * nowhere (`undefined`). It never steps past items in the way.
+ */
+export function placeNextItemAtSide<T extends NextItem>(from: BoardElement, template: T, side: ArrowSide, elements: readonly BoardElement[], measures?: ElementMeasures): T | undefined {
+  const fromBox = elementBounds(from, measures);
+  if (!fromBox) return undefined;
+  const obstacles = nextItemObstacles(fromBox, elements, measures);
+  for (const toward of side === 'bottom' ? (['bottom'] as const) : [side, 'bottom' as const]) {
+    const spot = spotBeside(fromBox, fromBox, template, toward);
+    if (!obstacles.some((box) => boxesNearlyTouch(spot, box))) return { ...template, x: spot.x, y: spot.y };
+  }
+  return undefined;
+}
+
+/** Items that take the room a side dot needs: notes, shapes, sections and stickers. */
+export const SIDE_DOT_BLOCKING_TYPES: ReadonlySet<ElementType> = new Set(['note', 'shape', 'container', 'sticker']);
+
+/** Distance from a point to a box: 0 inside it. */
+function distanceToBox(box: Box, x: number, y: number): number {
+  const dx = x < box.x ? box.x - x : x > box.x + box.w ? x - box.x - box.w : 0;
+  const dy = y < box.y ? box.y - y : y > box.y + box.h ? y - box.y - box.h : 0;
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * Whether a side dot at (`x`, `y`) has room: no note, shape, section or
+ * sticker other than `owner` within `reach` of it. A section counts by its
+ * outline, so a dot well inside one still has room.
+ */
+export function sideDotHasRoom(owner: BoardElement, x: number, y: number, reach: number, elements: readonly BoardElement[], measures?: ElementMeasures): boolean {
+  return !elements.some((element) => {
+    if (element.id === owner.id || !SIDE_DOT_BLOCKING_TYPES.has(element.type)) return false;
+    const box = elementBounds(element, measures);
+    if (!box) return false;
+    const inside = distanceToBox(box, x, y) === 0;
+    const distance = inside && element.type === 'container' ? Math.min(x - box.x, box.x + box.w - x, y - box.y, box.y + box.h - y) : distanceToBox(box, x, y);
+    return distance <= reach;
+  });
 }
 
 /* ------------------------------------------------------------------------ */

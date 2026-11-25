@@ -20,7 +20,7 @@ A draft holds these documents, and anything else you write in it, such as a titl
 - **A source that is new, or whose call changes**, at `drafts/<id>/datasets/<dataset id>`. It replaces the dashboard's whole document, so write all of it. Every other source is the dashboard's own, read by its id.
 - **Changed filter defaults**, in collection `drafts/<id>/dash`, doc `params`, which replaces all of the defaults.
 
-A write or a delete in the dashboard's own `files/`, `datasets/` or `dash/` shows to everyone at once.
+A write or a delete in the dashboard's own `files/`, `datasets/` or `dash/` shows to everyone at once, and so does every saved row: those never go into a draft.
 
 ## Who sees what
 

@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { selectionOfArea, selectedArea, mergedAreaOrCellOf } from '../selection/model.ts';
 import { withNoEffects } from '../state/transitions.ts';
 import { richTextMarksOfCell } from '../model/cell-values.ts';
@@ -8,17 +7,32 @@ import { layoutOfView } from '../grid/layout.ts';
 import { queueEdits, IF_QUEUED_DEFAULTS } from '../model/edit-effects.ts';
 import { DEFAULT_CELL_FORMAT } from '../model/cell-format.ts';
 import { colorsEqual } from '../model/colors.ts';
+import { wrappingOfWrapText } from '../grid/text-overflow.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export let DEFAULT_CELL_CONTROL: Dynamic;
-export let DEFAULT_BORDER: Dynamic;
-export let DEFAULT_NUMBER_FORMAT: Dynamic;
-export let DEFAULT_FONT: Dynamic;
-export let DEFAULT_ALIGNMENT: Dynamic;
-export let DEFAULT_FORMAT_REST: Dynamic;
-export function resetPatchOf(defaults?: Dynamic, current?: Dynamic) {
-  let patch: Dynamic = {};
+import type { BorderSide, WholeCellFormat } from '../model/cell-format.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { CellFormat, Color, Edit, NumberFormatKind, SharedCellFormat } from '@open-artifact/sheets-core';
+import type { PageTransition } from '../state/transitions.ts';
+/** A value of one part of a format: a color, a flag, a size or a named choice. */
+export type FormatPartValue = Color | string | number | boolean;
+/** What clearing formats sets: the whole format, or its font or alignment. */
+export type FormatPatch = CellFormat | NonNullable<CellFormat['font']> | NonNullable<CellFormat['alignment']>;
+/** The parts of the default format besides its cell control, borders, number format, font and alignment. */
+export type RestOfDefaultFormat = Omit<WholeCellFormat, 'cellControl' | 'border' | 'numberFormat' | 'font' | 'alignment'>;
+export let DEFAULT_CELL_CONTROL: WholeCellFormat['cellControl'];
+export let DEFAULT_BORDER: WholeCellFormat['border'];
+export let DEFAULT_NUMBER_FORMAT: WholeCellFormat['numberFormat'];
+export let DEFAULT_FONT: WholeCellFormat['font'];
+export let DEFAULT_ALIGNMENT: WholeCellFormat['alignment'];
+export let DEFAULT_FORMAT_REST: RestOfDefaultFormat;
+/** The parts of `defaults` that `current` does not share, set back to their defaults. */
+export function resetPatchOf<Part extends { [Key in keyof Part]: FormatPartValue }>(
+  defaults: Part,
+  current: NoInfer<{ [Key in keyof Part]: Part[Key] | null }>,
+): Partial<Part> {
+  let patch: Partial<Part> = {};
   for (let key in defaults) {
     let value = current[key];
     if (value === null || !isSameFormatPart(value, defaults[key])) patch[key] = defaults[key];
@@ -28,21 +42,21 @@ export function resetPatchOf(defaults?: Dynamic, current?: Dynamic) {
 export function touchesBorders(
   state: PageState,
   reads: WorkbookReads,
-  { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount }: Dynamic,
-  format?: Dynamic,
-) {
-  if (['top', 'right', 'bottom', 'left'].some((side?: Dynamic) => hasBorderSide(format.border, side))) return true;
+  { topRowIndex, leftColumnIndex, rowCount, columnCount }: CellArea,
+  format: SharedCellFormat,
+): boolean {
+  if ((['top', 'right', 'bottom', 'left'] satisfies BorderSide[]).some((side) => hasBorderSide(format.border, side))) return true;
   let rowStrip = {
-    leftColumnIndex: leftColumnIndex,
-    columnCount: columnCount,
+    leftColumnIndex,
+    columnCount,
     rowCount: 1,
   };
   let columnStrip = {
-    topRowIndex: topRowIndex,
-    rowCount: rowCount,
+    topRowIndex,
+    rowCount,
     columnCount: 1,
   };
-  return [
+  return ([
     [
       'bottom',
       {
@@ -71,13 +85,13 @@ export function touchesBorders(
         leftColumnIndex: leftColumnIndex + columnCount,
       },
     ],
-  ].some(([side, area]: Dynamic) => {
+  ] satisfies [BorderSide, CellArea][]).some(([side, area]) => {
     let selection = selectionOfArea(state, reads, area);
     let neighbourFormat = selection === null ? null : reads.sharedFormatBetween(selection.activeCell, selection.selectionCorner);
     return neighbourFormat !== null && hasBorderSide(neighbourFormat.border, side);
   });
 }
-export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTextMeasurer) {
+export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTextMeasurer): PageTransition {
   let area = selectedArea(state, reads);
   let selection = area === null ? null : selectionOfArea(state, reads, area);
   if (area === null || selection === null) return withNoEffects(state);
@@ -85,13 +99,13 @@ export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTex
   if (format === null) return withNoEffects(state);
   let numberFormatKinds =
     format.numberFormat === null
-      ? reads.cellsOnShowIn(state.sheetId, area).map((cellId?: Dynamic) => reads.formatOf(cellId).numberFormat.kind)
+      ? reads.cellsOnShowIn(state.sheetId, area).map((cellId) => reads.formatOf(cellId).numberFormat.kind)
       : [format.numberFormat.kind];
   let resetsNumberFormat =
-    format.cellControl?.kind === 'none' && !numberFormatKinds.some((kind?: Dynamic) => DATE_LIKE_FORMAT_KINDS.has(kind));
+    format.cellControl?.kind === 'none' && !numberFormatKinds.some((kind) => DATE_LIKE_FORMAT_KINDS.has(kind));
   let { pattern: generalPattern } = DEFAULT_NUMBER_FORMAT;
-  let richTextMarks = new (Set as Dynamic)(
-    reads.filledCellsIn(state.sheetId, area).flatMap((cellId?: Dynamic) => richTextMarksOfCell(reads.cellOf(cellId))),
+  let richTextMarks = new Set(
+    reads.filledCellsIn(state.sheetId, area).flatMap((cellId) => richTextMarksOfCell(reads.cellOf(cellId))),
   );
   let fontPatch = {
     ...resetPatchOf(DEFAULT_FONT, format.font),
@@ -108,8 +122,14 @@ export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTex
       strikethrough: DEFAULT_FONT.strikethrough,
     }),
   };
-  let alignmentPatch = resetPatchOf(DEFAULT_ALIGNMENT, format.alignment);
-  let formatPatch = {
+  let { wrap: wrapReset, ...otherAlignmentPatch } = resetPatchOf(DEFAULT_ALIGNMENT, format.alignment);
+  let alignmentPatch = {
+    ...otherAlignmentPatch,
+    ...(wrapReset !== undefined && {
+      wrap: wrappingOfWrapText(wrapReset),
+    }),
+  };
+  let formatPatch: CellFormat = {
     ...resetPatchOf(DEFAULT_FORMAT_REST, format),
     ...(hasAnyKey(fontPatch) && {
       font: fontPatch,
@@ -126,27 +146,27 @@ export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTex
   };
   let cells = cellBlockOfSelection(state, reads, selection);
   if (cells === null) return withNoEffects(state);
-  let edits = [
+  let edits: Edit[] = [
     ...(reads.hasBorderLine(state.sheetId) && touchesBorders(state, reads, area, format)
       ? [
           {
             kind: 'setBorders',
-            cells: cells,
+            cells,
             edges: 'all',
             border: {
               kind: 'none',
             },
           },
-        ]
+        ] satisfies Edit[]
       : []),
     ...(hasAnyKey(formatPatch)
       ? [
           {
             kind: 'formatCells',
-            cells: cells,
+            cells,
             format: formatPatch,
           },
-        ]
+        ] satisfies Edit[]
       : []),
   ];
   let activeArea = mergedAreaOrCellOf(reads, state.activeCell);
@@ -173,8 +193,8 @@ export function clearFormattingOfSelection(state: PageState, reads: ReadsWithTex
   alignment: DEFAULT_ALIGNMENT,
   ...DEFAULT_FORMAT_REST
 } = DEFAULT_CELL_FORMAT);
-export const isSameFormatPart = (value?: Dynamic, other?: Dynamic) =>
+export const isSameFormatPart = (value: FormatPartValue, other: FormatPartValue): boolean =>
   typeof value === 'object' && typeof other === 'object' ? colorsEqual(value, other) : value === other;
-export const hasAnyKey = (record?: Dynamic) => Object.keys(record).length > 0;
-export const DATE_LIKE_FORMAT_KINDS = new (Set as Dynamic)(['date', 'time', 'dateAndTime', 'duration']);
-export const hasBorderSide = (border?: Dynamic, side?: Dynamic) => border[side]?.kind !== 'none';
+export const hasAnyKey = (record: FormatPatch): boolean => Object.keys(record).length > 0;
+export const DATE_LIKE_FORMAT_KINDS: ReadonlySet<NumberFormatKind> = new Set<NumberFormatKind>(['date', 'time', 'dateAndTime', 'duration']);
+export const hasBorderSide = (border: SharedCellFormat['border'], side: BorderSide): boolean => border[side]?.kind !== 'none';

@@ -136,14 +136,18 @@ function readSheetFiles(root: string): Map<string, string> {
   return files;
 }
 
-/** Checks one artifact folder: the text files the check read, and the findings. */
-export async function runCheck(root: string, type: TypeName): Promise<{ files: Map<string, string>; findings: CheckFinding[] }> {
+/**
+ * Checks one artifact folder: the text files the check read, and the findings. `staleCopies: false` leaves out the
+ * stale-copy notes, which read the source folder an installed design system records (a hosted server reads no
+ * folder outside the artifact).
+ */
+export async function runCheck(root: string, type: TypeName, { staleCopies = true }: { staleCopies?: boolean } = {}): Promise<{ files: Map<string, string>; findings: CheckFinding[] }> {
   // A db-backed type is checked from its documents (paths already start with `db/` in findings).
   const store = TYPES[type].store;
   const files =
     store === 'db' ? readDbFiles(root) : store === 'workbook' ? readSheetFiles(root) : store === 'doc' ? readDocFiles(root) : await new ArtifactStore(root).readProject();
   const findings = TYPES[type].check(files, await checkContextOf(root, type));
-  try {
+  if (staleCopies) try {
     findings.push(...staleCopyFindings(root, type));
   } catch {
     // An index that cannot be read is reported by the type's own check.

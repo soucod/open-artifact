@@ -28,7 +28,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'JA2tuLTTqb',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -41,8 +41,8 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: '+okyOR6KuS',
         },
         {
-          count: count,
-          noun: noun,
+          count,
+          noun,
         },
       ),
   ],
@@ -104,7 +104,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'I/MEhBaO2m',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -141,7 +141,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'HLZSnftI+8',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -154,7 +154,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'w/ykghRGKH',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -167,7 +167,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: '7hMrFu4Dzs',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -180,7 +180,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: '4zZul+szRM',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -193,7 +193,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'DC8U3V1Qj9',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -214,7 +214,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'y0pCoTFiKU',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -227,7 +227,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'UQHVfk/X7+',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -256,7 +256,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'nsgFXgN/hX',
         },
         {
-          hint: hint,
+          hint,
         },
       ),
   ],
@@ -269,7 +269,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'm9BLFj56N5',
         },
         {
-          count: count,
+          count,
         },
       ),
   ],
@@ -346,7 +346,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'NKPfmmHQdx',
         },
         {
-          count: count,
+          count,
         },
       ),
   ],
@@ -359,7 +359,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'Ff1QOLaeZb',
         },
         {
-          count: count,
+          count,
         },
       ),
   ],
@@ -388,7 +388,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'oDI/Rp4thV',
         },
         {
-          count: count,
+          count,
         },
       ),
   ],
@@ -401,7 +401,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'k5iu07zSUr',
         },
         {
-          item: item,
+          item,
         },
       ),
   ],
@@ -422,7 +422,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'GHRzoS0vqm',
         },
         {
-          item: item,
+          item,
         },
       ),
   ],
@@ -443,7 +443,7 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
           id: 'VhNYDGOeBE',
         },
         {
-          name: name,
+          name,
         },
       ),
   ],
@@ -493,6 +493,14 @@ export const UI_LABEL_MESSAGES: ReadonlyMap<string, (values: UiLabelValues) => s
       translateMessage({
         defaultMessage: 'then',
         id: 'E9kbIZCBAM',
+      }),
+  ],
+  [
+    'unnamedPanelContent',
+    (): string =>
+      translateMessage({
+        defaultMessage: 'Panel content',
+        id: 'zNmqxlYJxm',
       }),
   ],
   [

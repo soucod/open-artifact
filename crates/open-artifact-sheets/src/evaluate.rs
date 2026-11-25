@@ -12,10 +12,12 @@
 //!
 //! Working an expression out also leaves what number format it brings (`Calculation::brought`, see [`brought`]).
 
+pub(crate) mod pivot;
+
 use std::rc::Rc;
 
 use crate::brought::{self, Brought};
-use crate::calculate::{Calculation, Slot};
+use crate::calculate::{Calculation, Slot, SpillFormats};
 use crate::coerce;
 use crate::formula::{BinaryOp, Expr, UnaryOp};
 use crate::functions::{self, Arg, CallContext, Cells, ErrorInIt, FunctionId, Shape, Takes};
@@ -109,6 +111,7 @@ impl Calculation {
                 None => Operand::error(CellError::Name),
             },
             Expr::Array(a) => Operand::Array(a.clone()),
+            Expr::Call { name, arguments, .. } if name.as_ref() == "PIVOT" => self.pivot(f, arguments),
             Expr::Call { function: None, .. } => Operand::error(CellError::Name),
             Expr::Call { function: Some(id), arguments, index, .. } => self.call(f, *id, arguments, *index),
             Expr::Unary(op, operand) => {
@@ -258,7 +261,7 @@ impl Calculation {
                     if answers_errors {
                         let first_error = match &arg {
                             Arg::Value(v) => v.error(),
-                            Arg::Cells(cells) => cells.values().iter().find_map(Value::error),
+                            Arg::Cells(cells) => cells.values().find_map(Value::error),
                             _ => None,
                         };
                         if let Some(e) = first_error {
@@ -325,7 +328,7 @@ impl Calculation {
             (_, Some(formats)) => {
                 let first = formats.first().cloned().flatten();
                 if let Operand::Array(a) | Operand::Values(a) = &operand {
-                    self.array_formats.insert(Rc::as_ptr(a), (a.clone(), formats.into()));
+                    self.array_formats.insert(Rc::as_ptr(a), (a.clone(), SpillFormats::Dense(formats.into())));
                 }
                 first
             }
@@ -444,7 +447,7 @@ impl Calculation {
         match arg {
             Arg::Cells(Cells { place: Some(p), .. }) => self.cell_brought(p.sheet, p.top + r, p.left + c),
             Arg::Cells(Cells { array, place: None }) => {
-                self.array_formats.get(&Rc::as_ptr(array))?.1.get(r * array.columns() + c)?.clone()
+                self.array_formats.get(&Rc::as_ptr(array))?.1.get(array.columns(), (r, c)).cloned()
             }
             Arg::Value(_) => expression.clone(),
             _ => None,
@@ -589,7 +592,8 @@ impl Calculation {
         let mut answer = None;
         for i in 0..pairs {
             let name = match &arguments[2 * i] {
-                Expr::Name(n) if !names.contains(n) => n.clone(),
+                // A name written as a cell's address (one past the sheet's end) is not one LET gives a value to.
+                Expr::Name(n) if !names.contains(n) && !crate::formula::parse::looks_like_a_cell(n) => n.clone(),
                 _ => {
                     answer = Some(Operand::error(CellError::Name));
                     break;

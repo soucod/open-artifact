@@ -123,7 +123,7 @@ export function createCalculationEngine(context: CalculationContext): Calculatio
       return {
         status: input.status,
         stopped: `${id}${input.status === 'missing' ? ' isn’t in this dashboard' : ' didn’t load'}`,
-        give: () => [...input.rows],
+        give: () => (input.value === undefined || typeof input.value === 'string' ? [...input.rows] : structuredClone(input.value)),
       };
     });
     const stopped = inputs.filter((input) => input.status !== 'ok' && input.status !== 'loading');

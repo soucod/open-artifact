@@ -52,15 +52,20 @@ export function isArtifactLink(href: string): boolean {
   return normalizeArtifactAddress(href) !== undefined;
 }
 
-/** A card title: whitespace collapsed, invisible characters dropped, capped. */
-export function sanitizeLinkTitle(title: unknown): string {
-  if (typeof title !== 'string') return '';
-  const value = title
+/** A short one-line label: whitespace collapsed, invisible characters dropped, capped at `maxChars`. */
+export function sanitizeShortLabel(label: unknown, maxChars: number): string {
+  if (typeof label !== 'string') return '';
+  const value = label
     .replace(/\s+/g, ' ')
     .replace(/(?![‌‍\u{E0020}-\u{E007F}])[\p{Cc}\p{Cf}]/gu, '')
     .replace(/ +/g, ' ')
     .trim();
-  return VISIBLE_TITLE_CHAR_PATTERN.test(value) ? [...value].slice(0, MAX_LINK_TITLE_CHARS).join('') : '';
+  return VISIBLE_TITLE_CHAR_PATTERN.test(value) ? [...value].slice(0, maxChars).join('').trim() : '';
+}
+
+/** A card title: whitespace collapsed, invisible characters dropped, capped. */
+export function sanitizeLinkTitle(title: unknown): string {
+  return sanitizeShortLabel(title, MAX_LINK_TITLE_CHARS);
 }
 
 /** The link fields of a card, or `undefined` when its address is not allowed. Legacy `kind: "board"` reads as `whiteboard`. */

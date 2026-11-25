@@ -10,7 +10,8 @@
  *   View thread ›
  *
  * A request from one of the page's buttons gets a card of its own, the header and its words; a message from the
- * Shell's chat (a request without a label, id `ask_…`) is one too.
+ * Shell's chat (a request without a label, id `ask_…`) is one too. Words from someone other than the owner say who
+ * sent them (`source.from`), and the result of a task the agent started (`source.task`) gets a card of its own.
  */
 import { WAKE_SOURCE_KIND } from '@open-artifact/protocol';
 
@@ -37,6 +38,10 @@ export interface CardData {
   viewUrl: string;
   threads: CardThread[];
   requests: CardRequest[];
+  /** Someone other than the owner sent it: their name and role on the artifact. */
+  from: { name: string; role: string } | null;
+  /** A task's result: what it did and whether it worked. */
+  task: { action: string; ok: boolean } | null;
   seq: number;
 }
 
@@ -55,6 +60,18 @@ export function isWakeEvent(event: SessionEventLike): boolean {
   return event.type === 'user/message' && event.surfaceOp === 'append' && event.data?.source?.kind === WAKE_SOURCE_KIND;
 }
 
+/** The sender, when it is a collaborator rather than the owner. */
+function fromOf(value: unknown): CardData['from'] {
+  const from = value as { kind?: unknown; name?: unknown; role?: unknown } | null;
+  return from && typeof from === 'object' && from.kind === 'collaborator' ? { name: str(from.name) || '?', role: str(from.role) } : null;
+}
+
+/** The task a result is about. */
+function taskOf(value: unknown): CardData['task'] {
+  const task = value as { action?: unknown; ok?: unknown } | null;
+  return task && typeof task === 'object' ? { action: str(task.action), ok: task.ok !== false } : null;
+}
+
 /** The card's data, from the message's source. */
 export function cardData(event: SessionEventLike): CardData {
   const source = event.data?.source ?? {};
@@ -66,6 +83,8 @@ export function cardData(event: SessionEventLike): CardData {
     viewUrl: str(source.viewUrl),
     threads: threads.map((t) => ({ id: str(t.id), where: str(t.where), text: str(t.text) })).filter((t) => t.id),
     requests: requests.map((r) => ({ id: str(r.id), label: str(r.label), text: str(r.text) })).filter((r) => r.id && r.text),
+    from: fromOf(source.from),
+    task: taskOf(source.task),
     seq: event.seq,
   };
 }

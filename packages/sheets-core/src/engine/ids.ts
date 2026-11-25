@@ -26,6 +26,15 @@ export interface IdRun {
   count: number;
 }
 
+/**
+ * The ids of one base as runs of `[first, count]`, rising and apart. Operations
+ * write a sheet's rows so (each base once) when there are many runs of them.
+ */
+export interface RunsOfABase {
+  base: string;
+  runs: [first: number, count: number][];
+}
+
 /** A cell by its row and column ids. */
 export interface CellAt {
   r: RowId;

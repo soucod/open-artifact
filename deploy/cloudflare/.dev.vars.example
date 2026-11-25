@@ -1,0 +1,27 @@
+# Copy to .dev.vars for `npm run dev` (wrangler reads it; never commit .dev.vars). Deployed, set each with
+# `wrangler secret put <NAME>`.
+
+# Required: one or more random secrets of at least 32 characters, comma-separated; the first signs (page tokens,
+# link tokens). Rotate by putting a new key first and dropping the old one later.
+OA_SIGNING_KEYS=change-me-to-a-random-secret-of-32-chars-or-more
+
+# Required while the owner-key sign-in is on (the default OA_AUTH): the key you sign in with, 24 characters or more.
+OA_OWNER_KEY=change-me-to-a-random-owner-key
+
+# Optional (see packages/host/README.md for each):
+# OA_OWNER_NAME=Owner
+# OA_AUTH=[{"kind":"owner-key"},{"kind":"github","clientId":"…","clientSecret":"…"}]
+# OA_OWNERS=you@example.com
+# OA_SIGNUP=invite
+# OA_LINK_MAX_ROLE=editor
+# OA_PUBLIC_ACCESS=true
+
+# Host plugins (packages/host-plugin/README.md): the list, as JSON. Each "use" must be a key of plugins.mjs (bundled at
+# build time). Give a secret setting as {"env":"NAME"} and put NAME here (deployed: `wrangler secret put NAME`).
+# Changing the list needs no build; adding a plugin module to plugins.mjs does.
+# OA_PLUGINS=[{"use":"header-auth","config":{"secret":{"env":"PROXY_SECRET"}}}]
+# PROXY_SECRET=change-me
+
+# Local only: answer /__open-artifact/stats and add an x-open-artifact-d1 header (D1 queries of each request).
+# Honoured only while OA_APP_ORIGIN is a localhost origin.
+# OA_DEBUG_STATS=1

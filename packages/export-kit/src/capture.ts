@@ -312,14 +312,29 @@ function fitImages(root: Element, fits: readonly ImageFit[]): void {
 /**
  * The element rebuilt as plain SVG by dom-to-svg (links dropped), its
  * resources inlined. `area` defaults to the element's own box.
+ *
+ * `fontCss` replaces the `@font-face` rules dom-to-svg copies itself. It
+ * only copies those of linked stylesheets it may read (none from an inline
+ * `<style>`, none from another origin), and without its font a text is
+ * drawn in a fallback at the place measured for the real one. Pass the
+ * document's {@link embeddedFontCss} for a drawing that is rasterized.
  */
-export async function elementSvg(element: Element, area?: CaptureArea): Promise<XMLDocument> {
+export async function elementSvg(element: Element, area?: CaptureArea, options: { fontCss?: string } = {}): Promise<XMLDocument> {
   const box = area ?? element.getBoundingClientRect();
   const view = element.ownerDocument.defaultView!;
   const fits = imageFits(element);
   const doc = withCaptureSafeDom(element, () => elementToSVG(element, { captureArea: new view.DOMRect(box.x, box.y, box.width, box.height), keepLinks: false }));
   linkImages(doc.documentElement);
   fitImages(doc.documentElement, fits);
+  // dom-to-svg's own rules sit in the first <style>; emptied, there is nothing for it to download a second time.
+  const fontStyle = options.fontCss === undefined ? null : Array.from(doc.documentElement.children).find((child) => child.localName === 'style');
+  if (fontStyle) fontStyle.textContent = '';
   await inlineResources(doc.documentElement);
+  if (fontStyle) fontStyle.textContent = options.fontCss!;
+  else if (options.fontCss) {
+    const style = doc.createElementNS(SVG_NS, 'style');
+    style.textContent = options.fontCss;
+    doc.documentElement.prepend(style);
+  }
   return doc;
 }

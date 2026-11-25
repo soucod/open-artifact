@@ -1,15 +1,89 @@
-import type { Dynamic } from '../dynamic.ts';
 import { versionHistoryOfPane } from '../state/queries.ts';
-import { withNoEffects, clearPassingNotice } from '../state/transitions.ts';
+import { withNoEffects, clearPassingNotice, type PageEffect, type PageTransition } from '../state/transitions.ts';
 import { commitEntryInPlaceIfEditing } from '../editor/commit-entry.ts';
 import { showChangedPlace } from '../state/edit-answers.ts';
 import { editRefusalReason } from '../model/refusals.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type {
+  HistoryWhy,
+  LookAtVersion,
+  PageState,
+  TakingBack,
+  VersionHistoryInPane,
+  VersionOfWorkbook,
+  VersionRestoredOffer,
+  VersionsAwaited,
+  WhatIsTakenBack,
+} from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export let lastShownVersionHistory: Dynamic;
-export function askForVersions(state: PageState, history2?: Dynamic, of?: Dynamic) {
+import type {
+  EditsThatTakeBackOutcome,
+  PageEvent,
+  TakeBackAnswered,
+  VersionHistoryAct,
+  VersionHistoryCarriedOn,
+  VersionsReadOutcome,
+  WhyVersionNotShown,
+} from '../state/event-reducer.ts';
+import type { EditAuthor } from './requests.ts';
+import type { ProfileOfPerson } from '../chips/people-list.ts';
+import type { AgentUndoRefusalWhy } from '../i18n/agent-turn-labels.ts';
+
+/** What is to be taken back, and how many times the store moved on before the edits that take it back were read. */
+export interface TakingBackAsked {
+  what: WhatIsTakenBack;
+  timesMovedOn: number;
+}
+/** Edits that take back read from the store; `'storeMovedOn'` is handled, though no read gives it now. */
+export type EditsThatTakeBackAnswer = EditsThatTakeBackOutcome | { kind: 'notRead'; why: 'storeMovedOn' };
+/** The newest versions read, or the list as it stands with them taken in. */
+interface VersionsListed {
+  versions: VersionOfWorkbook[];
+  hasOlder: boolean;
+}
+/** An author of a version as the pane shows it: a person's name is null while their profile is awaited. */
+export type ShownAuthor = { kind: 'agent' } | { kind: 'person'; userId: string; name: string | null; avatarUrl: string };
+/** A version as the pane lists it. */
+export interface ShownVersion {
+  revision: number;
+  firstRevision: number;
+  atMs: number;
+  authors: ShownAuthor[];
+  isCurrent: boolean;
+  isBeingRestored: boolean;
+}
+/** The version looked at, or being opened to be looked at. */
+export interface ShownVersionLook {
+  firstRevision: number;
+  atMs: number;
+  isOpening: boolean;
+}
+/** The version history as the pane shows it. */
+export interface ShownVersionHistory {
+  versions: ShownVersion[] | null;
+  whyNotRead: HistoryWhy | null;
+  hasOlder: boolean;
+  awaited: VersionsAwaited['of'] | null;
+  isTakingBack: boolean;
+  look: ShownVersionLook | null;
+  picked: number | null;
+  isCaretForCells: boolean;
+  pickedLast: number | null;
+  /** The change count the history is behind at, while it waits to be read again. */
+  behindAtChangeCount: number | null;
+}
+/** The version history last shown, and what it was worked out from. */
+interface ShownVersionHistoryKept {
+  pane: VersionHistoryInPane;
+  takingBack: TakingBack | null;
+  profilesById: Map<string, ProfileOfPerson>;
+  behindAtChangeCount: number | null;
+  shown: ShownVersionHistory;
+}
+
+export let lastShownVersionHistory: ShownVersionHistoryKept | null;
+export function askForVersions(state: PageState, history: VersionHistoryInPane, of: VersionsAwaited['of']): PageTransition {
   let askId = state.versionHistoryAskCount + 1;
-  let { firstRevision } = (of === 'older' ? history2.versions?.at(-1) : null) ?? {};
+  let { firstRevision }: Partial<VersionOfWorkbook> = (of === 'older' ? history.versions?.at(-1) : null) ?? {};
   let before = firstRevision === undefined ? null : { firstRevision };
   return {
     state: {
@@ -18,11 +92,11 @@ export function askForVersions(state: PageState, history2?: Dynamic, of?: Dynami
       sidePane: {
         kind: 'versionHistory',
         history: {
-          ...history2,
-          whyNotRead: of === versionsAskedOf(history2) ? history2.whyNotRead : null,
+          ...history,
+          whyNotRead: of === versionsAskedOf(history) ? history.whyNotRead : null,
           awaited: {
-            askId: askId,
-            of: of,
+            askId,
+            of,
             atChangeCount: state.saving === 'allSaved' ? state.workbookChangeCount : null,
           },
         },
@@ -31,22 +105,22 @@ export function askForVersions(state: PageState, history2?: Dynamic, of?: Dynami
     effects: [
       {
         kind: 'readVersions',
-        askId: askId,
-        before: before,
+        askId,
+        before,
       },
     ],
   };
 }
-export function toggleVersionHistory(state: PageState) {
-  let history2 = versionHistoryOfPane(state);
-  if (history2 !== null)
+export function toggleVersionHistory(state: PageState): PageTransition {
+  let history = versionHistoryOfPane(state);
+  if (history !== null)
     return {
       state: {
         ...state,
         sidePane: null,
       },
       effects:
-        history2.look === null
+        history.look === null
           ? []
           : [
               {
@@ -69,8 +143,8 @@ export function toggleVersionHistory(state: PageState) {
       whyNotRead: null,
       awaited: null,
       readAtChangeCount: null,
-      authorsLookedUp: new (Set as Dynamic)(),
-      authorsAwaited: new (Set as Dynamic)(),
+      authorsLookedUp: new Set(),
+      authorsAwaited: new Set(),
       looksInVainInARow: 0,
       look: null,
       picked: null,
@@ -80,30 +154,30 @@ export function toggleVersionHistory(state: PageState) {
     'newest',
   );
 }
-export function mergeNewestVersions(history2: Dynamic, { versions: versions, hasOlder: hasOlder }: Dynamic) {
+export function mergeNewestVersions(history: VersionHistoryInPane, { versions, hasOlder }: VersionsListed): VersionsListed {
   let oldestNew = versions.at(-1);
   let olderKept =
-    oldestNew === undefined ? [] : (history2.versions ?? []).filter(({ revision: revision }: Dynamic) => revision < oldestNew.firstRevision);
+    oldestNew === undefined ? [] : (history.versions ?? []).filter(({ revision }) => revision < oldestNew.firstRevision);
   return olderKept.length === 0
     ? {
-        versions: versions,
-        hasOlder: hasOlder,
+        versions,
+        hasOlder,
       }
     : {
         versions: [...versions, ...olderKept],
-        hasOlder: history2.hasOlder,
+        hasOlder: history.hasOlder,
       };
 }
-export function versionsAnswered(state: PageState, askId?: Dynamic, answer?: Dynamic) {
-  let history2 = versionHistoryOfPane(state);
-  if (history2 === null || history2.awaited?.askId !== askId) return withNoEffects(state);
-  let { of: awaitedOf, atChangeCount: atChangeCount } = history2.awaited;
+export function versionsAnswered(state: PageState, askId: number, answer: VersionsReadOutcome): PageTransition {
+  let history = versionHistoryOfPane(state);
+  if (history === null || history.awaited?.askId !== askId) return withNoEffects(state);
+  let { of: awaitedOf, atChangeCount } = history.awaited;
   let historyAnswered = {
-    ...history2,
+    ...history,
     awaited: null,
   };
   if (answer.kind === 'notRead') {
-    let isNewestAgain = awaitedOf === 'newest' && history2.versions !== null;
+    let isNewestAgain = awaitedOf === 'newest' && history.versions !== null;
     return withNoEffects(
       setVersionHistoryPane(
         state,
@@ -111,7 +185,7 @@ export function versionsAnswered(state: PageState, askId?: Dynamic, answer?: Dyn
           ? {
               ...historyAnswered,
               readAtChangeCount: atChangeCount,
-              looksInVainInARow: history2.looksInVainInARow + 1,
+              looksInVainInARow: history.looksInVainInARow + 1,
             }
           : {
               ...historyAnswered,
@@ -120,17 +194,17 @@ export function versionsAnswered(state: PageState, askId?: Dynamic, answer?: Dyn
       ),
     );
   }
-  let { versions: versions, hasOlder: hasOlder } = answer;
-  let authorsToLookUp2 = authorsToLookUp(
+  let { versions, hasOlder } = answer;
+  let userIdsToLookUp = authorsToLookUp(
     state,
-    history2,
-    versions.flatMap(({ authors: authors }: Dynamic) => authors),
+    history,
+    versions.flatMap(({ authors }) => authors),
   );
   let historyRead = {
     ...historyAnswered,
     whyNotRead: null,
-    authorsLookedUp: new (Set as Dynamic)([...history2.authorsLookedUp, ...authorsToLookUp2]),
-    authorsAwaited: new (Set as Dynamic)([...history2.authorsAwaited, ...authorsToLookUp2]),
+    authorsLookedUp: new Set([...history.authorsLookedUp, ...userIdsToLookUp]),
+    authorsAwaited: new Set([...history.authorsAwaited, ...userIdsToLookUp]),
   };
   return {
     state: setVersionHistoryPane(
@@ -138,77 +212,78 @@ export function versionsAnswered(state: PageState, askId?: Dynamic, answer?: Dyn
       awaitedOf === 'older'
         ? {
             ...historyRead,
-            versions: [...(history2.versions ?? []), ...versions],
-            hasOlder: hasOlder,
+            versions: [...(history.versions ?? []), ...versions],
+            hasOlder,
           }
         : {
             ...historyRead,
-            ...mergeNewestVersions(history2, answer),
+            ...mergeNewestVersions(history, answer),
             readAtChangeCount: atChangeCount,
             looksInVainInARow: 0,
           },
     ),
     effects:
-      authorsToLookUp2.length === 0
+      userIdsToLookUp.length === 0
         ? []
         : [
             {
               kind: 'lookUpPeople',
-              userIds: authorsToLookUp2,
+              userIds: userIdsToLookUp,
             },
           ],
   };
 }
-export function withoutAuthors(authors?: Dynamic, arrived?: Dynamic) {
-  if (!arrived.some((userId?: Dynamic) => authors.has(userId))) return authors;
-  let kept = new (Set as Dynamic)(authors);
-  for (let userId of arrived as Dynamic) kept.delete(userId);
+/** The user ids awaited, less those that arrived; the same set when none of them did. */
+export function withoutAuthors(authors: Set<string>, arrived: string[]): Set<string> {
+  if (!arrived.some((userId) => authors.has(userId))) return authors;
+  let kept = new Set(authors);
+  for (let userId of arrived) kept.delete(userId);
   return kept;
 }
-export function versionAuthorsArrived(state: PageState, userIds?: Dynamic) {
-  let history2 = versionHistoryOfPane(state);
-  if (history2 === null) return state;
-  let awaited = withoutAuthors(history2.authorsAwaited, userIds);
-  return awaited === history2.authorsAwaited
+export function versionAuthorsArrived(state: PageState, userIds: string[]): PageState {
+  let history = versionHistoryOfPane(state);
+  if (history === null) return state;
+  let awaited = withoutAuthors(history.authorsAwaited, userIds);
+  return awaited === history.authorsAwaited
     ? state
     : setVersionHistoryPane(state, {
-        ...history2,
+        ...history,
         authorsAwaited: awaited,
       });
 }
-export function isVersionHistoryBehind(state: PageState) {
-  let history2 = versionHistoryOfPane(state);
+export function isVersionHistoryBehind(state: PageState): boolean {
+  let history = versionHistoryOfPane(state);
   return (
-    history2 !== null &&
-    history2.versions !== null &&
-    history2.awaited === null &&
+    history !== null &&
+    history.versions !== null &&
+    history.awaited === null &&
     state.takingBack === null &&
-    history2.look === null &&
-    history2.looksInVainInARow < MOST_LOOKS_IN_VAIN &&
-    history2.readAtChangeCount !== state.workbookChangeCount &&
+    history.look === null &&
+    history.looksInVainInARow < MOST_LOOKS_IN_VAIN &&
+    history.readAtChangeCount !== state.workbookChangeCount &&
     state.saving === 'allSaved'
   );
 }
-export function refreshVersionHistory(state: PageState) {
-  let history2 = versionHistoryOfPane(state);
-  return history2 !== null && isVersionHistoryBehind(state) ? askForVersions(state, history2, 'newest') : withNoEffects(state);
+export function refreshVersionHistory(state: PageState): PageTransition {
+  let history = versionHistoryOfPane(state);
+  return history !== null && isVersionHistoryBehind(state) ? askForVersions(state, history, 'newest') : withNoEffects(state);
 }
-export function askForEditsThatTakeBack(state: PageState, takingBack?: Dynamic) {
+export function askForEditsThatTakeBack(state: PageState, takingBack: TakingBackAsked): PageTransition {
   let askId = state.versionHistoryAskCount + 1;
-  let { what: what, timesMovedOn: timesMovedOn } = takingBack;
+  let { what, timesMovedOn } = takingBack;
   return {
     state: {
       ...clearPassingNotice(state),
       versionHistoryAskCount: askId,
       takingBack: {
         ...takingBack,
-        askId: askId,
+        askId,
       },
     },
     effects: [
       {
         kind: 'readEditsThatTakeBack',
-        askId: askId,
+        askId,
         asked:
           what.kind === 'allSinceVersion'
             ? {
@@ -224,9 +299,9 @@ export function askForEditsThatTakeBack(state: PageState, takingBack?: Dynamic) 
     ],
   };
 }
-export function dropStaleTakingBack(state: PageState) {
+export function dropStaleTakingBack(state: PageState): PageState {
   if (state.takingBack === null) return state;
-  let { what: what } = state.takingBack;
+  let { what } = state.takingBack;
   return (what.kind === 'allSinceVersion' ? versionHistoryOfPane(state) !== null : state.undoOfTurnOffered?.edits === what.edits)
     ? state
     : {
@@ -234,11 +309,11 @@ export function dropStaleTakingBack(state: PageState) {
         takingBack: null,
       };
 }
-export function startTakingBack(state: PageState, workbook: ReadsWithTextMeasurer, what?: Dynamic) {
+export function startTakingBack(state: PageState, workbook: ReadsWithTextMeasurer, what: WhatIsTakenBack): PageTransition {
   if (state.takingBack !== null) return withNoEffects(state);
   let committed = commitEntryInPlaceIfEditing(state, workbook);
   let asked = askForEditsThatTakeBack(committed?.state ?? state, {
-    what: what,
+    what,
     timesMovedOn: 0,
   });
   return {
@@ -246,18 +321,18 @@ export function startTakingBack(state: PageState, workbook: ReadsWithTextMeasure
     effects: [...(committed?.effects ?? []), ...asked.effects],
   };
 }
-export function lookAtVersion(state: PageState, history2?: Dynamic, revision?: Dynamic) {
-  let version = history2.versions?.find((version2?: Dynamic) => version2.revision === revision);
+export function lookAtVersion(state: PageState, history: VersionHistoryInPane, revision: number): PageTransition {
+  let version = history.versions?.find((listed) => listed.revision === revision);
   if (version === undefined || state.takingBack !== null) return withNoEffects(state);
-  if (history2.look?.awaited?.version.revision === revision) return withNoEffects(state);
+  if (history.look?.awaited?.version.revision === revision) return withNoEffects(state);
   let askId = state.versionHistoryAskCount + 1;
   let historyLooking = {
-    ...history2,
+    ...history,
     look: {
-      shown: history2.look?.shown ?? null,
+      shown: history.look?.shown ?? null,
       awaited: {
-        askId: askId,
-        version: version,
+        askId,
+        version,
       },
     },
     picked: version.firstRevision,
@@ -277,50 +352,54 @@ export function lookAtVersion(state: PageState, history2?: Dynamic, revision?: D
     effects: [
       {
         kind: 'lookAtVersion',
-        askId: askId,
-        revision: revision,
+        askId,
+        revision,
         pane: historyLooking,
       },
     ],
   };
 }
-export function carrySessionIntoState(state: PageState, history2: Dynamic, { profilesById: profilesById, ...session }: Dynamic) {
+export function carrySessionIntoState(
+  state: PageState,
+  history: VersionHistoryInPane | null,
+  { profilesById, ...session }: VersionHistoryCarriedOn['kept'],
+): PageState {
   let carried = {
     ...state,
     ...session,
     areStepsToUndoLost: false,
-    profilesById: new (Map as Dynamic)([...profilesById, ...state.profilesById]),
+    profilesById: new Map([...profilesById, ...state.profilesById]),
   };
-  if (history2 === null) return carried;
-  let authorsLookedUp = new (Set as Dynamic)(history2.authorsLookedUp);
-  for (let userId of history2.authorsAwaited as Dynamic) authorsLookedUp.delete(userId);
+  if (history === null) return carried;
+  let authorsLookedUp = new Set(history.authorsLookedUp);
+  for (let userId of history.authorsAwaited) authorsLookedUp.delete(userId);
   return {
     ...carried,
     sidePane: {
       kind: 'versionHistory',
       history: {
-        ...history2,
+        ...history,
         awaited: null,
         readAtChangeCount: null,
-        authorsLookedUp: authorsLookedUp,
-        authorsAwaited: new (Set as Dynamic)(),
+        authorsLookedUp,
+        authorsAwaited: new Set(),
       },
     },
     timesSidePaneAsked: state.timesSidePaneAsked + 1,
   };
 }
-export function endVersionLook(state: PageState) {
-  let history2 = versionHistoryOfPane(state);
-  return history2 === null
+export function endVersionLook(state: PageState): PageState {
+  let history = versionHistoryOfPane(state);
+  return history === null
     ? state
     : setVersionHistoryPane(state, {
-        ...history2,
+        ...history,
         look: null,
       });
 }
-export function endLookEffects(previousState: Dynamic, state: PageState, effects?: Dynamic, event?: Dynamic) {
+export function endLookEffects(previousState: PageState, state: PageState, effects: PageEffect[], event: PageEvent): PageEffect[] {
   return !((versionHistoryOfPane(previousState)?.look ?? null) !== null && (versionHistoryOfPane(state)?.look ?? null) === null) ||
-    effects.some(({ kind: kind }: Dynamic) => kind === 'endLookAtVersion')
+    effects.some(({ kind }) => kind === 'endLookAtVersion')
     ? effects
     : [
         ...effects,
@@ -334,30 +413,30 @@ export function endLookEffects(previousState: Dynamic, state: PageState, effects
         },
       ];
 }
-export function versionLookAnswered(state: PageState, askId?: Dynamic, failure?: Dynamic) {
-  let history2 = versionHistoryOfPane(state);
-  let awaited = history2?.look?.awaited ?? null;
-  if (history2 === null || history2.look === null || awaited?.askId !== askId) return withNoEffects(state);
+export function versionLookAnswered(state: PageState, askId: number, failure: WhyVersionNotShown | null): PageTransition {
+  let history = versionHistoryOfPane(state);
+  let awaited = history?.look?.awaited ?? null;
+  if (history === null || history.look === null || awaited?.askId !== askId) return withNoEffects(state);
   if (failure === null)
     return withNoEffects(
       setVersionHistoryPane(state, {
-        ...history2,
+        ...history,
         look: {
           shown: awaited.version,
           awaited: null,
         },
       }),
     );
-  let { shown: shownBefore } = history2.look;
+  let { shown: shownBefore } = history.look;
   let historyAfter = setVersionHistoryPane(
     state,
     shownBefore === null
       ? {
-          ...history2,
+          ...history,
           look: null,
         }
       : {
-          ...history2,
+          ...history,
           look: {
             shown: shownBefore,
             awaited: null,
@@ -377,70 +456,70 @@ export function versionLookAnswered(state: PageState, askId?: Dynamic, failure?:
         },
   );
 }
-export function versionHistoryActed(state: PageState, workbook: ReadsWithTextMeasurer, action?: Dynamic) {
-  let history2 = versionHistoryOfPane(state);
-  if (history2 === null) return withNoEffects(state);
+export function versionHistoryActed(state: PageState, workbook: ReadsWithTextMeasurer, action: VersionHistoryAct): PageTransition {
+  let history = versionHistoryOfPane(state);
+  if (history === null) return withNoEffects(state);
   switch (action.kind) {
     case 'look': {
-      let value = commitEntryInPlaceIfEditing(state, workbook);
-      if (value === null) return lookAtVersion(state, history2, action.revision);
-      let value2 = lookAtVersion(value.state, history2, action.revision);
+      let committed = commitEntryInPlaceIfEditing(state, workbook);
+      if (committed === null) return lookAtVersion(state, history, action.revision);
+      let looking = lookAtVersion(committed.state, history, action.revision);
       return {
-        state: value2.state,
-        effects: [...value.effects, ...value2.effects],
+        state: looking.state,
+        effects: [...committed.effects, ...looking.effects],
       };
     }
     case 'endLook': {
-      if (history2.look === null)
+      if (history.look === null)
         return withNoEffects(
           setVersionHistoryPane(state, {
-            ...history2,
+            ...history,
             picked: null,
           }),
         );
-      let state2 = paneWithLookEnded(history2, action, history2.picked);
+      let paneAfterLook = paneWithLookEnded(history, action, history.picked);
       return {
-        state: setVersionHistoryPane(state, state2),
+        state: setVersionHistoryPane(state, paneAfterLook),
         effects: [
           {
             kind: 'endLookAtVersion',
-            pane: state2,
+            pane: paneAfterLook,
             thenRestore: null,
           },
         ],
       };
     }
     case 'restore': {
-      let value = history2.versions?.find((version?: Dynamic) => version.revision === action.revision);
-      if ((history2.look?.shown ?? null) !== null) {
-        let state2 = paneWithLookEnded(history2, action, value?.firstRevision ?? history2.picked);
+      let versionToRestore = history.versions?.find((version) => version.revision === action.revision);
+      if ((history.look?.shown ?? null) !== null) {
+        let paneAfterLook = paneWithLookEnded(history, action, versionToRestore?.firstRevision ?? history.picked);
         return {
-          state: setVersionHistoryPane(state, state2),
+          state: setVersionHistoryPane(state, paneAfterLook),
           effects: [
             {
               kind: 'endLookAtVersion',
-              pane: state2,
+              pane: paneAfterLook,
               thenRestore: action.revision,
             },
           ],
         };
       }
-      return value === undefined
+      return versionToRestore === undefined
         ? withNoEffects(state)
         : startTakingBack(state, workbook, {
             kind: 'allSinceVersion',
-            version: value,
+            version: versionToRestore,
           });
     }
     case 'showOlder':
-      return history2.hasOlder && history2.awaited?.of !== 'older' ? askForVersions(state, history2, 'older') : withNoEffects(state);
+      return history.hasOlder && history.awaited?.of !== 'older' ? askForVersions(state, history, 'older') : withNoEffects(state);
     case 'tryAgain': {
-      let value = versionsAskedOf(history2);
-      return history2.whyNotRead === null || history2.awaited?.of === value ? withNoEffects(state) : askForVersions(state, history2, value);
+      let askedOf = versionsAskedOf(history);
+      return history.whyNotRead === null || history.awaited?.of === askedOf ? withNoEffects(state) : askForVersions(state, history, askedOf);
     }
   }
 }
-export function takeBackFailed(state: PageState, { what: what }: Dynamic, why?: Dynamic) {
+export function takeBackFailed(state: PageState, { what }: Pick<TakingBackAsked, 'what'>, why: AgentUndoRefusalWhy): PageState {
   let stateCleared = {
     ...state,
     takingBack: null,
@@ -460,35 +539,40 @@ export function takeBackFailed(state: PageState, { what: what }: Dynamic, why?: 
     isUndoOfTurnNotToBeHad: state.isUndoOfTurnNotToBeHad || FATAL_TAKE_BACK_FAULTS.has(why),
     notice: {
       kind: 'turnOfAgentNotUndone',
-      why: why,
+      why,
     },
   };
 }
-export function retryTakingBack(state: PageState, takingBack?: Dynamic) {
+export function retryTakingBack(state: PageState, takingBack: TakingBackAsked): PageTransition {
   let timesMovedOn = takingBack.timesMovedOn + 1;
   return timesMovedOn < MOST_TIMES_MOVED_ON
     ? askForEditsThatTakeBack(state, {
         ...takingBack,
-        timesMovedOn: timesMovedOn,
+        timesMovedOn,
       })
     : withNoEffects(takeBackFailed(state, takingBack, 'storeMovedOn'));
 }
-export function editsThatTakeBackRead(state: PageState, workbook: ReadsWithTextMeasurer, askId?: Dynamic, answer?: Dynamic) {
-  let { takingBack: takingBack } = state;
+export function editsThatTakeBackRead(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  askId: number,
+  answer: EditsThatTakeBackAnswer,
+): PageTransition {
+  let { takingBack } = state;
   if (takingBack === null || takingBack.askId !== askId) return withNoEffects(state);
   let committed = commitEntryInPlaceIfEditing(state, workbook);
   if (committed !== null && committed.effects.length > 0) {
-    let value = retryTakingBack(committed.state, takingBack);
+    let retried = retryTakingBack(committed.state, takingBack);
     return {
-      state: value.state,
-      effects: [...committed.effects, ...value.effects],
+      state: retried.state,
+      effects: [...committed.effects, ...retried.effects],
     };
   }
   if (committed !== null) return editsThatTakeBackRead(committed.state, workbook, askId, answer);
   if (answer.kind === 'read') {
-    let { builtOnRevision: value, edits: value2 } = answer;
-    let { what: what } = takingBack;
-    let offerIfMade =
+    let { builtOnRevision, edits } = answer;
+    let { what } = takingBack;
+    let offerIfMade: VersionRestoredOffer | null =
       what.kind === 'allSinceVersion'
         ? {
             kind: 'versionRestored',
@@ -497,14 +581,14 @@ export function editsThatTakeBackRead(state: PageState, workbook: ReadsWithTextM
           }
         : null;
     return {
-      state: state,
+      state,
       effects: [
         {
           kind: 'queueEditsThatTakeBack',
-          askId: askId,
-          builtOnRevision: value,
-          edits: value2,
-          offerIfMade: offerIfMade,
+          askId,
+          builtOnRevision,
+          edits,
+          offerIfMade,
         },
       ],
     };
@@ -513,9 +597,11 @@ export function editsThatTakeBackRead(state: PageState, workbook: ReadsWithTextM
     case 'storeMovedOn':
       return retryTakingBack(state, takingBack);
     case 'unknownRevision': {
-      let value = takeBackFailed(state, takingBack, 'refused');
-      let value2 = versionHistoryOfPane(value);
-      return value2 === null || takingBack.what.kind !== 'allSinceVersion' ? withNoEffects(value) : askForVersions(value, value2, 'newest');
+      let failed = takeBackFailed(state, takingBack, 'refused');
+      let historyAfter = versionHistoryOfPane(failed);
+      return historyAfter === null || takingBack.what.kind !== 'allSinceVersion'
+        ? withNoEffects(failed)
+        : askForVersions(failed, historyAfter, 'newest');
     }
     case 'changedSince':
     case 'storeDoesNotKnowHow':
@@ -529,7 +615,7 @@ export function editsThatTakeBackRead(state: PageState, workbook: ReadsWithTextM
       return withNoEffects(takeBackFailed(state, takingBack, answer.why));
   }
 }
-export function takeBackAnswered(state: PageState, workbook: ReadsWithTextMeasurer, { askId: askId, outcome: outcome, offerIfMade: offerIfMade }: Dynamic) {
+export function takeBackAnswered(state: PageState, workbook: ReadsWithTextMeasurer, { askId, outcome, offerIfMade }: TakeBackAnswered): PageTransition {
   let takingBack = state.takingBack?.askId === askId ? state.takingBack : null;
   let stateCleared =
     takingBack === null
@@ -539,14 +625,14 @@ export function takeBackAnswered(state: PageState, workbook: ReadsWithTextMeasur
           takingBack: null,
         };
   if (outcome.kind === 'made') {
-    let value = {
+    let stateMade = {
       ...clearPassingNotice(stateCleared),
       dragging: null,
     };
-    let changedOnSheet = outcome.changed?.sheetId === value.sheetId ? outcome.changed : null;
+    let changedOnSheet = outcome.changed?.sheetId === stateMade.sheetId ? outcome.changed : null;
     return withNoEffects({
-      ...value,
-      lastDone: offerIfMade === null ? showChangedPlace(value, workbook, 'undone', changedOnSheet).lastDone : null,
+      ...stateMade,
+      lastDone: offerIfMade === null ? showChangedPlace(stateMade, workbook, 'undone', changedOnSheet).lastDone : null,
       undoOffer: offerIfMade,
       undoOfTurnOffered: null,
     });
@@ -556,15 +642,15 @@ export function takeBackAnswered(state: PageState, workbook: ReadsWithTextMeasur
     case 'builtOnAnotherRevision':
       return retryTakingBack(state, takingBack);
     case 'refused': {
-      let value = editRefusalReason(outcome.refusal);
+      let reason = editRefusalReason(outcome.refusal);
       return withNoEffects(
-        value === 'fault'
-          ? takeBackFailed(state, takingBack, value)
+        reason === 'fault'
+          ? takeBackFailed(state, takingBack, reason)
           : {
               ...stateCleared,
               notice: {
                 kind: 'editRefused',
-                why: value,
+                why: reason,
                 asked: 'otherEdit',
               },
             },
@@ -574,102 +660,104 @@ export function takeBackAnswered(state: PageState, workbook: ReadsWithTextMeasur
       return withNoEffects(takeBackFailed(state, takingBack, outcome.kind));
   }
 }
-export function authorShown(author?: Dynamic, profilesById?: Dynamic, awaitedAuthors?: Dynamic) {
+export function authorShown(author: EditAuthor, profilesById: Map<string, ProfileOfPerson>, awaitedAuthors: Set<string>): ShownAuthor {
   if (author.kind === 'agent') return author;
-  let { name = '', avatarUrl = '' } = profilesById.get(author.userId) ?? {};
+  let { name = '', avatarUrl = '' }: Partial<ProfileOfPerson> = profilesById.get(author.userId) ?? {};
   return {
     ...author,
     name: name === '' && awaitedAuthors.has(author.userId) ? null : name,
-    avatarUrl: avatarUrl,
+    avatarUrl,
   };
 }
-export function versionLookShown(look?: Dynamic) {
+export function versionLookShown(look: LookAtVersion | null): ShownVersionLook | null {
   let version = look?.awaited?.version ?? look?.shown ?? null;
   if (look === null || version === null) return null;
-  let { firstRevision: firstRevision, atMs: atMs } = version;
+  let { firstRevision, atMs } = version;
   return {
-    firstRevision: firstRevision,
-    atMs: atMs,
+    firstRevision,
+    atMs,
     isOpening: look.awaited !== null,
   };
 }
-export function shownVersionHistory(state: PageState) {
-  let [history2, { profilesById: profilesById }] = [versionHistoryOfPane(state), state];
-  if (history2 === null) return null;
+export function shownVersionHistory(state: PageState): ShownVersionHistory | null {
+  let [history, { profilesById }] = [versionHistoryOfPane(state), state];
+  if (history === null) return null;
   let behindAtChangeCount = isVersionHistoryBehind(state) ? state.workbookChangeCount : null;
-  let { takingBack: takingBack } = state;
+  let { takingBack } = state;
   let versionBeingRestored = takingBack?.what.kind === 'allSinceVersion' ? takingBack.what.version : null;
   if (
-    lastShownVersionHistory?.pane === history2 &&
+    lastShownVersionHistory?.pane === history &&
     lastShownVersionHistory.takingBack === takingBack &&
     lastShownVersionHistory.profilesById === profilesById &&
     lastShownVersionHistory.behindAtChangeCount === behindAtChangeCount
   )
     return lastShownVersionHistory.shown;
-  let shown = {
+  let shown: ShownVersionHistory = {
     versions:
-      history2.versions?.map(
-        (version?: Dynamic, index?: Dynamic) => ({
+      history.versions?.map(
+        (version, index) => ({
           revision: version.revision,
           firstRevision: version.firstRevision,
           atMs: version.atMs,
-          authors: version.authors.map((author?: Dynamic) => authorShown(author, profilesById, history2.authorsAwaited)),
+          authors: version.authors.map((author) => authorShown(author, profilesById, history.authorsAwaited)),
           isCurrent: index === 0,
           isBeingRestored: versionBeingRestored?.firstRevision === version.firstRevision,
         }),
       ) ?? null,
-    whyNotRead: history2.whyNotRead,
-    hasOlder: history2.hasOlder,
-    awaited: history2.awaited?.of ?? null,
+    whyNotRead: history.whyNotRead,
+    hasOlder: history.hasOlder,
+    awaited: history.awaited?.of ?? null,
     isTakingBack: takingBack !== null,
-    look: versionLookShown(history2.look),
-    picked: history2.picked,
-    isCaretForCells: history2.isCaretForCells,
-    pickedLast: history2.pickedLast,
-    behindAtChangeCount: behindAtChangeCount,
+    look: versionLookShown(history.look),
+    picked: history.picked,
+    isCaretForCells: history.isCaretForCells,
+    pickedLast: history.pickedLast,
+    behindAtChangeCount,
   };
   lastShownVersionHistory = {
-    pane: history2,
-    takingBack: takingBack,
-    profilesById: profilesById,
-    behindAtChangeCount: behindAtChangeCount,
-    shown: shown,
+    pane: history,
+    takingBack,
+    profilesById,
+    behindAtChangeCount,
+    shown,
   };
   return shown;
 }
 export const MOST_LOOKS_IN_VAIN = 3;
 export const MOST_TIMES_MOVED_ON = 3;
 export const TAKE_BACK_RETRY_MS = 1000;
-export const setVersionHistoryPane = (state: PageState, history2?: Dynamic) =>
-  history2 === versionHistoryOfPane(state)
+export const setVersionHistoryPane = (state: PageState, history: VersionHistoryInPane): PageState =>
+  history === versionHistoryOfPane(state)
     ? state
     : {
         ...state,
         sidePane: {
           kind: 'versionHistory',
-          history: history2,
+          history: history,
         },
       };
-export const versionsAskedOf = ({ versions: versions }: Dynamic) => (versions === null ? 'newest' : 'older');
+export const versionsAskedOf = ({ versions }: Pick<VersionHistoryInPane, 'versions'>): VersionsAwaited['of'] =>
+  versions === null ? 'newest' : 'older';
+/** The people among the authors whose profiles are still to be looked up. */
 export const authorsToLookUp = (
-  { profilesById: profilesById }: Dynamic,
-  { authorsLookedUp: authorsLookedUp }: Dynamic,
-  authors?: Dynamic,
-) =>
-  [...new (Set as Dynamic)(authors.flatMap((author?: Dynamic) => (author.kind === 'person' ? [author.userId] : [])))].filter(
-    (userId?: Dynamic) => !authorsLookedUp.has(userId) && (profilesById.get(userId)?.name ?? '') === '',
+  { profilesById }: Pick<PageState, 'profilesById'>,
+  { authorsLookedUp }: { authorsLookedUp: Set<string> },
+  authors: EditAuthor[],
+): string[] =>
+  [...new Set(authors.flatMap((author) => (author.kind === 'person' ? [author.userId] : [])))].filter(
+    (userId) => !authorsLookedUp.has(userId) && (profilesById.get(userId)?.name ?? '') === '',
   );
 export const paneWithLookEnded = (
-  history2: Dynamic,
-  { isFromBar: isFromBar, isByPointer: isByPointer }: Dynamic,
-  pickedLast?: Dynamic,
-) => ({
-  ...history2,
+  history: VersionHistoryInPane,
+  { isFromBar, isByPointer }: { isFromBar?: true; isByPointer?: true },
+  pickedLast: number | null,
+): VersionHistoryInPane => ({
+  ...history,
   look: null,
   picked: null,
   isCaretForCells: isFromBar === true || isByPointer === true,
-  pickedLast: pickedLast,
+  pickedLast,
 });
-export const RETRYABLE_TAKE_BACK_FAULTS = new (Set as Dynamic)(['busy', 'noAnswer', 'storeMovedOn']);
-export const FATAL_TAKE_BACK_FAULTS = new (Set as Dynamic)(['storeDoesNotKnowHow', 'recordDoesNotMatch', 'tookTooLong']);
+export const RETRYABLE_TAKE_BACK_FAULTS = new Set<AgentUndoRefusalWhy>(['busy', 'noAnswer', 'storeMovedOn']);
+export const FATAL_TAKE_BACK_FAULTS = new Set<AgentUndoRefusalWhy>(['storeDoesNotKnowHow', 'recordDoesNotMatch', 'tookTooLong']);
 lastShownVersionHistory = null;

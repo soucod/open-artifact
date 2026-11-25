@@ -22,11 +22,11 @@ import {
 } from './codec.ts';
 import { UNKNOWN_SVG_PART, unknownSvgParts } from './drawn-svg/vetting.ts';
 import { savedIdeaPath, VERSION_OPTION_LIMITS } from './ideas.ts';
-import { UPLOADED_BLOB_PATH_PATTERN, normalizeImageSource } from './image-source.ts';
+import { MAX_SVG_DATA_URL_CHARS, MAX_SVG_SOURCE_CHARS, UPLOADED_BLOB_PATH_PATTERN, normalizeImageSource } from './image-source.ts';
 import { escapedJsonByteLength } from './json.ts';
 import { normalizeClaimedAreas, normalizeElement } from './normalize.ts';
-import { ELEMENT_ID_PATTERN, MAX_BOARD_ELEMENTS, arrowEndIds, isBoxElement, type BoardElement, type ElementId } from './schema.ts';
-import { COLUMN_WIDTH_GUIDE, COLUMN_WIDTH_LIMITS, suggestedColumnWidth, toFiniteNumber, type TableData } from './table.ts';
+import { DRAWING_STYLES, ELEMENT_ID_PATTERN, MAX_BOARD_ELEMENTS, NOTE_COLORS, arrowEndIds, isBoxElement, type BoardElement, type ElementId, type TableElement } from './schema.ts';
+import { COLUMN_WIDTH_GUIDE, COLUMN_WIDTH_LIMITS, suggestedColumnWidth, tableRowIds, tableTintColor, toFiniteNumber, type TableData } from './table.ts';
 
 /** Severity of a board finding. */
 export type BoardCheckLevel = 'error' | 'warning' | 'info';
@@ -83,9 +83,36 @@ function groupDepth(svg: string): number {
   return deepest;
 }
 
+const countText = (count: number): string => count.toLocaleString('en-US');
+
+/** Findings about a drawing over {@link MAX_SVG_SOURCE_CHARS} or {@link MAX_SVG_DATA_URL_CHARS}, with how much to cut. */
+function drawingSizeFindings(src: string, svg: string, base64: boolean): Array<[BoardCheckLevel, string]> {
+  const findings: Array<[BoardCheckLevel, string]> = [];
+  if (svg.length > MAX_SVG_SOURCE_CHARS) {
+    findings.push([
+      'error',
+      `The SVG is ${countText(svg.length)} characters, over the ${countText(MAX_SVG_SOURCE_CHARS)} limit: cut at least ${countText(svg.length - MAX_SVG_SOURCE_CHARS)}. The drawing shows as an empty picture.`,
+    ]);
+  }
+  const stored = base64 ? src.length : 'data:image/svg+xml;base64,'.length + 4 * Math.ceil(new TextEncoder().encode(svg).length / 3);
+  if (src.length > MAX_SVG_DATA_URL_CHARS) {
+    findings.push([
+      'error',
+      `The SVG data URI is ${countText(src.length)} characters, over the ${countText(MAX_SVG_DATA_URL_CHARS)} limit: cut at least ${countText(src.length - MAX_SVG_DATA_URL_CHARS)}. The drawing shows as an empty picture.`,
+    ]);
+  } else if (stored > MAX_SVG_DATA_URL_CHARS) {
+    findings.push([
+      'error',
+      `Stored as base64 this drawing takes ${countText(stored)} characters, over the ${countText(MAX_SVG_DATA_URL_CHARS)} limit: cut its SVG by at least ${countText(Math.ceil(((stored - MAX_SVG_DATA_URL_CHARS) * 3) / 4))} characters. The drawing shows as an empty picture.`,
+    ]);
+  }
+  return findings;
+}
+
 /**
  * Findings about an image's SVG drawing (`data:image/svg+xml…`): a raw `#`,
- * a URI that does not decode or holds no `<svg>`, and what makes the page
+ * a URI that does not decode or holds no `<svg>`, a drawing over the size
+ * limits (saying by how much), and what makes the page
  * show a grey box instead (nesting, opacity layers, parts it does not know).
  * Empty for any other source.
  */
@@ -97,8 +124,8 @@ export function drawingFindings(src: unknown): Array<[BoardCheckLevel, string]> 
   }
   const svg = drawingText(src);
   if (svg === undefined) return [['error', 'The SVG data URI does not decode (a lone % is written %25).']];
-  if (!/^\s*(?:<\?xml[^>]*\?>\s*)?<svg[\s>]/i.test(svg)) return [['error', 'The SVG data URI holds no <svg> element.']];
-  const findings: Array<[BoardCheckLevel, string]> = [];
+  const findings = drawingSizeFindings(src, svg, base64);
+  if (!/^\s*(?:<\?xml[^>]*\?>\s*)?<svg[\s>]/i.test(svg)) return [...findings, ['error', 'The SVG data URI holds no <svg> element.']];
   const depth = groupDepth(svg);
   if (depth > MAX_DRAWING_GROUP_DEPTH) {
     findings.push(['error', `<g> groups nest ${depth} deep; with more than ${MAX_DRAWING_GROUP_DEPTH} nested <g> the page shows a grey box instead of the drawing. Flatten the groups.`]);
@@ -210,6 +237,41 @@ export function tableColumnFindings(cols: unknown, table?: TableData): Array<[Bo
   return findings;
 }
 
+/**
+ * Findings about a stored table's `fills` and `heat`: colors that are not
+ * a block color name or `#rrggbb`, and rows or columns the table does not
+ * have (the board ignores both). `""` clears a color and is not reported.
+ */
+export function tableTintFindings(fills: unknown, heat: unknown, table: TableData & Pick<TableElement, 'head'>): Array<[BoardCheckLevel, string]> {
+  const findings: Array<[BoardCheckLevel, string]> = [];
+  const look = (where: string, value: unknown, known: boolean): void => {
+    if (!known) findings.push(['warning', `${where} names a row or column the table does not have: the board ignores it.`]);
+    else if (value !== '' && tableTintColor(value) === undefined) {
+      findings.push(['warning', `${where} is ${JSON.stringify(value)}, not a table color (${NOTE_COLORS.join(', ')} or #rrggbb): the board ignores it.`]);
+    }
+  };
+  for (const [rowId, cells] of isPlainObject(fills) ? Object.entries(fills) : []) {
+    for (const [colId, value] of isPlainObject(cells) ? Object.entries(cells) : []) {
+      look(`"fills" ${rowId} / ${colId}`, value, Object.hasOwn(table.rows, rowId) && Object.hasOwn(table.cols, colId));
+    }
+  }
+  const heatMaps = isPlainObject(heat) ? heat : {};
+  const headRowId = table.head ? tableRowIds(table)[0] : undefined;
+  const shaded = { cols: 0, rows: 0 };
+  for (const axis of ['cols', 'rows'] as const) {
+    const colors = heatMaps[axis];
+    for (const [id, value] of isPlainObject(colors) ? Object.entries(colors) : []) {
+      if (axis === 'rows' && id === headRowId) findings.push(['warning', `"heat" rows ${id} is the header row, which is never shaded: the board ignores it.`]);
+      else look(`"heat" ${axis} ${id}`, value, Object.hasOwn(table[axis], id));
+      if (value !== '') shaded[axis] += 1;
+    }
+  }
+  if (shaded.cols > 0 && shaded.rows > 0) {
+    findings.push(['info', '"heat" shades both columns and rows; where they cross, the column\'s shade shows. Heat maps read best along one axis: keep "cols" or "rows".']);
+  }
+  return findings;
+}
+
 /** True for paths the board reads. */
 function isKnownPath(path: string): boolean {
   return (
@@ -287,6 +349,13 @@ export function checkBoardDocuments(
       if (!drawing.some(([level]) => level === 'error') && normalizeImageSource(stored.src) === undefined) {
         add(path, 'error', 'The image "src" is not allowed: use an uploaded /_blob/<id> URL, an https URL, or a small data: URL. It shows as an empty drawing.');
       }
+      if (stored.style !== undefined) {
+        if (typeof stored.src !== 'string' || !stored.src.startsWith('data:image/svg+xml')) {
+          add(path, 'warning', 'Only SVG drawings take a "style": the board ignores it on this image.');
+        } else if (!(DRAWING_STYLES as readonly unknown[]).includes(stored.style)) {
+          add(path, 'error', `"style" is ${JSON.stringify(stored.style)}; a drawing's style is one of ${DRAWING_STYLES.join(', ')}. The board draws it without one.`);
+        }
+      }
       const blob = typeof stored.src === 'string' && UPLOADED_BLOB_PATH_PATTERN.test(stored.src) ? stored.src.slice(-32) : undefined;
       if (blob && options.blobExists && !options.blobExists(blob)) {
         add(path, 'error', `/_blob/${blob} is not an upload of this board: upload the image first and use the url it prints.`);
@@ -298,7 +367,9 @@ export function checkBoardDocuments(
       continue;
     }
     if (element.id !== raw.id) add(path, 'warning', `The id ${raw.id} is taken: the board gives this element the id ${element.id}.`);
-    if (element.type === 'table') for (const [level, message] of tableColumnFindings(stored?.cols, element)) add(path, level, message);
+    if (element.type === 'table') {
+      for (const [level, message] of [...tableColumnFindings(stored?.cols, element), ...tableTintFindings(stored?.fills, stored?.heat, element)]) add(path, level, message);
+    }
     taken.add(element.id);
     kept.push(element);
     if (!ordered.has(raw.id)) add(path, 'warning', `Not listed in ${describe(BOARD_META_PATH)} "order": it is drawn on top of everything.`);
@@ -339,13 +410,19 @@ export function checkBoardDocuments(
     if (problem) add(path, 'error', `${problem.message.slice(path.length + 2)} The page drops the idea.`);
   }
 
-  // Agent claims.
+  // Agent claims: `{}` ends one; one that still frames something should end once the work is written.
   for (const [path, value] of documents) {
     if (!path.startsWith(BOARD_CLAIM_PREFIX)) continue;
     const key = path.slice(BOARD_CLAIM_PREFIX.length);
     const [claim] = normalizeClaimedAreas([{ ...value, key }]);
-    if (claim === undefined || Object.keys(claim).length === 1) {
-      add(path, 'info', 'This claim marks no area and no elements: it only shows the agent is at work.');
+    const marks = [
+      claim?.x !== undefined ? 'an area' : '',
+      claim?.ids !== undefined ? `${claim.ids.length} element${claim.ids.length === 1 ? '' : 's'}` : '',
+    ].filter((mark) => mark !== '');
+    if (marks.length > 0) {
+      add(path, 'warning', `This claim still frames ${marks.join(' and ')} for everyone: once the work is written, set it to {} so the frame goes.`);
+    } else if (Object.keys(value).length > 0) {
+      add(path, 'warning', 'The board reads no area or elements from this claim (x, y, w, h are numbers; ids are element ids): it frames nothing. Set it to {} once the work is written.');
     }
   }
 

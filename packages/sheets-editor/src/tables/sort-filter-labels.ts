@@ -1,9 +1,21 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SortDirection } from '@open-artifact/sheets-core';
+import type { SortHoldsOfColumn, SuggestedAskWhat } from '../state/initial-state.ts';
+import type { SaidOfFilterItem, SaidOfSortColumn } from './own-filters.ts';
 import { sortOrderLabel } from '../i18n/grid-action-labels.ts';
 import { translateMessage, joinMessageParts, MESSAGE_LOCALE } from '../i18n/messages.ts';
 import { filterMessages, describeFilterLineAlternatives } from './filter-messages.ts';
 import { ruleColumnName } from '../messages/conditional-format.ts';
-export function sortDirectionWords(holds?: Dynamic, direction?: Dynamic) {
+/** What rows a filter lets through, line by line, and the columns they are sorted by. */
+export interface FilterAndSortSaid {
+  lines: SaidOfFilterItem[][];
+  sortBy: SaidOfSortColumn[];
+}
+/** The first words of a summary of a filter and sort, and the words of the sort that follow, if any. */
+export interface FilterAndSortSummaryParts {
+  first: string;
+  thenSort: string | null;
+}
+export function sortDirectionWords(holds: SortHoldsOfColumn | null, direction: SortDirection): string {
   if (holds !== null) return sortOrderLabel(holds, direction);
   return direction === 'ascending'
     ? translateMessage({
@@ -15,7 +27,7 @@ export function sortDirectionWords(holds?: Dynamic, direction?: Dynamic) {
         id: '/A2U0xMiaS',
       });
 }
-export function filterViewChoiceLabel(choice?: Dynamic) {
+export function filterViewChoiceLabel(choice: SuggestedAskWhat): string {
   switch (choice.kind) {
     case 'mine':
       return sortAndFilterMessages.onlyMine();
@@ -53,7 +65,7 @@ export function filterViewChoiceLabel(choice?: Dynamic) {
       );
   }
 }
-export function sortKeysWords([firstKey, ...otherKeys]: Dynamic, isAlone?: Dynamic) {
+export function sortKeysWords([firstKey, ...otherKeys]: readonly SaidOfSortColumn[], isAlone: boolean): string | null {
   if (firstKey === undefined) return null;
   let firstWords = isAlone
     ? translateMessage(
@@ -76,23 +88,23 @@ export function sortKeysWords([firstKey, ...otherKeys]: Dynamic, isAlone?: Dynam
       );
   return withThenByWords(firstWords, otherKeys);
 }
-export function withThenByWords(firstWords?: Dynamic, otherKeys?: Dynamic) {
+export function withThenByWords(firstWords: string, otherKeys: readonly SaidOfSortColumn[]): string {
   return otherKeys.reduce(
-    (input?: Dynamic, options?: Dynamic) =>
+    (before, key) =>
       translateMessage(
         {
           defaultMessage: '{before}, then {column}',
           id: 'qzFZJnigGD',
         },
         {
-          before: input,
-          column: sortKeyWords(options),
+          before,
+          column: sortKeyWords(key),
         },
       ),
     firstWords,
   );
 }
-export function filterAndSortSummaryParts({ lines: lines, sortBy: sortBy }: Dynamic) {
+export function filterAndSortSummaryParts({ lines, sortBy }: FilterAndSortSaid): FilterAndSortSummaryParts {
   let sortWords = sortKeysWords(sortBy, lines.length === 0);
   return lines.length === 0
     ? {
@@ -100,12 +112,12 @@ export function filterAndSortSummaryParts({ lines: lines, sortBy: sortBy }: Dyna
         thenSort: null,
       }
     : {
-        first: joinAsUnitList(lines.map((input?: Dynamic) => joinMessageParts(describeFilterLineAlternatives(input)))),
+        first: joinAsUnitList(lines.map((line) => joinMessageParts(describeFilterLineAlternatives(line)))),
         thenSort: sortWords,
       };
 }
-export function filterAndSortSummary(filterAndSort?: Dynamic) {
-  let { first: first, thenSort: thenSort } = filterAndSortSummaryParts(filterAndSort);
+export function filterAndSortSummary(filterAndSort: FilterAndSortSaid): string {
+  let { first, thenSort } = filterAndSortSummaryParts(filterAndSort);
   return thenSort === null ? first : joinAsUnitList([first, thenSort]);
 }
 export const customSortMessages = {
@@ -165,66 +177,66 @@ export const customSortMessages = {
       id: 'uWw+xP0N6j',
     }),
 };
-export const columnLettersLabel = (letters?: Dynamic) =>
+export const columnLettersLabel = (letters: string): string =>
   translateMessage(
     {
       defaultMessage: 'Column {letters}',
       id: 'ZRJxTihJCV',
     },
     {
-      letters: letters,
+      letters,
     },
   );
-export const labeledSortColumnWords = (label?: Dynamic, column?: Dynamic) =>
+export const labeledSortColumnWords = (label: string, column: string): string =>
   translateMessage(
     {
       defaultMessage: '{label}: {column}',
       id: 'uejRhJTxo2',
     },
     {
-      label: label,
-      column: column,
+      label,
+      column,
     },
   );
-export const sortOrderOfColumnLabel = (column?: Dynamic, direction?: Dynamic) =>
+export const sortOrderOfColumnLabel = (column: string, direction: string): string =>
   translateMessage(
     {
       defaultMessage: 'Order of {column}: {direction}',
       id: 'gCmbSkn1um',
     },
     {
-      column: column,
-      direction: direction,
+      column,
+      direction,
     },
   );
-export const removeSortColumnLabel = (column?: Dynamic) =>
+export const removeSortColumnLabel = (column: string): string =>
   translateMessage(
     {
       defaultMessage: 'Remove {column} from the sort',
       id: 'wUpSuFcVVg',
     },
     {
-      column: column,
+      column,
     },
   );
-export const reorderSortColumnLabel = (column?: Dynamic) =>
+export const reorderSortColumnLabel = (column: string): string =>
   translateMessage(
     {
       defaultMessage: 'Reorder {column}',
       id: 'KM4xGxgZK2',
     },
     {
-      column: column,
+      column,
     },
   );
-export const quotedFilterWords = (words?: Dynamic) =>
+export const quotedFilterWords = (words: string): string =>
   translateMessage(
     {
       defaultMessage: '“{words}”',
       id: 'IHDZaAzRxR',
     },
     {
-      words: words,
+      words,
     },
   );
 export const sortAndFilterMessages = {
@@ -293,17 +305,17 @@ export const sortAndFilterMessages = {
       defaultMessage: 'Agent is temporarily unavailable. Try again later.',
       id: 'LUJnRAzRGK',
     }),
-  wordsNotUnderstood: (input?: Dynamic) =>
+  wordsNotUnderstood: (wordsNotKnown: readonly string[]) =>
     translateMessage(
       {
         defaultMessage: 'Couldn’t understand {words}.',
         id: 'PsmATlHCcO',
       },
       {
-        words: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(input.map(quotedFilterWords)),
+        words: new Intl.ListFormat(MESSAGE_LOCALE).format(wordsNotKnown.map(quotedFilterWords)),
       },
     ),
-  tableHasBlankRows: (input?: Dynamic) =>
+  tableHasBlankRows: (blankRows: number) =>
     translateMessage(
       {
         defaultMessage:
@@ -311,16 +323,21 @@ export const sortAndFilterMessages = {
         id: '2/P/UNgigV',
       },
       {
-        count: input,
+        count: blankRows,
       },
     ),
+  tableHasSections: () =>
+    translateMessage({
+      defaultMessage: 'Can’t sort this table while it has sections or subtotals.',
+      id: 'EBcH8Qxjwo',
+    }),
   cannotEdit: () =>
     translateMessage({
       defaultMessage: 'Can’t sort because you can’t edit this Sheet.',
       id: 'TG4yDHr/Jn',
     }),
 };
-export const sortByColumnLabel = ({ column: column, direction: direction, holds: holds }: Dynamic) =>
+export const sortByColumnLabel = ({ column, direction, holds }: SaidOfSortColumn): string =>
   translateMessage(
     {
       defaultMessage: 'Sort by {column}: {direction}',
@@ -331,17 +348,17 @@ export const sortByColumnLabel = ({ column: column, direction: direction, holds:
       direction: sortDirectionWords(holds, direction),
     },
   );
-export const rowCountWords = (count?: Dynamic) =>
+export const rowCountWords = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {# row} other {# rows}}',
       id: 'gSxh2fW9E+',
     },
     {
-      count: count,
+      count,
     },
   );
-export const sortKeyWords = ({ column: column, direction: direction, holds: holds }: Dynamic) =>
+export const sortKeyWords = ({ column, direction, holds }: SaidOfSortColumn): string =>
   direction === 'ascending'
     ? ruleColumnName(column)
     : translateMessage(
@@ -354,7 +371,7 @@ export const sortKeyWords = ({ column: column, direction: direction, holds: hold
           direction: sortDirectionWords(holds, direction),
         },
       );
-export const sortedByWords = ([firstKey, ...otherKeys]: Dynamic) =>
+export const sortedByWords = ([firstKey, ...otherKeys]: readonly SaidOfSortColumn[]): string =>
   withThenByWords(
     translateMessage(
       {
@@ -367,7 +384,7 @@ export const sortedByWords = ([firstKey, ...otherKeys]: Dynamic) =>
     ),
     otherKeys,
   );
-export const joinAsUnitList = (parts?: Dynamic) =>
-  new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE, {
+export const joinAsUnitList = (parts: readonly string[]): string =>
+  new Intl.ListFormat(MESSAGE_LOCALE, {
     type: 'unit',
   }).format(parts);

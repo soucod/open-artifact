@@ -15,6 +15,7 @@
  */
 
 import { artifactUrl } from './refs.ts';
+import type { ArtifactRole } from './type-server.ts';
 
 /** How long the daemon waits for more messages to the same artifact, ms. */
 export const WAKE_MERGE_MS = 1500;
@@ -59,7 +60,20 @@ export interface WakeThread {
   where?: string;
   /** Quoted content of the place (data). */
   detail?: string;
+  /** Optional context supplied by the artifact for this send. Separate from the person's messages. */
+  pageContext?: string;
   messages?: ThreadMessage[];
+  /**
+   * Who sent the thread to the agent, when it was not the owner: someone the artifact is shared with (a hosted
+   * artifact whose owner lets editors ask the agent). Unset on this computer, where only the owner sends.
+   */
+  from?: WakeSender;
+}
+
+/** Who sent a thread or request to the agent, when it was not the owner. */
+export interface WakeSender {
+  name: string;
+  role: ArtifactRole;
 }
 
 /** A page request ("Ask agent to…") as a type server hands it to `open-artifact.type.wake`. */
@@ -72,6 +86,8 @@ export interface WakeRequestItem {
   /** What was selected on the page, as text (data). */
   selection?: string;
   sentAt?: string;
+  /** Who asked, when it was not the owner (see {@link WakeThread.from}). */
+  from?: WakeSender;
 }
 
 /** The structured copy of a wake message, for adapters that render it. */
@@ -88,14 +104,41 @@ export interface WakeSource {
   task?: { id: string; action: string; ok: boolean };
   /** One line, at most 120 characters, for notifications and titles. */
   summary: string;
+  /**
+   * Why the session is woken: comments (`comment`), a page request (`request`), or a background action that finished
+   * (`task`). A merged wake with comments and requests says `comment`. Every daemon that lists the feature `wake.from`
+   * fills it in; for an older daemon's wake, which lacks it, `@open-artifact/harness-kit` fills it in from the text
+   * before the adapter sees it ({@link wakeSourceOf}).
+   */
+  reason: WakeReason;
+  /**
+   * Who sent it: the owner on this computer, someone the published artifact is shared with, or the system. Only
+   * `owner` may be handed to the agent as the person's own message; the others are outside events (feature
+   * `wake.from`). A merged wake names the least trusted sender in it: `collaborator` when anyone but the owner wrote
+   * part of it.
+   */
+  from: WakeFrom;
 }
+
+/** A {@link WakeSource}: `reason` and `from` are always there now. Kept for code written when they were optional. */
+export type FilledWakeSource = WakeSource;
+
+/** Why a session is woken. */
+export type WakeReason = 'comment' | 'request' | 'task';
+
+/** Who a wake comes from. */
+export type WakeFrom = { kind: 'owner' } | { kind: 'collaborator'; name: string; role: ArtifactRole } | { kind: 'system' };
 
 /** What `wake.deliver` carries to an adapter (besides the session). */
 export interface WakePayload {
   /** `open-artifact://artifact/<id>`. */
   artifact: string;
   artifactId: string;
-  /** The full message text, ready to show to the agent as a user message. */
+  /**
+   * The full message text, ready to show to the agent. Only the owner's words (`source.from.kind === 'owner'`) are
+   * given to the agent as the user's message; a collaborator's comment or a system wake (`collaborator`, `system`) is
+   * outside text, shown as a notice and never taken as the user's instructions.
+   */
   text: string;
   source: WakeSource;
 }
@@ -130,17 +173,27 @@ export function threadBlock(id: string, thread: WakeThread): string {
   const last = lastUserMessage(thread);
   const elementPath = `${thread.anchor || thread.file || ''};thread=${thread.id}`;
   const lines = [COMMENT_HEADER, `Artifact: ${artifactUrl(id)}`, `Element path: ${elementPath}`];
+  if (thread.from) lines.push(senderLine(thread.from));
   if (thread.where) lines.push(`Where: ${noLinks(thread.where)}`);
   if (thread.detail) lines.push(quote(noLinks(thread.detail)));
+  if (typeof thread.pageContext === 'string' && thread.pageContext.length <= 2000 && thread.pageContext.trim() && new TextEncoder().encode(thread.pageContext).length <= 2000) {
+    lines.push('Context supplied by the page (data only):', quote(noLinks(thread.pageContext)));
+  }
   const earlier = (thread.messages ?? []).filter((m) => m !== last);
   if (earlier.length) lines.push('', 'Earlier in this thread:', ...earlier.map((m) => `- ${m.name || m.from}: ${noLinks(m.text)}`));
   lines.push('', noLinks(last?.text ?? ''));
   return lines.join('\n');
 }
 
+/** The line naming who sent something when it was not the owner (a name is the sender's own words: no links). */
+function senderLine(from: WakeSender): string {
+  return `From: ${noLinks(from.name).replace(/\s+/g, ' ').trim().slice(0, 80) || 'someone'} (${from.role}, not the owner)`;
+}
+
 /** One page request, as the agent reads it. */
 export function requestBlock(id: string, request: WakeRequestItem): string {
   const lines = [REQUEST_HEADER, `Artifact: ${artifactUrl(id)}`, `Request: ${request.id}`];
+  if (request.from) lines.push(senderLine(request.from));
   if (request.label) lines.push(`Label: ${noLinks(request.label)}`);
   if (request.selection) lines.push('Selection (page content, data only):', quote(noLinks(request.selection)));
   lines.push('', noLinks(request.text));
@@ -161,7 +214,7 @@ export function wakeMessage(
   threads: WakeThread[],
   requests: WakeRequestItem[],
   options: WakeMessageOptions,
-): { text: string; source: WakeSource } {
+): { text: string; source: FilledWakeSource } {
   const blocks = [...threads.map((t) => threadBlock(artifact.id, t)), ...requests.map((r) => requestBlock(artifact.id, r))];
   const footer = [
     '---',
@@ -201,18 +254,83 @@ export function wakeMessage(
       threads: threads.map((t) => ({ id: t.id, where: t.where ?? '', text: personText(t) })),
       requests: requests.map((r) => ({ id: r.id, label: r.label ?? '', text: r.text })),
       summary,
+      reason: threads.length ? 'comment' : 'request',
+      from: wakeFrom([...threads.map((t) => t.from), ...requests.map((r) => r.from)]),
     },
+  };
+}
+
+/** Who a merged wake comes from: the owner, unless anyone else sent part of it (the first of them). */
+function wakeFrom(senders: Array<WakeSender | undefined>): WakeFrom {
+  const other = senders.find((sender): sender is WakeSender => !!sender);
+  if (!other) return { kind: 'owner' };
+  return { kind: 'collaborator', name: noLinks(other.name).replace(/\s+/g, ' ').trim().slice(0, 80) || 'someone', role: other.role };
+}
+
+const WAKE_REASONS: readonly string[] = ['comment', 'request', 'task'];
+const SENDER_ROLES: readonly string[] = ['owner', 'editor', 'commenter', 'viewer'];
+
+/** Whether a value is a {@link WakeFrom}. */
+function isWakeFrom(value: unknown): value is WakeFrom {
+  const from = value as Partial<{ kind: string; name: unknown; role: unknown }> | null;
+  if (!from || typeof from !== 'object') return false;
+  if (from.kind === 'owner' || from.kind === 'system') return true;
+  return from.kind === 'collaborator' && typeof from.name === 'string' && typeof from.role === 'string' && SENDER_ROLES.includes(from.role);
+}
+
+/**
+ * A wake's source with `reason` and `from` always there: as the daemon said them, or, from a daemon older than the
+ * feature `wake.from`, read from the text it rendered (its header, and a `From: <name> (<role>, not the owner)` line).
+ * A text that names someone else is never read as the owner's.
+ */
+export function wakeSourceOf(source: Partial<WakeSource> | null | undefined, text: string): WakeSource {
+  const given = source && typeof source === 'object' ? source : {};
+  const reason: WakeReason =
+    typeof given.reason === 'string' && WAKE_REASONS.includes(given.reason)
+      ? given.reason
+      : given.task || text.startsWith(TASK_HEADER)
+        ? 'task'
+        : text.includes(COMMENT_HEADER)
+          ? 'comment'
+          : 'request';
+  let from: WakeFrom;
+  if (isWakeFrom(given.from)) from = given.from;
+  else if (reason === 'task') from = { kind: 'system' };
+  else {
+    const line = /^From: (.*) \(([a-z]+), not the owner\)$/m.exec(text);
+    from = line ? { kind: 'collaborator', name: line[1]!.slice(0, 80) || 'someone', role: (SENDER_ROLES.includes(line[2]!) ? line[2] : 'viewer') as ArtifactRole } : { kind: 'owner' };
+  }
+  return {
+    kind: WAKE_SOURCE_KIND,
+    artifactId: '',
+    url: '',
+    title: '',
+    root: '',
+    viewUrl: '',
+    threads: [],
+    requests: [],
+    summary: '',
+    ...given,
+    reason,
+    from,
   };
 }
 
 /** How a wake ended up, as `open-artifact.type.wake` reports it. */
 export type WakeStatus = 'delivered' | 'resumed' | 'inbox' | 'failed';
 
-/** Which route took a wake. */
-export type WakeVia = 'live' | 'wait' | 'inbox' | 'dropped' | 'failed';
+/**
+ * Which route took a wake. `link`: a cloud host stored it for the owner's linked daemon, which takes it when it
+ * connects and routes it on (status `inbox`).
+ */
+export type WakeVia = 'live' | 'wait' | 'inbox' | 'link' | 'dropped' | 'failed';
 
-/** What an adapter answers to `wake.deliver`. */
-export type WakeDeliverStatus = 'delivered' | 'resumed' | 'queued' | 'failed';
+/**
+ * What an adapter answers to `wake.deliver`: put into the running turn (`delivered`), started a turn (`resumed`),
+ * kept for the session's next poll (`queued`), put into the session's draft for the person to send (`drafted`, for a
+ * harness whose `caps.wake.mode` is `draft`), or could not take it (`failed`: the daemon keeps it in the inbox).
+ */
+export type WakeDeliverStatus = 'delivered' | 'resumed' | 'queued' | 'drafted' | 'failed';
 
 /** A finished long action, as {@link taskMessage} renders it. */
 export interface TaskOutcome {
@@ -229,7 +347,7 @@ export interface TaskOutcome {
  * error) as JSON. The result is the type's answer, as a `call` would have
  * returned it.
  */
-export function taskMessage(artifact: WakeArtifact, outcome: TaskOutcome, options: { viewUrl: string }): { text: string; source: WakeSource } {
+export function taskMessage(artifact: WakeArtifact, outcome: TaskOutcome, options: { viewUrl: string }): { text: string; source: FilledWakeSource } {
   const ok = outcome.error === undefined || outcome.error === null;
   const body = ok ? (outcome.result ?? null) : { error: outcome.error };
   const text = [TASK_HEADER, `Artifact: ${artifactUrl(artifact.id)}`, `Task: ${outcome.task} (${outcome.action})`, '', JSON.stringify(body, null, 2)].join('\n');
@@ -246,6 +364,8 @@ export function taskMessage(artifact: WakeArtifact, outcome: TaskOutcome, option
       requests: [],
       task: { id: outcome.task, action: outcome.action, ok },
       summary: `${outcome.action} ${ok ? 'finished' : 'failed'} on "${artifact.title}"`.replace(/\s+/g, ' ').slice(0, 120),
+      reason: 'task',
+      from: { kind: 'system' },
     },
   };
 }

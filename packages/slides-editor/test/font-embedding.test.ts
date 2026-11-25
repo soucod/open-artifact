@@ -18,7 +18,9 @@ import {
 } from '../src/services/export/font-embedding.ts';
 import { containsGlyph, EOT_MAGIC, EOT_VERSION, fsTypeAllowsEmbedding, panoseHex, readFontTables, wrapEot } from '../src/services/export/font-tables.ts';
 import { ExportNotes, nameList } from '../src/services/export/notes.ts';
-import { pptxEntries, type PptxSlide } from '../src/services/export/ooxml.ts';
+import { fetchRetrying } from '../src/services/export/assets.ts';
+import { lateFontFamilies } from '../src/render/fonts.ts';
+import { pptxEntries, type Paragraph, type PptxSlide } from '../src/services/export/ooxml.ts';
 
 const text = (data: Uint8Array | string): string => (typeof data === 'string' ? data : new TextDecoder().decode(data));
 
@@ -226,6 +228,16 @@ describe('font embedding: choices', () => {
     assert.equal(uses.get('inter')!.italic, false);
     assert.equal(uses.get('lora')!.italic, true);
   });
+
+  it('counts a marker drawn in the text font among that font\u2019s characters', () => {
+    const body = (bullet: NonNullable<Paragraph['bullet']>) => ({ inset: { l: 0, t: 0, r: 0, b: 0 }, paragraphs: [{ endSize: 20, bullet, runs: [{ text: 'ab', size: 20, font: 'Inter' }] }] });
+    const shape = (bullet: NonNullable<Paragraph['bullet']>) => ({ type: 'shape' as const, name: 'List 1', box: { x: 0, y: 0, w: 10, h: 10 }, geometry: { preset: 'rect' as const }, fill: { type: 'none' as const }, text: body(bullet) });
+    const uses = collectFontUses([{ elements: [shape({ type: 'char', char: '→ ', ownFont: true }), shape({ type: 'char', char: '•' })] }]);
+    const inter = uses.get('inter')!;
+    assert.ok(inter.codePoints.has('→'.codePointAt(0)!));
+    assert.ok(!inter.codePoints.has('•'.codePointAt(0)!));
+    assert.equal(inter.chars, 6);
+  });
 });
 
 describe('font embedding: fetching and the budget', () => {
@@ -294,6 +306,30 @@ describe('font embedding: fetching and the budget', () => {
     ]);
   });
 
+  it('tells files that took too long apart from files that failed', async () => {
+    const uses = new Map([use('Slow', 'Taking its time'), use('Gone', 'Ok')]);
+    const faces = ['Slow', 'Gone'].map((family) => ({ family, href: `https://fonts.googleapis.com/css2?family=${family}` }));
+    const options: EmbeddingOptions = {
+      async fetchJson(url) {
+        if (url.endsWith('gone')) throw new Error('fetch 404');
+        return catalog();
+      },
+      fetchBytes: (_url, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+      deadlineMs: 20,
+    };
+    const result = await embedDeckFonts(uses, faces, options);
+    assert.deepEqual(result.families.map((f) => [f.family, f.outcome]), [['Slow', 'slow'], ['Gone', 'fetch']]);
+    const notes = new ExportNotes();
+    noteFontEmbedding(notes, result);
+    assert.deepEqual(notes.list(), [
+      'Gone: not embedded because their files could not be downloaded.',
+      'Slow: not embedded because their files took too long to download; exporting again may carry them.',
+    ]);
+  });
+
   it('gives the budget to the most used families first', async () => {
     const uses = new Map([use('Small', 'ab'), use('Big', 'a lot of text set in this family')]);
     const faces = [{ family: 'Small', href: 'https://fonts.googleapis.com/css2?family=Small' }, { family: 'Big', href: 'https://fonts.googleapis.com/css2?family=Big' }];
@@ -334,6 +370,71 @@ describe('font embedding: fetching and the budget', () => {
     );
     const otf = await embedDeckFonts(uses, [{ family: 'Brand', src: '/_blob/otf' }], { ...fetchers({}, () => null), readFile: async () => makeFont({ cff: true }) });
     assert.deepEqual(otf.families, [{ family: 'Brand', outcome: 'format' }]);
+  });
+});
+
+describe('fetching for an export', () => {
+  const answer = (status: number) => new Response(status === 200 ? 'ok' : null, { status });
+  /** A fetch answering the statuses in turn ('throw' fails like a dropped connection) and recording each request's cache mode. */
+  function scripted(...answers: Array<number | 'throw'>) {
+    const calls: Array<RequestCache | undefined> = [];
+    const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init?.cache);
+      const next = answers.shift() ?? 200;
+      if (next === 'throw') throw new TypeError('Failed to fetch');
+      return answer(next);
+    }) as typeof fetch;
+    return { fetcher, calls };
+  }
+
+  it('tries once more, past the cache, after a network error or a busy server', async () => {
+    for (const first of ['throw', 503, 429, 408] as const) {
+      const { fetcher, calls } = scripted(first, 200);
+      assert.equal((await fetchRetrying('https://x.test/a.woff2', {}, fetcher)).status, 200, String(first));
+      assert.deepEqual(calls, [undefined, 'reload']);
+    }
+  });
+
+  it('takes a missing file or a second failure as the answer', async () => {
+    const missing = scripted(404);
+    assert.equal((await fetchRetrying('https://x.test/a.woff2', {}, missing.fetcher)).status, 404);
+    assert.equal(missing.calls.length, 1);
+    const twice = scripted(503, 502);
+    assert.equal((await fetchRetrying('https://x.test/a.woff2', {}, twice.fetcher)).status, 502);
+    assert.equal(twice.calls.length, 2);
+  });
+
+  it('does not try again once the export gave up', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const { fetcher, calls } = scripted('throw');
+    await assert.rejects(fetchRetrying('https://x.test/a.woff2', { signal: stop.signal }, fetcher));
+    assert.equal(calls.length, 1);
+  });
+});
+
+describe('fonts still loading when a slide is drawn', () => {
+  it('names each family once, without quotes', () => {
+    const faces = [
+      { family: '"Inter"', status: 'loading' },
+      { family: 'Inter', status: 'loading' },
+      { family: "'Lora'", status: 'loading' },
+      { family: 'Mono', status: 'loaded' },
+      { family: 'Gone', status: 'error' },
+    ];
+    assert.deepEqual(lateFontFamilies(faces), ['Inter', 'Lora']);
+  });
+
+  it('notes them once, and not for a family another font note already names', () => {
+    const notes = new ExportNotes();
+    notes.family('fontLate', 'Inter');
+    notes.family('fontLate', 'Lora');
+    notes.family('fontLate', 'Inter');
+    notes.family('fontFetch', 'Lora');
+    assert.deepEqual(notes.list(), [
+      'Lora: not embedded because their files could not be downloaded.',
+      'Inter: had not finished loading when the slides were drawn, so some of their text may show in a fallback font; exporting again may help.',
+    ]);
   });
 });
 

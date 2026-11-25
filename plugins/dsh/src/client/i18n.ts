@@ -111,7 +111,7 @@ export const zh = {
   'about.design-system': '颜色、字体、组件和素材，幻灯片和设计都照着它来做。',
   'about.data': '用你的数据做的图表、数字和表格，每一项都标明出处。',
   'about.whiteboard': '方框、箭头和便利贴，你和 Agent 都能在上面画。',
-  'about.motion': '一段在页面里直接播放的短动画，可以导出成视频。',
+  'about.motion': '一段在页面里直接播放的短动画，可以导出成 MP4、GIF 或网页。',
   'card.comment': '已将对“{title}”的评论发给 Agent',
   'card.request': '已将“{title}”上的 {label} 发给 Agent',
   'card.message': '已将关于“{title}”的消息发给 Agent',
@@ -119,6 +119,9 @@ export const zh = {
   'card.more': '显示位置',
   'card.less': '收起位置',
   'card.requestLabel': '请求',
+  'card.from': '来自 {name}（{role}，不是所有者）',
+  'card.task': '“{title}”上的 {action} 已完成，结果已发给 Agent',
+  'card.taskFailed': '“{title}”上的 {action} 失败，结果已发给 Agent',
 };
 
 /** A key of the dictionaries. */
@@ -235,7 +238,7 @@ export const en: Record<Key, string> = {
   'about.design-system': 'Colors, type, components and assets that your decks and designs are built from.',
   'about.data': 'Charts, numbers and tables from your data, each marked with its source.',
   'about.whiteboard': 'Boxes, arrows and sticky notes you and the agent both draw on.',
-  'about.motion': 'A short motion piece that plays in place and exports as video.',
+  'about.motion': 'A short animated film that plays in place and exports as MP4, GIF or HTML.',
   'card.comment': 'Comment on “{title}” sent to agent',
   'card.request': '{label} on “{title}” sent to agent',
   'card.message': 'Message on “{title}” sent to agent',
@@ -243,6 +246,9 @@ export const en: Record<Key, string> = {
   'card.more': 'Show where',
   'card.less': 'Hide where',
   'card.requestLabel': 'Request',
+  'card.from': 'From {name} ({role}, not the owner)',
+  'card.task': '{action} on “{title}” finished; result sent to agent',
+  'card.taskFailed': '{action} on “{title}” failed; result sent to agent',
 };
 
 /** Words with `{name}` placeholders filled. */

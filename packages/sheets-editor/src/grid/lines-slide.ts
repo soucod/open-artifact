@@ -1,14 +1,171 @@
 import { useReducedMotion } from '../kit/platform.ts';
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
+import type { LineIndex, LineSpan } from '../model/line-ids.ts';
+import type { LineSizes } from '../model/line-sizes.ts';
+import type { LinesAxisName, PaneRect } from './geometry.ts';
 import * as React from 'react';
 import { PRESS_LIFT_REPEAT_MAX_MS } from '../ui/press-swallow.ts';
-export let slideTiming: Dynamic;
-export function bandClipPath(axis?: Dynamic, bodyStart?: Dynamic, band?: Dynamic, covered: Dynamic = 0) {
+/** The lines of one axis on show: their order, those out of sight, their edges, how many are frozen, and how far the rest are scrolled. */
+export interface AxisLinesOnShow {
+  order: LineIndex | null;
+  outOfSight: readonly LineSpan[];
+  edges: LineSizes;
+  frozenCount: number;
+  scroll: number;
+}
+/** The rows and the columns on show of a sheet. */
+export interface LinesOnShow {
+  sheetId: SheetId;
+  rows: AxisLinesOnShow;
+  columns: AxisLinesOnShow;
+}
+/** What of a drawn row a slide of lines reads. */
+export interface RowToSlide {
+  key: string;
+  rowNumber: number;
+  top: number;
+  height: number;
+  isFrozen: boolean;
+  cells: readonly { key: string }[];
+}
+/** What of a drawn column header a slide of lines reads. */
+export interface ColumnHeaderToSlide {
+  key: string;
+  columnNumber: number;
+  left: number;
+  width: number;
+  isFrozen: boolean;
+}
+/** What of the drawn grid a slide of lines reads. */
+export interface GridToSlide {
+  rows: readonly RowToSlide[];
+  columnHeaders: readonly ColumnHeaderToSlide[];
+  body: Pick<PaneRect, 'left' | 'top'>;
+}
+/** A row or a column as drawn: its key, its index, and where it starts and how big it is along its axis. */
+export interface LineDrawn {
+  key: string;
+  index: number;
+  start: number;
+  size: number;
+}
+/** A line as drawn, with where it starts on the other side of a change. */
+export interface LineDrawnElsewhere extends LineDrawn {
+  elsewhere: number;
+}
+/** Where a line starts on screen and how big it is. */
+export interface LineOnScreen {
+  start: number;
+  size: number;
+}
+/** How far a line slides, by its key. */
+export interface LineSlid {
+  key: string;
+  by: number;
+}
+/** How far a line drawn before a change slides away, and whether it ends out of sight. */
+export interface LineSlidAway extends LineSlid {
+  isOutOfSight: boolean;
+}
+/** A run of lines that slide together, and how much of its end the band after it covers. */
+export interface BandOfSlide {
+  start: number;
+  size: number;
+  by: number;
+  covered: number;
+}
+/** Lines of one axis sliding to their new places: those drawn now, those drawn before, and the bands they move in. */
+export interface SlideOfAxis {
+  axis: LinesAxisName;
+  now: LineSlid[];
+  asBefore: LineSlidAway[];
+  bandsNow: BandOfSlide[];
+  bandsAsBefore: BandOfSlide[];
+}
+/** A veil laid over lines that slide out of sight. */
+export interface VeilOfSlide {
+  start: number;
+  size: number;
+  by: number;
+}
+/** Drawn rows that slide away together. */
+export interface GroupOfLinesGoing<Row> {
+  by: number;
+  rows: Row[];
+}
+/** The lines drawn before a slide, kept on screen while they slide away. */
+export interface LinesAsBefore<Grid extends GridToSlide> {
+  grid: Grid | null;
+  slide: SlideOfAxis | null;
+  veils: VeilOfSlide[];
+  groups: GroupOfLinesGoing<Grid['rows'][number]>[];
+  columnHeaders: Grid['columnHeaders'][number][];
+}
+/** How often lines of an axis have slid of late, and how long to rest before they slide again. */
+export interface SlidePace {
+  isFirstPlayOver: boolean;
+  inARow: number;
+  nextRestMs: number;
+  restUntilMs: number;
+}
+/** How long a slide takes, and its easing. */
+export interface SlideTiming {
+  duration: number;
+  easing: string;
+}
+/** Where a mark over the grid stood: its top, left, height and width. */
+export type MarkPlace = [number, number, number, number];
+/** The marks over the grid that slide with the lines, and where each stood. */
+export type MarksOfGrid = Map<HTMLElement | SVGElement, MarkPlace>;
+/** The slide being played, told to whoever draws the grid. */
+export interface SlideTold {
+  tell(slideNow: SlideOfAxis | null): void;
+  now: () => SlideOfAxis | null;
+  subscribe(listener: () => void): () => void;
+}
+/** The grid as drawn, with the lines on show it was drawn with. */
+export interface GridWithLines<Grid extends GridToSlide> {
+  grid: Grid;
+  lines: LinesOnShow;
+}
+/** A slide planned when the grid was drawn again, and the grid it slides from. */
+export interface SlideDrawnAgain<Grid extends GridToSlide> {
+  slide: SlideOfAxis;
+  from: Grid;
+  plannedAtMs: number;
+}
+/** The grid last drawn, the one before it, and the slide between them. */
+export interface SlideState<Grid extends GridToSlide> {
+  grid: Grid | null;
+  before: GridWithLines<Grid> | null;
+  now: GridWithLines<Grid> | null;
+  slide: SlideOfAxis | null;
+  marksBefore: MarksOfGrid;
+  drawnAgain: SlideDrawnAgain<Grid> | null;
+}
+/** The animations of a slide: of what stays drawn, and of what goes. */
+export interface SlideAnimations {
+  staying: Animation[];
+  going: Animation[];
+}
+/** A slide paused while a press is held. */
+export interface SlidePausedByPress {
+  these: SlideAnimations;
+  pointerId: number;
+}
+/** What lines slide in: the grid as drawn, the lines on show, and where the slide is told. */
+export interface LinesSlideProps<Grid extends GridToSlide> {
+  grid: Grid;
+  lines: LinesOnShow | null;
+  slideTold: SlideTold;
+}
+export let slideTiming: SlideTiming | null;
+export function bandClipPath(axis: LinesAxisName, bodyStart: number, band: Pick<BandOfSlide, 'start' | 'size'>, covered: number = 0): string {
   let [from, to] = [`${bodyStart + band.start}px`, `calc(100% - ${bodyStart + band.start + band.size - covered}px)`];
   return axis === 'rows' ? `inset(${from} 0 ${to} 0)` : `inset(0 ${to} 0 ${from})`;
 }
-export function startOfHiddenRunAt(index?: Dynamic, outOfSight?: Dynamic) {
-  let [low, high]: Dynamic = [0, outOfSight.length - 1];
+export function startOfHiddenRunAt(index: number, outOfSight: readonly LineSpan[]): number {
+  let [low, high] = [0, outOfSight.length - 1];
   while (low < high) {
     let middle = Math.ceil((low + high) / 2);
     if ((outOfSight[middle]?.firstIndex ?? 0) <= index) low = middle;
@@ -16,10 +173,10 @@ export function startOfHiddenRunAt(index?: Dynamic, outOfSight?: Dynamic) {
   }
   return outOfSight[low]?.firstIndex ?? index;
 }
-export function bandsOfSlide(lines?: Dynamic, moves?: Dynamic, isNow?: Dynamic) {
-  let byOfKey = new Map(moves.map(({ key: key, by: by }: Dynamic) => [key, by]));
-  let bands: Dynamic = [];
-  for (let { key: key, start: start, size: size } of lines) {
+export function bandsOfSlide(lines: readonly LineDrawn[], moves: readonly LineSlid[], isNow: boolean): BandOfSlide[] {
+  let byOfKey = new Map(moves.map(({ key, by }: LineSlid): [string, number] => [key, by]));
+  let bands: BandOfSlide[] = [];
+  for (let { key, start, size } of lines) {
     let [by, last] = [byOfKey.get(key) ?? (isNow ? 0 : null), bands.at(-1)];
     if (by === null) continue;
     if (last?.by === by && last.start + last.size === start)
@@ -29,38 +186,38 @@ export function bandsOfSlide(lines?: Dynamic, moves?: Dynamic, isNow?: Dynamic) 
       };
     else
       bands.push({
-        start: start,
-        size: size,
-        by: by,
+        start,
+        size,
+        by,
         covered: 0,
       });
   }
   if (!isNow) return bands;
   return bands.map(
-    ({ start: start, size: size, by: by }: Dynamic, index?: Dynamic) => ({
-      start: start,
-      size: size,
-      by: by,
+    ({ start, size, by }: BandOfSlide, index: number): BandOfSlide => ({
+      start,
+      size,
+      by,
       covered: Math.max(0, by - (bands[index + 1]?.by ?? by)),
     }),
   );
 }
-export function spanOfLinesFrom(lines?: Dynamic, firstIndex?: Dynamic) {
-  let [first, last] = [lines.find(({ index: index }: Dynamic) => index >= firstIndex), lines.at(-1)];
+export function spanOfLinesFrom(lines: readonly LineDrawn[], firstIndex: number): [number, number] | null {
+  let [first, last] = [lines.find(({ index }: LineDrawn) => index >= firstIndex), lines.at(-1)];
   return first === undefined || last === undefined ? null : [first.start, last.start + last.size];
 }
-export function slideDistances(lines?: Dynamic, frozenCount?: Dynamic, span?: Dynamic) {
-  let distances = lines.map(({ start: start, elsewhere: elsewhere }: Dynamic) => elsewhere - start);
+export function slideDistances(lines: readonly LineDrawnElsewhere[], frozenCount: number, span: [number, number] | null): number[] {
+  let distances = lines.map(({ start, elsewhere }: LineDrawnElsewhere) => elsewhere - start);
   if (span === null) return distances;
   let firstAfter = lines.findIndex(
-    ({ index: index, elsewhere: elsewhere }: Dynamic) => index >= frozenCount && elsewhere >= span[1],
+    ({ index, elsewhere }: LineDrawnElsewhere) => index >= frozenCount && elsewhere >= span[1],
   );
-  let lastBefore: Dynamic = -1;
+  let lastBefore = -1;
   return (
-    lines.forEach(({ index: index, size: size, elsewhere: elsewhere }: Dynamic, position?: Dynamic) => {
+    lines.forEach(({ index, size, elsewhere }: LineDrawnElsewhere, position: number) => {
       if (index >= frozenCount && elsewhere + size <= span[0]) lastBefore = position;
     }),
-    distances.map((distance?: Dynamic, position?: Dynamic) => {
+    distances.map((distance: number, position: number) => {
       let [after, before] = [lines[firstAfter], lines[lastBefore]];
       if (after !== undefined && position >= firstAfter) return span[1] - after.start;
       return before !== undefined && position <= lastBefore && (lines[position]?.index ?? 0) >= frozenCount
@@ -69,38 +226,42 @@ export function slideDistances(lines?: Dynamic, frozenCount?: Dynamic, span?: Dy
     })
   );
 }
-export function startElsewhere({ index: index, start: start }: Dynamic, [linesThere, linesHere]: Dynamic = []) {
+export function startElsewhere({ index, start }: Pick<LineDrawn, 'index' | 'start'>, [linesThere, linesHere]: readonly AxisLinesOnShow[] = []): number {
   let there = lineSpanOf(linesHere, index);
   if (there.size > 0) return there.start;
   return start + there.start - lineSpanOf(linesThere, startOfHiddenRunAt(index, linesHere.outOfSight)).start;
 }
-export function slideOfAxis(axis?: Dynamic, [gridBefore, gridNow]: Dynamic = [], [linesBefore, linesNow]: Dynamic = []) {
+export function slideOfAxis(
+  axis: LinesAxisName,
+  [gridBefore, gridNow]: readonly GridToSlide[] = [],
+  [linesBefore, linesNow]: readonly AxisLinesOnShow[] = [],
+): SlideOfAxis | null {
   let [drawnBefore, drawnNow] = [linesDrawnOf(gridBefore, axis), linesDrawnOf(gridNow, axis)];
   let frozenCount = Math.max(linesBefore.frozenCount, linesNow.frozenCount);
-  let wasOutOfSight = (line?: Dynamic) => lineSpanOf(linesBefore, line.index).size === 0;
+  let wasOutOfSight = (line: LineDrawn): boolean => lineSpanOf(linesBefore, line.index).size === 0;
   let nowWithPlaceBefore = drawnNow.map(
-    (line?: Dynamic) => ({
+    (line: LineDrawn): LineDrawnElsewhere => ({
       ...line,
       elsewhere: startElsewhere(line, [linesNow, linesBefore]),
     }),
   );
   let distancesNow = slideDistances(nowWithPlaceBefore, frozenCount, spanOfLinesFrom(drawnBefore, frozenCount));
-  let now = drawnNow.flatMap((line?: Dynamic, position?: Dynamic) => {
+  let now = drawnNow.flatMap((line: LineDrawn, position: number): LineSlid[] => {
     let by = distancesNow[position] ?? 0;
     return by === 0 && !wasOutOfSight(line)
       ? []
       : [
           {
             key: line.key,
-            by: by,
+            by,
           },
         ];
   });
-  let keysNow = new Set(drawnNow.map(({ key: key }: Dynamic) => key));
-  let gone = drawnBefore.filter(({ key: key }: Dynamic) => !keysNow.has(key));
+  let keysNow = new Set(drawnNow.map(({ key }: LineDrawn) => key));
+  let gone = drawnBefore.filter(({ key }: LineDrawn) => !keysNow.has(key));
   let distancesGone = slideDistances(
     gone.map(
-      (line?: Dynamic) => ({
+      (line: LineDrawn): LineDrawnElsewhere => ({
         ...line,
         elsewhere: startElsewhere(line, [linesBefore, linesNow]),
       }),
@@ -109,8 +270,8 @@ export function slideOfAxis(axis?: Dynamic, [gridBefore, gridNow]: Dynamic = [],
     spanOfLinesFrom(drawnNow, frozenCount),
   );
   let asBefore = gone.map(
-    ({ key: key, index: index }: Dynamic, position?: Dynamic) => ({
-      key: key,
+    ({ key, index }: LineDrawn, position: number): LineSlidAway => ({
+      key,
       by: distancesGone[position] ?? 0,
       isOutOfSight: lineSpanOf(linesNow, index).size === 0,
     }),
@@ -118,107 +279,110 @@ export function slideOfAxis(axis?: Dynamic, [gridBefore, gridNow]: Dynamic = [],
   return now.length === 0 && asBefore.length === 0
     ? null
     : {
-        axis: axis,
-        now: now,
-        asBefore: asBefore,
+        axis,
+        now,
+        asBefore,
         bandsNow: bandsOfSlide(drawnNow, now, true),
         bandsAsBefore: bandsOfSlide(drawnBefore, asBefore, false),
       };
 }
-export function slideBetween(before?: Dynamic, now?: Dynamic) {
+export function slideBetween(before: GridWithLines<GridToSlide>, now: GridWithLines<GridToSlide>): SlideOfAxis | null {
   let [linesBefore, linesNow] = [before.lines, now.lines];
   if (linesBefore.sheetId !== linesNow.sheetId) return null;
-  let axis = ['rows', 'columns'].find(
-    (lineAxis?: Dynamic) =>
+  let axis = (['rows', 'columns'] as const).find(
+    (lineAxis: LinesAxisName) =>
       linesBefore[lineAxis].order !== null &&
       linesBefore[lineAxis].order === linesNow[lineAxis].order &&
       !areSameOutOfSight(linesBefore[lineAxis].outOfSight, linesNow[lineAxis].outOfSight),
   );
   return axis === undefined ? null : slideOfAxis(axis, [before.grid, now.grid], [linesBefore[axis], linesNow[axis]]);
 }
-export function mostCommonOf(values?: Dynamic) {
-  let counts = new Map();
+export function mostCommonOf(values: readonly number[]): number {
+  let counts = new Map<number, number>();
   for (let value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  return [...counts].reduce((most?: Dynamic, entry?: Dynamic) => (entry[1] > most[1] ? entry : most), [0, 0])[0];
+  return [...counts].reduce((most: [number, number], entry: [number, number]) => (entry[1] > most[1] ? entry : most), [0, 0])[0];
 }
-export function haveLinesMoved(before?: Dynamic, now?: Dynamic) {
+export function haveLinesMoved(before: GridWithLines<GridToSlide>, now: GridWithLines<GridToSlide>): boolean {
   let [linesBefore, linesNow] = [before.lines, now.lines];
   if (linesBefore.sheetId !== linesNow.sheetId) return true;
   if (
-    ['rows', 'columns'].some(
-      (axis?: Dynamic) =>
+    (['rows', 'columns'] as const).some(
+      (axis: LinesAxisName) =>
         linesBefore[axis].order !== linesNow[axis].order || !areSameOutOfSight(linesBefore[axis].outOfSight, linesNow[axis].outOfSight),
     )
   )
     return true;
   let [row, column] = [
-    now.grid.rows.find(({ isFrozen: isFrozen }: Dynamic) => !isFrozen),
-    now.grid.columnHeaders.find(({ isFrozen: isFrozen }: Dynamic) => !isFrozen),
+    now.grid.rows.find(({ isFrozen }: RowToSlide) => !isFrozen),
+    now.grid.columnHeaders.find(({ isFrozen }: ColumnHeaderToSlide) => !isFrozen),
   ];
   return (
     (row !== undefined && lineSpanOf(linesBefore.rows, row.rowNumber - 1).start !== row.top) ||
     (column !== undefined && lineSpanOf(linesBefore.columns, column.columnNumber - 1).start !== column.left)
   );
 }
-export function veilsOfSlide(grid?: Dynamic, { axis: axis, asBefore: asBefore }: Dynamic = {}) {
+export function veilsOfSlide(
+  grid: GridToSlide,
+  { axis, asBefore }: Pick<SlideOfAxis, 'axis' | 'asBefore'> = {} as Pick<SlideOfAxis, 'axis' | 'asBefore'>,
+): VeilOfSlide[] {
   let byOfKey = new Map(
-    asBefore.flatMap(({ key: key, by: by, isOutOfSight: isOutOfSight }: Dynamic) => (isOutOfSight ? [[key, by]] : [])),
+    asBefore.flatMap(({ key, by, isOutOfSight }: LineSlidAway): [string, number][] => (isOutOfSight ? [[key, by]] : [])),
   );
-  let veils: Dynamic = [];
-  for (let { key: key, start: start, size: size } of linesDrawnOf(grid, axis)) {
+  let veils: VeilOfSlide[] = [];
+  for (let { key, start, size } of linesDrawnOf(grid, axis)) {
     let [by, last] = [byOfKey.get(key), veils.at(-1)];
     if (by === undefined) continue;
     if (last?.by === by && last.start + last.size === start) last.size += size;
     else
       veils.push({
-        start: start,
-        size: size,
-        by: by,
+        start,
+        size,
+        by,
       });
   }
   return veils;
 }
-export function linesAsBeforeOf(grid?: Dynamic, slide?: Dynamic) {
-  let byOfKey = new Map(slide.asBefore.map(({ key: key, by: by }: Dynamic) => [key, by]));
+export function linesAsBeforeOf<Grid extends GridToSlide>(grid: Grid, slide: SlideOfAxis): LinesAsBefore<Grid> {
+  let byOfKey = new Map(slide.asBefore.map(({ key, by }: LineSlidAway): [string, number] => [key, by]));
   let veils = veilsOfSlide(grid, slide);
   if (slide.axis === 'columns')
     return {
-      grid: grid,
-      slide: slide,
-      veils: veils,
+      grid,
+      slide,
+      veils,
       groups: [
         {
           by: mostCommonOf([...byOfKey.values()]),
           rows: grid.rows.map(
-            (row?: Dynamic) => ({
+            (row: Grid['rows'][number]): Grid['rows'][number] => ({
               ...row,
-              cells: row.cells.filter(({ key: key }: Dynamic) => byOfKey.has(key)),
+              cells: row.cells.filter(({ key }: { key: string }) => byOfKey.has(key)),
             }),
           ),
         },
       ],
-      columnHeaders: grid.columnHeaders.filter(({ key: key }: Dynamic) => byOfKey.has(key)),
+      columnHeaders: grid.columnHeaders.filter(({ key }: ColumnHeaderToSlide) => byOfKey.has(key)),
     };
-  let groups: Dynamic = [];
+  let groups: GroupOfLinesGoing<Grid['rows'][number]>[] = [];
   for (let row of grid.rows) {
     let [by, last] = [byOfKey.get(row.key), groups.at(-1)];
     if (by === undefined) continue;
     if (last?.by === by) last.rows.push(row);
     else
       groups.push({
-        by: by,
+        by,
         rows: [row],
       });
   }
   return {
-    groups: groups,
+    groups,
     columnHeaders: [],
-    veils: veils,
-    grid: grid,
-    slide: slide,
+    veils,
+    grid,
+    slide,
   };
 }
-export function paceAfterSlide(pace?: Dynamic, tookMs?: Dynamic, nowMs?: Dynamic) {
+export function paceAfterSlide(pace: SlidePace, tookMs: number, nowMs: number): SlidePace {
   if (!pace.isFirstPlayOver)
     return {
       ...pace,
@@ -242,23 +406,23 @@ export function paceAfterSlide(pace?: Dynamic, tookMs?: Dynamic, nowMs?: Dynamic
     restUntilMs: nowMs + pace.nextRestMs,
   };
 }
-export function createSlideTold() {
-  let slide: Dynamic = null;
-  let listeners = new Set();
+export function createSlideTold(): SlideTold {
+  let slide: SlideOfAxis | null = null;
+  let listeners = new Set<() => void>();
   return {
-    tell(slideNow?: Dynamic) {
+    tell(slideNow: SlideOfAxis | null) {
       if (slideNow === slide) return;
       slide = slideNow;
       for (let listener of listeners) listener();
     },
     now: () => slide,
-    subscribe(listener?: Dynamic) {
+    subscribe(listener: () => void) {
       return (listeners.add(listener), () => void listeners.delete(listener));
     },
   };
 }
-export function marksOfGrid(element?: Dynamic) {
-  let marks = new Map();
+export function marksOfGrid(element: Element): MarksOfGrid {
+  let marks: MarksOfGrid = new Map();
   for (let mark of element.closest('.sheet-with-group-margins')?.querySelectorAll(MARKS_THAT_SLIDE) ?? [])
     if ((mark instanceof HTMLElement || mark instanceof SVGElement) && mark.closest(MARKS_INSIDE_LINES) === null)
       marks.set(mark, [
@@ -269,9 +433,14 @@ export function marksOfGrid(element?: Dynamic) {
       ]);
   return marks;
 }
-export function marksMovedBy(slide?: Dynamic, [marksBefore, marksNow]: Dynamic = [], parent?: Dynamic, body?: Dynamic) {
+export function marksMovedBy(
+  slide: SlideOfAxis,
+  [marksBefore, marksNow]: readonly MarksOfGrid[] = [],
+  parent: Element,
+  body: Pick<PaneRect, 'left' | 'top'>,
+): [HTMLElement | SVGElement, number][] {
   let [place, bodyStart] = slide.axis === 'rows' ? [0, body.top] : [1, body.left];
-  return [...marksNow].flatMap(([mark, placeNow]: Dynamic) => {
+  return [...marksNow].flatMap(([mark, placeNow]: [HTMLElement | SVGElement, MarkPlace]): [HTMLElement | SVGElement, number][] => {
     let by =
       mark.parentElement === parent
         ? slideByAt(slide, placeNow[place] - bodyStart + 2)
@@ -280,17 +449,20 @@ export function marksMovedBy(slide?: Dynamic, [marksBefore, marksNow]: Dynamic =
     return by === 0 || Number.isNaN(by) ? [] : [[mark, Number.isNaN(scale) ? by : by / scale]];
   });
 }
-export function filterOutlinesResized({ axis: axis }: Dynamic, [marksBefore, marksNow]: Dynamic = []) {
+export function filterOutlinesResized(
+  { axis }: Pick<SlideOfAxis, 'axis'>,
+  [marksBefore, marksNow]: readonly MarksOfGrid[] = [],
+): (HTMLElement | SVGElement)[] {
   let place = axis === 'rows' ? 2 : 3;
   return [...marksNow].flatMap(
-    ([mark, placeNow]: Dynamic) =>
+    ([mark, placeNow]: [HTMLElement | SVGElement, MarkPlace]) =>
       mark.matches(OWN_FILTER_OUTLINE_SELECTOR) && marksBefore.get(mark)?.[place] !== placeNow[place] ? [mark] : [],
   );
 }
-export function slideTimingOf(element?: Dynamic) {
+export function slideTimingOf(element: Element): SlideTiming {
   return (slideTiming ??= readSlideTiming(element));
 }
-export function readSlideTiming(element?: Dynamic) {
+export function readSlideTiming(element: Element): SlideTiming {
   let style = (element.ownerDocument.defaultView ?? window).getComputedStyle(element);
   let duration = style.getPropertyValue('--ui-dur-base').trim();
   let easing = style.getPropertyValue('--ui-ease-out').trim();
@@ -300,83 +472,92 @@ export function readSlideTiming(element?: Dynamic) {
     easing: easing === '' ? 'ease-out' : easing,
   };
 }
-export function linesMovedBy({ axis: axis }: Dynamic, moves?: Dynamic, parent?: Dynamic, columnHeaders?: Dynamic) {
-  let byOfKey = new Map(moves.map(({ key: key, by: by }: Dynamic) => [key, by]));
+export function linesMovedBy(
+  { axis }: Pick<SlideOfAxis, 'axis'>,
+  moves: readonly LineSlid[],
+  parent: Element,
+  columnHeaders: readonly ColumnHeaderToSlide[],
+): [Element, number][] {
+  let byOfKey = new Map(moves.map(({ key, by }: LineSlid): [string, number] => [key, by]));
   if (axis === 'rows')
-    return [...parent.querySelectorAll(':scope > [data-row]')].flatMap((row?: Dynamic) => {
+    return [...parent.querySelectorAll(':scope > [data-row]')].flatMap((row: Element): [Element, number][] => {
       let by = byOfKey.get(row.getAttribute('data-row') ?? '');
       return by === undefined ? [] : [[row, by]];
     });
   let byOfColumn = new Map(
-    columnHeaders.map(({ key: key, columnNumber: columnNumber }: Dynamic) => [String(columnNumber + 1), byOfKey.get(key) ?? 0]),
+    columnHeaders.map(({ key, columnNumber }: ColumnHeaderToSlide): [string, number] => [String(columnNumber + 1), byOfKey.get(key) ?? 0]),
   );
   let rowBy = mostCommonOf([0, ...byOfColumn.values()]);
-  let moved: Dynamic = [];
+  let moved: [Element, number][] = [];
   for (let row of parent.querySelectorAll(':scope > [role="row"]')) {
     moved.push([row, rowBy]);
     for (let cell of row.children) moved.push([cell, (byOfColumn.get(cell.getAttribute('aria-colindex') ?? '') ?? 0) - rowBy]);
   }
   return moved;
 }
-export function nextSlideState(
-  { now: before, drawnAgain: drawnAgain }: Dynamic,
-  grid?: Dynamic,
-  lines?: Dynamic,
-  parent?: Dynamic,
-  isReducedMotion?: Dynamic,
-) {
-  let now =
+export function nextSlideState<Grid extends GridToSlide>(
+  { now: before, drawnAgain }: Pick<SlideState<Grid>, 'now' | 'drawnAgain'>,
+  grid: Grid,
+  lines: LinesOnShow | null,
+  parent: Element | null,
+  isReducedMotion: boolean,
+): SlideState<Grid> {
+  let now: GridWithLines<Grid> | null =
     lines === null
       ? null
       : {
-          grid: grid,
-          lines: lines,
+          grid,
+          lines,
         };
-  let still = {
-    grid: grid,
-    before: before,
-    now: now,
+  let still: SlideState<Grid> = {
+    grid,
+    before,
+    now,
     slide: null,
     marksBefore: NO_MARKS,
-    drawnAgain: drawnAgain,
+    drawnAgain,
   };
   if (before === null || now === null || parent === null || isReducedMotion) return still;
   let slide = slideBetween(before, now);
   let plannedAtMs = slide === null ? 0 : performance.now();
   if (slide === null || plannedAtMs < slidePaceByAxis[slide.axis].restUntilMs) return still;
   return {
-    grid: grid,
-    before: before,
-    now: now,
-    slide: slide,
+    grid,
+    before,
+    now,
+    slide,
     marksBefore: marksOfGrid(parent),
     drawnAgain: {
-      slide: slide,
+      slide,
       from: before.grid,
-      plannedAtMs: plannedAtMs,
+      plannedAtMs,
     },
   };
 }
-export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tell, now: slideNow, subscribe: subscribe } }: Dynamic) {
-  let [element, setElement] = React.useState(null);
+export function useLinesSlide<Grid extends GridToSlide>({
+  grid,
+  lines,
+  slideTold: { tell, now: slideNow, subscribe },
+}: LinesSlideProps<Grid>): [LinesAsBefore<Grid>, (element: HTMLElement | null) => void] {
+  let [element, setElement] = React.useState<HTMLElement | null>(null);
   let parent = element?.parentElement ?? null;
   let win = element?.ownerDocument.defaultView ?? null;
-  let [slideState, setSlideState] = React.useState(NO_SLIDE_STATE);
+  let [slideState, setSlideState] = React.useState<SlideState<Grid>>(NO_SLIDE_STATE);
   let isReducedMotion = useReducedMotion();
   if (slideState.grid !== grid) setSlideState(nextSlideState(slideState, grid, lines, parent, isReducedMotion));
-  let [slideEnded, setSlideEnded] = React.useState(null);
-  let { drawnAgain: drawnAgain } = slideState;
-  let asBefore = React.useMemo(
+  let [slideEnded, setSlideEnded] = React.useState<SlideOfAxis | null>(null);
+  let { drawnAgain } = slideState;
+  let asBefore = React.useMemo<LinesAsBefore<Grid>>(
     () => (drawnAgain === null || drawnAgain.slide === slideEnded ? NO_LINES_AS_BEFORE : linesAsBeforeOf(drawnAgain.from, drawnAgain.slide)),
     [drawnAgain, slideEnded],
   );
-  let animations = React.useRef({
+  let animations = React.useRef<SlideAnimations>({
     staying: [],
     going: [],
   });
-  let slideOn = React.useRef(null);
-  let slidePlayed = React.useRef(null);
-  let pausedByPress = React.useRef(null);
+  let slideOn = React.useRef<SlideOfAxis | null>(null);
+  let slidePlayed = React.useRef<SlideOfAxis | null>(null);
+  let pausedByPress = React.useRef<SlidePausedByPress | null>(null);
   let endSlide = React.useCallback(() => {
     if (slideOn.current === null) return;
     setSlideEnded(slideOn.current);
@@ -391,7 +572,7 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
     tell(null);
   }, [tell]);
   let animateStaying = React.useCallback(
-    (target?: Dynamic, keyframes?: Dynamic, options?: Dynamic) =>
+    (target: Element, keyframes: Keyframe[], options: KeyframeAnimationOptions) =>
       void animations.current.staying.push(
         target.animate(keyframes, {
           ...options,
@@ -401,7 +582,7 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
     [],
   );
   React.useLayoutEffect(() => {
-    let { before: before, now: now, slide: slide, marksBefore: marksBefore } = slideState;
+    let { before, now, slide, marksBefore } = slideState;
     if (now === null || before === null || parent === null) return;
     if (slide === null) {
       if (haveLinesMoved(before, now)) endSlide();
@@ -454,12 +635,12 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
       if (slideShown === null || slideShown !== asBefore.slide || slideShown !== slideOn.current || element === null) return;
       if (slidePlayed.current === slideShown) return;
       slidePlayed.current = slideShown;
-      let { axis: axis, asBefore: movesBefore } = slideShown;
-      let timing = {
+      let { axis, asBefore: movesBefore } = slideShown;
+      let timing: KeyframeAnimationOptions = {
         ...slideTimingOf(element),
         fill: 'forwards',
       };
-      let animateGoing = (target?: Dynamic, by?: Dynamic, extra: Dynamic = [{}, {}]) =>
+      let animateGoing = (target: Element, by: number, extra: [Keyframe, Keyframe] = [{}, {}]) =>
         void animations.current.going.push(
           target.animate(
             [
@@ -477,9 +658,9 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
         );
       let byOfColumn = new Map(
         asBefore.columnHeaders.map(
-          ({ key: key, columnNumber: columnNumber }: Dynamic) => [
+          ({ key, columnNumber }: ColumnHeaderToSlide): [string, number | undefined] => [
             String(columnNumber + 1),
-            movesBefore.find((move?: Dynamic) => move.key === key)?.by,
+            movesBefore.find((move: LineSlidAway) => move.key === key)?.by,
           ],
         ),
       );
@@ -500,15 +681,15 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
             opacity: VEIL_OPACITY,
           },
         ]);
-      let bandsIn = (container?: Dynamic) => [...(container?.querySelectorAll(':scope > [data-band]') ?? [])];
-      bandsIn(element).forEach((band?: Dynamic, index?: Dynamic) => animateGoing(band, slideShown.bandsAsBefore[index]?.by ?? 0));
+      let bandsIn = (container: Element | null): Element[] => [...(container?.querySelectorAll(':scope > [data-band]') ?? [])];
+      bandsIn(element).forEach((band: Element, index: number) => animateGoing(band, slideShown.bandsAsBefore[index]?.by ?? 0));
       let bodyStart = axis === 'rows' ? asBefore.grid?.body.top : asBefore.grid?.body.left;
       let [firstStaying] = animations.current.staying;
-      let bandAnimations: Dynamic = [];
-      bandsIn(element.parentElement).forEach((band?: Dynamic, index?: Dynamic) => {
+      let bandAnimations: Animation[] = [];
+      bandsIn(element.parentElement).forEach((band: Element, index: number) => {
         let bandNow = slideShown.bandsNow[index];
         if (bandNow === undefined || bodyStart === undefined) return;
-        let keyframes = [
+        let keyframes: Keyframe[] = [
           {
             transform: translateAlong(axis, bandNow.by),
             clipPath: bandClipPath(axis, bodyStart, bandNow, bandNow.covered),
@@ -525,7 +706,7 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
       let all = [...these.staying, ...these.going];
       if (firstStaying !== undefined) for (let animation of bandAnimations) animation.pause();
       let plannedAtMs = slideState.drawnAgain?.plannedAtMs ?? performance.now();
-      let isPaceNoted: Dynamic = false;
+      let isPaceNoted = false;
       let notePace = () => {
         if (!isPaceNoted) slidePaceByAxis[axis] = paceAfterSlide(slidePaceByAxis[axis], performance.now() - plannedAtMs, performance.now());
         isPaceNoted = true;
@@ -547,7 +728,7 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
         notePace();
         endIfStill();
       }, START_WAIT_MS);
-      Promise.allSettled(all.map(({ finished: finished }: Dynamic) => finished)).then(() => {
+      Promise.allSettled(all.map(({ finished }: Animation) => finished)).then(() => {
         if (animations.current === these) endSlide();
         return;
       });
@@ -555,29 +736,29 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
     React.useLayoutEffect(() => {
       if (element === null || win === null) return;
       slideTimingOf(element);
-      let endAfter = (these?: Dynamic, ms?: Dynamic) =>
+      let endAfter = (these: SlideAnimations, ms: number) =>
         void win.setTimeout(() => void (animations.current === these && endSlide()), ms);
-      let onPointerDown = ({ target: target, button: button, isPrimary: isPrimary, pointerId: pointerId }: Dynamic) => {
+      let onPointerDown = ({ target, button, isPrimary, pointerId }: PointerEvent) => {
         if (slideOn.current === null || !isWithin(target, GRID_AREA_SELECTOR)) return;
         if (button !== 0 || !isPrimary || !isWithin(target, PRESSABLE_SELECTOR) || isWithin(target, '.sheet-row')) return endSlide();
         let these = animations.current;
         pausedByPress.current = {
-          these: these,
-          pointerId: pointerId,
+          these,
+          pointerId,
         };
         for (let animation of [...these.staying, ...these.going]) animation.pause();
         return endAfter(these, PAUSED_PRESS_MS);
       };
-      let onPointerUp = ({ pointerId: pointerId }: Dynamic) => {
+      let onPointerUp = ({ pointerId }: PointerEvent) => {
         if (pausedByPress.current?.pointerId === pointerId) endAfter(pausedByPress.current.these, PRESS_LIFT_REPEAT_MAX_MS);
       };
       let onClick = () => void (pausedByPress.current !== null && endSlide());
-      let onPointerCancel = ({ pointerId: pointerId }: Dynamic) =>
+      let onPointerCancel = ({ pointerId }: PointerEvent) =>
         void (pausedByPress.current?.pointerId === pointerId && endSlide());
-      let onKeyDown = ({ target: target }: Dynamic) => void (isWithin(target, DIALOG_SELECTOR) || endSlide());
-      let onBlur = ({ target: target }: Dynamic) => void (target === win && endSlide());
+      let onKeyDown = ({ target }: KeyboardEvent) => void (isWithin(target, DIALOG_SELECTOR) || endSlide());
+      let onBlur = ({ target }: FocusEvent) => void (target === win && endSlide());
       let listening = new AbortController();
-      let options = {
+      let options: AddEventListenerOptions = {
         capture: true,
         signal: listening.signal,
       };
@@ -601,10 +782,10 @@ export function useLinesSlide({ grid: grid, lines: lines, slideTold: { tell: tel
   );
 }
 export const LINES_SLIDE_ANIMATION_ID = 'lines-slide';
-export const linesDrawnOf = (grid?: Dynamic, axis?: Dynamic) =>
+export const linesDrawnOf = (grid: GridToSlide, axis: LinesAxisName): LineDrawn[] =>
   axis === 'rows'
     ? grid.rows.map(
-        (row?: Dynamic) => ({
+        (row: RowToSlide): LineDrawn => ({
           key: row.key,
           index: row.rowNumber - 1,
           start: row.top,
@@ -612,42 +793,42 @@ export const linesDrawnOf = (grid?: Dynamic, axis?: Dynamic) =>
         }),
       )
     : grid.columnHeaders.map(
-        (column?: Dynamic) => ({
+        (column: ColumnHeaderToSlide): LineDrawn => ({
           key: column.key,
           index: column.columnNumber - 1,
           start: column.left,
           size: column.width,
         }),
       );
-export const lineSpanOf = ({ edges: edges, frozenCount: frozenCount, scroll: scroll }: Dynamic, index?: Dynamic) => ({
+export const lineSpanOf = ({ edges, frozenCount, scroll }: Pick<AxisLinesOnShow, 'edges' | 'frozenCount' | 'scroll'>, index: number): LineOnScreen => ({
   start: edges.startOf(index) - (index < frozenCount ? 0 : scroll),
   size: edges.sizeOf(index),
 });
-export const areSameOutOfSight = (one?: Dynamic, other?: Dynamic) =>
+export const areSameOutOfSight = (one: readonly LineSpan[], other: readonly LineSpan[]): boolean =>
   one === other ||
   (one.length === other.length &&
     one.every(
-      ({ firstIndex: firstIndex, count: count }: Dynamic, index?: Dynamic) =>
+      ({ firstIndex, count }: LineSpan, index: number) =>
         firstIndex === other[index]?.firstIndex && count === other[index].count,
     ));
-export const slideByAt = ({ bandsNow: bandsNow }: Dynamic, at?: Dynamic) =>
-  bandsNow.find(({ start: start, size: size }: Dynamic) => at >= start && at < start + size)?.by ?? 0;
-export const NO_LINES_AS_BEFORE = {
+export const slideByAt = ({ bandsNow }: Pick<SlideOfAxis, 'bandsNow'>, at: number): number =>
+  bandsNow.find(({ start, size }: BandOfSlide) => at >= start && at < start + size)?.by ?? 0;
+export const NO_LINES_AS_BEFORE: LinesAsBefore<never> = {
   groups: [],
   columnHeaders: [],
   veils: [],
   grid: null,
   slide: null,
 };
-export const groupIndexAt = ({ groups: groups }: Dynamic, top?: Dynamic) =>
+export const groupIndexAt = ({ groups }: { groups: readonly GroupOfLinesGoing<Pick<RowToSlide, 'top'>>[] }, top: number): number =>
   Math.max(
     0,
-    groups.findLastIndex(({ rows: rows }: Dynamic) => (rows[0]?.top ?? 0) <= top),
+    groups.findLastIndex(({ rows }: GroupOfLinesGoing<Pick<RowToSlide, 'top'>>) => (rows[0]?.top ?? 0) <= top),
   );
 export const SLIDE_SETTLE_MS = 150;
 export const FIRST_SLIDE_REST_MS = 30000;
 export const LONGEST_SLIDE_REST_MS = 64 * FIRST_SLIDE_REST_MS;
-export const SLIDE_PACE_START = {
+export const SLIDE_PACE_START: SlidePace = {
   isFirstPlayOver: false,
   inARow: 0,
   nextRestMs: FIRST_SLIDE_REST_MS,
@@ -683,13 +864,13 @@ export const MARKS_THAT_SLIDE = [
   'group-mark',
   'seam',
 ]
-  .map((name?: Dynamic) => `.sheet-${name}`)
+  .map((name: string) => `.sheet-${name}`)
   .join(',');
 export const MARKS_INSIDE_LINES =
   '.sheet-row, .sheet-header-row, .sheet-header-kept, .sheet-cells-held, .sheet-lines-as-before, [data-is-in-view="false"]';
-export const NO_MARKS = new Map();
+export const NO_MARKS: MarksOfGrid = new Map();
 export const OWN_FILTER_OUTLINE_SELECTOR = '.sheet-own-filter-outline';
-export const FADE_IN_LATE = [
+export const FADE_IN_LATE: Keyframe[] = [
   {
     opacity: 0,
   },
@@ -703,8 +884,8 @@ export const FADE_IN_LATE = [
 ];
 slideTiming = null;
 export const VEIL_OPACITY = 0.4;
-export const translateAlong = (axis?: Dynamic, by?: Dynamic) => (axis === 'rows' ? `translateY(${by}px)` : `translateX(${by}px)`);
-export const NO_SLIDE_STATE = {
+export const translateAlong = (axis: LinesAxisName, by: number): string => (axis === 'rows' ? `translateY(${by}px)` : `translateX(${by}px)`);
+export const NO_SLIDE_STATE: SlideState<never> = {
   grid: null,
   before: null,
   now: null,
@@ -716,9 +897,9 @@ export const PRESSABLE_SELECTOR = ['button', 'a', '[role="button"]'].join(',');
 export const GRID_AREA_SELECTOR = '.sheet-grid-zoomed, .sheet-group-lanes';
 export const PAUSED_PRESS_MS = 1000;
 export const START_WAIT_MS = 500;
-export const slidePaceByAxis = {
+export const slidePaceByAxis: Record<LinesAxisName, SlidePace> = {
   rows: SLIDE_PACE_START,
   columns: SLIDE_PACE_START,
 };
 export const DIALOG_SELECTOR = '[role="dialog"]';
-export const isWithin = (target?: Dynamic, selector?: Dynamic) => target instanceof Element && target.closest(selector) !== null;
+export const isWithin = (target: EventTarget | null, selector: string): boolean => target instanceof Element && target.closest(selector) !== null;

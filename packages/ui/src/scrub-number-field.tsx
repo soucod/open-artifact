@@ -4,7 +4,7 @@
  */
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import { cn } from './cn.ts';
-import { clampNumber, evaluateNumberInput, formatNumber, roundTo, stepDecimals } from './numbers.ts';
+import { clampNumber, evaluateNumberInput, formatNumber, roundTo, snapToStep, stepDecimals, stepStart } from './numbers.ts';
 
 /** Props of {@link ScrubNumberField}. */
 export interface ScrubNumberFieldProps {
@@ -50,9 +50,13 @@ export interface ScrubNumberFieldProps {
  * A number field with a drag-to-scrub label.
  *
  * - Drag the label sideways to scrub (Shift: large steps, Alt: small
- *   steps); Escape during a drag puts the value back.
+ *   steps); values land on multiples of `step` unless Alt is held. Escape
+ *   during a drag puts the value back; the end of a drag leaves the field
+ *   focused with its text selected. Pressing the label commits any other
+ *   field being typed in first.
  * - Arrow Up/Down step (Shift ×10, Alt ÷10), Page Up/Down take large
- *   steps, Home/End go to `min`/`max`.
+ *   steps, Home/End go to `min`/`max`. An empty or mixed field steps
+ *   from 0 (kept within `min`/`max`).
  * - Typing accepts arithmetic (`12*2`, `100/3`) and a unit; Enter or blur
  *   commits, Escape reverts.
  * - `mixed` shows "Mixed" until something is entered.
@@ -118,15 +122,19 @@ export function ScrubNumberField({
     if (next !== value || mixed || otherUnit) onCommit(next, otherUnit);
   };
 
-  /** Steps from the current value (or 0 / min when empty or mixed). */
-  const stepBy = (delta: number) => {
-    const typed = editing.current ? evaluateNumberInput(draft) : null;
-    const base = typed?.value ?? (mixed || value === null ? (min ?? 0) : value);
-    const next = fit(base + delta);
+  /** Puts `target` (fitted) in the field and commits it. */
+  const settleAt = (target: number) => {
+    const next = fit(target);
     editing.current = false;
     setDraft(formatNumber(next, decimals));
     onChange?.(next);
     onCommit(next);
+  };
+
+  /** Steps from the text being typed, else the value, else {@link stepStart}. */
+  const stepBy = (delta: number) => {
+    const typed = editing.current ? evaluateNumberInput(draft) : null;
+    settleAt((typed?.value ?? (mixed || value === null ? stepStart(min, max) : value)) + delta);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -151,13 +159,13 @@ export function ScrubNumberField({
       case 'Home':
         if (min !== undefined && !event.shiftKey) {
           event.preventDefault();
-          stepBy(min - (value ?? 0));
+          settleAt(min);
         }
         break;
       case 'End':
         if (max !== undefined && !event.shiftKey) {
           event.preventDefault();
-          stepBy(max - (value ?? 0));
+          settleAt(max);
         }
         break;
       case 'Enter':
@@ -189,20 +197,21 @@ export function ScrubNumberField({
       if (state.current !== state.start) onChange?.(state.start);
       return;
     }
-    if (state.travel < pixelsPerStep) {
-      // A click on the label focuses the field.
-      inputRef.current?.focus();
-      inputRef.current?.select();
-      return;
-    }
+    // A click on the label, or the end of a drag, leaves the field focused and selected.
+    inputRef.current?.focus();
+    inputRef.current?.select();
+    if (state.travel < pixelsPerStep) return;
     if (state.current !== state.start || mixed) onCommit(state.current);
   };
 
   const onPointerDown = (event: PointerEvent<HTMLSpanElement>) => {
     if (disabled || event.button !== 0) return;
     event.preventDefault();
+    // A field typed into elsewhere commits before the scrub writes its own value.
+    const typing = document.activeElement;
+    if (typing instanceof HTMLElement && typing !== inputRef.current && (typing.matches('input, textarea') || typing.isContentEditable)) typing.blur();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const start = mixed || value === null ? (min ?? 0) : value;
+    const start = mixed || value === null ? stepStart(min, max) : value;
     scrub.current = { start, current: start, travel: 0, carry: 0, pointerId: event.pointerId };
   };
 
@@ -218,7 +227,8 @@ export function ScrubNumberField({
     if (steps === 0) return;
     state.carry -= steps * pixelsPerStep;
     const unitStep = event.shiftKey ? big : event.altKey ? small : step;
-    const next = fit(state.current + steps * unitStep);
+    const moved = state.current + steps * unitStep;
+    const next = fit(event.altKey ? moved : snapToStep(moved, step));
     if (next === state.current) return;
     state.current = next;
     setDraft(formatNumber(next, decimals));
@@ -242,6 +252,7 @@ export function ScrubNumberField({
 
   return (
     <div
+      data-ui-field=""
       className={cn(
         'flex h-7 min-w-0 items-center rounded-control border border-line bg-surface-2 text-[13px] text-fg focus-within:border-accent focus-within:bg-surface',
         disabled && 'opacity-50',

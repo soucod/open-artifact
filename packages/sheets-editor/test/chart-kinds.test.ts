@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { STOCK_CHART_PROGRAMS, STOCK_KINDS } from '@open-artifact/sheets-core/stock-charts';
+import type { StockKind } from '@open-artifact/sheets-core/stock-charts';
 import { canSwapChartKind, doesChartKindSuitRows } from '../src/charts/chart-kind-fit.ts';
 import { canAskChartChange, chartChangeOffers } from '../src/charts/change-offers.ts';
-import { chartThumbnailPaths } from '../src/charts/chart-thumbnail.ts';
+import { chartThumbnailPaths } from '../src/charts/chart-thumbnail-paths.ts';
+import type { ChartCell } from '../src/chart-frame/messages.ts';
+import type { ChartOfView } from '../src/charts/placed-views.ts';
 
-const cell = (value: unknown) => ({ value: typeof value === 'number' ? value : undefined, text: String(value) });
+const cell = (value: unknown): ChartCell => ({ value: typeof value === 'number' ? value : undefined, text: String(value) });
 const table = (...rows: unknown[][]) => rows.map((row) => row.map(cell));
 
 /** Months of two positive series: the shape of the chart in the screenshot this change came from. */
@@ -16,14 +19,14 @@ const POINTS = table(['Price', 'Sold'], [10, 300], [12, 260], [15, 210]);
 // tests cannot, so what is tested here is the choosing of kinds; the swap itself is checked in the page.
 describe('changing a chart’s kind', () => {
   it('offers the kinds the rows suit, leaving out the kind it is now', () => {
-    const chart = { kind: 'code', nodeId: 'n1', inputs: { rows: MONTHS } };
-    const kinds = (kindNow: string | null, canAgentWrite: boolean) => chartChangeOffers(chart, kindNow, canAgentWrite).map((offer: { kind: string }) => offer.kind);
+    const chart: ChartOfView = { kind: 'code', nodeId: 'n1', inputs: { rows: MONTHS } };
+    const kinds = (kindNow: StockKind | null, canAgentWrite: boolean) => chartChangeOffers(chart, kindNow, canAgentWrite).map((offer: { kind: string }) => offer.kind);
     assert.deepEqual(kinds('stackedBar', false), ['bar', 'horizontalBar', 'line', 'area']);
     assert.deepEqual(kinds(null, true), ['bar', 'horizontalBar', 'stackedBar', 'line', 'area']);
     assert.ok(chartChangeOffers(chart, null, false).every((offer: { isSwap: boolean }) => offer.isSwap));
     assert.equal(canAskChartChange({}, chart, false), true);
     // A chart that reads other inputs is the agent's to change, and is offered nothing without it.
-    const other = { kind: 'code', nodeId: 'n1', inputs: { costs: MONTHS } };
+    const other: ChartOfView = { kind: 'code', nodeId: 'n1', inputs: { costs: MONTHS } };
     assert.deepEqual(chartChangeOffers(other, null, false), []);
     assert.equal(canAskChartChange({}, other, false), false);
     assert.deepEqual(

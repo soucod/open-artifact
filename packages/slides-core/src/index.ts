@@ -12,6 +12,7 @@ export * from './text.ts';
 export * from './video.ts';
 export * from './css/color.ts';
 export * from './css/values.ts';
+export * from './css/clip-path.ts';
 export * from './css/properties.ts';
 export * from './compile.ts';
 export * from './serialize.ts';

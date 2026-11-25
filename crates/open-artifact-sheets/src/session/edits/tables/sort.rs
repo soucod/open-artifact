@@ -12,15 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use hashbrown::HashMap;
 
 use super::{live_column, live_row, sheet, Direction, Made, Refused};
+use crate::calculate::SpillOutcome;
 use crate::coerce::{compare_numbers, compare_texts};
-use crate::formula::{Reference, StoredFormula};
-use crate::ids::{runs_of, Axis, IdRun, LineId};
+use crate::ids::{Axis, IdRun, LineId};
 use crate::session::place::Place;
 use crate::session::reads::tables::values::SheetValues;
 use crate::value::Value;
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{self, sorted_runs, write_format, Leaf, LEAVES};
 use crate::workbook::layout::{live_ends, merged_boxes, CellIds, RangeIds};
-use crate::workbook::load::{CellToSet, CellsToFormat, Op, RowMove};
+use crate::workbook::load::{CellToSet, CellsToFormat, Op};
+use crate::workbook::reorder::{self, rewritten, KeyDirection, SortedBy};
 use crate::workbook::{Input, Sheet, Workbook};
 
 mod objects;
@@ -139,6 +141,37 @@ fn key_columns(
     keys.iter().map(|(c, d)| Ok((live_column(workbook, s, c)?.1, *d))).collect()
 }
 
+/// Sorting cannot reorder a key's values that come from one formula spanning rows, or a formula in a
+/// column outside the sorted cells.
+fn check_spilled_keys(
+    workbook: &Workbook,
+    sheet: &Sheet,
+    top: usize,
+    bottom: usize,
+    left: usize,
+    keys: &[(usize, Direction)],
+) -> Result<(), Refused> {
+    let mut spills_down = false;
+    for ((sheet_id, r, c), outcome) in &workbook.outcomes {
+        if sheet_id != &sheet.id {
+            continue;
+        }
+        let Some(SpillOutcome::Fills { to, .. }) = &outcome.spill else { continue };
+        let Some((row, column)) = sheet.rows.position(*r).zip(sheet.columns.position(*c)) else { continue };
+        if row > bottom || to.0 < top || !keys.iter().any(|&(key, _)| (column..=to.1).contains(&key)) {
+            continue;
+        }
+        if column < left {
+            return Err(Refused::Because("sortColumnFilledFromOutsideTheCells"));
+        }
+        spills_down |= to.0 > row;
+    }
+    if spills_down {
+        return Err(Refused::Because("sortColumnFilledDownByOneFormula"));
+    }
+    Ok(())
+}
+
 /// The first row a sort may move: rows frozen at the top stay where they are.
 fn first_unfrozen(s: &Sheet) -> usize {
     s.last_frozen_row.and_then(|r| s.rows.position(r)).map_or(0, |p| p + 1)
@@ -175,6 +208,7 @@ pub(super) fn rows_in_sorted_order(
     if is_calculation_due && keys.iter().any(|&(c, _)| (top..=bottom).any(|r| holds_formula((r, c)))) {
         return Err(Refused::Because("sortKeysNotCalculated"));
     }
+    check_spilled_keys(workbook, s, top, bottom, 0, &keys)?;
     let order = sorted(s, &SheetValues::of(workbook, s), top, bottom, &keys);
     Ok(order.into_iter().map(|p| s.rows.line(p).expect("a live row")).collect())
 }
@@ -196,15 +230,14 @@ pub(super) fn sort_rows(
         return Ok(Made::nothing());
     }
     let keys = key_columns(workbook, s, keys)?;
+    check_spilled_keys(workbook, s, top, bottom, 0, &keys)?;
     let order = sorted(s, &SheetValues::of(workbook, s), top, bottom, &keys);
     let Some(i) = order.iter().enumerate().position(|(k, &p)| p != top + k) else { return Ok(Made::nothing()) };
     let j = order.iter().enumerate().rposition(|(k, &p)| p != top + k).expect("a row that moves");
     // What else the sheet holds goes along (its ids checked before anything else is).
     let moved = Moved::new(s, top, &order, true);
     let groups = objects::groups(workbook, &moved, code)?;
-    let conditional_formats = objects::conditional_formats(workbook, &moved)?;
-    let placements = objects::placements(workbook, &moved)?;
-    let views = objects::views(workbook, &moved)?;
+    // Conditional formats, placements and widgets' ranges keep their places as the rows are put in order.
     // Where each row of the sorted ones goes; a merged range across rows has to stay whole, in its order.
     let mut new_place: Vec<usize> = vec![0; order.len()];
     for (k, &p) in order.iter().enumerate() {
@@ -217,50 +250,51 @@ pub(super) fn sort_rows(
             return Err(Refused::Because("moveSplitsMergedRange"));
         }
     }
-    let moved: Vec<LineId> = order[i..=j].iter().map(|&p| s.rows.line(p).expect("a live row")).collect();
-    let after = (top + i).checked_sub(1).map(|p| workbook.bases.text(s.rows.line(p).expect("a live row")));
+    // The rows from the first that moves to the last, in their new order; they keep the places they take.
+    let in_order: Vec<LineId> = order[i..=j].iter().map(|&p| s.rows.line(p).expect("a live row")).collect();
     let mut rows_after = s.rows.clone();
-    rows_after.move_lines(&[(moved.clone(), (top + i).checked_sub(1).and_then(|p| s.rows.line(p)))]);
+    rows_after.reorder(&in_order);
     let mut ops = merged_again(workbook, s, &rows_after)?;
-    let rows = runs_of(&moved, &workbook.bases);
-    ops.push(Op::MoveRows { sheet_id: sheet_id.to_owned(), moves: vec![RowMove { rows, after }] });
-    ops.extend(groups);
-    // Every formula that names the rows sorted keeps naming the places it named, its own rows moving with it.
+    // A formula among them one of whose references would leave the sheet as its row moves is written again first,
+    // that reference as text (the move moves the rest).
     let index = workbook.sheet_index(sheet_id).expect("a sheet");
-    let line = |p: usize| s.rows.line(if (top..=bottom).contains(&p) { order[p - top] } else { p });
-    for (k, other) in workbook.sheets.iter().enumerate() {
-        // A cell a merged range the page shows covers (all but its top left) is left as it is.
-        let boxes = merged_boxes(&workbook.bases, other);
-        let covered = |r: usize, c: usize| {
-            boxes.iter().any(|&(t, b, l, x)| (t..=b).contains(&r) && (l..=x).contains(&c) && (r, c) != (t, l))
-        };
-        let mut cells: Vec<((usize, usize), CellToSet)> = Vec::new();
-        for (&(r, c), cell) in &other.cells {
-            let Input::Formula { formula } = &cell.input else { continue };
-            let (Some(at_r), Some(at_c)) = (other.rows.position(r), other.columns.position(c)) else { continue };
-            if covered(at_r, at_c) {
-                continue;
-            }
-            if !formula.references.iter().any(|x| workbook.sheet_index(x.sheet_id()) == Some(index)) {
-                continue;
-            }
-            let delta = match (k == index).then(|| s.rows.position(r)).flatten() {
-                Some(p) if (top..=bottom).contains(&p) => Some(place(p) as i64 - p as i64),
-                _ => None,
-            };
-            let new = rewritten(workbook, formula, index, delta, &line, &rows_after);
-            if new != *formula {
-                let (r, c) = (workbook.bases.text(r), workbook.bases.text(c));
-                cells.push(((at_r, at_c), CellToSet { r, c, input: Some(Input::Formula { formula: new }) }));
-            }
+    let boxes = merged_boxes(&workbook.bases, s);
+    let covered = |r: usize, c: usize| {
+        boxes.iter().any(|&(t, b, l, x)| (t..=b).contains(&r) && (l..=x).contains(&c) && (r, c) != (t, l))
+    };
+    let mut cells: Vec<((usize, usize), CellToSet)> = Vec::new();
+    for (&(r, c), cell) in &s.cells {
+        let Input::Formula { formula } = &cell.input else { continue };
+        let (Some(at_r), Some(at_c)) = (s.rows.position(r), s.columns.position(c)) else { continue };
+        if !(top..=bottom).contains(&at_r) || place(at_r) == at_r || covered(at_r, at_c) {
+            continue;
         }
-        if !cells.is_empty() {
-            cells.sort_by_key(|x| x.0);
-            let cells = cells.into_iter().map(|x| x.1).collect();
-            ops.push(Op::SetCells { sheet_id: other.id.clone(), cells, listed: false });
+        let delta = place(at_r) as i64 - at_r as i64;
+        if let Some(new) = reorder::unshiftable(workbook, formula, index, delta) {
+            let (r, c) = (workbook.bases.text(r), workbook.bases.text(c));
+            cells.push(((at_r, at_c), CellToSet { r, c, input: Some(Input::Formula { formula: new }) }));
         }
     }
-    ops.extend(conditional_formats.into_iter().chain(placements).chain(views));
+    if !cells.is_empty() {
+        cells.sort_by_key(|x| x.0);
+        let cells = cells.into_iter().map(|x| x.1).collect();
+        ops.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells, form: CellForm::Auto });
+    }
+    // The keys it was sorted by, a column again left out.
+    let mut seen = BTreeSet::new();
+    let sorted_by = keys
+        .iter()
+        .filter(|&&(c, _)| seen.insert(c))
+        .map(|&(c, d)| SortedBy {
+            c: workbook.bases.text(s.columns.line(c).expect("a live column")),
+            direction: match d {
+                Direction::Ascending => KeyDirection::Ascending,
+                Direction::Descending => KeyDirection::Descending,
+            },
+        })
+        .collect();
+    ops.push(reorder::op_for(workbook, sheet_id, &in_order, sorted_by));
+    ops.extend(groups);
     let span = Place::cells(sheet_id, top + i, 0, top + j, s.columns.len().saturating_sub(1));
     Ok(Made { ops, place: Some(span) })
 }
@@ -341,6 +375,7 @@ pub(super) fn sort_cells(
     if merged_boxes(bases, s).iter().any(meets) {
         return Err(Refused::Because("mergedRangeAmongSortedCells"));
     }
+    check_spilled_keys(workbook, s, top, bottom, left, &keys)?;
     let order = sorted(s, &SheetValues::of(workbook, s), top, bottom, &keys);
     if order.iter().enumerate().all(|(k, &p)| p == top + k) {
         return Ok(Made::nothing());
@@ -361,7 +396,7 @@ pub(super) fn sort_cells(
             let new = s.cells.get(&from).map(|cell| match &cell.input {
                 Input::Formula { formula } => {
                     let (delta, line) = (p as i64 - q as i64, |p| s.rows.line(p));
-                    Input::Formula { formula: rewritten(workbook, formula, index, Some(delta), &line, &s.rows) }
+                    Input::Formula { formula: rewritten(workbook, formula, index, Some(delta), &line, &s.rows, None) }
                 }
                 input => input.clone(),
             });
@@ -378,7 +413,7 @@ pub(super) fn sort_cells(
     }
     let mut ops = Vec::new();
     if !cells.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells, listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells, form: CellForm::Auto });
     }
     if formats_change {
         // Formats change in the rows from the first that changes to the last.
@@ -433,103 +468,4 @@ pub(super) fn sort_cells(
     }
     ops.extend(groups);
     Ok(Made { ops, place: Some(place) })
-}
-
-/// A formula as moved by a sort. Its references to the sheet sorted (`sheet`) keep the places they name: each row
-/// not fixed moves by `delta` (as far as the formula's cell moves, when it is among the cells sorted), and the
-/// reference then names the rows at those places (`line`); one that would leave the sheet becomes `#REF!`. A reference
-/// whose ends would be at those places anyway (with the rows as they are after the sort, `after`) stays as it is, its
-/// deleted rows too. References to other sheets stay as they are.
-pub(super) fn rewritten(
-    workbook: &Workbook,
-    formula: &StoredFormula,
-    sheet: usize,
-    delta: Option<i64>,
-    line: &dyn Fn(usize) -> Option<LineId>,
-    after: &Axis,
-) -> StoredFormula {
-    let mut pieces = vec![formula.text_between_references[0].clone()];
-    let mut references = Vec::new();
-    for (i, reference) in formula.references.iter().enumerate() {
-        let next = &formula.text_between_references[i + 1];
-        let moved = if workbook.sheet_index(reference.sheet_id()) != Some(sheet) {
-            Some(reference.clone())
-        } else {
-            moved_reference(workbook, reference, sheet, delta, line, after)
-        };
-        match moved {
-            Some(r) => {
-                references.push(r);
-                pieces.push(next.clone());
-            }
-            None => {
-                let last = pieces.last_mut().expect("a piece");
-                last.push_str("#REF!");
-                last.push_str(next);
-            }
-        }
-    }
-    StoredFormula { text_between_references: pieces, references }
-}
-
-fn moved_reference(
-    workbook: &Workbook,
-    reference: &Reference,
-    sheet: usize,
-    delta: Option<i64>,
-    line: &dyn Fn(usize) -> Option<LineId>,
-    after: &Axis,
-) -> Option<Reference> {
-    let rows = &workbook.sheets[sheet].rows;
-    let bases = &workbook.bases;
-    // Each end of the rows where it is now (a deleted one gives way toward the other end), moved, and read again; an
-    // end that is nowhere stays as it is. Where the end would be after the sort as it is (`now`) tells whether it
-    // changes.
-    let changed = std::cell::Cell::new(false);
-    let somewhere = std::cell::Cell::new(false);
-    let row = |r: &mut String, fixed: bool, (place, now): (Option<usize>, Option<usize>)| -> Option<()> {
-        somewhere.set(somewhere.get() || now.is_some());
-        let Some(p) = place else { return Some(()) };
-        let to = usize::try_from(p as i64 + if fixed { 0 } else { delta.unwrap_or(0) }).ok()?;
-        let new = line(to)?;
-        changed.set(changed.get() || now != Some(to));
-        *r = bases.text(new);
-        Some(())
-    };
-    let snap = |axis: &Axis, a: &str, b: &str| axis.snap_toward(bases.parse(a)?, bases.parse(b)?);
-    let toward = |a: &str, b: &str| (snap(rows, a, b), snap(after, a, b));
-    let mut r = reference.clone();
-    let moved = (|| -> Option<()> {
-        match &mut r {
-            Reference::Cell { cell, .. } => {
-                let place = toward(&cell.r, &cell.r);
-                row(&mut cell.r, cell.is_row_absolute, place)?;
-            }
-            Reference::Range { top_left: a, bottom_right: b, .. } => {
-                let (pa, pb) = (toward(&a.r, &b.r), toward(&b.r, &a.r));
-                row(&mut a.r, a.is_row_absolute, pa)?;
-                row(&mut b.r, b.is_row_absolute, pb)?;
-            }
-            Reference::Columns { top, .. } => {
-                if let Some(top) = top {
-                    let line = bases.parse(&top.r);
-                    let place = (line.and_then(|l| rows.snap_forward(l)), line.and_then(|l| after.snap_forward(l)));
-                    row(&mut top.r, top.is_row_absolute, place)?;
-                }
-            }
-            Reference::Rows { top: a, bottom: b, .. } => {
-                let (pa, pb) = (toward(&a.r, &b.r), toward(&b.r, &a.r));
-                row(&mut a.r, a.is_row_absolute, pa)?;
-                row(&mut b.r, b.is_row_absolute, pb)?;
-            }
-        }
-        Some(())
-    })();
-    match moved {
-        Some(()) if changed.get() => Some(r),
-        Some(()) => Some(reference.clone()),
-        // One already `#REF!` (its columns deleted, say), or that names no row once the rows move, stays as it is
-        // when its rows would leave the sheet.
-        None => (workbook.locate(reference).is_none() || !somewhere.get()).then(|| reference.clone()),
-    }
 }

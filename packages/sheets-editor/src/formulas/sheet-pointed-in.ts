@@ -1,10 +1,16 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
+import type { CaretInEntryPlaced } from '../editor/entry-boxes.ts';
+import type { GridPoint } from '../grid/geometry.ts';
+import type { KeyStep } from '../keys/key-acts.ts';
+import type { IfQueued, PageContext, PageEvent } from '../state/event-reducer.ts';
+import type { SheetShownDone } from '../state/sheet-tabs.ts';
+import type { PageMode, PageTransition } from '../state/transitions.ts';
 import { clampScrollOfView, findSheetById } from '../grid/layout.ts';
 import { activeAnchorCell, areaOfPosition, selectedArea, scrollToShowActiveCell, selectionAtCell } from '../selection/model.ts';
 import { areaToA1AsStored } from './from-words/where.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import { isPointingPossible, pointAtCell, dragPointedReference } from './reference-pointing.ts';
-import { firstPlaceInSheet } from '../state/places.ts';
+import { firstPlaceInSheet, interactiveOfSheet } from '../state/places.ts';
 import { isFormulaAskedOrProposed } from './from-words/actions.ts';
 import { selectionAtPointer } from '../selection/pointer.ts';
 import { withNoEffects } from '../state/transitions.ts';
@@ -14,27 +20,31 @@ import { withIfQueued } from '../model/edit-effects.ts';
 import { isFormulaText } from '../chips/dropdown-pane-edits.ts';
 import { carryFormulaOfAgentDiscarded } from '../agent/discarded-formula-note.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { PageState, SheetShownForDone } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function showSheetPointedIn(state: PageState, workbook: ReadsWithTextMeasurer) {
-  let place = state.placesLeft.find(({ sheetId: sheetId2 }: Dynamic) => sheetId2 === state.sheetPointedIn);
+/** What a sheet beside the entry's would be to point in: the entry's own, another, or none to point in. */
+export type SheetToPointIn = 'entrysOwn' | 'another' | null;
+/** The state as it is seen while a formula is entered in one sheet and its references are pointed at in another. */
+export function showSheetPointedIn(state: PageState, workbook: ReadsWithTextMeasurer): PageState {
+  let place = state.placesLeft.find(({ sheetId: placeSheetId }) => placeSheetId === state.sheetPointedIn);
   if (place === undefined) return state;
-  let { sheetId: sheetId, scrollLeft: scrollLeft, scrollTop: scrollTop } = place;
+  let { sheetId, scrollLeft, scrollTop } = place;
   return clampScrollOfView(
     {
       ...state,
-      sheetId: sheetId,
-      scrollLeft: scrollLeft,
-      scrollTop: scrollTop,
+      sheetId,
+      scrollLeft,
+      scrollTop,
     },
     workbook,
   );
 }
-export function restoreEntrySheet(entryState?: Dynamic, shown?: Dynamic, next?: Dynamic) {
+/** Back from the sheet pointed in, as `shown`, to the entry's sheet, keeping what changed from `shown` to `next`. */
+export function restoreEntrySheet(entryState: PageState, shown: PageState, next: PageState): PageState {
   if (next === shown) return entryState;
-  let { sheetId: sheetId, scrollLeft: scrollLeft, scrollTop: scrollTop } = entryState;
+  let { sheetId, scrollLeft, scrollTop } = entryState;
   let placesLeft = entryState.placesLeft.map(
-    (place?: Dynamic) =>
+    (place) =>
       place.sheetId === next.sheetId
         ? {
             ...place,
@@ -45,18 +55,22 @@ export function restoreEntrySheet(entryState?: Dynamic, shown?: Dynamic, next?: 
   );
   return {
     ...next,
-    sheetId: sheetId,
-    scrollLeft: scrollLeft,
-    scrollTop: scrollTop,
-    placesLeft: placesLeft,
+    sheetId,
+    scrollLeft,
+    scrollTop,
+    placesLeft,
   };
 }
-export function actOnSheetPointedIn(state: PageState, workbook: ReadsWithTextMeasurer, act?: Dynamic) {
+export function actOnSheetPointedIn(state: PageState, workbook: ReadsWithTextMeasurer, act: (state: PageState) => PageState): PageState {
   if (state.sheetPointedIn === null) return act(state);
   let shown = showSheetPointedIn(state, workbook);
   return restoreEntrySheet(state, shown, act(shown));
 }
-export function sheetShownLastDone(state: PageState, workbook: WorkbookReads, pointedSheetId?: Dynamic) {
+export function sheetShownLastDone(
+  state: PageState,
+  workbook: WorkbookReads,
+  pointedSheetId: SheetId | null,
+): SheetShownDone | SheetShownForDone | null {
   let entrySheetName = findSheetById(workbook, state.sheetId)?.name;
   if (entrySheetName === undefined) return null;
   if (pointedSheetId === null)
@@ -71,57 +85,82 @@ export function sheetShownLastDone(state: PageState, workbook: WorkbookReads, po
   return {
     what: 'sheetShownForFormula',
     name: pointedSheetName,
-    entryCell: entryCell,
+    entryCell,
     entrySheet: entrySheetName,
   };
 }
-export function canSwitchSheetWhileEditing(mode?: Dynamic, caret?: Dynamic, isBackToEntrySheet?: Dynamic, mayPoint?: Dynamic) {
+export function canSwitchSheetWhileEditing(
+  mode: PageMode,
+  caret: CaretInEntryPlaced | undefined,
+  isBackToEntrySheet: boolean,
+  mayPoint: boolean,
+): boolean {
   if (mode.kind !== 'editing') return false;
   return isBackToEntrySheet || (mayPoint && isPointingPossible(mode, caret));
 }
-export function sheetIdAtOffset(sheetId: Dynamic, workbook: WorkbookReads, offset?: Dynamic) {
+export function sheetIdAtOffset(sheetId: SheetId, workbook: WorkbookReads, offset: KeyStep): SheetId | undefined {
   let sheets = workbook.listSheets();
-  return sheets[sheets.findIndex((sheet?: Dynamic) => sheet.sheetId === sheetId) + offset]?.sheetId;
+  return sheets[sheets.findIndex((sheet) => sheet.sheetId === sheetId) + offset]?.sheetId;
 }
-export function sheetsToPointInFor(state: PageState, workbook: WorkbookReads, allowsAnother?: Dynamic) {
-  let { sheetId: sheetId, sheetPointedIn: sheetPointedIn } = state;
-  let targetAt = (offset?: Dynamic) => {
+export function sheetsToPointInFor(
+  state: PageState,
+  workbook: WorkbookReads,
+  allowsAnother: boolean,
+): { before: SheetToPointIn; after: SheetToPointIn } {
+  let { sheetId, sheetPointedIn } = state;
+  let targetAt = (offset: KeyStep): SheetToPointIn => {
     let targetSheetId = sheetIdAtOffset(sheetPointedIn ?? sheetId, workbook, offset);
     if (targetSheetId === undefined || firstPlaceInSheet(workbook, targetSheetId) === null) return null;
     if (targetSheetId === sheetId) return 'entrysOwn';
-    return allowsAnother && !isFormulaAskedOrProposed(state) ? 'another' : null;
+    return allowsAnother && !isFormulaAskedOrProposed(state) && interactiveOfSheet(workbook, targetSheetId) === null ? 'another' : null;
   };
   return {
     before: targetAt(-1),
     after: targetAt(1),
   };
 }
-export function switchSheetWhileEditing(state: PageState, workbook: ReadsWithTextMeasurer, sheetId?: Dynamic, caret?: Dynamic, allowsAnother?: Dynamic) {
-  let { mode: mode, placesLeft: placesLeft, sheetPointedIn: sheetPointedIn } = state;
+export function switchSheetWhileEditing(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  sheetId: SheetId,
+  caret: CaretInEntryPlaced | undefined,
+  allowsAnother: boolean,
+): PageState | null {
+  let { mode, placesLeft, sheetPointedIn } = state;
   let isBackToEntrySheet = sheetId === state.sheetId && sheetPointedIn !== null;
-  let mayPoint = allowsAnother && !isFormulaAskedOrProposed(state);
+  let mayPoint = allowsAnother && !isFormulaAskedOrProposed(state) && interactiveOfSheet(workbook, sheetId) === null;
   if (!canSwitchSheetWhileEditing(mode, caret, isBackToEntrySheet, mayPoint)) return null;
   if (sheetId === (sheetPointedIn ?? state.sheetId)) return state;
   if (isBackToEntrySheet) return withSheetPointedIn(state, workbook, null);
-  let placeLeft = placesLeft.find((place2?: Dynamic) => place2.sheetId === sheetId);
+  let placeLeft = placesLeft.find((placeKept) => placeKept.sheetId === sheetId);
   let place = placeLeft !== undefined && selectedArea(placeLeft, workbook) !== null ? placeLeft : firstPlaceInSheet(workbook, sheetId);
   if (place === null) return null;
   return {
     ...withSheetPointedIn(scrollToShowActiveCell(state, workbook), workbook, sheetId),
     placesLeft:
-      placeLeft === undefined ? [place, ...placesLeft] : placesLeft.map((place2?: Dynamic) => (place2 === placeLeft ? place : place2)),
+      placeLeft === undefined ? [place, ...placesLeft] : placesLeft.map((placeKept) => (placeKept === placeLeft ? place : placeKept)),
   };
 }
-export function switchToNextSheetWhileEditing(state: PageState, workbook: ReadsWithTextMeasurer, offset?: Dynamic, caret?: Dynamic) {
+export function switchToNextSheetWhileEditing(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  offset: KeyStep,
+  caret: CaretInEntryPlaced | undefined,
+): PageState {
   let sheetId = sheetIdAtOffset(state.sheetPointedIn ?? state.sheetId, workbook, offset);
   return sheetId === undefined ? state : (switchSheetWhileEditing(state, workbook, sheetId, caret, true) ?? state);
 }
-export function pressCellsInSheetPointedIn(state: PageState, shown: Dynamic, workbook: ReadsWithTextMeasurer, pointer?: Dynamic) {
+export function pressCellsInSheetPointedIn(
+  state: PageState,
+  shown: PageState,
+  workbook: ReadsWithTextMeasurer,
+  pointer: GridPoint,
+): PageTransition {
   let selection = selectionAtPointer(shown, workbook, pointer);
   if (selection === null) return withNoEffects(state);
   let selected = 'activeCell' in selection ? selection : selectionAtCell(selection);
   let ended = endEntryOnPointerPress(state, workbook, null);
-  let { lastDone: lastDone } = ended.state;
+  let { lastDone } = ended.state;
   let discardNotice = lastDone?.what === 'formulaOfAgentDiscarded' ? lastDone : null;
   if (ended.state.mode.kind !== 'editing')
     return withNoEffects({
@@ -129,7 +168,7 @@ export function pressCellsInSheetPointedIn(state: PageState, shown: Dynamic, wor
       ...selected,
       lastDone: discardNotice,
     });
-  let ifQueued = {
+  let ifQueued: Partial<IfQueued> = {
     ...('activeCell' in selection
       ? pointerSelectRequest(selection)
       : {
@@ -138,13 +177,18 @@ export function pressCellsInSheetPointedIn(state: PageState, shown: Dynamic, wor
         }),
     thenSheet: shown.sheetId,
   };
-  let effects = ended.effects.map((effect?: Dynamic) => withIfQueued(effect, ifQueued));
+  let effects = ended.effects.map((effect) => withIfQueued(effect, ifQueued));
   return {
     state: ended.state,
-    effects: effects,
+    effects,
   };
 }
-export function stepInSheetPointedIn(state: PageState, event: Dynamic, { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic) {
+/** The step of an event on the grid while a sheet other than the entry's is pointed in; `null` for an event it leaves alone. */
+export function stepInSheetPointedIn(
+  state: PageState,
+  event: PageEvent,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition | null {
   if (state.sheetPointedIn === null) return null;
   let shown = showSheetPointedIn(state, reads);
   if (event.kind === 'pointerPressed') {
@@ -164,9 +208,9 @@ export function stepInSheetPointedIn(state: PageState, event: Dynamic, { reads: 
     let clamped = clampScrollOfView(
       {
         ...shown,
-        scrollLeft: scrollLeft,
+        scrollLeft,
         scrollTop: pointedOrScrollTop,
-        pagesTurnedForReader: pagesTurnedForReader,
+        pagesTurnedForReader,
       },
       reads,
     );
@@ -176,8 +220,8 @@ export function stepInSheetPointedIn(state: PageState, event: Dynamic, { reads: 
   if (event.kind === 'menuAsked' && event.at !== null) return pressCellsInSheetPointedIn(state, shown, reads, event.at);
   return event.kind === 'pointerPressedTwice' ? withNoEffects(state) : null;
 }
-export function dropSheetPointedInWhenDone(state: PageState, workbook: WorkbookReads) {
-  let { sheetPointedIn: sheetPointedIn, mode: mode } = state;
+export function dropSheetPointedInWhenDone(state: PageState, workbook: WorkbookReads): PageState {
+  let { sheetPointedIn, mode } = state;
   if (sheetPointedIn === null) return state;
   if (sheetPointedIn === state.sheetId)
     return {
@@ -193,7 +237,7 @@ export function dropSheetPointedInWhenDone(state: PageState, workbook: WorkbookR
         calendar: null,
       };
 }
-export const withSheetPointedIn = (state: PageState, workbook: WorkbookReads, sheetId?: Dynamic) => ({
+export const withSheetPointedIn = (state: PageState, workbook: WorkbookReads, sheetId: SheetId | null): PageState => ({
   ...state,
   sheetPointedIn: sheetId,
   dragging: null,

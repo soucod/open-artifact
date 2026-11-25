@@ -1,7 +1,36 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
-import { isNearFullZoom, clampZoom } from './zoom.ts';
-export function nextWheelZoom(run: Dynamic, { zoomNow: zoomNow, factor: factor, atMs: atMs }: Dynamic) {
+import { isNearFullZoom, clampZoom, type ZoomStore } from './zoom.ts';
+/** A zoom asked for by a run of wheel turns or a gesture, and whether the run has gone away from full zoom. */
+export interface ZoomAsk {
+  asked: number;
+  isAway: boolean;
+}
+/** A run of wheel turns that zoom: what it asked for, the zoom it shows and when it last turned. */
+export interface WheelZoomRun extends ZoomAsk {
+  shown: number;
+  lastAtMs: number;
+}
+/** One wheel turn that zooms: the zoom it starts from, the factor it zooms by and when it came. */
+export interface WheelZoomTurn {
+  zoomNow: number;
+  factor: number;
+  atMs: number;
+}
+/** The last wheel turn that scrolled, to tell whether a pinch on the trackpad goes on. */
+export type LastWheel = Pick<WheelEvent, 'deltaY' | 'timeStamp'>;
+/** Where a zoom gesture or wheel turn is on screen. */
+export type ZoomPointer = Pick<MouseEvent, 'clientX' | 'clientY'>;
+/** A pinch on a trackpad as the browser reports it in a gesture event. */
+export interface PinchGestureEvent extends Event, ZoomPointer {
+  scale: number;
+}
+export interface GridZoomGesturesProps {
+  gridRef: React.RefObject<HTMLElement | null>;
+  overGridRef: React.RefObject<HTMLElement | null>;
+  gridZoom: ZoomStore;
+  zoomTo: (nextZoom: number, pointer: ZoomPointer) => void;
+}
+export function nextWheelZoom(run: WheelZoomRun | null, { zoomNow, factor, atMs }: WheelZoomTurn): WheelZoomRun {
   let baseRun = run !== null && atMs - run.lastAtMs <= ZOOM_WHEEL_RUN_MS && run.shown === zoomNow ? run : zoomAsked(zoomNow);
   let nextRun = zoomAskedTimes(baseRun, baseRun.asked * factor);
   return {
@@ -10,7 +39,7 @@ export function nextWheelZoom(run: Dynamic, { zoomNow: zoomNow, factor: factor, 
     lastAtMs: atMs,
   };
 }
-export function useGridZoomGestures({ gridRef: gridRef, overGridRef: overGridRef, gridZoom: gridZoom, zoomTo: zoomTo }: Dynamic) {
+export function useGridZoomGestures({ gridRef, overGridRef, gridZoom, zoomTo }: GridZoomGesturesProps): void {
   let zoomToEvent = React.useEffectEvent(zoomTo);
   React.useEffect(() => {
     let scroller = gridRef.current?.parentElement;
@@ -19,17 +48,17 @@ export function useGridZoomGestures({ gridRef: gridRef, overGridRef: overGridRef
     if (scroller === null || scroller === undefined || overGrid === null) return;
     if (defaultView === null || defaultView === undefined) return;
     let targets = [scroller, overGrid];
-    let zoomAtGestureStart: Dynamic = 1;
-    let gestureRun: Dynamic = zoomAsked(1);
-    let { NEGATIVE_INFINITY: lastGestureAt, NEGATIVE_INFINITY: lastPlainWheelAt }: Dynamic = Number;
-    let lastWheel: Dynamic = {
+    let zoomAtGestureStart = 1;
+    let gestureRun = zoomAsked(1);
+    let { NEGATIVE_INFINITY: lastGestureAt, NEGATIVE_INFINITY: lastPlainWheelAt } = Number;
+    let lastWheel: LastWheel = {
       deltaY: 0,
       timeStamp: Number.NEGATIVE_INFINITY,
     };
-    let isModifierHeldForZoom: Dynamic = false;
-    let wheelRun: Dynamic = null;
-    let touchPointers = new (Set as Dynamic)();
-    let onWheel = (event?: Dynamic) => {
+    let isModifierHeldForZoom = false;
+    let wheelRun: WheelZoomRun | null = null;
+    let touchPointers = new Set<number>();
+    let onWheel = (event: WheelEvent) => {
       let isRightAfterGesture = event.timeStamp - lastGestureAt <= GESTURE_WHEEL_GUARD_MS;
       if (!isZoomModifier(event)) lastPlainWheelAt = event.timeStamp;
       if (!event.ctrlKey && !event.metaKey) isModifierHeldForZoom = false;
@@ -59,7 +88,7 @@ export function useGridZoomGestures({ gridRef: gridRef, overGridRef: overGridRef
       });
       zoomToEvent(wheelRun.shown, event);
     };
-    let onModifierKey = (event?: Dynamic) => {
+    let onModifierKey = (event: KeyboardEvent) => {
       if ((event.key !== 'Control' && event.key !== 'Meta') || event.repeat) return;
       if (event.type === 'keydown') isModifierHeldForZoom ||= event.timeStamp - lastPlainWheelAt <= ZOOM_WHEEL_RUN_MS;
       else if (!event.ctrlKey && !event.metaKey) isModifierHeldForZoom = false;
@@ -67,14 +96,14 @@ export function useGridZoomGestures({ gridRef: gridRef, overGridRef: overGridRef
     let onWindowBlur = () => {
       isModifierHeldForZoom = false;
     };
-    let onTouchPointer = (event?: Dynamic) => {
+    let onTouchPointer = (event: PointerEvent | TouchEvent) => {
       if ('touches' in event) return void (event.touches.length === 0 && touchPointers.clear());
       if (event.pointerType !== 'touch') return;
       if (event.type === 'pointerup') return void touchPointers.delete(event.pointerId);
       if (event.isPrimary) touchPointers.clear();
       return void touchPointers.add(event.pointerId);
     };
-    let onGesture = (event?: Dynamic) => {
+    let onGesture = (event: Event) => {
       if (touchPointers.size === 0 || event.currentTarget !== overGrid) event.preventDefault();
       if (touchPointers.size > 0) {
         if (isGestureEvent(event) && event.scale > 0) zoomAtGestureStart = gridZoom.now() / event.scale;
@@ -91,55 +120,55 @@ export function useGridZoomGestures({ gridRef: gridRef, overGridRef: overGridRef
         zoomToEvent(zoomShown(gestureRun), event);
       }
     };
-    for (let target of targets as Dynamic)
+    for (let target of targets)
       target.addEventListener('wheel', onWheel, {
         capture: true,
         passive: false,
       });
     let gestureEvents = ['gesturestart', 'gesturechange', 'gestureend'];
-    for (let target of targets as Dynamic)
-      for (let eventName of gestureEvents as Dynamic)
+    for (let target of targets)
+      for (let eventName of gestureEvents)
         target.addEventListener(eventName, onGesture, {
           passive: false,
         });
-    let pointerEvents = ['pointerdown', 'pointerup', 'touchend', 'touchcancel'];
-    for (let target of pointerEvents as Dynamic) defaultView.addEventListener(target, onTouchPointer, true);
-    for (let target of ['keydown', 'keyup'] as Dynamic) defaultView.addEventListener(target, onModifierKey, true);
+    let pointerEvents: readonly ('pointerdown' | 'pointerup' | 'touchend' | 'touchcancel')[] = ['pointerdown', 'pointerup', 'touchend', 'touchcancel'];
+    for (let eventName of pointerEvents) defaultView.addEventListener(eventName, onTouchPointer, true);
+    for (let eventName of ['keydown', 'keyup'] as const) defaultView.addEventListener(eventName, onModifierKey, true);
     defaultView.addEventListener('blur', onWindowBlur);
     return () => {
-      for (let target of targets as Dynamic) {
+      for (let target of targets) {
         target.removeEventListener('wheel', onWheel, true);
-        for (let eventName of gestureEvents as Dynamic) target.removeEventListener(eventName, onGesture);
+        for (let eventName of gestureEvents) target.removeEventListener(eventName, onGesture);
       }
-      for (let target of pointerEvents as Dynamic) defaultView.removeEventListener(target, onTouchPointer, true);
-      for (let target of ['keydown', 'keyup'] as Dynamic) defaultView.removeEventListener(target, onModifierKey, true);
+      for (let eventName of pointerEvents) defaultView.removeEventListener(eventName, onTouchPointer, true);
+      for (let eventName of ['keydown', 'keyup'] as const) defaultView.removeEventListener(eventName, onModifierKey, true);
       defaultView.removeEventListener('blur', onWindowBlur);
     };
   }, [gridRef, overGridRef, gridZoom]);
 }
-export const wheelZoomFactor = (wheelDelta?: Dynamic) => Math.min(1.25, Math.max(0.8, Math.exp(-wheelDelta * 0.01)));
-export const isZoomModifier = ({ ctrlKey: ctrlKey, metaKey: metaKey, altKey: altKey, shiftKey: shiftKey }: Dynamic) =>
+export const wheelZoomFactor = (wheelDelta: number): number => Math.min(1.25, Math.max(0.8, Math.exp(-wheelDelta * 0.01)));
+export const isZoomModifier = ({ ctrlKey, metaKey, altKey, shiftKey }: Pick<MouseEvent, 'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey'>): boolean =>
   (ctrlKey || metaKey) && !altKey && !shiftKey;
 export const WHEEL_LINE_PIXELS = 16;
 export const GESTURE_WHEEL_GUARD_MS = 1000;
 export const ZOOM_WHEEL_RUN_MS = 200;
-export const isPinchWheelContinuing = (isPageFocused?: Dynamic, wheelEvent?: Dynamic, lastWheel?: Dynamic) =>
+export const isPinchWheelContinuing = (isPageFocused: boolean, wheelEvent: WheelEvent, lastWheel: LastWheel): boolean =>
   !isPageFocused &&
   wheelEvent.timeStamp - lastWheel.timeStamp <= ZOOM_WHEEL_RUN_MS &&
   (!wheelEvent.ctrlKey || (wheelEvent.deltaY * lastWheel.deltaY >= 0 && Math.abs(wheelEvent.deltaY) <= Math.abs(lastWheel.deltaY)));
-export const zoomAsked = (askedZoom?: Dynamic) => ({
+export const zoomAsked = (askedZoom: number): ZoomAsk => ({
   asked: askedZoom,
   isAway: !isNearFullZoom(askedZoom),
 });
-export const zoomAskedTimes = ({ isAway: isAway }: Dynamic, nextZoom?: Dynamic) => {
+export const zoomAskedTimes = ({ isAway }: ZoomAsk, nextZoom: number): ZoomAsk => {
   let clampedZoom = clampZoom(nextZoom);
   return {
     asked: clampedZoom,
     isAway: isAway || !isNearFullZoom(clampedZoom),
   };
 };
-export const zoomShown = ({ asked: asked, isAway: isAway }: Dynamic) => (isAway && isNearFullZoom(asked) ? 1 : asked);
-export const isGestureEvent = (gestureEvent?: Dynamic) =>
+export const zoomShown = ({ asked, isAway }: ZoomAsk): number => (isAway && isNearFullZoom(asked) ? 1 : asked);
+export const isGestureEvent = (gestureEvent: Event): gestureEvent is PinchGestureEvent =>
   'scale' in gestureEvent &&
   typeof gestureEvent.scale === 'number' &&
   'clientX' in gestureEvent &&

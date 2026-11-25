@@ -13,8 +13,12 @@ import { getDashboardSourceUrl } from '../src/page/faults.ts';
 
 describe('page sanitizing', () => {
   it('removes active and embedding elements, whatever their case', () => {
-    for (const name of ['script', 'IFRAME', 'form', 'object', 'base', 'meta']) assert.equal(isRemovedPageElement(name), true, name);
+    for (const name of ['script', 'IFRAME', 'object', 'base', 'meta']) assert.equal(isRemovedPageElement(name), true, name);
     for (const name of ['div', 'svg', 'style', 'template']) assert.equal(isRemovedPageElement(name), false, name);
+  });
+
+  it('keeps forms: their submissions run the page’s listeners in place', () => {
+    for (const name of ['form', 'FORM', 'input', 'button']) assert.equal(isRemovedPageElement(name), false, name);
   });
 
   it('strips event handlers and ping', () => {

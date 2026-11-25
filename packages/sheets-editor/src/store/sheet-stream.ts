@@ -147,11 +147,11 @@ export function openSheetStream(channel: Promise<SheetChannel | null>, { onEvent
   const send = (call: StoreCall, target: SheetChannel): Promise<JsonObject> => {
     switch (call.route) {
       case 'read':
-        return target.read(call.request as never) as unknown as Promise<JsonObject>;
+        return target.read(call.request);
       case 'send':
-        return target.send(call.request) as unknown as Promise<JsonObject>;
+        return target.send(call.request);
       case 'widget':
-        return target.widget(call.request) as unknown as Promise<JsonObject>;
+        return target.widget(call.request);
     }
   };
 

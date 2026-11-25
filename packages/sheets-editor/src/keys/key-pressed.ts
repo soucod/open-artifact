@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { toggleCheckboxesByKey } from '../chips/checkbox-presses.ts';
 import { checkboxLinesOfCell, toggleCellCheckboxLine, pressListKeyInEntry } from '../editor/entry-looks.ts';
 import {
@@ -124,21 +123,26 @@ import { hideExplainedCard } from '../state/explained-under-cell.ts';
 import { canEditLinkAtActiveCell } from '../links/link-form.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function pressSpaceInCell(state: PageState, reads: ReadsWithTextMeasurer) {
+import type { KeyPressed, PageContext, WordsOfferedPressed } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { CellId } from '../model/workbook.ts';
+import type { KeyMove } from '../selection/keyboard.ts';
+import type { KeyAct } from './key-acts.ts';
+export function pressSpaceInCell(state: PageState, reads: ReadsWithTextMeasurer): PageTransition | null {
   let toggled = toggleCheckboxesByKey(state, 'space', reads);
   if (toggled !== null) return toggled;
   let [firstLine, ...otherLines] = checkboxLinesOfCell(state, reads);
   if (firstLine === undefined) return null;
   return otherLines.length === 0 ? toggleCellCheckboxLine(state, reads, firstLine) : startEntryAtActiveCell(state, reads);
 }
-export function stepKeyPressed(state: PageState, keyEvent?: Dynamic, context?: Dynamic, isFromWordsOffer: Dynamic = false) {
-  let { reads: reads } = context;
+export function stepKeyPressed(state: PageState, keyEvent: KeyPressed, context: PageContext, isFromWordsOffer = false): PageTransition {
+  let { reads } = context;
   let stateBackInCells = state.isSteppedOutOfCells && doesKeyStepBackIntoCells(keyEvent.key) ? stepBackIntoCells(state) : state;
   let stateInCells = keyEvent.key === 'Enter' && !keyEvent.isAltHeld ? takeOfferLitAlone(stateBackInCells, reads) : stateBackInCells;
-  let wordsAccepted =
+  let wordsAccepted: string | null =
     isFromWordsOffer || doesTabAcceptWordsOffered(stateInCells, keyEvent) ? (wordsOfferedNow(stateInCells)?.offered ?? null) : null;
   let stateAfterWords = wordsAccepted === null ? stateInCells : acceptWordsOffered(stateInCells);
-  let act = keyActInState(stateAfterWords, keyEvent, context);
+  const act = keyActInState(stateAfterWords, keyEvent, context);
   if (act === null) return withNoEffects(stateAfterWords);
   if (keyEvent.hasWaitedForPeople === true && isPeopleCellEditedWithoutList(stateAfterWords, reads)) return withDropWhatIsHeld(stateAfterWords);
   let isRepeatableAct =
@@ -154,7 +158,7 @@ export function stepKeyPressed(state: PageState, keyEvent?: Dynamic, context?: D
     act.kind === 'moveInFunctionList' ||
     (act.kind === 'actOnLists' && act.key === 'backspace');
   if (keyEvent.isRepeat && !isRepeatableAct) return withNoEffects(act.kind === 'waitForFormula' ? waitForFormula(stateAfterWords) : stateAfterWords);
-  let isTabOrEnterMove =
+  const isTabOrEnterMove =
     (keyEvent.key === 'Tab' || keyEvent.key === 'Enter') && 'columnDelta' in act && (act.rowDelta !== 0 || act.columnDelta !== 0);
   let walkWithin = isTabOrEnterMove ? walkWithinSelection(stateAfterWords, reads, act) : null;
   let pagedState =
@@ -170,33 +174,33 @@ export function stepKeyPressed(state: PageState, keyEvent?: Dynamic, context?: D
         }
       : stateAfterWords;
   let stepped = stepKeyAct(stateForAct, keyEvent, act, context, walkWithin?.at ?? null, wordsAccepted);
-  if (stepped.effects.some(({ kind: kind }: Dynamic) => kind === 'waitForPeople')) return stepped;
+  if (stepped.effects.some(({ kind }) => kind === 'waitForPeople')) return stepped;
   let walkedStep = walkWithin === null ? null : withRangeWalked(walkWithin, stepped);
   if (walkedStep !== null) return walkedStep;
   let moveAct = 'columnDelta' in act ? act : null;
   let isArrowCommit = act.kind === 'commitEdit' && ARROW_KEY_MOVES[keyEvent.key] !== undefined;
   let tabRun = nextTabRun(stateAfterWords, keyEvent.key, moveAct, dropsRangeWalked || isArrowCommit, reads);
-  let result = isTabOrEnterMove && walkWithin === null ? withLineAddedAfterEntry(stepped, stateAfterWords, context, act) : stepped;
-  return tabRun === result.state.tabRun
-    ? result
+  let transition = isTabOrEnterMove && walkWithin === null ? withLineAddedAfterEntry(stepped, stateAfterWords, context, act) : stepped;
+  return tabRun === transition.state.tabRun
+    ? transition
     : {
-        ...result,
+        ...transition,
         state: {
-          ...result.state,
-          tabRun: tabRun,
+          ...transition.state,
+          tabRun,
         },
       };
 }
 export function stepKeyAct(
   state: PageState,
-  keyEvent?: Dynamic,
-  act?: Dynamic,
-  context?: Dynamic,
-  walkedTo?: Dynamic,
-  offeredWords?: Dynamic,
-) {
-  let { reads: reads } = context;
-  let targetOfMove = (move?: Dynamic) =>
+  keyEvent: KeyPressed,
+  act: KeyAct,
+  context: PageContext,
+  walkedTo: CellId | null,
+  offeredWords: string | null,
+): PageTransition {
+  let { reads } = context;
+  let targetOfMove = (move: KeyMove): CellId =>
     walkedTo ?? (keyEvent.key === 'Enter' && move.rowDelta === 1 ? cellBelowTabRunStart(state, reads) : null) ?? cellAfterKeyMove(state, reads, move);
   if (
     (act.kind === 'sumUp' ||
@@ -213,15 +217,15 @@ export function stepKeyAct(
     case 'extendSelection':
       return withNoEffects(extendSelectionByKey(state, reads, act));
     case 'jump': {
-      let resultOfCase = jumpOrExtendSelection(act.isExtending ? state : withoutOtherRanges(state), reads, act.to, act.isExtending);
-      let targetInCase = act.to.kind === 'page' && !act.isExtending ? scrollToTallCellStart(state, reads) : state;
-      if (targetInCase === state) return withNoEffects(resultOfCase);
-      if (isSameCell(resultOfCase.activeCell, state.activeCell))
+      let jumped = jumpOrExtendSelection(act.isExtending ? state : withoutOtherRanges(state), reads, act.to, act.isExtending);
+      let atTallCellStart = act.to.kind === 'page' && !act.isExtending ? scrollToTallCellStart(state, reads) : state;
+      if (atTallCellStart === state) return withNoEffects(jumped);
+      if (isSameCell(jumped.activeCell, state.activeCell))
         return withNoEffects({
-          ...resultOfCase,
+          ...jumped,
           scrollTop: state.scrollTop,
         });
-      return withNoEffects(jumpOrExtendSelection(withoutOtherRanges(targetInCase), reads, act.to, false));
+      return withNoEffects(jumpOrExtendSelection(withoutOtherRanges(atTallCellStart), reads, act.to, false));
     }
     case 'selectAll':
       return withNoEffects(selectAllCells(withoutOtherRanges(state), reads));
@@ -230,14 +234,14 @@ export function stepKeyAct(
     case 'selectWhole':
       return withNoEffects(selectWholeLines(withoutOtherRanges(state), reads, act.what));
     case 'openCell': {
-      let resultOfCase = toggleCheckboxesByKey(state, 'enter', reads);
-      if (resultOfCase !== null) return resultOfCase;
+      let checkboxesToggled = toggleCheckboxesByKey(state, 'enter', reads);
+      if (checkboxesToggled !== null) return checkboxesToggled;
       if (dropdownAtActiveCell(state, reads) !== null) return withNoEffects(openDropdownList(scrollToShowActiveCell(state, reads), reads));
       return startEntryAtActiveCell(state, reads);
     }
     case 'startEditing': {
-      let resultOfCase = act.text === ' ' ? pressSpaceInCell(state, reads) : null;
-      if (resultOfCase !== null) return resultOfCase;
+      let spacePressed = act.text === ' ' ? pressSpaceInCell(state, reads) : null;
+      if (spacePressed !== null) return spacePressed;
       if (act.text === null) return startEntryAtActiveCell(state, reads);
       if (isFormulaText(act.text) && peopleChipsOfListCell(state, reads) !== null) return withNoEffects(state);
       return withNoEffects(
@@ -249,26 +253,26 @@ export function stepKeyAct(
     }
     case 'moveInPeopleList':
       return withNoEffects(
-        moveInPeopleList(state, reads, (index?: Dynamic, count?: Dynamic) => stepListIndex(index, act.by, count), act.by === 1),
+        moveInPeopleList(state, reads, (index: number | null, count: number) => stepListIndex(index, act.by, count), act.by === 1),
       );
     case 'moveInDropdownList': {
       if (state.dropdown === null) return withNoEffects(state);
-      let resultOfCase = (dropdownListRows(state, reads) ?? []).map(menuItemKey);
-      let pickedInCase = state.dropdown.highlighted === null ? -1 : resultOfCase.indexOf(state.dropdown.highlighted);
-      let targetInCase = stepListIndex(pickedInCase === -1 ? null : pickedInCase, act.by, resultOfCase.length);
-      return withNoEffects(highlightDropdownRow(state, targetInCase === null ? null : (resultOfCase[targetInCase] ?? null)));
+      let rowKeys = (dropdownListRows(state, reads) ?? []).map(menuItemKey);
+      let highlightedIndex = state.dropdown.highlighted === null ? -1 : rowKeys.indexOf(state.dropdown.highlighted);
+      let nextIndex = stepListIndex(highlightedIndex === -1 ? null : highlightedIndex, act.by, rowKeys.length);
+      return withNoEffects(highlightDropdownRow(state, nextIndex === null ? null : (rowKeys[nextIndex] ?? null)));
     }
     case 'takeDropdownListRow': {
-      let resultOfCase = state.dropdown?.highlighted ?? null;
-      let pickedInCase = dropdownListRows(state, reads)
+      let highlighted = state.dropdown?.highlighted ?? null;
+      let rowTaken = dropdownListRows(state, reads)
         ?.map(menuItemKey)
-        .find((option?: Dynamic) => option === resultOfCase);
-      let targetInCase = targetOfMove(act);
-      let flagInCase = pickedInCase === 'addOption' && act.columnDelta !== 0;
-      if (pickedInCase !== undefined && !flagInCase) return pickDropdownRow(state, reads, pickedInCase, targetInCase, 'key');
-      let stateInCase = closeDropdownList(state);
-      if (state.mode.kind === 'editing') return commitEntryAndMove(stateInCase, reads, targetInCase);
-      return withNoEffects(act.columnDelta === 0 ? stateInCase : moveActiveCellTo(stateInCase, reads, targetInCase, 'key'));
+        .find((option) => option === highlighted);
+      let cellToGoTo = targetOfMove(act);
+      let isAddOptionSideways = rowTaken === 'addOption' && act.columnDelta !== 0;
+      if (rowTaken !== undefined && !isAddOptionSideways) return pickDropdownRow(state, reads, rowTaken, cellToGoTo, 'key');
+      let listClosed = closeDropdownList(state);
+      if (state.mode.kind === 'editing') return commitEntryAndMove(listClosed, reads, cellToGoTo);
+      return withNoEffects(act.columnDelta === 0 ? listClosed : moveActiveCellTo(listClosed, reads, cellToGoTo, 'key'));
     }
     case 'shutList':
       return withNoEffects({
@@ -276,13 +280,13 @@ export function stepKeyAct(
         peopleList: null,
       });
     case 'takePeopleListRow': {
-      let resultOfCase = peopleListRows(state, reads);
-      let pickedInCase = targetOfMove(act);
-      if (state.peopleList === null || resultOfCase === null) return commitEntryAndMove(state, reads, pickedInCase);
-      let targetInCase = resultOfCase[indexOfPeopleListRowGoneTo(state.peopleList, resultOfCase)];
-      let flagInCase = act.columnDelta !== 0;
-      if (targetInCase === undefined && peopleChipsOfListCell(state, reads) !== null) {
-        if (state.mode.kind === 'editing' && state.mode.text.trim() !== '' && !flagInCase) return withNoEffects(state);
+      let rows = peopleListRows(state, reads);
+      let cellToGoTo = targetOfMove(act);
+      if (state.peopleList === null || rows === null) return commitEntryAndMove(state, reads, cellToGoTo);
+      let rowGoneTo = rows[indexOfPeopleListRowGoneTo(state.peopleList, rows)];
+      let isSideways = act.columnDelta !== 0;
+      if (rowGoneTo === undefined && peopleChipsOfListCell(state, reads) !== null) {
+        if (state.mode.kind === 'editing' && state.mode.text.trim() !== '' && !isSideways) return withNoEffects(state);
         return withNoEffects(
           moveActiveCellTo(
             leaveEntryEditing({
@@ -290,33 +294,33 @@ export function stepKeyAct(
               peopleList: null,
             }),
             reads,
-            pickedInCase,
+            cellToGoTo,
             'key',
           ),
         );
       }
-      if (targetInCase === undefined) return commitEntryAndMove(state, reads, pickedInCase);
+      if (rowGoneTo === undefined) return commitEntryAndMove(state, reads, cellToGoTo);
       if (keyEvent.hasWaitedForPeople !== true && shouldWaitForPeopleOnEnter(state, reads)) {
-        let { searchedFor: extraInCase } = state.peopleList;
+        let { searchedFor } = state.peopleList;
         return {
-          state: state,
+          state,
           effects: [
             {
               kind: 'waitForPeople',
-              searchedFor: extraInCase,
+              searchedFor,
               key: keyEvent,
             },
           ],
         };
       }
-      let stateInCase = keyEvent.hasWaitedForPeople === true ? stepOffUnderAgent(state, reads) : null;
-      if (stateInCase !== null) return withDropWhatIsHeld(stateInCase);
+      let steppedOff = keyEvent.hasWaitedForPeople === true ? stepOffUnderAgent(state, reads) : null;
+      if (steppedOff !== null) return withDropWhatIsHeld(steppedOff);
       if (
         isEnterHeldInPeopleList(state, reads, keyEvent.hasWaitedForPeople === true) ||
-        isAskAgentRowBusy(peopleListRowKey(targetInCase), state, context)
+        isAskAgentRowBusy(peopleListRowKey(rowGoneTo), state, context)
       )
         return keyEvent.hasWaitedForPeople === true ? withDropWhatIsHeld(state) : withNoEffects(state);
-      return takePeopleListRow(state, reads, peopleListRowKey(targetInCase), pickedInCase, 'key', flagInCase, keyEvent.hasWaitedForPeople === true);
+      return takePeopleListRow(state, reads, peopleListRowKey(rowGoneTo), cellToGoTo, 'key', isSideways, keyEvent.hasWaitedForPeople === true);
     }
     case 'removeFromField': {
       if (act.atCaret !== 'everyone' || chipGoneToInPeopleCell(state, reads) !== null) return removePersonFromCell(state, reads, null, 'key');
@@ -331,14 +335,14 @@ export function stepKeyAct(
           );
     }
     case 'stepInField': {
-      let resultOfCase = stepAmongPeopleChips(state, reads, act.step);
-      if ('chip' in resultOfCase) return withNoEffects(withPeopleChipGoneTo(state, resultOfCase.chip));
+      let stepped = stepAmongPeopleChips(state, reads, act.step);
+      if ('chip' in stepped) return withNoEffects(withPeopleChipGoneTo(state, stepped.chip));
       if (keyEvent.isRepeat) return withNoEffects(state);
-      let pickedInCase = targetOfMove({
+      let cellToGoTo = targetOfMove({
         rowDelta: 0,
-        ...resultOfCase,
+        ...stepped,
       });
-      if (isSameCell(pickedInCase, state.activeCell)) return withNoEffects(state);
+      if (isSameCell(cellToGoTo, state.activeCell)) return withNoEffects(state);
       return withNoEffects(
         moveActiveCellTo(
           {
@@ -346,7 +350,7 @@ export function stepKeyAct(
             peopleList: null,
           },
           reads,
-          pickedInCase,
+          cellToGoTo,
         ),
       );
     }
@@ -365,7 +369,7 @@ export function stepKeyAct(
     case 'openCardOfOption':
       return withNoEffects(openCardOfHighlighted(state, reads));
     case 'moveInTimeList':
-      return withNoEffects(moveInTimeList(state, 'chosen', (index?: Dynamic, count?: Dynamic) => stepListIndex(index, act.by, count)));
+      return withNoEffects(moveInTimeList(state, 'chosen', (index: number | null, count: number) => stepListIndex(index, act.by, count)));
     case 'moveInFunctionList':
       return withNoEffects(moveFunctionListHighlight(state, act.by));
     case 'takeFunctionListRow':
@@ -377,8 +381,8 @@ export function stepKeyAct(
     case 'takeFormulaOfferRow':
       return chooseOfferRow(state, reads, null);
     case 'enterFormulaRead': {
-      let resultOfCase = entryWithOfferRowFormula(state, reads);
-      return resultOfCase === null ? withNoEffects(state) : commitEntryAndMove(resultOfCase, reads, targetOfMove(act), 'key');
+      let entryWithFormula = entryWithOfferRowFormula(state, reads);
+      return entryWithFormula === null ? withNoEffects(state) : commitEntryAndMove(entryWithFormula, reads, targetOfMove(act), 'key');
     }
     case 'waveFormulaOfferOff':
       return withNoEffects(waveFormulaOfferOff(state));
@@ -407,10 +411,10 @@ export function stepKeyAct(
     case 'pressBoxOfLine':
       return toggleEntryCheckboxAndSave(state, reads, entryAtCaretOf(state.mode, keyEvent));
     case 'commitEdit': {
-      let resultOfCase = ARROW_KEY_MOVES[keyEvent.key] !== undefined;
-      let pickedInCase = resultOfCase ? typedTextNotice(state, reads) : null;
+      let isArrowKey = ARROW_KEY_MOVES[keyEvent.key] !== undefined;
+      let noticeOfTypedText = isArrowKey ? typedTextNotice(state, reads) : null;
       return commitEntryAndMove(
-        resultOfCase || isEntryExpanded(state.mode)
+        isArrowKey || isEntryExpanded(state.mode)
           ? {
               ...state,
               lastDone: null,
@@ -420,7 +424,7 @@ export function stepKeyAct(
         targetOfMove(act),
         'key',
         offeredWords === null
-          ? pickedInCase
+          ? noticeOfTypedText
           : {
               what: 'offeredWordsEntered',
               words: offeredWords,
@@ -431,21 +435,21 @@ export function stepKeyAct(
     case 'commitEditToSelection':
       return commitEntryToSelection(state, reads);
     case 'cancelEdit': {
-      let resultOfCase = {
+      let navigating = {
         ...clearPassingNotice(state),
         mode: NAVIGATING_MODE,
         dropdown: null,
         peopleList: null,
       };
-      let pickedInCase = state.mode.kind === 'editing' && isFormulaText(state.mode.text);
-      return withNoEffects(pickedInCase ? scrollToShowActiveCell(resultOfCase, reads) : resultOfCase);
+      let wasFormula = state.mode.kind === 'editing' && isFormulaText(state.mode.text);
+      return withNoEffects(wasFormula ? scrollToShowActiveCell(navigating, reads) : navigating);
     }
     case 'pointAtCells':
       return withNoEffects(
         actOnSheetPointedIn(
           state,
           reads,
-          (stateToPoint?: Dynamic) => movePointedReference(stateToPoint, reads, caretInEntryOf(state.mode, keyEvent), act),
+          (stateToPoint: PageState) => movePointedReference(stateToPoint, reads, caretInEntryOf(state.mode, keyEvent), act),
         ),
       );
     case 'switchArrows':
@@ -453,15 +457,15 @@ export function stepKeyAct(
         actOnSheetPointedIn(
           state,
           reads,
-          (stateToSwitch?: Dynamic) => toggleArrowsTarget(stateToSwitch, reads, caretInEntryOf(state.mode, keyEvent)),
+          (stateToSwitch: PageState) => toggleArrowsTarget(stateToSwitch, reads, caretInEntryOf(state.mode, keyEvent)),
         ),
       );
     case 'writeInEntry': {
       if (state.mode.kind !== 'editing') return withNoEffects(state);
-      let { isBegunToListFunctions: resultOfCase, ...pickedInCase } = state.mode;
+      let { isBegunToListFunctions, ...entryMode } = state.mode;
       return withNoEffects({
         ...state,
-        mode: withEntryText(pickedInCase, act.text, act.caretAt),
+        mode: withEntryText(entryMode, act.text, act.caretAt),
       });
     }
     case 'askForMenu':
@@ -473,18 +477,18 @@ export function stepKeyAct(
     case 'collapseEntry':
       return withNoEffects(collapseEntry(state, reads));
     case 'insertOrDeleteLines': {
-      let resultOfCase = selectedArea(state, reads);
-      let pickedInCase = resultOfCase === null ? 'cells' : selectionKindOf(resultOfCase, layoutOfView(state, reads));
-      if (pickedInCase === 'cells') return openContextMenu(state, null, reads);
-      let targetInCase = LINE_EDITS_OF_COMMAND[act.what][pickedInCase];
-      let flagInCase = oneRangeActOfCommand(targetInCase);
-      let stateInCase = flagInCase === null ? null : refuseWhenSeveralRanges(state, flagInCase);
-      if (stateInCase !== null) return stateInCase;
-      let extraInCase = withCalendarShut(state);
-      if (targetInCase === 'deleteRows') return deleteSelectedRows(extraInCase, reads);
-      return targetInCase === 'deleteColumns'
-        ? deleteSelectedLines(extraInCase, reads, targetInCase)
-        : insertRowsOrColumns(extraInCase, reads, targetInCase);
+      let area = selectedArea(state, reads);
+      let selectionKind = area === null ? 'cells' : selectionKindOf(area, layoutOfView(state, reads));
+      if (selectionKind === 'cells') return openContextMenu(state, null, reads);
+      let lineEdit = LINE_EDITS_OF_COMMAND[act.what][selectionKind];
+      let oneRangeAct = oneRangeActOfCommand(lineEdit);
+      let refused = oneRangeAct === null ? null : refuseWhenSeveralRanges(state, oneRangeAct);
+      if (refused !== null) return refused;
+      let calendarShut = withCalendarShut(state);
+      if (lineEdit === 'deleteRows') return deleteSelectedRows(calendarShut, reads);
+      return lineEdit === 'deleteColumns'
+        ? deleteSelectedLines(calendarShut, reads, lineEdit)
+        : insertRowsOrColumns(calendarShut, reads, lineEdit);
     }
     case 'actOnGroups':
       return actOnOutlineGroups(withCalendarShut(state), context, act.act, outlineAxisForAct(state, reads, act.act));
@@ -492,12 +496,12 @@ export function stepKeyAct(
       return keyEvent.newSheetNameStem === undefined ? withNoEffects(state) : addSheetAfter(withCalendarShut(state), keyEvent.newSheetNameStem);
     case 'showSheetBeside': {
       if (state.mode.kind === 'editing') return withNoEffects(switchToNextSheetWhileEditing(state, reads, act.by, keyEvent.caretInEntry));
-      let resultOfCase = act.by === 1 ? filterButtonAtActiveCell(state, reads, state.activeCell) : null;
-      if (resultOfCase === null && state.peopleList !== null) return withNoEffects(state);
-      if (resultOfCase === null) return withNoEffects(showSheetAtOffset(state, reads, act.by));
-      if (resultOfCase.isOfFoundTable && ownFilterKeyNotDrawnYet(state) !== null) return withNoEffects(state);
-      if (resultOfCase.isOfFoundTable) {
-        let pickedInCase = (stateToSort?: Dynamic) =>
+      let filterButton = act.by === 1 ? filterButtonAtActiveCell(state, reads, state.activeCell) : null;
+      if (filterButton === null && state.peopleList !== null) return withNoEffects(state);
+      if (filterButton === null) return withNoEffects(showSheetAtOffset(state, reads, act.by));
+      if (filterButton.isOfFoundTable && ownFilterKeyNotDrawnYet(state) !== null) return withNoEffects(state);
+      if (filterButton.isOfFoundTable) {
+        let openRowsAskFrom = (stateToSort: PageState) =>
           openRowsAsk(
             {
               ...reduceOwnFilterList(stateToSort, reads, {
@@ -506,14 +510,14 @@ export function stepKeyAct(
               contextBarMenu: 'sort',
             },
             reads,
-            resultOfCase,
+            filterButton,
           );
-        let targetInCase = pickedInCase(state);
+        let rowsAskOpened = openRowsAskFrom(state);
         return withNoEffects(
-          outlineOfFilterNotDrawnYet(targetInCase, reads) === null ? pickedInCase(scrollToShowActiveCell(state, reads)) : targetInCase,
+          outlineOfFilterNotDrawnYet(rowsAskOpened, reads) === null ? openRowsAskFrom(scrollToShowActiveCell(state, reads)) : rowsAskOpened,
         );
       }
-      return withNoEffects(openOwnFilterList(state, reads, resultOfCase.tableKey, resultOfCase.c, keyEvent.today ?? null));
+      return withNoEffects(openOwnFilterList(state, reads, filterButton.tableKey, filterButton.c, keyEvent.today ?? null));
     }
     case 'showOrHideFormulas':
       return withNoEffects(toggleFormulasShown(state));
@@ -545,10 +549,10 @@ export function stepKeyAct(
           state: {
             ...state,
             comments: (state.comments ?? []).map(
-              ({ handle: handle, cells: cells, isResolved: isResolved }: Dynamic) => ({
-                handle: handle,
-                cells: cells,
-                isResolved: isResolved,
+              ({ handle, cells, isResolved }) => ({
+                handle,
+                cells,
+                isResolved,
                 isOpen: false,
               }),
             ),
@@ -568,25 +572,25 @@ export function stepKeyAct(
           copiedCells: null,
         });
       if (!hasNoticeToDismiss(state) && state.dragging === null) {
-        let resultOfCase = {
+        let withNothingHeld = {
           ...state,
           lastDone: null,
           copiedCells: null,
         };
-        let pickedInCase = conditionalRulesOfPane(resultOfCase);
-        let { state: targetInCase, effects: flagInCase } =
+        let conditionalRules = conditionalRulesOfPane(withNothingHeld);
+        let { state: stateAfter, effects } =
           state.find !== null
-            ? withNoEffects(closeFind(resultOfCase))
+            ? withNoEffects(closeFind(withNothingHeld))
             : !isSidePaneShuttable(state)
               ? withNoEffects(letGoOfCopiedCells(state, reads, context.refusalOfEveryEdit === null))
-              : pickedInCase !== null && isAgentOfferPendingOrAsked(pickedInCase)
-                ? actInConditionalFormats(resultOfCase, reads, {
+              : conditionalRules !== null && isAgentOfferPendingOrAsked(conditionalRules)
+                ? actInConditionalFormats(withNothingHeld, reads, {
                     kind: 'stepBack',
                   })
-                : withNoEffects(closeSidePane(resultOfCase));
+                : withNoEffects(closeSidePane(withNothingHeld));
         return {
-          state: hideExplainedCard(targetInCase, reads),
-          effects: flagInCase,
+          state: hideExplainedCard(stateAfter, reads),
+          effects,
         };
       }
       return withNoEffects({
@@ -623,9 +627,9 @@ export function stepKeyAct(
 }
 export const keyActInState = (
   state: PageState,
-  keyEvent: Dynamic,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic,
-) =>
+  keyEvent: KeyPressed,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): KeyAct | null =>
   keyActOf(state.mode, keyEvent, popupOverEntry(state, reads), escapeInCellsDoes(state), {
     sheetsToPointIn: sheetsToPointInFor(state, reads, refusalOfEveryEdit === null),
     pointedReference: state.pointedReference,
@@ -635,13 +639,13 @@ export const keyActInState = (
     isSteppedOutOfCells: state.isSteppedOutOfCells,
     doesKeyOpenLinkForm: refusalOfEveryEdit === null && canEditLinkAtActiveCell(state, reads),
   });
-export const startEntryAtActiveCell = (state: PageState, reads: ReadsWithTextMeasurer) =>
+export const startEntryAtActiveCell = (state: PageState, reads: ReadsWithTextMeasurer): PageTransition =>
   withNoEffects(
     isEntryAmongPeople(state, reads)
       ? refreshPeopleList(scrollToShowActiveCell(state, reads), reads)
       : startEntryEditing(state, reads, textToEditAt(state, reads, activeAnchorCell(state, reads)), 'cell'),
   );
-export const takeWordsOfferedByTab = (state: PageState, offer?: Dynamic, context?: Dynamic) =>
+export const takeWordsOfferedByTab = (state: PageState, offer: WordsOfferedPressed, context: PageContext): PageTransition =>
   matchingWordsOffered(state, offer)?.isShown === true
     ? stepKeyPressed(
         state,

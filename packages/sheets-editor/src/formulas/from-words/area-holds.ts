@@ -1,18 +1,51 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { NumberFormatKind, RowId, SheetId } from '@open-artifact/sheets-core';
 import { cellValueOf, usersOfCell } from '../../model/cell-values.ts';
 import { numberFormatOfCell } from '../../model/workbook.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
-export function holdsOfCells(workbook: WorkbookReads, cellIds?: Dynamic) {
-  let kinds = new (Set as Dynamic)();
-  let spelled = new (Map as Dynamic)();
-  let squeezed = new (Map as Dynamic)();
-  let distinct = new (Set as Dynamic)();
-  let byRow = new (Map as Dynamic)();
-  let [filledCount, textCount, numberCount, sum]: Dynamic = [0, 0, 0, 0];
-  let [lowest, highest]: Dynamic = [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
-  let [isEveryNumberWhole, isAnyFilledAndBlank]: Dynamic = [true, false];
+import type { CellId, SheetRead, WorkbookReads } from '../../model/workbook.ts';
+import type { CellArea } from '../../selection/model.ts';
+/** A kind of value an area holds, as the formulas written from words tell them apart. */
+export type HeldKind =
+  | 'severalPeople'
+  | 'trueOrFalse'
+  | 'error'
+  | 'number'
+  | 'percent'
+  | 'date'
+  | 'time'
+  | 'dateAndTime'
+  | 'text'
+  | 'numberAsText';
+/** What the cells of an area hold, counted once for the words of a formula to be read against. */
+export interface AreaHolds {
+  filledCount: number;
+  kinds: Set<HeldKind>;
+  /** Each text held, lower-cased, to how it is first spelled. */
+  spelled: Map<string, string>;
+  /** Each text held, lower-cased with its spaces squeezed out, to the lower-cased text, or null when texts apart by spaces alone share it. */
+  squeezed: Map<string, string | null>;
+  isTooMany: boolean;
+  isAnyRepeated: boolean;
+  textCount: number;
+  numberCount: number;
+  sum: number;
+  /** The number in each filled row, or null when that row holds something else. */
+  byRow: Map<RowId, number | null>;
+  /** The lowest and highest numbers held. */
+  numbersLieIn: [number, number] | null;
+  isEveryNumberWhole: boolean;
+  isAnyFilledAndBlank: boolean;
+}
+export function holdsOfCells(workbook: WorkbookReads, cellIds: CellId[]): AreaHolds {
+  let kinds = new Set<HeldKind>();
+  let spelled = new Map<string, string>();
+  let squeezed = new Map<string, string | null>();
+  let distinct = new Set<string>();
+  let byRow = new Map<RowId, number | null>();
+  let [filledCount, textCount, numberCount, sum] = [0, 0, 0, 0];
+  let [lowest, highest] = [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  let [isEveryNumberWhole, isAnyFilledAndBlank] = [true, false];
   let isTooMany = cellIds.length > MOST_CELLS_LOOKED_AT;
-  for (let cellId of (isTooMany ? [] : cellIds) as Dynamic) {
+  for (let cellId of isTooMany ? [] : cellIds) {
     let cell = workbook.cellOnShowIn(cellId);
     let value = cellValueOf(cell);
     if (value === null || (value.kind === 'text' && value.value.trim() === '')) {
@@ -43,49 +76,49 @@ export function holdsOfCells(workbook: WorkbookReads, cellIds?: Dynamic) {
   }
   return {
     filledCount: isTooMany ? cellIds.length : filledCount,
-    kinds: kinds,
-    spelled: spelled,
-    squeezed: squeezed,
-    isTooMany: isTooMany,
+    kinds,
+    spelled,
+    squeezed,
+    isTooMany,
     isAnyRepeated: isTooMany || distinct.size < filledCount,
-    textCount: textCount,
-    numberCount: numberCount,
-    sum: sum,
-    byRow: byRow,
+    textCount,
+    numberCount,
+    sum,
+    byRow,
     numbersLieIn: numberCount === 0 ? null : [lowest, highest],
-    isEveryNumberWhole: isEveryNumberWhole,
+    isEveryNumberWhole,
     isAnyFilledAndBlank: isTooMany || isAnyFilledAndBlank,
   };
 }
-export function areAllNumbersIn(workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
+export function areAllNumbersIn(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): boolean {
   if (area.rowCount * area.columnCount > MOST_CELLS_CHECKED_FOR_NUMBERS) return false;
-  let sheet = workbook.sheetAsItStands(sheetId) ?? {};
-  let sheetCache: Dynamic = allNumbersCache.get(sheet);
-  if (sheetCache === undefined) allNumbersCache.set(sheet, (sheetCache = new (Map as Dynamic)()));
+  let sheet: Partial<SheetRead> = workbook.sheetAsItStands(sheetId) ?? {};
+  let sheetCache = allNumbersCache.get(sheet);
+  if (sheetCache === undefined) allNumbersCache.set(sheet, (sheetCache = new Map<string, boolean>()));
   let areaKey = [area.topRowIndex, area.leftColumnIndex, area.rowCount, area.columnCount].join();
-  let areAllNumbers: Dynamic = sheetCache.get(areaKey);
+  let areAllNumbers = sheetCache.get(areaKey);
   if (areAllNumbers === undefined) {
     let cellIds = workbook.cellsOnShowIn(sheetId, area);
-    let isNumberCell = (cellId?: Dynamic) => cellValueOf(workbook.cellOnShowIn(cellId))?.kind === 'number';
+    let isNumberCell = (cellId: CellId) => cellValueOf(workbook.cellOnShowIn(cellId))?.kind === 'number';
     sheetCache.set(areaKey, (areAllNumbers = cellIds.every(isNumberCell)));
   }
   return areAllNumbers;
 }
-export function holdsOfArea(workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
+export function holdsOfArea(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): AreaHolds {
   let sheet = workbook.sheetAsItStands(sheetId);
   if (sheet === null) return holdsOfCells(workbook, workbook.cellsOnShowIn(sheetId, area));
-  let sheetCache: Dynamic = areaHoldsCache.get(sheet);
-  if (sheetCache === undefined) areaHoldsCache.set(sheet, (sheetCache = new (Map as Dynamic)()));
-  let holds: Dynamic = sheetCache.get(areaCacheKey(area));
+  let sheetCache = areaHoldsCache.get(sheet);
+  if (sheetCache === undefined) areaHoldsCache.set(sheet, (sheetCache = new Map<string, AreaHolds>()));
+  let holds = sheetCache.get(areaCacheKey(area));
   if (holds === undefined) sheetCache.set(areaCacheKey(area), (holds = holdsOfCells(workbook, workbook.cellsOnShowIn(sheetId, area))));
   return holds;
 }
-export function holdsOfEachColumn(workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
-  let columnAreas = Array.from<Dynamic, Dynamic>(
+export function holdsOfEachColumn(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): AreaHolds[] {
+  let columnAreas = Array.from(
     {
       length: area.columnCount,
     },
-    (input?: Dynamic, offset?: Dynamic) => ({
+    (_, offset): CellArea => ({
       ...area,
       leftColumnIndex: area.leftColumnIndex + offset,
       columnCount: 1,
@@ -93,23 +126,23 @@ export function holdsOfEachColumn(workbook: WorkbookReads, sheetId?: Dynamic, ar
   );
   let sheet = workbook.sheetAsItStands(sheetId);
   let sheetCache = sheet === null ? undefined : areaHoldsCache.get(sheet);
-  if (sheet === null || columnAreas.every((columnArea?: Dynamic) => sheetCache?.has(areaCacheKey(columnArea)) === true))
-    return columnAreas.map((columnArea?: Dynamic) => holdsOfArea(workbook, sheetId, columnArea));
-  let cellsByColumn = columnAreas.map(() => []);
-  for (let value of workbook.cellsOnShowIn(sheetId, area) as Dynamic)
-    cellsByColumn[(workbook.positionOfCell(value)?.columnIndex ?? -1) - area.leftColumnIndex]?.push(value);
-  let holdsByColumn = cellsByColumn.map((cellIds?: Dynamic) => holdsOfCells(workbook, cellIds));
-  let cache = sheetCache ?? new (Map as Dynamic)();
+  if (sheet === null || columnAreas.every((columnArea) => sheetCache?.has(areaCacheKey(columnArea)) === true))
+    return columnAreas.map((columnArea) => holdsOfArea(workbook, sheetId, columnArea));
+  let cellsByColumn = columnAreas.map((): CellId[] => []);
+  for (let cellId of workbook.cellsOnShowIn(sheetId, area))
+    cellsByColumn[(workbook.positionOfCell(cellId)?.columnIndex ?? -1) - area.leftColumnIndex]?.push(cellId);
+  let holdsByColumn = cellsByColumn.map((cellIds) => holdsOfCells(workbook, cellIds));
+  let cache = sheetCache ?? new Map<string, AreaHolds>();
   areaHoldsCache.set(sheet, cache);
-  for (let [value, columnArea] of columnAreas.entries() as Dynamic) {
-    let holds = holdsByColumn[value];
+  for (let [columnOffset, columnArea] of columnAreas.entries()) {
+    let holds = holdsByColumn[columnOffset];
     if (holds !== undefined) cache.set(areaCacheKey(columnArea), holds);
   }
   return holdsByColumn;
 }
 export const MOST_CELLS_LOOKED_AT = 3000;
 export const NUMBER_LIKE_TEXT_PATTERN = /^[-+(]?\p{Sc}?\s*\d/u;
-export const HELD_KIND_OF_NUMBER_FORMAT = {
+export const HELD_KIND_OF_NUMBER_FORMAT: Record<NumberFormatKind, HeldKind> = {
   general: 'number',
   number: 'number',
   currency: 'number',
@@ -122,8 +155,9 @@ export const HELD_KIND_OF_NUMBER_FORMAT = {
   duration: 'time',
   dateAndTime: 'dateAndTime',
 };
-export const squeezeSpaces = (text?: Dynamic) => text.replaceAll(/\s+/g, '');
+export const squeezeSpaces = (text: string): string => text.replaceAll(/\s+/g, '');
 export const MOST_CELLS_CHECKED_FOR_NUMBERS = 20000;
-export const allNumbersCache = new (WeakMap as Dynamic)();
-export const areaHoldsCache = new (WeakMap as Dynamic)();
-export const areaCacheKey = (area?: Dynamic) => [area.topRowIndex, area.leftColumnIndex, area.rowCount, area.columnCount].join();
+/** Whether each area holds numbers alone, by sheet (or by a fresh object, kept for nothing, when the sheet is not found). */
+export const allNumbersCache = new WeakMap<Partial<SheetRead>, Map<string, boolean>>();
+export const areaHoldsCache = new WeakMap<SheetRead, Map<string, AreaHolds>>();
+export const areaCacheKey = (area: CellArea): string => [area.topRowIndex, area.leftColumnIndex, area.rowCount, area.columnCount].join();

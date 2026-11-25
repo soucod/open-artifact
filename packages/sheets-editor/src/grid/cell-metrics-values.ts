@@ -44,7 +44,7 @@ export const CELL_PADDING_BY_DENSITY: Record<CellDensity, CellPadding> = {
   },
 };
 export const GRIDLINE_THICKNESS = 1;
-export const rowHeightForLines = (lineCount: number, fontSize: number, { over: over, under: under }: Pick<CellPadding, 'over' | 'under'>): number =>
+export const rowHeightForLines = (lineCount: number, fontSize: number, { over, under }: Pick<CellPadding, 'over' | 'under'>): number =>
   Math.min(MAX_ROW_HEIGHT, over + firstLineHeight(fontSize) + (lineCount - 1) * nextLineHeight(fontSize) + under + GRIDLINE_THICKNESS);
 export const rowHeightForLinesAtDensity = (lineCount: number, fontSize: number, density: CellDensity): number =>
   rowHeightForLines(lineCount, fontSize, CELL_PADDING_BY_DENSITY[density]);

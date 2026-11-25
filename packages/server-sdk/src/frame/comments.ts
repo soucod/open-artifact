@@ -8,81 +8,45 @@
  * under `location.custom` and `anchor` is its stable JSON text, so the page
  * gets back exactly what it gave. Writes take `comments.json.lock` (O_EXCL)
  * and replace the file through a dot temp file; the file exists only once
- * there is a thread.
+ * there is a thread. A store whose process is the only writer of the folder
+ * (`lock: 'process'`, a host's own storage) locks within the process instead,
+ * never waits on a file, and removes a lock file a crash left behind.
  */
 
 import { randomBytes } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FrameError } from './files.ts';
+import { FrameError, LINK_GUARD, type PathGuard } from './files.ts';
+import type { Author, CommentMessage, ThreadAgentState, Thread } from './page-values.ts';
+
+export type { Author, MessageReaction, CommentMessage, ThreadAgentState, Thread } from './page-values.ts';
 
 export const COMMENTS_FILE = 'comments.json';
 export const TEXT_MAX = 10_000;
 const LOCK_STALE_MS = 10_000;
 const LOCK_WAIT_MS = 5_000;
 
-export interface Author {
-  kind: 'user' | 'agent';
-  name: string;
-}
-
 export const AGENT_AUTHOR: Readonly<Author> = Object.freeze({ kind: 'agent', name: 'agent' });
-
-/** One person's emoji on a message. */
-export interface MessageReaction {
-  emoji: string;
-  author: Author;
-  at: string;
-}
-
-export interface CommentMessage {
-  id: string;
-  author: Author;
-  text: string;
-  at: string;
-  editedAt?: string;
-  /** Who the message asks, as the page named them (`agent` asks the agent). */
-  to?: string[];
-  reactions?: MessageReaction[];
-  /** The agent's reply to a message that was sent to it without asking it (no `@agent`): it joined without being asked. */
-  joined?: boolean;
-}
 
 /** At most this many recipients on a message. */
 const TO_MAX = 20;
 /** The longest emoji a reaction may be (a sequence with modifiers). */
 const EMOJI_MAX = 32;
 
-export interface ThreadAgentState {
-  status: 'pending' | 'delivered' | 'replied';
-  sentAt?: string;
-  deliveredAt?: string;
-  repliedAt?: string;
-  via?: string;
-  /** When a reply that did not ask the agent was sent to it after it had answered; its next reply has `joined`. */
-  unaskedAt?: string;
-}
-
-export interface Thread {
-  id: string;
-  anchor: string;
-  label: string;
-  detail?: string;
-  location: Record<string, unknown>;
-  status: 'open' | 'resolved';
-  agent?: ThreadAgentState;
-  createdAt: string;
-  updatedAt: string;
-  resolvedAt?: string;
-  /** Who resolved it, while it is resolved. */
-  resolvedBy?: Author;
-  messages: CommentMessage[];
-}
-
 interface CommentsDoc {
   version: 1;
   threads: Thread[];
 }
+
+/**
+ * How a {@link CommentStore} keeps two writes apart: `file`, the O_EXCL lock file every process honours (the agent's
+ * CLI and the type server write the same folder); `process`, within this process alone, for a store whose process is
+ * the only writer (no file is made, and nothing waits).
+ */
+export type CommentLock = 'file' | 'process';
+
+/** Files being written under the `process` lock, by path: a write that comes back to the same file while it runs. */
+const writing = new Set<string>();
 
 const newId = (prefix: string): string => `${prefix}${randomBytes(5).toString('hex')}`;
 const now = (): string => new Date().toISOString();
@@ -91,13 +55,23 @@ export class CommentStore {
   readonly root: string;
   readonly file: string;
 
-  constructor(root: string) {
+  readonly lock: CommentLock;
+  private readonly guard: PathGuard;
+
+  /** `guard`: how it keeps inside the artifact folder (default {@link LINK_GUARD}: links followed). */
+  constructor(root: string, options: { lock?: CommentLock; guard?: PathGuard } = {}) {
     this.root = root;
     this.file = join(root, COMMENTS_FILE);
+    this.lock = options.lock ?? 'file';
+    this.guard = options.guard ?? LINK_GUARD;
+    // The only writer: a lock file here was left by a write that never finished (a crash), and nobody holds it.
+    if (this.lock === 'process') rmSync(`${this.file}.lock`, { force: true });
   }
 
   load(): CommentsDoc {
     try {
+      // A comments.json that is a link to a file outside the artifact folder is not read (and a write replaces the link).
+      if (!this.guard.inside(this.root, this.file)) return { version: 1, threads: [] };
       const doc = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<CommentsDoc> | null;
       if (doc && Array.isArray(doc.threads)) return { ...doc, version: 1, threads: doc.threads };
     } catch {
@@ -129,6 +103,16 @@ export class CommentStore {
 
   /** Runs `fn(doc)` under the lock and writes the result back. */
   mutate<T>(fn: (doc: CommentsDoc) => T): T {
+    if (this.lock === 'process') {
+      // A write runs to its end in one turn of this process, so the only other writer can be `fn` itself.
+      if (writing.has(this.file)) throw new FrameError('unavailable', 'comments.json is being written.', 409);
+      writing.add(this.file);
+      try {
+        return this.write(fn);
+      } finally {
+        writing.delete(this.file);
+      }
+    }
     const lock = `${this.file}.lock`;
     const started = Date.now();
     let fd: number;
@@ -151,18 +135,23 @@ export class CommentStore {
       }
     }
     try {
-      const doc = this.load();
-      const out = fn(doc);
-      if (doc.threads.length || existsSync(this.file)) {
-        const tmp = join(this.root, `.${COMMENTS_FILE}.${randomBytes(4).toString('hex')}.tmp`);
-        writeFileSync(tmp, `${JSON.stringify({ version: 1, threads: doc.threads }, null, 2)}\n`);
-        renameSync(tmp, this.file);
-      }
-      return out;
+      return this.write(fn);
     } finally {
       closeSync(fd);
       rmSync(lock, { force: true });
     }
+  }
+
+  /** Reads, applies `fn` and replaces the file (the caller holds the lock). */
+  private write<T>(fn: (doc: CommentsDoc) => T): T {
+    const doc = this.load();
+    const out = fn(doc);
+    if (doc.threads.length || existsSync(this.file)) {
+      const tmp = join(this.root, `.${COMMENTS_FILE}.${randomBytes(4).toString('hex')}.tmp`);
+      writeFileSync(tmp, `${JSON.stringify({ version: 1, threads: doc.threads }, null, 2)}\n`);
+      renameSync(tmp, this.file);
+    }
+    return out;
   }
 
   create(input: { anchor?: unknown; label?: unknown; detail?: unknown; location?: unknown; text: unknown; to?: unknown; author?: Author }): Thread {

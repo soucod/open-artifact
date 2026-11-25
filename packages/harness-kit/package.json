@@ -1,0 +1,20 @@
+{
+  "name": "@open-artifact/harness-kit",
+  "version": "0.14.6",
+  "private": true,
+  "type": "module",
+  "description": "The SDK an agent app uses to integrate Open Artifact: find or start the local daemon, hold a Harness API connection that reconnects, register the tools, take comment wakes and page opens, and follow the artifacts its sessions make.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts",
+    "./embed": "./src/embed/index.ts"
+  },
+  "dependencies": {
+    "@open-artifact/protocol": "0.14.6"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "license": "Apache-2.0"
+}

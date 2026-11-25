@@ -352,11 +352,23 @@ export function useLayerMenu(): [boolean, (open: boolean) => void] {
   return [open, setOpen];
 }
 
-export function MoreMenu({ items, label = 'More options' }: { items: readonly MenuItemSpec[]; label?: string }) {
+export function MoreMenu({
+  items,
+  label = 'More options',
+  disabled = false,
+  waitReason,
+}: {
+  items: readonly MenuItemSpec[];
+  label?: string;
+  /** The menu does not open. */
+  disabled?: boolean;
+  /** The menu opens, but every item is disabled for this reason. */
+  waitReason?: string;
+}) {
   const [open, setOpen] = useLayerMenu();
   if (items.length === 0) return null;
   return (
-    <Menu.Root open={open} onOpenChange={setOpen} modal={false}>
+    <Menu.Root open={open} onOpenChange={setOpen} modal={false} disabled={disabled}>
       <Tooltip content={label} disabled={open}>
         <Menu.Trigger
           render={
@@ -376,6 +388,7 @@ export function MoreMenu({ items, label = 'More options' }: { items: readonly Me
         <MenuItems
           items={items.map(item => ({
             ...item,
+            ...(waitReason === undefined ? {} : { disabled: true, disabledReason: waitReason }),
             onSelect: () => {
               setOpen(false);
               item.onSelect();
@@ -387,7 +400,18 @@ export function MoreMenu({ items, label = 'More options' }: { items: readonly Me
   );
 }
 
-export function ResolveAction({ resolved = false, busy = false, onResolve }: { resolved?: boolean; busy?: boolean; onResolve?: () => void }) {
+export function ResolveAction({
+  resolved = false,
+  busy = false,
+  disabled = false,
+  onResolve,
+}: {
+  resolved?: boolean;
+  busy?: boolean;
+  /** Shown but not pressable (another change is on its way). */
+  disabled?: boolean;
+  onResolve?: () => void;
+}) {
   if (resolved) {
     return (
       <Tooltip content="Resolved" side="top">
@@ -404,7 +428,7 @@ export function ResolveAction({ resolved = false, busy = false, onResolve }: { r
         variant="ghost"
         iconOnly
         aria-label="Resolve"
-        {...(busy ? { 'aria-busy': true, 'aria-disabled': true } : {})}
+        {...(busy ? { 'aria-busy': true, 'aria-disabled': true } : disabled ? { 'aria-disabled': true } : {})}
         data-cds-part="resolve"
         data-resolving={busy ? 'true' : undefined}
         icon={
@@ -419,7 +443,7 @@ export function ResolveAction({ resolved = false, busy = false, onResolve }: { r
             <Icon name="Check" size="sm" />
           )
         }
-        onClick={busy ? undefined : onResolve}
+        onClick={busy || disabled ? undefined : onResolve}
         className={ACTION}
       />
       <span role="status" className="sr-only" />
@@ -489,7 +513,7 @@ export function EditField({
   };
   return (
     <div ref={part} data-cds-part="edit-field" className="flex flex-col gap-xs" onMouseDown={event => focusOnBareClick(event, box.current)}>
-      <div ref={box} className={cn(FIELD_CLASS, 'forced-colors:border')}>
+      <div ref={box} className={FIELD_CLASS}>
         <PlainEditor
           ref={editor}
           aria-label="Edit comment"
@@ -497,6 +521,7 @@ export function EditField({
           onChange={setValue}
           onSubmit={save}
           readOnly={busy}
+          className="scroll-thin max-h-[8lh]"
           onKeyDown={event => {
             if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
               event.preventDefault();
@@ -568,7 +593,7 @@ export function ReplyField({ children }: { children: ReactNode }) {
       className="px-lg pb-lg group-has-[:is([data-cds-part=edit-field],[data-cds-part=delete-confirm])]/comment-card:hidden"
       onMouseDown={onMouseDown}
     >
-      <div ref={box} className={cn(FIELD_CLASS, 'forced-colors:border')} onMouseDown={onMouseDown}>
+      <div ref={box} className={FIELD_CLASS} onMouseDown={onMouseDown}>
         <ReplyFieldContext.Provider value={true}>{children}</ReplyFieldContext.Provider>
       </div>
     </div>

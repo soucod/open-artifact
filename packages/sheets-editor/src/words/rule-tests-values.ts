@@ -1,5 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
-export const RULE_WORD_REWRITES = [
+export const RULE_WORD_REWRITES: [words: string[], rewrite: string][] = [
   ['greater than or equal to', 'at least'],
   ['more than or equal to', 'at least'],
   ['less than or equal to', 'at most'],
@@ -13,5 +12,5 @@ export const RULE_WORD_REWRITES = [
   ['zero', '0'],
   ['missing', 'blank'],
   ['in the past', 'past'],
-].map(([phrase, rewrite]: Dynamic) => [phrase.split(' '), rewrite]);
-export const UNCHECKED_RULE_WORDS = new (Set as Dynamic)(['unchecked', 'unticked', 'false']);
+].map(([phrase, rewrite]): [string[], string] => [phrase.split(' '), rewrite]);
+export const UNCHECKED_RULE_WORDS = new Set<string>(['unchecked', 'unticked', 'false']);

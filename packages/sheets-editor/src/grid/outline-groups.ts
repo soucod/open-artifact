@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Edit } from '@open-artifact/sheets-core';
 import { sheetOfView, layoutOfView, findSheetById, clampScrollOfView, keepScrollAnchoredAcrossChange } from './layout.ts';
 import { withOwnCollapsing, groupsNotInsideCollapsed, collapsedIndexRuns, clipIndexRuns } from './line-runs.ts';
 import {
@@ -19,44 +19,121 @@ import { defaultRowHeightAtDensity, ROW_HEADER_WIDTH } from './cell-metrics-valu
 import { COLUMN_HEADER_HEIGHT } from './cell-metrics.ts';
 import { rowPanes, columnPanes, rowRunSpanOnScreen, columnRunSpanOnScreen } from './geometry.ts';
 import { rowLabelEnds, columnLabelEnds } from '../model/a1-references.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { GroupOnGrid, SheetSummary, WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function outlineGroupsOfView(view: Dynamic, reads: WorkbookReads, axis?: Dynamic) {
+import type { LineSpan } from '../model/line-ids.ts';
+import type { LineSizes } from '../model/line-sizes.ts';
+import type { LabelEnds } from '../model/a1-references.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { GroupDone, GroupsDone, PageState, ShownToLevelDone } from '../state/initial-state.ts';
+import type { PageContext } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { OutlineGroupAct } from '../keys/key-acts.ts';
+import type { GridLayout, LayoutView } from './layout.ts';
+import type { GridPane, LinesAxisName, SpanOnScreen } from './geometry.ts';
+import type { Place } from '../state/places.ts';
+/** The acts that collapse or expand groups. */
+export type GroupToggleAct = Extract<OutlineGroupAct, 'collapse' | 'expand'>;
+/** The acts that group lines or ungroup them. */
+export type GroupingAct = Extract<OutlineGroupAct, 'group' | 'ungroup'>;
+/** The commands that group, ungroup, collapse or expand rows or columns. */
+export type OutlineCommand =
+  | 'groupRows'
+  | 'groupColumns'
+  | 'ungroupRows'
+  | 'ungroupColumns'
+  | 'collapseRows'
+  | 'collapseColumns'
+  | 'expandRows'
+  | 'expandColumns';
+/** What is said to be done when groups are collapsed, expanded or shown to a level. */
+export type GroupCollapsingDone = GroupDone | GroupsDone | ShownToLevelDone;
+/** What of the page the outline groups are read and changed with. */
+export type OutlineContext = Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>;
+/** Of the view, what places the outline on screen. */
+export type OutlineScreenView = Pick<PageState, 'scrollTop' | 'scrollLeft' | 'gridHeight' | 'gridWidth'>;
+/** Of the view, what the outline margin is drawn from. */
+export type OutlineGutterView = OutlineScreenView & Pick<PageState, 'sheetId' | 'ownCollapsing' | 'density'>;
+/** The lines of a layout along one axis: their edges and how many there are. */
+export interface LinesOnAxis {
+  edges: LineSizes;
+  count: number;
+}
+/** Groups side by side at one depth, collapsed together, drawn as one mark. */
+export interface OutlineRun extends GroupOnGrid {
+  groupIds: string[];
+}
+/** The bracket drawn along an open group, from its mark to its end. */
+export interface OutlineBracket {
+  start: number;
+  end: number;
+  endsInView: boolean;
+  startsBeforeMark: boolean;
+}
+/** A group's mark in the outline margin: its lane, where it sits, its labels, and its bracket when it is open. */
+export interface OutlineMark extends LabelEnds {
+  key: string;
+  groupIds: string[];
+  lane: number;
+  isCollapsed: boolean;
+  markAt: number;
+  line: OutlineBracket | null;
+}
+/** The outline margin along one axis: how much room it takes, its level buttons and its marks. */
+export interface OutlineGutter {
+  of: LinesAxisName;
+  size: number;
+  beforeBody: number;
+  levelCount: number;
+  hasLevelButtons: boolean;
+  groups: OutlineMark[];
+}
+/** The outline margins of the rows and the columns, when there are groups on them. */
+export interface OutlineGutters {
+  rows: OutlineGutter | null;
+  columns: OutlineGutter | null;
+}
+/** A seam drawn where lines are out of sight, and the lines it stands for. */
+export interface HiddenLineSeam {
+  at: number;
+  lines: LineSpan;
+}
+export function outlineGroupsOfView(view: Pick<PageState, 'sheetId' | 'ownCollapsing'>, reads: WorkbookReads, axis: LinesAxisName): readonly GroupOnGrid[] {
   let sheet = sheetOfView(view, reads);
   return sheet === undefined ? [] : withOwnCollapsing(view.ownCollapsing, outlineGroupsOnAxis(sheet, axis));
 }
-export function collapsibleGroupsAtSelection(view: Dynamic, reads: WorkbookReads, axis?: Dynamic) {
+export function collapsibleGroupsAtSelection(view: PageState, reads: WorkbookReads, axis: LinesAxisName): GroupOnGrid[] {
   let area = selectedArea(view, reads);
   if (area === null) return [];
   let span = areaSpanOnAxis(area, axis);
   let openGroups = groupsNotInsideCollapsed(outlineGroupsOfView(view, reads, axis)).filter(
-    (group?: Dynamic) => !group.isCollapsed && doSpansOverlap(group, span),
+    (group: GroupOnGrid) => !group.isCollapsed && doSpansOverlap(group, span),
   );
-  return openGroups.filter((group?: Dynamic, index?: Dynamic) => {
+  return openGroups.filter((group: GroupOnGrid, index: number) => {
     let next = openGroups[index + 1];
     return next === undefined || !isSpanWithin(next, group);
   });
 }
-export function expandableGroupsAtSelection(view: Dynamic, reads: ReadsWithTextMeasurer, axis?: Dynamic) {
+export function expandableGroupsAtSelection(view: PageState, reads: ReadsWithTextMeasurer, axis: LinesAxisName): GroupOnGrid[] {
   let area = selectedArea(view, reads);
   if (area === null) return [];
   let span = areaSpanOnAxis(area, axis);
-  let { edges: edges } = layoutLinesOnAxis(layoutOfView(view, reads), axis);
+  let { edges } = layoutLinesOnAxis(layoutOfView(view, reads), axis);
   let firstShown = shownLineAtOrBefore(edges, span.firstIndex - 1) + 1;
-  let shownSpan = {
+  let shownSpan: LineSpan = {
     firstIndex: firstShown,
     count: shownLineAtOrAfter(edges, outlineSpanEnd(span)) - firstShown,
   };
   return groupsNotInsideCollapsed(outlineGroupsOfView(view, reads, axis)).filter(
-    (group?: Dynamic) => group.isCollapsed && isSpanWithin(group, shownSpan),
+    (group: GroupOnGrid) => group.isCollapsed && isSpanWithin(group, shownSpan),
   );
 }
-export function outlineAxisForAct(view: Dynamic, reads: WorkbookReads, act?: Dynamic) {
+export function outlineAxisForAct(view: PageState, reads: ReadsWithTextMeasurer, act: OutlineGroupAct): LinesAxisName {
   if (selectionAreaAndKind(view, reads)?.kind === 'columns') return 'columns';
   if (view.movedClearOfColumnsTo === null || (act !== 'collapse' && act !== 'expand')) return 'rows';
   return GROUP_TOGGLE_FINDERS[act](view, reads, 'columns').length > 0 ? 'columns' : 'rows';
 }
-export function dropStaleMovedClearOfColumns(view: Dynamic, reads: WorkbookReads) {
+export function dropStaleMovedClearOfColumns(view: PageState, reads: WorkbookReads): PageState {
   let { movedClearOfColumnsTo: movedTo } = view;
   return movedTo === null || (isSameCell(movedTo, view.activeCell) && isSelectionOneCell(view, reads))
     ? view
@@ -65,24 +142,24 @@ export function dropStaleMovedClearOfColumns(view: Dynamic, reads: WorkbookReads
         movedClearOfColumnsTo: null,
       };
 }
-export function ungroupableGroupsAtSelection(view: Dynamic, reads: WorkbookReads, axis?: Dynamic) {
+export function ungroupableGroupsAtSelection(view: PageState, reads: WorkbookReads, axis: LinesAxisName): GroupOnGrid[] {
   let area = selectedArea(view, reads);
   if (area === null) return [];
   let span = areaSpanOnAxis(area, axis);
   let groups = outlineGroupsOfView(view, reads, axis);
-  let innermostHolding = groups.findLast((group?: Dynamic) => isSpanWithin(span, group));
+  let innermostHolding = groups.findLast((group: GroupOnGrid) => isSpanWithin(span, group));
   if (innermostHolding !== undefined) return [innermostHolding];
-  let within = groups.filter((group?: Dynamic) => isSpanWithin(group, span));
-  return within.filter((group?: Dynamic) => !within.some((other?: Dynamic) => other !== group && isSpanWithin(group, other)));
+  let within = groups.filter((group: GroupOnGrid) => isSpanWithin(group, span));
+  return within.filter((group: GroupOnGrid) => !within.some((other: GroupOnGrid) => other !== group && isSpanWithin(group, other)));
 }
-export function groupableAxes(view: Dynamic, reads: WorkbookReads) {
+export function groupableAxes(view: PageState, reads: WorkbookReads): LinesAxisName[] {
   if (view.mode.kind === 'editing') return ['rows', 'columns'];
   let area = selectedArea(view, reads);
   let sheet = findSheetById(reads, view.activeCell.sheetId);
   if (area === null || sheet === undefined) return ['rows', 'columns'];
-  return [...(area.rowCount < sheet.rowCount ? ['rows'] : []), ...(area.columnCount < sheet.columnCount ? ['columns'] : [])];
+  return [...(area.rowCount < sheet.rowCount ? ['rows' as const] : []), ...(area.columnCount < sheet.columnCount ? ['columns' as const] : [])];
 }
-export function moveSelectionClearOfHiddenLines(view: Dynamic, reads: ReadsWithTextMeasurer, axis?: Dynamic, collapsedRuns?: Dynamic) {
+export function moveSelectionClearOfHiddenLines(view: PageState, reads: ReadsWithTextMeasurer, axis: LinesAxisName, collapsedRuns: readonly LineSpan[]): PageState {
   let area = mergedAreaOrCellOf(reads, view.activeCell);
   if (area === null || !groupableAxes(view, reads).includes(axis)) return view;
   let lines = layoutLinesOnAxis(layoutOfView(view, reads), axis);
@@ -91,51 +168,55 @@ export function moveSelectionClearOfHiddenLines(view: Dynamic, reads: ReadsWithT
   let lineAfter = shownLineAtOrAfter(edgesAfter, span.firstIndex);
   if (lineAfter < outlineSpanEnd(span)) return view;
   let line = lineAfter < lines.count ? lineAfter : shownLineAtOrBefore(edgesAfter, span.firstIndex);
-  let otherAxis = axis === 'rows' ? 'columns' : 'rows';
+  let otherAxis: LinesAxisName = axis === 'rows' ? 'columns' : 'rows';
   let otherLines = layoutLinesOnAxis(layoutOfView(view, reads), otherAxis);
   let otherLine = nearestShownLine(otherLines.edges, otherLines.count, areaSpanOnAxis(area, otherAxis).firstIndex, 1);
   let cellId = axis === 'rows' ? reads.cellIdAt(view.sheetId, line, otherLine) : reads.cellIdAt(view.sheetId, otherLine, line);
   if (cellId === null) return view;
-  let { scrollTop: scrollTop, scrollLeft: scrollLeft } = view;
+  let { scrollTop, scrollLeft } = view;
   let moved = moveActiveCellTo(withoutOtherRanges(view), reads, cellId);
   let movedClearOfColumnsTo = axis === 'columns' ? moved.activeCell : null;
   return {
     ...moved,
-    scrollTop: scrollTop,
-    scrollLeft: scrollLeft,
-    movedClearOfColumnsTo: movedClearOfColumnsTo,
+    scrollTop,
+    scrollLeft,
+    movedClearOfColumnsTo,
   };
 }
-export function queueCollapseEditKeepingSelection(view?: Dynamic, next?: Dynamic, edit?: Dynamic, done?: Dynamic) {
+export function queueCollapseEditKeepingSelection(view: PageState, next: PageState, edit: Edit, done: GroupCollapsingDone): PageTransition {
   if (next.activeCell === view.activeCell)
     return queueEdit(next, edit, {
       ...IF_QUEUED_DEFAULTS,
       select: null,
-      done: done,
+      done,
     });
   let {
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
-    rangeWalked: rangeWalked,
-    otherRanges: otherRanges,
-    movedClearOfColumnsTo: movedClearOfColumnsTo,
+    activeCell,
+    selectionCorner,
+    rangeWalked,
+    otherRanges,
+    movedClearOfColumnsTo,
   } = view;
   return queueEdit(next, edit, {
     ...IF_QUEUED_DEFAULTS,
     select: selectionAtCell(next.activeCell),
-    done: done,
+    done,
     selectionIfRefused: {
-      activeCell: activeCell,
-      selectionCorner: selectionCorner,
-      rangeWalked: rangeWalked,
-      otherRanges: otherRanges,
-      movedClearOfColumnsTo: movedClearOfColumnsTo,
+      activeCell,
+      selectionCorner,
+      rangeWalked,
+      otherRanges,
+      movedClearOfColumnsTo,
     },
   });
 }
-export function nextOwnCollapsing({ ownCollapsing: ownCollapsing }: Dynamic, groups?: Dynamic, isCollapsedOf?: Dynamic) {
-  let next = new (Map as Dynamic)(ownCollapsing);
-  for (let group of groups as Dynamic) {
+export function nextOwnCollapsing(
+  { ownCollapsing }: Pick<PageState, 'ownCollapsing'>,
+  groups: readonly GroupOnGrid[],
+  isCollapsedOf: (group: GroupOnGrid) => boolean,
+): Map<string, boolean> {
+  let next = new Map(ownCollapsing);
+  for (let group of groups) {
     let isCollapsed = isCollapsedOf(group);
     if (isCollapsed === group.isCollapsed) next.delete(group.groupId);
     else next.set(group.groupId, isCollapsed);
@@ -143,37 +224,37 @@ export function nextOwnCollapsing({ ownCollapsing: ownCollapsing }: Dynamic, gro
   return next;
 }
 export function changeGroupCollapsing(
-  view: Dynamic,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic,
-  axis?: Dynamic,
-  isCollapsedOf?: Dynamic,
-  isAsked?: Dynamic,
-  edit?: Dynamic,
-  done?: Dynamic,
-) {
+  view: PageState,
+  { reads, refusalOfEveryEdit }: OutlineContext,
+  axis: LinesAxisName,
+  isCollapsedOf: (group: GroupOnGrid) => boolean,
+  isAsked: (group: GroupOnGrid) => boolean,
+  edit: Edit,
+  done: GroupCollapsingDone,
+): PageTransition {
   let sheet = sheetOfView(view, reads);
   if (sheet === undefined) return withNoEffects(view);
   let groups = outlineGroupsOnAxis(sheet, axis);
   if (groups.length === 0) return withNoEffects(view);
   let collapsedRuns = collapsedIndexRuns(
     groups.map(
-      (group?: Dynamic) => ({
+      (group: GroupOnGrid): GroupOnGrid => ({
         ...group,
         isCollapsed: isCollapsedOf(group),
       }),
     ),
   );
-  let cleared = {
+  let cleared: PageState = {
     ...view,
     lastDone: null,
     notice: null,
   };
   let moved = moveSelectionClearOfHiddenLines(cleared, reads, axis, collapsedRuns);
-  let changesWorkbook = groups.some((group?: Dynamic) => isAsked(group) && isCollapsedOf(group) !== group.isCollapsed);
+  let changesWorkbook = groups.some((group: GroupOnGrid) => isAsked(group) && isCollapsedOf(group) !== group.isCollapsed);
   if (refusalOfEveryEdit === null && changesWorkbook) {
-    let differsFromShown = (group?: Dynamic) =>
+    let differsFromShown = (group: GroupOnGrid) =>
       isCollapsedOf(group) !== (view.ownCollapsing.get(group.groupId) ?? group.isCollapsed);
-    let ownCollapsing = nextOwnCollapsing(view, groups.filter(differsFromShown), (group?: Dynamic) => group.isCollapsed);
+    let ownCollapsing = nextOwnCollapsing(view, groups.filter(differsFromShown), (group: GroupOnGrid) => group.isCollapsed);
     return queueCollapseEditKeepingSelection(view, applyOwnCollapsing(moved, reads, ownCollapsing), edit, done);
   }
   if (wouldHideEveryLine(collapsedRuns, layoutLinesOnAxis(layoutOfView(view, reads), axis).count))
@@ -186,17 +267,17 @@ export function changeGroupCollapsing(
         asked: 'otherEdit',
       },
     });
-  let nextOwnCollapsing2 = nextOwnCollapsing(view, groups, isCollapsedOf);
-  let next = {
-    ...applyOwnCollapsing(moved, reads, nextOwnCollapsing2),
+  let ownCollapsing = nextOwnCollapsing(view, groups, isCollapsedOf);
+  let next: PageState = {
+    ...applyOwnCollapsing(moved, reads, ownCollapsing),
     lastDone: done,
   };
   return withNoEffects(moved.activeCell === view.activeCell ? next : scrollToShowSelection(next, reads));
 }
-export function groupCollapsingDoneNote(groups?: Dynamic, axis?: Dynamic, isCollapsed?: Dynamic) {
+export function groupCollapsingDoneNote(groups: readonly GroupOnGrid[], axis: LinesAxisName, isCollapsed: boolean): GroupDone | GroupsDone | null {
   let [first, ...others] = collapsedIndexRuns(
     groups.map(
-      (group?: Dynamic) => ({
+      (group: GroupOnGrid): GroupOnGrid => ({
         ...group,
         isCollapsed: true,
       }),
@@ -215,76 +296,82 @@ export function groupCollapsingDoneNote(groups?: Dynamic, axis?: Dynamic, isColl
         groupCount: groups.length,
       };
 }
-export function setOutlineGroupsCollapsed(view?: Dynamic, workbook?: Dynamic, axis?: Dynamic, groupIds?: Dynamic, isCollapsed?: Dynamic) {
-  let { sheetId: sheetId } = view;
-  let asked = new (Set as Dynamic)(groupIds);
-  let groups = outlineGroupsOfView(view, workbook.reads, axis).filter(({ groupId: groupId }: Dynamic) => asked.has(groupId));
-  let [firstGroupId, ...otherGroupIds] = groups.map(({ groupId: groupId }: Dynamic) => groupId);
+export function setOutlineGroupsCollapsed(
+  view: PageState,
+  context: OutlineContext,
+  axis: LinesAxisName,
+  groupIds: readonly string[],
+  isCollapsed: boolean,
+): PageTransition {
+  let { sheetId } = view;
+  let asked = new Set(groupIds);
+  let groups = outlineGroupsOfView(view, context.reads, axis).filter(({ groupId }: GroupOnGrid) => asked.has(groupId));
+  let [firstGroupId, ...otherGroupIds] = groups.map(({ groupId }: GroupOnGrid) => groupId);
   let done = groupCollapsingDoneNote(groups, axis, isCollapsed);
   if (firstGroupId === undefined || done === null) return withNoEffects(view);
   return changeGroupCollapsing(
     view,
-    workbook,
+    context,
     axis,
-    (group?: Dynamic) => (asked.has(group.groupId) ? isCollapsed : (view.ownCollapsing.get(group.groupId) ?? group.isCollapsed)),
-    (group?: Dynamic) => asked.has(group.groupId),
+    (group: GroupOnGrid) => (asked.has(group.groupId) ? isCollapsed : (view.ownCollapsing.get(group.groupId) ?? group.isCollapsed)),
+    (group: GroupOnGrid) => asked.has(group.groupId),
     {
       kind: axis === 'rows' ? 'setRowGroupsCollapsed' : 'setColumnGroupsCollapsed',
-      sheetId: sheetId,
+      sheetId,
       groupIds: [firstGroupId, ...otherGroupIds],
-      isCollapsed: isCollapsed,
+      isCollapsed,
     },
     done,
   );
 }
-export function showOutlineGroupsToLevel(view?: Dynamic, workbook?: Dynamic, axis?: Dynamic, level?: Dynamic) {
+export function showOutlineGroupsToLevel(view: PageState, context: OutlineContext, axis: LinesAxisName, level: number): PageTransition {
   let depth = level - 1;
   return changeGroupCollapsing(
     view,
-    workbook,
+    context,
     axis,
-    (group?: Dynamic) => group.depth > depth,
+    (group: GroupOnGrid) => group.depth > depth,
     () => true,
     {
       kind: axis === 'rows' ? 'showRowGroupsToDepth' : 'showColumnGroupsToDepth',
       sheetId: view.sheetId,
-      depth: depth,
+      depth,
     },
     {
       what: 'shownToLevel',
       of: axis,
-      level: level,
+      level,
     },
   );
 }
-export function queueGroupingEdit(view?: Dynamic, workbook?: Dynamic, act?: Dynamic, axis?: Dynamic) {
-  let { reads: reads } = workbook;
+export function queueGroupingEdit(view: PageState, context: Pick<PageContext, 'reads'>, act: GroupingAct, axis: LinesAxisName): PageTransition {
+  let { reads } = context;
   let viewOneRange = withoutOtherRanges(view);
   let area = selectedArea(viewOneRange, reads);
   if (area === null) return withNoEffects(viewOneRange);
-  let { sheetId: sheetId } = viewOneRange;
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = area;
+  let { sheetId } = viewOneRange;
+  let { topRowIndex, leftColumnIndex, rowCount, columnCount } = area;
   let topLeft = reads.cellIdAt(sheetId, topRowIndex, leftColumnIndex);
   let bottomRight = reads.cellIdAt(sheetId, topRowIndex + rowCount - 1, leftColumnIndex + columnCount - 1);
   if (topLeft === null || bottomRight === null) return withNoEffects(viewOneRange);
   let span = areaSpanOnAxis(area, axis);
-  let edit =
+  let edit: Edit =
     axis === 'rows'
       ? {
           kind: `${act}Rows`,
-          sheetId: sheetId,
+          sheetId,
           oneRow: topLeft.rowId,
           otherRow: bottomRight.rowId,
         }
       : {
           kind: `${act}Columns`,
-          sheetId: sheetId,
+          sheetId,
           oneColumn: topLeft.columnId,
           otherColumn: bottomRight.columnId,
         };
   let [onlyGroup, ...otherGroups] = act === 'ungroup' ? ungroupableGroupsAtSelection(viewOneRange, reads, axis) : [];
   let doneSpan = onlyGroup !== undefined && otherGroups.length === 0 ? onlyGroup : span;
-  let done = {
+  let done: GroupDone = {
     what: GROUPING_DONE_KIND[act],
     of: axis,
     ...spanLabelEnds(doneSpan, axis),
@@ -292,30 +379,30 @@ export function queueGroupingEdit(view?: Dynamic, workbook?: Dynamic, act?: Dyna
   return queueEdit(viewOneRange, edit, {
     ...IF_QUEUED_DEFAULTS,
     select: null,
-    done: done,
+    done,
   });
 }
-export function actOnOutlineGroups(view?: Dynamic, workbook?: Dynamic, act?: Dynamic, axis?: Dynamic) {
-  let { reads: reads } = workbook;
-  if (act !== 'collapse' && act !== 'expand') return queueGroupingEdit(view, workbook, act, axis);
+export function actOnOutlineGroups(view: PageState, context: OutlineContext, act: OutlineGroupAct, axis: LinesAxisName): PageTransition {
+  let { reads } = context;
+  if (act !== 'collapse' && act !== 'expand') return queueGroupingEdit(view, context, act, axis);
   return setOutlineGroupsCollapsed(
     view,
-    workbook,
+    context,
     axis,
-    GROUP_TOGGLE_FINDERS[act](view, reads, axis).map(({ groupId: groupId }: Dynamic) => groupId),
+    GROUP_TOGGLE_FINDERS[act](view, reads, axis).map(({ groupId }: GroupOnGrid) => groupId),
     act === 'collapse',
   );
 }
-export function outlineGroupsById(reads: WorkbookReads) {
-  let byId = new (Map as Dynamic)();
-  for (let { rowGroups: rowGroups, columnGroups: columnGroups } of reads.listSheets() as Dynamic)
-    for (let groups of [rowGroups, columnGroups] as Dynamic) for (let group of groups as Dynamic) byId.set(group.groupId, group);
+export function outlineGroupsById(reads: WorkbookReads): Map<string, GroupOnGrid> {
+  let byId = new Map<string, GroupOnGrid>();
+  for (let { rowGroups, columnGroups } of reads.listSheets())
+    for (let groups of [rowGroups, columnGroups]) for (let group of groups) byId.set(group.groupId, group);
   return byId;
 }
-export function pruneSettledOwnCollapsing(view: Dynamic, readsBefore: Dynamic, reads: WorkbookReads) {
+export function pruneSettledOwnCollapsing(view: PageState, readsBefore: WorkbookReads, reads: WorkbookReads): PageState {
   if (view.ownCollapsing.size === 0) return view;
   let [before, after] = [outlineGroupsById(readsBefore), outlineGroupsById(reads)];
-  let kept = [...view.ownCollapsing].filter(([groupId, isCollapsed]: Dynamic) => {
+  let kept = [...view.ownCollapsing].filter(([groupId, isCollapsed]: [string, boolean]) => {
     let group = after.get(groupId);
     return group !== undefined && group.isCollapsed !== isCollapsed && group.isCollapsed === (before.get(groupId)?.isCollapsed ?? group.isCollapsed);
   });
@@ -323,77 +410,83 @@ export function pruneSettledOwnCollapsing(view: Dynamic, readsBefore: Dynamic, r
     ? view
     : {
         ...view,
-        ownCollapsing: new (Map as Dynamic)(kept),
+        ownCollapsing: new Map(kept),
       };
 }
-export function collapsedGroupsHidingSpanStart(view: Dynamic, reads: WorkbookReads, { edges: edges }: Dynamic, span?: Dynamic, axis?: Dynamic) {
+export function collapsedGroupsHidingSpanStart(
+  view: Pick<PageState, 'sheetId' | 'ownCollapsing'>,
+  reads: WorkbookReads,
+  { edges }: Pick<LinesOnAxis, 'edges'>,
+  span: LineSpan,
+  axis: LinesAxisName,
+): GroupOnGrid[] {
   if (shownLineAtOrAfter(edges, span.firstIndex) < outlineSpanEnd(span)) return [];
-  let firstLine = {
+  let firstLine: LineSpan = {
     firstIndex: span.firstIndex,
     count: 1,
   };
-  return outlineGroupsOfView(view, reads, axis).filter((group?: Dynamic) => group.isCollapsed && isSpanWithin(firstLine, group));
+  return outlineGroupsOfView(view, reads, axis).filter((group: GroupOnGrid) => group.isCollapsed && isSpanWithin(firstLine, group));
 }
-export function expandGroupsLocally(view?: Dynamic, groups?: Dynamic) {
+export function expandGroupsLocally(view: PageState, groups: readonly Pick<GroupOnGrid, 'groupId'>[]): PageState {
   if (groups.length === 0) return view;
-  let ownCollapsing = new (Map as Dynamic)(view.ownCollapsing);
-  for (let { groupId: groupId } of groups as Dynamic) ownCollapsing.set(groupId, false);
+  let ownCollapsing = new Map(view.ownCollapsing);
+  for (let { groupId } of groups) ownCollapsing.set(groupId, false);
   return {
     ...view,
-    ownCollapsing: ownCollapsing,
+    ownCollapsing,
   };
 }
-export function revealActiveCellLocally(view: Dynamic, reads: ReadsWithTextMeasurer, justCollapsed: Dynamic = NO_NEWLY_COLLAPSED_GROUPS) {
-  let { sheetId: sheetId } = view.activeCell;
+export function revealActiveCellLocally(view: PageState, reads: ReadsWithTextMeasurer, justCollapsed: ReadonlySet<string> = NO_NEWLY_COLLAPSED_GROUPS): PageState {
+  let { sheetId } = view.activeCell;
   let sheet = findSheetById(reads, sheetId);
   if (sheet === undefined) return view;
   if (sheet.rowGroups.length === 0 && sheet.columnGroups.length === 0) return view;
   let area = mergedAreaOrCellOf(reads, view.activeCell);
   if (area === null) return view;
-  let viewOfSheet = {
+  let viewOfSheet: PageState = {
     ...view,
-    sheetId: sheetId,
+    sheetId,
   };
   let layout = layoutOfView(viewOfSheet, reads);
   let hiding = groupableAxes(view, reads).flatMap(
-    (axis?: Dynamic) =>
+    (axis: LinesAxisName) =>
       collapsedGroupsHidingSpanStart(viewOfSheet, reads, layoutLinesOnAxis(layout, axis), areaSpanOnAxis(area, axis), axis),
   );
-  return hiding.some(({ groupId: groupId }: Dynamic) => justCollapsed.has(groupId)) ? view : expandGroupsLocally(view, hiding);
+  return hiding.some(({ groupId }: GroupOnGrid) => justCollapsed.has(groupId)) ? view : expandGroupsLocally(view, hiding);
 }
-export function revealAreaInCollapsedGroups(view: Dynamic, reads: ReadsWithTextMeasurer, area?: Dynamic) {
+export function revealAreaInCollapsedGroups(view: PageState, reads: ReadsWithTextMeasurer, area: CellArea): PageState {
   let layout = layoutOfView(view, reads);
   return expandGroupsLocally(
     view,
-    ['rows', 'columns'].flatMap(
-      (axis?: Dynamic) => collapsedGroupsHidingSpanStart(view, reads, layoutLinesOnAxis(layout, axis), areaSpanOnAxis(area, axis), axis),
+    (['rows', 'columns'] as const).flatMap(
+      (axis: LinesAxisName) => collapsedGroupsHidingSpanStart(view, reads, layoutLinesOnAxis(layout, axis), areaSpanOnAxis(area, axis), axis),
     ),
   );
 }
-export function newlyCollapsedGroupIds(readsBefore: Dynamic, reads: WorkbookReads) {
-  let collapsed = [...outlineGroupsById(reads).values()].filter(({ isCollapsed: isCollapsed }: Dynamic) => isCollapsed);
+export function newlyCollapsedGroupIds(readsBefore: WorkbookReads, reads: WorkbookReads): ReadonlySet<string> {
+  let collapsed = [...outlineGroupsById(reads).values()].filter(({ isCollapsed }: GroupOnGrid) => isCollapsed);
   if (collapsed.length === 0 || readsBefore === reads) return NO_NEWLY_COLLAPSED_GROUPS;
   let groupsBefore = outlineGroupsById(readsBefore);
-  return new (Set as Dynamic)(
-    collapsed.flatMap(({ groupId: groupId }: Dynamic) => (groupsBefore.get(groupId)?.isCollapsed === true ? [] : groupId)),
+  return new Set(
+    collapsed.flatMap(({ groupId }: GroupOnGrid) => (groupsBefore.get(groupId)?.isCollapsed === true ? [] : groupId)),
   );
 }
-export function moveSelectionsOutOfNewlyCollapsed(view: Dynamic, reads: ReadsWithTextMeasurer, justCollapsed?: Dynamic) {
+export function moveSelectionsOutOfNewlyCollapsed(view: PageState, reads: ReadsWithTextMeasurer, justCollapsed: ReadonlySet<string>): PageState {
   if (justCollapsed.size === 0) return view;
-  let moveClear = (place?: Dynamic) =>
-    ['rows', 'columns'].reduce((current?: Dynamic, axis?: Dynamic) => {
+  let moveClear = (place: PageState) =>
+    (['rows', 'columns'] as const).reduce((current: PageState, axis: LinesAxisName) => {
       let area = mergedAreaOrCellOf(reads, current.activeCell);
       if (area === null) return current;
       let lines = layoutLinesOnAxis(layoutOfView(current, reads), axis);
       return collapsedGroupsHidingSpanStart(current, reads, lines, areaSpanOnAxis(area, axis), axis).some(
-        ({ groupId: groupId }: Dynamic) => justCollapsed.has(groupId),
+        ({ groupId }: GroupOnGrid) => justCollapsed.has(groupId),
       )
         ? moveSelectionClearOfHiddenLines(current, reads, axis, [])
         : current;
     }, place);
   let moved = view.activeCell.sheetId === view.sheetId ? moveClear(view) : view;
-  let placesLeft = view.placesLeft.map((place?: Dynamic) => {
-    let { activeCell: activeCell } = moveClear({
+  let placesLeft = view.placesLeft.map((place: Place): Place => {
+    let { activeCell } = moveClear({
       ...view,
       ...place,
     });
@@ -406,18 +499,18 @@ export function moveSelectionsOutOfNewlyCollapsed(view: Dynamic, reads: ReadsWit
   });
   return {
     ...(moved === view ? view : scrollToShowSelection(moved, reads)),
-    placesLeft: placesLeft,
+    placesLeft,
   };
 }
-export function revealActiveCellAfterMove(viewBefore: Dynamic, view: Dynamic, reads: ReadsWithTextMeasurer) {
+export function revealActiveCellAfterMove(viewBefore: Pick<PageState, 'activeCell'>, view: PageState, reads: ReadsWithTextMeasurer): PageState {
   let revealed = revealActiveCellLocally(view, reads);
   if (revealed === view) return view;
   return view.activeCell === viewBefore.activeCell ? revealed : scrollToShowSelection(revealed, reads);
 }
-export function mergeAdjacentCollapsedGroups(groups?: Dynamic) {
-  let runs: Dynamic = [];
-  let runByDepth = new (Map as Dynamic)();
-  for (let group of groups as Dynamic) {
+export function mergeAdjacentCollapsedGroups(groups: readonly GroupOnGrid[]): OutlineRun[] {
+  let runs: OutlineRun[] = [];
+  let runByDepth = new Map<number, number>();
+  for (let group of groups) {
     let runIndex = group.isCollapsed ? runByDepth.get(group.depth) : undefined;
     let run = runIndex === undefined ? undefined : runs[runIndex];
     if (runIndex !== undefined && run !== undefined && run.firstIndex + run.count === group.firstIndex) {
@@ -436,25 +529,25 @@ export function mergeAdjacentCollapsedGroups(groups?: Dynamic) {
   }
   return runs;
 }
-export function outlineGutterOnAxis(view: Dynamic, reads: WorkbookReads, layout?: Dynamic, axis?: Dynamic) {
+export function outlineGutterOnAxis(view: OutlineGutterView, reads: WorkbookReads, layout: GridLayout, axis: LinesAxisName): OutlineGutter | null {
   let groups = outlineGroupsOfView(view, reads, axis);
   if (groups.length === 0) return null;
-  let maxDepth = groups.reduce((deepest: Dynamic, { depth: depth }: Dynamic) => Math.max(deepest, depth), 0);
+  let maxDepth = groups.reduce((deepest: number, { depth }: GroupOnGrid) => Math.max(deepest, depth), 0);
   let halfMark = Math.ceil(OUTLINE_MARK_SIZE / 2);
   let edges = axis === 'rows' ? layout.rowEdges : layout.columnEdges;
-  let nextFreeByLane = new (Map as Dynamic)();
-  let placeMark = (lane?: Dynamic, wanted?: Dynamic) => {
+  let nextFreeByLane = new Map<number, number>();
+  let placeMark = (lane: number, wanted: number) => {
     let at = Math.max(wanted, nextFreeByLane.get(lane) ?? wanted);
     nextFreeByLane.set(lane, at + OUTLINE_MARK_SIZE);
     return at;
   };
-  let marks = mergeAdjacentCollapsedGroups(groupsNotInsideCollapsed(groups)).flatMap((run?: Dynamic) => {
-    let { start: start, end: end, showFrom: showFrom, showTo: showTo } = outlineRunOnScreen(run, axis, view, layout);
+  let marks = mergeAdjacentCollapsedGroups(groupsNotInsideCollapsed(groups)).flatMap((run: OutlineRun): OutlineMark[] => {
+    let { start, end, showFrom, showTo } = outlineRunOnScreen(run, axis, view, layout);
     let lane = run.depth - 1;
     let mark = {
       key: run.groupId,
       groupIds: run.groupIds,
-      lane: lane,
+      lane,
       isCollapsed: run.isCollapsed,
       ...spanLabelEnds(run, axis),
     };
@@ -466,7 +559,7 @@ export function outlineGutterOnAxis(view: Dynamic, reads: WorkbookReads, layout?
       return [
         {
           ...mark,
-          markAt: markAt,
+          markAt,
           line: null,
         },
       ];
@@ -483,7 +576,7 @@ export function outlineGutterOnAxis(view: Dynamic, reads: WorkbookReads, layout?
           start: startsBeforeMark ? start : placedAt,
           end: Math.max(placedAt, Math.min(end, showTo)),
           endsInView: end <= showTo,
-          startsBeforeMark: startsBeforeMark,
+          startsBeforeMark,
         },
       },
     ];
@@ -497,19 +590,19 @@ export function outlineGutterOnAxis(view: Dynamic, reads: WorkbookReads, layout?
     groups: marks,
   };
 }
-export function hiddenLineSeams(view?: Dynamic, layout?: Dynamic, axis?: Dynamic) {
+export function hiddenLineSeams(view: OutlineScreenView, layout: GridLayout, axis: LinesAxisName): HiddenLineSeam[] {
   let [hiddenRuns, panes] =
     axis === 'rows' ? [layout.rowsOutOfSight, rowPanes(view, layout, view)] : [layout.columnsOutOfSight, columnPanes(view, layout, view)];
   return panes
     .flatMap(
-      ({ first: first, count: count }: Dynamic) =>
+      ({ first, count }: GridPane) =>
         clipIndexRuns(hiddenRuns, {
           firstIndex: first - 1,
           count: count + 2,
         }),
     )
-    .flatMap((run?: Dynamic) => {
-      let { start: start, showFrom: showFrom, showTo: showTo } = outlineRunOnScreen(run, axis, view, layout);
+    .flatMap((run: LineSpan): HiddenLineSeam[] => {
+      let { start, showFrom, showTo } = outlineRunOnScreen(run, axis, view, layout);
       return start < showFrom || start > showTo
         ? []
         : [
@@ -520,8 +613,8 @@ export function hiddenLineSeams(view?: Dynamic, layout?: Dynamic, axis?: Dynamic
           ];
     });
 }
-export function findRunEndingAfter(runs?: Dynamic, index?: Dynamic) {
-  let [low, high]: Dynamic = [0, runs.length];
+export function findRunEndingAfter(runs: readonly LineSpan[], index: number): LineSpan | undefined {
+  let [low, high] = [0, runs.length];
   while (low < high) {
     let middle = Math.floor((low + high) / 2);
     let run = runs[middle];
@@ -530,16 +623,16 @@ export function findRunEndingAfter(runs?: Dynamic, index?: Dynamic) {
   }
   return runs[low];
 }
-export function outlineGutters(view: Dynamic, reads: ReadsWithTextMeasurer) {
+export function outlineGutters(view: OutlineGutterView & LayoutView, reads: ReadsWithTextMeasurer): OutlineGutters {
   let layout = layoutOfView(view, reads);
   return {
     rows: outlineGutterOnAxis(view, reads, layout, 'rows'),
     columns: outlineGutterOnAxis(view, reads, layout, 'columns'),
   };
 }
-export const outlineGroupsOnAxis = ({ rowGroups: rowGroups, columnGroups: columnGroups }: Dynamic, axis?: Dynamic) =>
+export const outlineGroupsOnAxis = ({ rowGroups, columnGroups }: Pick<SheetSummary, 'rowGroups' | 'columnGroups'>, axis: LinesAxisName): GroupOnGrid[] =>
   axis === 'rows' ? rowGroups : columnGroups;
-export const layoutLinesOnAxis = (layout?: Dynamic, axis?: Dynamic) =>
+export const layoutLinesOnAxis = (layout: GridLayout, axis: LinesAxisName): LinesOnAxis =>
   axis === 'rows'
     ? {
         edges: layout.rowEdges,
@@ -549,7 +642,7 @@ export const layoutLinesOnAxis = (layout?: Dynamic, axis?: Dynamic) =>
         edges: layout.columnEdges,
         count: layout.columnCount,
       };
-export const areaSpanOnAxis = (area?: Dynamic, axis?: Dynamic) =>
+export const areaSpanOnAxis = (area: CellArea, axis: LinesAxisName): LineSpan =>
   axis === 'rows'
     ? {
         firstIndex: area.topRowIndex,
@@ -559,12 +652,12 @@ export const areaSpanOnAxis = (area?: Dynamic, axis?: Dynamic) =>
         firstIndex: area.leftColumnIndex,
         count: area.columnCount,
       };
-export const outlineSpanEnd = ({ firstIndex: firstIndex, count: count }: Dynamic) => firstIndex + count;
-export const doSpansOverlap = (span?: Dynamic, other?: Dynamic) =>
+export const outlineSpanEnd = ({ firstIndex, count }: LineSpan): number => firstIndex + count;
+export const doSpansOverlap = (span: LineSpan, other: LineSpan): boolean =>
   span.firstIndex < outlineSpanEnd(other) && other.firstIndex < outlineSpanEnd(span);
-export const isSpanWithin = (inner?: Dynamic, outer?: Dynamic) =>
+export const isSpanWithin = (inner: LineSpan, outer: LineSpan): boolean =>
   inner.firstIndex >= outer.firstIndex && outlineSpanEnd(inner) <= outlineSpanEnd(outer);
-export const spanLabelEnds = ({ firstIndex: firstIndex, count: count }: Dynamic, axis?: Dynamic) =>
+export const spanLabelEnds = ({ firstIndex, count }: LineSpan, axis: LinesAxisName): LabelEnds =>
   axis === 'rows'
     ? rowLabelEnds(
         {
@@ -580,19 +673,19 @@ export const spanLabelEnds = ({ firstIndex: firstIndex, count: count }: Dynamic,
         rowCount: 1,
         leftColumnIndex: firstIndex,
         columnCount: count,
-      });
-export const GROUP_TOGGLE_FINDERS = {
+      } as CellArea);
+export const GROUP_TOGGLE_FINDERS: Record<GroupToggleAct, (view: PageState, reads: ReadsWithTextMeasurer, axis: LinesAxisName) => GroupOnGrid[]> = {
   collapse: collapsibleGroupsAtSelection,
   expand: expandableGroupsAtSelection,
 };
-export const wouldHideEveryLine = ([firstRun]: Dynamic, lineCount?: Dynamic) =>
+export const wouldHideEveryLine = ([firstRun]: readonly LineSpan[], lineCount: number): boolean =>
   firstRun?.firstIndex === 0 && firstRun.count === lineCount;
-export const applyOwnCollapsing = (view: Dynamic, reads: ReadsWithTextMeasurer, ownCollapsing?: Dynamic) =>
+export const applyOwnCollapsing = (view: PageState, reads: ReadsWithTextMeasurer, ownCollapsing: Map<string, boolean>): PageState =>
   clampScrollOfView(
     keepScrollAnchoredAcrossChange(
       {
         ...view,
-        ownCollapsing: ownCollapsing,
+        ownCollapsing,
       },
       reads,
       reads,
@@ -600,11 +693,11 @@ export const applyOwnCollapsing = (view: Dynamic, reads: ReadsWithTextMeasurer, 
     ),
     reads,
   );
-export const GROUPING_DONE_KIND = {
+export const GROUPING_DONE_KIND: Record<GroupingAct, GroupDone['what']> = {
   group: 'grouped',
   ungroup: 'ungrouped',
 };
-export const OUTLINE_COMMAND_ACTS = {
+export const OUTLINE_COMMAND_ACTS: Record<OutlineCommand, [OutlineGroupAct, LinesAxisName]> = {
   groupRows: ['group', 'rows'],
   groupColumns: ['group', 'columns'],
   ungroupRows: ['ungroup', 'rows'],
@@ -614,29 +707,34 @@ export const OUTLINE_COMMAND_ACTS = {
   expandRows: ['expand', 'rows'],
   expandColumns: ['expand', 'columns'],
 };
-export const runOutlineCommand = (view?: Dynamic, workbook?: Dynamic, command?: Dynamic) =>
-  (actOnOutlineGroups as Dynamic)(view, workbook, ...OUTLINE_COMMAND_ACTS[command]);
-export const NO_NEWLY_COLLAPSED_GROUPS = new (Set as Dynamic)();
-export const ownCollapsingAfterReadsChange = (view: Dynamic, readsBefore: Dynamic, reads: ReadsWithTextMeasurer, justCollapsed?: Dynamic) =>
+export const runOutlineCommand = (view: PageState, context: OutlineContext, command: OutlineCommand): PageTransition =>
+  actOnOutlineGroups(view, context, ...OUTLINE_COMMAND_ACTS[command]);
+export const NO_NEWLY_COLLAPSED_GROUPS: ReadonlySet<string> = new Set<string>();
+export const ownCollapsingAfterReadsChange = (
+  view: PageState,
+  readsBefore: WorkbookReads,
+  reads: ReadsWithTextMeasurer,
+  justCollapsed: ReadonlySet<string>,
+): Map<string, boolean> =>
   revealActiveCellLocally(pruneSettledOwnCollapsing(view, readsBefore, reads), reads, justCollapsed).ownCollapsing;
 export const OUTLINE_LANE_SIZE = 20;
 export const OUTLINE_MARK_SIZE = 20;
-export const outlineRunOnScreen = (run?: Dynamic, axis?: Dynamic, view?: Dynamic, layout?: Dynamic) =>
+export const outlineRunOnScreen = (run: LineSpan, axis: LinesAxisName, view: OutlineScreenView, layout: GridLayout): SpanOnScreen =>
   axis === 'rows' ? rowRunSpanOnScreen(run, view, layout, view) : columnRunSpanOnScreen(run, view, layout, view);
-export const hiddenLineSeamPositions = (view?: Dynamic, layout?: Dynamic, axis?: Dynamic) => [
-  ...new (Set as Dynamic)(hiddenLineSeams(view, layout, axis).map(({ at: at }: Dynamic) => at)),
+export const hiddenLineSeamPositions = (view: OutlineScreenView, layout: GridLayout, axis: LinesAxisName): number[] => [
+  ...new Set(hiddenLineSeams(view, layout, axis).map(({ at }: HiddenLineSeam) => at)),
 ];
-export const ownFilterSeamPositions = (view?: Dynamic, layout?: Dynamic, ownFilterRuns?: Dynamic) => [
-  ...new (Set as Dynamic)(
+export const ownFilterSeamPositions = (view: OutlineScreenView, layout: GridLayout, ownFilterRuns: readonly LineSpan[]): number[] => [
+  ...new Set(
     hiddenLineSeams(view, layout, 'rows')
-      .filter(({ lines: lines }: Dynamic) => {
-        let hiddenRun = findRunEndingAfter(layout.rowsOutOfSight, lines.firstIndex) ?? {
+      .filter(({ lines }: HiddenLineSeam) => {
+        let hiddenRun: LineSpan = findRunEndingAfter(layout.rowsOutOfSight, lines.firstIndex) ?? {
           firstIndex: lines.firstIndex,
           count: 1,
         };
         let filterRun = findRunEndingAfter(ownFilterRuns, hiddenRun.firstIndex);
         return filterRun !== undefined && filterRun.firstIndex < hiddenRun.firstIndex + hiddenRun.count;
       })
-      .map(({ at: at }: Dynamic) => at),
+      .map(({ at }: HiddenLineSeam) => at),
   ),
 ];

@@ -160,13 +160,9 @@ impl<'a> Grid<'a> {
                     match workbook.outcome(&sheet.id, r, c) {
                         Some(outcome) => {
                             if let Some(SpillOutcome::Fills { array, formats, .. }) = &outcome.spill {
-                                for i in 0..array.rows() {
-                                    for j in 0..array.columns() {
-                                        if i + j > 0 {
-                                            let brought = formats.as_ref().and_then(|f| f.get(i * array.columns() + j)?.clone());
-                                            spilled.push(((row + i, column + j), array.get(i, j).clone(), brought));
-                                        }
-                                    }
+                                for ((i, j), value) in array.stored_entries().filter(|(position, _)| *position != (0, 0)) {
+                                    let brought = formats.as_ref().and_then(|f| f.get(array.columns(), (i, j))).cloned();
+                                    spilled.push(((row + i, column + j), value.clone(), brought));
                                 }
                             }
                             // A formula that reads an empty cell shows 0.
@@ -224,6 +220,16 @@ impl<'a> Grid<'a> {
     pub(super) fn owned(&self, row: usize, first: usize, last: usize) -> impl Iterator<Item = (usize, &Shown)> {
         let cells = self.rows.get(&row).filter(|_| first <= last);
         cells.into_iter().flat_map(move |cells| cells.range(first..=last)).map(|(&c, shown)| (c, shown))
+    }
+
+    /// Rows containing one of their own visible cells in the given columns.
+    pub(super) fn owned_rows(&self, top: usize, bottom: usize, first: usize, last: usize) -> Vec<usize> {
+        let (first, last) = (first.min(last), first.max(last));
+        let mut rows: Vec<_> = self.rows.iter().filter_map(|(&row, cells)| {
+            (top <= row && row <= bottom && cells.range(first..=last).next().is_some()).then_some(row)
+        }).collect();
+        rows.sort_unstable();
+        rows
     }
 
     /// The number format a cell's number shows in: the cell's own, else the one its formula's number or its array's

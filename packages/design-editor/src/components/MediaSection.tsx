@@ -15,6 +15,9 @@ import { useRef } from 'react';
 import { attributeValue, elementPath } from '@open-artifact/dc';
 import { toast } from '@open-artifact/ui';
 import { useView } from '../state/view.ts';
+import { useDocument } from '../state/document.ts';
+import { templateOf } from '../services/agent.ts';
+import { mediaTarget, relocateMedia } from '../lib/media-target.ts';
 import { edit } from '../services/commands.ts';
 import { boardApi, frameOf } from '../services/frames.ts';
 import { session } from '../services/session.ts';
@@ -67,9 +70,16 @@ export function MediaSection({ ctx, readOnly }: { ctx: ElementContext; readOnly:
       toast.add({ title: 'Files cannot be uploaded here', description: 'This host does not accept uploads.' });
       return;
     }
+    const before = mediaTarget(ctx.model, ctx.element);
     try {
       const record = await assets.upload(picked, { name: picked.name });
-      edit(ctx.board, { kind: 'attr', target, name: 'src', value: record.url });
+      const source = useDocument.getState().boards[ctx.board]?.source;
+      const now = source ? relocateMedia(templateOf(source), before) : null;
+      if (!now) {
+        toast.add({ title: `That ${video ? 'video' : 'image'} could not be placed here.`, description: 'It changed or was removed while the file uploaded.' });
+        return;
+      }
+      if (!edit(ctx.board, { kind: 'attr', target: now, name: 'src', value: record.url })) return;
       announce(`${video ? 'Video' : 'Image'} replaced with ${picked.name}`);
     } catch (error) {
       toast.add({ title: `Could not upload ${picked.name}`, description: error instanceof Error ? error.message : String(error) });

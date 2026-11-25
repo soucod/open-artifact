@@ -1,6 +1,6 @@
 /** A thread's card: the words it is on, its messages, the agent's progress and the reply box; a reaction shows as a chip. */
 import type { CommentThread } from '@open-artifact/runtime';
-import { queuedNote } from '@open-artifact/editor-kit';
+import { draftedText, queuedNote } from '@open-artifact/editor-kit';
 import { Tip } from '@open-artifact/editor-kit/react';
 import { ConfirmDialog, cn } from '@open-artifact/ui';
 import { CircleCheck } from 'lucide-react';
@@ -50,7 +50,7 @@ function AgentProgress({ thread }: { thread: CommentThread }): ReactNode {
   return (
     <div className="flex items-center gap-1.5 text-[12px] text-chrome-muted" role="status">
       <Initial name={name} agent size="md" />
-      <span className="truncate">{status === 'pending' ? queuedNote({ name, ...(agent?.wakesIdle !== undefined ? { wakesIdle: agent.wakesIdle } : {}) }) : 'Working…'}</span>
+      <span className="truncate">{status === 'pending' ? queuedNote({ name, ...(agent?.wakesIdle !== undefined ? { wakesIdle: agent.wakesIdle } : {}) }) : thread.agent?.drafted ? draftedText(name).label : 'Working…'}</span>
     </div>
   );
 }

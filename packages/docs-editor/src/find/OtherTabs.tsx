@@ -4,8 +4,9 @@ import { ChevronDown } from 'lucide-react';
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import { CallDenied, docClient } from '../app/doc-client.ts';
 import { showTab } from '../app/start.ts';
+import { usePeopleNames } from '../app/people.ts';
 import { orderedTabs, useDocs } from '../app/store.ts';
-import { CountCache, type TabCount, type TabToCount, afterOpen, countTabs } from './other-tabs.ts';
+import { CountCache, type TabCount, type TabToCount, afterOpen, chipNamesKey, countTabs } from './other-tabs.ts';
 import { setFindBar } from './store.ts';
 
 /** How long the words rest before the other tabs are asked. */
@@ -19,12 +20,21 @@ export interface OtherTabsView {
   shown: boolean;
   rows: Array<{ id: string; name: string; hits: number }>;
   searching: boolean;
-  uncounted: number;
+  /** Tabs past the limit, not asked. */
+  skipped: number;
+  /** Tabs the server gave no count for. */
+  failed: number;
+}
+
+/** How this page writes dates, so the server reads date chips as they show here. */
+function dateStyle(): { locale: string; timeZone: string } {
+  const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions();
+  return { locale, timeZone };
 }
 
 async function serverCount(tab: TabToCount, query: string, caseSensitive: boolean): Promise<number | null> {
   try {
-    const answer = await docClient().call({ member: { verb: 'read', ref: { object: 'node', id: tab.node }, payload: { kind: 'search', text: query, caseSensitive } } });
+    const answer = await docClient().call({ member: { verb: 'read', ref: { object: 'node', id: tab.node }, payload: { kind: 'search', text: query, caseSensitive, dates: dateStyle() } } });
     return typeof answer.hits === 'number' && Number.isInteger(answer.hits) && answer.hits >= 0 ? answer.hits : null;
   } catch (error) {
     if (error instanceof CallDenied) return null;
@@ -38,6 +48,9 @@ export function useOtherTabs(open: boolean, query: string, caseSensitive: boolea
   const [cache] = useState(() => new CountCache());
   const [counts, setCounts] = useState<ReadonlyMap<string, TabCount>>(() => new Map());
   const left = useRef(activeTab);
+  const people = usePeopleNames(state => state.names);
+  const chipNames = useDocs(state => chipNamesKey(state.project, people));
+  const chipNamesCounted = useRef(chipNames);
 
   const tabs = useMemo<NamedTab[]>(() => orderedTabs(files ?? []).map(file => ({ id: file.id, node: file.content.id, rev: file.rev, name: file.name })), [files]);
   const others = useMemo(() => afterOpen(tabs, activeTab), [tabs, activeTab]);
@@ -47,6 +60,13 @@ export function useOtherTabs(open: boolean, query: string, caseSensitive: boolea
     if (left.current && left.current !== activeTab) cache.forget(left.current);
     left.current = activeTab;
   }, [activeTab, cache]);
+
+  useEffect(() => {
+    // An option, a tab or a person renamed: every tab's chips may read differently, though no tab's revision moved.
+    if (chipNamesCounted.current === chipNames) return;
+    chipNamesCounted.current = chipNames;
+    cache.clear();
+  }, [chipNames, cache]);
 
   useEffect(() => {
     if (!open || !query || !others.length) {
@@ -70,24 +90,30 @@ export function useOtherTabs(open: boolean, query: string, caseSensitive: boolea
       clearTimeout(timer);
       stop();
     };
-  }, [open, query, caseSensitive, others, cache]);
+  }, [open, query, caseSensitive, others, cache, chipNames]);
 
   return useMemo(() => {
+    const unsearchedBy = { skipped: 0, failed: 0 };
     const rows: OtherTabsView['rows'] = [];
     let searching = false;
-    let uncounted = 0;
     for (const tab of tabs) {
       if (tab.id === activeTab) continue;
       const count = counts.get(tab.id);
       if (count === 'pending') searching = true;
-      else if (count === 'uncounted') uncounted++;
+      else if (count === 'skipped' || count === 'failed') unsearchedBy[count]++;
       else if (typeof count === 'number' && count > 0) rows.push({ id: tab.id, name: tab.name, hits: count });
     }
-    return { shown: open && query !== '' && others.length > 0, rows, searching, uncounted };
+    return { shown: open && query !== '' && others.length > 0, rows, searching, ...unsearchedBy };
   }, [tabs, activeTab, counts, open, query, others.length]);
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** The tabs without a count, said as why: "2 tabs could not be searched", "60 tabs not searched". */
+function unsearched(view: OtherTabsView): string | null {
+  const parts = [view.failed > 0 ? `${plural(view.failed, 'tab', 'tabs')} could not be searched` : '', view.skipped > 0 ? `${plural(view.skipped, 'tab', 'tabs')} not searched` : ''].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
 
 /** Puts the keyboard in `field`, again while a closing menu would hand it back to its button. */
 function keepFocus(field: RefObject<HTMLInputElement | null>, ms = 400): void {
@@ -110,7 +136,7 @@ export function OtherTabsRow({ view, findField }: { view: OtherTabsView; findFie
   const [listed, setListed] = useState<OtherTabsView['rows'] | null>(null);
   const rows = listed ?? view.rows;
   if (!rows.length) {
-    const note = view.searching ? 'Searching other tabs…' : view.uncounted > 0 ? `${plural(view.uncounted, 'tab', 'tabs')} not searched` : 'No matches in other tabs';
+    const note = view.searching ? 'Searching other tabs…' : (unsearched(view) ?? 'No matches in other tabs');
     return (
       <span className="min-w-0 truncate text-[12px] text-chrome-muted" aria-live="polite">
         {note}
@@ -137,10 +163,10 @@ export function OtherTabsRow({ view, findField }: { view: OtherTabsView; findFie
           {row.name}
         </ChromeMenuItem>
       ))}
-      {view.uncounted > 0 ? (
+      {unsearched(view) ? (
         <>
           <ChromeMenuSeparator />
-          <ChromeMenuLabel>{plural(view.uncounted, 'tab', 'tabs')} not searched</ChromeMenuLabel>
+          <ChromeMenuLabel>{unsearched(view)}</ChromeMenuLabel>
         </>
       ) : null}
     </ChromeMenu>

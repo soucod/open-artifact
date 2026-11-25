@@ -37,6 +37,7 @@ import {
   Copy,
   DecimalsArrowLeft,
   DecimalsArrowRight,
+  Divide,
   DollarSign,
   Ellipsis,
   Eraser,
@@ -67,6 +68,7 @@ import {
   Link,
   List,
   ListChecks,
+  ListFilter,
   LoaderCircle,
   Lock,
   LogOut,
@@ -222,6 +224,7 @@ const ICONS = {
   DotsVertical: Ellipsis,
   Dropdown: SquareChevronDown,
   Edit: Pencil,
+  Divide,
   Eraser,
   Expand: ChevronsUpDown,
   Exponent: Superscript,
@@ -232,6 +235,7 @@ const ICONS = {
   FileUpload: FileUp,
   Files,
   Filter: Funnel,
+  FilterLines: ListFilter,
   Folder,
   Function: SquareFunction,
   GitPullRequest,
@@ -393,6 +397,8 @@ function nearestIconSize(px: number): IconSize {
 
 /** An icon drawn from path data, for marks the icon set has no name for. */
 export interface CustomIcon {
+  /** What the drawing is, as its callers call it; the icon neither draws nor announces it. */
+  name?: string;
   viewBox: number;
   paths: ReadonlyArray<string | { d: string; strokeWidth: number }>;
 }

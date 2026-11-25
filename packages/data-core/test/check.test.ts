@@ -48,13 +48,21 @@ describe('scaffold', () => {
 });
 
 describe('history', () => {
-  it('leaves out each person\'s documents and drafts', () => {
+  it('leaves out what the page saves under data/ and drafts', () => {
     assert.equal(dataHistoryIgnores('data/users/owner/check.json'), true);
     assert.equal(dataHistoryIgnores('drafts/abc/files/index.html.json'), true);
     assert.equal(dataHistoryIgnores('versions/1.json'), false);
     assert.equal(dataHistoryIgnores('datasets/sales.json'), false);
     assert.equal(dataHistoryIgnores('dash/meta.json'), false);
-    assert.equal(dataHistoryIgnores('data/other.json'), false);
+    assert.equal(dataHistoryIgnores('data/team/notes/n1.json'), true);
+    assert.equal(dataHistoryIgnores('database/x.json'), false);
+  });
+
+  it('leaves out dash/settings but keeps the rest of dash/', () => {
+    assert.equal(dataHistoryIgnores('dash/settings.json'), true);
+    assert.equal(dataHistoryIgnores('/dash/settings'), true);
+    assert.equal(dataHistoryIgnores('dash/settings/x.json'), false);
+    assert.equal(dataHistoryIgnores('dash/look.json'), false);
   });
 });
 
@@ -171,7 +179,41 @@ describe('check', () => {
     const lines = findings.map((finding) => `${finding.level} ${finding.message}`);
     assert.ok(lines.some((line) => line.startsWith('error needs updated')));
     assert.ok(lines.some((line) => line.startsWith('warning source.format is left out and the file name doesn’t say')));
-    assert.ok(lines.some((line) => line.startsWith('warning edit must be')));
+    assert.ok(lines.some((line) => line.startsWith('warning edit is the page’s {by, byAt}')));
+  });
+
+  it('accepts the page\'s own edit stamp and only notes one the agent wrote', () => {
+    const stamped = (edit: unknown): string[] =>
+      checkDataProject(project({ ...GOOD, 'datasets/costs': { ...GOOD['datasets/costs'], edit } }), CONTEXT)
+        .filter((finding) => finding.file === 'db/datasets/costs.json')
+        .map((finding) => `${finding.level} ${finding.message}`);
+    assert.deepEqual(stamped({ by: 'owner', byAt: 5 }), []);
+    const agent = stamped({ via: 'agent', at: '2026-01-01T00:00:00Z' });
+    assert.equal(agent.length, 1);
+    assert.match(agent[0] ?? '', /^warning edit holds \{via, at\}, which the page ignores; leave edit out/);
+  });
+
+  it('accepts a JSON file that is not rows and a text file without a loader', () => {
+    const files = new Map([[BLOB, '{"total": 84, "parts": {"a": 1}}'], ['f'.repeat(32), 'free text']]);
+    const context: DataCheckContext = { ...CONTEXT, blobExists: (id) => files.has(id), readBlob: (id) => files.get(id) ?? null };
+    const findings = checkDataProject(
+      project({
+        ...GOOD,
+        'datasets/costs': { ...GOOD['datasets/costs'], source: { kind: 'file', url: `/_blob/${BLOB}`, name: 'costs.json', format: 'json' } },
+        'datasets/notes': {
+          title: 'Notes',
+          source: { kind: 'file', url: `/_blob/${'f'.repeat(32)}`, name: 'notes.txt', format: 'text' },
+          updated: { at: '2026-01-01T00:00:00Z', by: 'agent' },
+        },
+        'files/index.html': { text: '<b data-source="sales" data-field="n"></b><div data-source="costs"></div><div data-source="notes"></div>' },
+      }),
+      context,
+    );
+    assert.deepEqual(errors(findings), []);
+    files.set(BLOB, '{not json');
+    const broken = errors(checkDataProject(project({ ...GOOD, 'datasets/costs': { ...GOOD['datasets/costs'], source: { kind: 'file', url: `/_blob/${BLOB}`, name: 'costs.json' } } }), context));
+    assert.deepEqual(broken.map(([file]) => file), ['db/datasets/costs.json']);
+    assert.match(broken[0]?.[1] ?? '', /^the file isn’t valid JSON/);
   });
 
   it('reads what the owner\'s open page reported, and says when it is older than the page', () => {
@@ -182,8 +224,48 @@ describe('check', () => {
     const freshErrors = errors(fresh);
     assert.ok(freshErrors.some(([file, message]) => file === 'db/data/users/owner/runs.json' && message === 'the open page says sales error: connector down.'));
     assert.ok(freshErrors.some(([file, message]) => file === 'db/data/users/owner/check.json' && message.startsWith('the page\'s code threw: TypeError (2)')));
+    const placed = { ...check, page: [{ kind: 'stopped', name: 'TypeError', file: 'app.js', where: 'dash.draw("trend")' }] };
+    const where = errors(checkDataProject(project({ ...GOOD, 'data/users/owner/check': placed }), { ...CONTEXT, modifiedAt: () => 10 }));
+    assert.ok(where.some(([, message]) => message.startsWith('the page\'s code stopped: TypeError in app.js, where dash.draw("trend");')));
     const stale = checkDataProject(documents, { ...CONTEXT, modifiedAt: (path) => (path.startsWith('files/') ? 20 : 10) });
     assert.deepEqual(errors(stale), []);
     assert.ok(stale.some((finding) => finding.level === 'warning' && finding.message.includes('a page file changed after the page wrote this')));
+  });
+});
+
+describe('saved rows', () => {
+  const withStore = (path: unknown): CheckFinding[] =>
+    checkDataProject(
+      project({
+        ...GOOD,
+        'datasets/notes': { title: 'Notes', source: { kind: 'store', path } },
+        'files/index.html': { text: '<b data-source="sales" data-field="n"></b><div data-source="costs"></div><ul data-source="notes"></ul>' },
+      }),
+      CONTEXT,
+    );
+  const storeErrors = (path: unknown): string[] =>
+    errors(withStore(path))
+      .filter(([file]) => file === 'db/datasets/notes.json')
+      .map(([, message]) => message);
+
+  it('accepts a collection, a document and a viewer\'s own path, with no rows yet', () => {
+    for (const path of ['data/team/notes', 'data/team/notes/today', 'data/users/me/notes', 'data/a.b~c:d@e+f/x_y-z'])
+      assert.deepEqual(storeErrors(path), [], path);
+    assert.deepEqual(withStore('data/team/notes').filter((finding) => finding.file === 'db/datasets/notes.json'), []);
+  });
+
+  it('refuses paths that cannot hold saved rows, each with its reason', () => {
+    assert.match(storeErrors(undefined)[0] ?? '', /^source\.path is missing/);
+    assert.match(storeErrors('datasets/sales')[0] ?? '', /isn’t under data\//);
+    assert.match(storeErrors('data/te am')[0] ?? '', /each part is 1–200 of/);
+    assert.match(storeErrors('data/../x')[0] ?? '', /each part is 1–200 of/);
+    assert.match(storeErrors(`data/${Array.from({ length: 16 }, () => 'a').join('/')}`)[0] ?? '', /more than 16 parts/);
+    for (const path of ['data/users/me', 'data/users/me/check', 'data/users/owner/runs', 'data/users/me/page', 'data/users/me/history-sales'])
+      assert.match(storeErrors(path)[0] ?? '', /one of the page’s own reports/, path);
+  });
+
+  it('lists the store among the kinds a source can have', () => {
+    const findings = checkDataProject(project({ ...GOOD, 'datasets/odd': { title: 'Odd', source: { kind: 'sheet' } } }), CONTEXT);
+    assert.ok(errors(findings).some(([, message]) => message === 'source.kind "sheet" isn’t one the page loads; use "call", "file" or "store".'));
   });
 });

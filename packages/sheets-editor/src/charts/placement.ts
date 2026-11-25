@@ -1,12 +1,26 @@
-import type { Dynamic } from '../dynamic.ts';
 import { wholeAreaToA1AsStored, columnLetters } from '../model/a1-references.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function filledRowSpanOfArea(workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
+import type { CellArea } from '../selection/model.ts';
+
+/** A box of cells by its top row and left column, and how many rows and columns it takes. */
+export interface CellsBox {
+  top: number;
+  left: number;
+  rows: number;
+  columns: number;
+}
+/** Where a new chart goes: the A1 range of the cells it draws, and the A1 address of the cell at its top left. */
+export interface ChartPlace {
+  range: string;
+  topLeft: string;
+}
+export function filledRowSpanOfArea(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): number {
   let onShow = workbook.areaOnShowIn(sheetId, area);
   return onShow === null ? 0 : onShow.topRowIndex + onShow.rowCount - area.topRowIndex;
 }
-export function placeChartForArea(workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
-  let sheet = workbook.listSheets().find((input?: Dynamic) => input.sheetId === sheetId);
+export function placeChartForArea(workbook: WorkbookReads, sheetId: SheetId, area: CellArea): ChartPlace | null {
+  let sheet = workbook.listSheets().find((summary) => summary.sheetId === sheetId);
   if (sheet === undefined || isChartSourceTooTall(workbook, sheetId, area)) return null;
   let sourceArea =
     area.rowCount > MAX_CHART_SOURCE_ROWS
@@ -15,7 +29,7 @@ export function placeChartForArea(workbook: WorkbookReads, sheetId?: Dynamic, ar
           rowCount: Math.max(1, filledRowSpanOfArea(workbook, sheetId, area)),
         }
       : area;
-  let filledIn = (box?: Dynamic) => {
+  let filledIn = (box: CellsBox) => {
     let [rows, columns] = [Math.min(box.rows, sheet.rowCount - box.top), Math.min(box.columns, sheet.columnCount - box.left)];
     return rows <= 0 || columns <= 0
       ? null
@@ -50,39 +64,39 @@ export function placeChartForArea(workbook: WorkbookReads, sheetId?: Dynamic, ar
   );
   if (range === null) return null;
   let chartRows = rowsForChartPixels(DEFAULT_CHART_SIZE.heightInPixels);
-  let columnsForPixels = (column?: Dynamic, pixels?: Dynamic) =>
+  let columnsForPixels = (column: number, pixels: number) =>
     sheet.columnEdges.indexAt(sheet.columnEdges.startOf(column) + pixels - 1) - column + 1;
   let placedCharts = workbook.placementsIn(sheetId).map(
-    (placement?: Dynamic) => ({
+    (placement): CellsBox => ({
       top: placement.rowIndex,
       left: placement.columnIndex,
       rows: rowsForChartPixels(placement.heightInPixels + placement.offsetFromAnchorCell.yInPixels),
       columns: columnsForPixels(placement.columnIndex, placement.widthInPixels + placement.offsetFromAnchorCell.xInPixels),
     }),
   );
-  let isSpotFree = (spot2?: Dynamic) =>
-    filledIn(spot2) === null && !placedCharts.some((placed?: Dynamic) => gridBoxesOverlap(placed, spot2));
-  let findSpotFrom = (topRow?: Dynamic, leftColumn?: Dynamic) => {
+  let isSpotFree = (spot: CellsBox) =>
+    filledIn(spot) === null && !placedCharts.some((placed) => gridBoxesOverlap(placed, spot));
+  let findSpotFrom = (topRow: number, leftColumn: number): CellsBox | null => {
     let { frozenRowCount: frozenRows, frozenColumnCount: frozenColumns } = sheet;
     let frozenRowCount = frozenRows < sheet.rowCount ? frozenRows : 0;
     let firstTop = Math.max(topRow, frozenRowCount);
     let topBelowFrozen = Math.max(topRow, frozenRowCount + CHART_ROWS_BELOW_FROZEN);
     let left = Math.max(leftColumn, frozenColumns < sheet.columnCount ? frozenColumns : 0);
     let columns = columnsForPixels(left, DEFAULT_CHART_SIZE.widthInPixels);
-    let tops = Array.from<Dynamic, Dynamic>(
+    let tops = Array.from(
       {
         length: CHART_SPOT_TRIES,
       },
-      (input?: Dynamic, index?: Dynamic) => topBelowFrozen + index * (chartRows + 1),
+      (_slot, index) => topBelowFrozen + index * (chartRows + 1),
     );
     let spots = [...tops.slice(0, 1), firstTop, ...tops.slice(1)]
-      .filter((top?: Dynamic) => top < sheet.rowCount)
+      .filter((top) => top < sheet.rowCount)
       .map(
-        (top?: Dynamic) => ({
-          top: top,
-          left: left,
+        (top) => ({
+          top,
+          left,
           rows: chartRows,
-          columns: columns,
+          columns,
         }),
       );
     return spots.find(isSpotFree) ?? spots.at(-1) ?? null;
@@ -106,8 +120,8 @@ export function placeChartForArea(workbook: WorkbookReads, sheetId?: Dynamic, ar
     let rowBelowData = filled === null ? rowBelow : filled.topRowIndex + filled.rowCount;
     return findSpotFrom(rowBelowData + CHART_GAP_ROWS_BELOW_DATA, 0);
   };
-  let spotBeside = findSpotFrom(sourceArea.topRowIndex, Math.min(besideColumn, sheet.columnCount - 1));
-  let canGoBeside =
+  const spotBeside = findSpotFrom(sourceArea.topRowIndex, Math.min(besideColumn, sheet.columnCount - 1));
+  const canGoBeside =
     lastFilledColumn <= MAX_LAST_COLUMN_FOR_CHART_BESIDE && besideColumn < sheet.columnCount && spotBeside !== null && isSpotFree(spotBeside);
   let fitsBeside =
     canGoBeside && sheet.columnEdges.startOf(spotBeside.left) + DEFAULT_CHART_SIZE.widthInPixels <= sheet.columnEdges.totalSize;
@@ -117,7 +131,7 @@ export function placeChartForArea(workbook: WorkbookReads, sheetId?: Dynamic, ar
   return spot === null
     ? null
     : {
-        range: range,
+        range,
         topLeft: `${columnLetters(spot.left)}${spot.top + 1}`,
       };
 }
@@ -126,14 +140,14 @@ export const DEFAULT_CHART_SIZE = {
   heightInPixels: 280,
 };
 export const CHART_ROW_HEIGHT_PX = 21;
-export const rowsForChartPixels = (pixels?: Dynamic) => Math.ceil(pixels / CHART_ROW_HEIGHT_PX);
+export const rowsForChartPixels = (pixels: number): number => Math.ceil(pixels / CHART_ROW_HEIGHT_PX);
 export const MAX_LAST_COLUMN_FOR_CHART_BESIDE = 7;
 export const CHART_GAP_ROWS_BELOW_DATA = 3;
 export const CHART_ROWS_BELOW_FROZEN = 1;
 export const MAX_ROWS_ADDED_TO_CHART_SOURCE = 40;
 export const MAX_CHART_SOURCE_ROWS = 2000;
 export const CHART_SPOT_TRIES = 12;
-export const gridBoxesOverlap = (box?: Dynamic, other?: Dynamic) =>
+export const gridBoxesOverlap = (box: CellsBox, other: CellsBox): boolean =>
   box.top < other.top + other.rows && other.top < box.top + box.rows && box.left < other.left + other.columns && other.left < box.left + box.columns;
-export const isChartSourceTooTall = (workbook: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) =>
+export const isChartSourceTooTall = (workbook: WorkbookReads, sheetId: SheetId, area: CellArea): boolean =>
   area.rowCount > MAX_CHART_SOURCE_ROWS && filledRowSpanOfArea(workbook, sheetId, area) > MAX_CHART_SOURCE_ROWS;

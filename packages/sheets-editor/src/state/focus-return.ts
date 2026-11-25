@@ -1,8 +1,8 @@
 import type { SheetId } from '@open-artifact/sheets-core';
 import type { CellId, WorkbookReads } from '../model/workbook.ts';
-import type { CellsChanged, CellsOfComment, ChangeByAgent, CommentOnPage, PageState, PeopleList } from './initial-state.ts';
+import type { CellsChanged, CellsChangedInSheet, CellsOfComment, CommentOnPage, PageState, PeopleList } from './initial-state.ts';
 import type { EditingMode, PageTransition } from './transitions.ts';
-import type { PageContext, PageEvent } from './event-reducer.ts';
+import type { ChangeArrivedFromAgent, PageContext, PageEvent } from './event-reducer.ts';
 import type { Wait } from './calculating-shown.ts';
 import { finishRenamingSheet, cleanSheetName, startRenamingSheet } from './sheet-tabs.ts';
 import { findSheetById } from '../grid/layout.ts';
@@ -16,50 +16,50 @@ import { AGENT_CHANGE_MAX_WAIT_MS } from '../agent/changes-by-agent.ts';
 import { isChangeNotYetCounted } from '../agent/turn-of-agent.ts';
 import { cachedSelectedArea, selectedAreaAsSeen } from '../presence/selections.ts';
 import { areasOverlap } from '../model/workbook.ts';
-export function keepEntryLeftByCaret(state: PageState, result: PageTransition): PageTransition {
-  let { mode: mode, peopleList: peopleList, activeCell: activeCell } = state;
+export function keepEntryLeftByCaret(state: PageState, transition: PageTransition): PageTransition {
+  let { mode, peopleList, activeCell } = state;
   if (mode.kind === 'editing') {
     let entryLeft: EntryLeftByCaret = {
       what: 'entry',
-      mode: mode,
-      peopleList: peopleList,
+      mode,
+      peopleList,
       cellId: activeCell,
       since: null,
     };
     return {
-      ...result,
+      ...transition,
       state: {
-        ...result.state,
+        ...transition.state,
         leftByCaret: entryLeft,
       },
     };
   }
-  if (peopleList === null) return result;
+  if (peopleList === null) return transition;
   return {
-    ...result,
+    ...transition,
     state: {
-      ...result.state,
+      ...transition.state,
       leftByCaret: {
         what: 'peopleField',
-        peopleList: peopleList,
+        peopleList,
       },
     },
   };
 }
 export function leaveSheetNameEntry(state: PageState, reads: WorkbookReads, mayComeBack: boolean): PageTransition {
-  let result = finishRenamingSheet(state, reads, true);
-  if (!mayComeBack || state.sheetBeingRenamed === null) return result;
-  let { sheetId: sheetId, typed: typed, nameWhenOpened: nameWhenOpened } = state.sheetBeingRenamed;
+  let renamingFinished = finishRenamingSheet(state, reads, true);
+  if (!mayComeBack || state.sheetBeingRenamed === null) return renamingFinished;
+  let { sheetId, typed, nameWhenOpened } = state.sheetBeingRenamed;
   let sheetNameLeft: SheetNameLeftByCaret = {
     what: 'sheetName',
-    sheetId: sheetId,
-    typed: typed,
-    nameWhenOpened: nameWhenOpened,
+    sheetId,
+    typed,
+    nameWhenOpened,
   };
   return {
-    ...result,
+    ...renamingFinished,
     state: {
-      ...result.state,
+      ...renamingFinished.state,
       leftByCaret: sheetNameLeft,
     },
   };
@@ -67,9 +67,9 @@ export function leaveSheetNameEntry(state: PageState, reads: WorkbookReads, mayC
 export function restoreWhatCaretLeft(
   state: PageState,
   isAsItLeft: boolean,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ): PageState {
-  let { leftByCaret: leftByCaret } = state;
+  let { leftByCaret } = state;
   if (leftByCaret === null) return state;
   let stateWithoutLeft: PageState = {
     ...state,
@@ -79,7 +79,7 @@ export function restoreWhatCaretLeft(
   if (leftByCaret.what === 'sheetName') {
     let currentName = findSheetById(reads, leftByCaret.sheetId)?.name;
     if (currentName !== cleanSheetName(leftByCaret.typed) && currentName !== leftByCaret.nameWhenOpened) return stateWithoutLeft;
-    let { sheetBeingRenamed: sheetBeingRenamed } = startRenamingSheet(stateWithoutLeft, reads, leftByCaret.sheetId);
+    let { sheetBeingRenamed } = startRenamingSheet(stateWithoutLeft, reads, leftByCaret.sheetId);
     if (sheetBeingRenamed === null) return stateWithoutLeft;
     return {
       ...stateWithoutLeft,
@@ -94,21 +94,21 @@ export function restoreWhatCaretLeft(
       ...stateWithoutLeft,
       peopleList: leftByCaret.peopleList,
     };
-  let { since: since } = leftByCaret;
+  let { since } = leftByCaret;
   if (!(since !== null && isSameCell(state.activeCell, leftByCaret.cellId) && state.textToEditOfEntryCell === since.textToEdit))
     return stateWithoutLeft;
-  let { isInBoxOfOneLine: isInBoxOfOneLine, savedWhileOpen: savedWhileOpen, ...modeWithoutBox } = leftByCaret.mode;
+  let { isInBoxOfOneLine, savedWhileOpen, ...modeWithoutBox } = leftByCaret.mode;
   let restoredMode = {
     ...modeWithoutBox,
     textAtStart: since.textToEdit,
   };
   let isWorkbookUnchanged = state.workbookChangeCount === since.workbookChangeCount;
-  let { peopleList: peopleList } = leftByCaret;
+  let { peopleList } = leftByCaret;
   let restoredState = {
     ...stateWithoutLeft,
     ...(isWorkbookUnchanged ? {} : selectionAtCell(leftByCaret.cellId)),
     mode: restoredMode,
-    peopleList: peopleList,
+    peopleList,
   };
   let editingState = startEntryEditing(restoredState, reads, restoredMode.text, restoredMode.typingIn);
   if (peopleList === null) return editingState;
@@ -117,8 +117,8 @@ export function restoreWhatCaretLeft(
 }
 export function restoreEntryOfPageBefore(
   state: PageState,
-  { cellId: cellId, mode: mode }: EntryOfPageBefore,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { cellId, mode }: EntryOfPageBefore,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ): PageState {
   if (state.mode.kind !== 'navigating' || refusalOfEveryEdit !== null) return state;
   if (!isSameCell(state.activeCell, cellId) || !isSameCell(activeAnchorCell(state, reads), cellId)) return state;
@@ -126,15 +126,15 @@ export function restoreEntryOfPageBefore(
   if (textNow !== mode.textAtStart && textNow !== mode.text) return state;
   let cellLooks = mode.isTypedOverCell === true ? undefined : looksOfRichCellText(reads, cellId, textNow);
   let looks = mode.looks ?? (cellLooks === undefined ? undefined : looksAfterTyping(cellLooks, textNow, mode.text));
-  let restoredMode = {
+  let restoredMode: EditingMode = {
     ...mode,
     textAtStart: textNow,
     mayHoldTextOfOthers: true,
     ...(looks !== undefined && {
-      looks: looks,
+      looks,
     }),
   };
-  let { isInBoxOfOneLine: isInBoxOfOneLine, savedWhileOpen: savedWhileOpen, ...modeWithoutBox } = restoredMode;
+  let { isInBoxOfOneLine, savedWhileOpen, ...modeWithoutBox } = restoredMode;
   return {
     ...startEntryEditing(
       {
@@ -151,7 +151,7 @@ export function restoreEntryOfPageBefore(
   };
 }
 export function trackLeftByCaret(stateBefore: PageState, state: PageState, event: PageEvent): PageState {
-  let { leftByCaret: leftByCaret, mode: mode, textToEditOfEntryCell: textToEdit, workbookChangeCount: workbookChangeCount } = state;
+  let { leftByCaret, mode, textToEditOfEntryCell: textToEdit, workbookChangeCount } = state;
   if (leftByCaret === null) return state;
   let letsGo = event.kind !== 'sheetListShut' && eventEffectOnDrag(event) === 'letsGo';
   if (leftByCaret === stateBefore.leftByCaret && letsGo)
@@ -167,8 +167,8 @@ export function trackLeftByCaret(stateBefore: PageState, state: PageState, event
         leftByCaret: {
           ...leftByCaret,
           since: {
-            textToEdit: textToEdit,
-            workbookChangeCount: workbookChangeCount,
+            textToEdit,
+            workbookChangeCount,
           },
         },
       }
@@ -185,12 +185,12 @@ export function trackCommentsWithAgent(stateBefore: PageState, state: PageState,
             handles.length === 0
               ? null
               : {
-                  handles: handles,
-                  wait: wait,
+                  handles,
+                  wait,
                 },
         };
   if (event.kind === 'commentsTold') {
-    let { sentToAgent: sentToAgent, repliedTo: repliedTo = [] } = event;
+    let { sentToAgent, repliedTo = [] } = event;
     let handles = [...(commentsWithAgent?.handles ?? []), ...(sentToAgent === undefined ? [] : [sentToAgent])].filter(
       (handle: string) =>
         !repliedTo.includes(handle) &&
@@ -202,7 +202,7 @@ export function trackCommentsWithAgent(stateBefore: PageState, state: PageState,
       sentToAgent === undefined && commentsWithAgent !== null
         ? commentsWithAgent.wait
         : {
-            ms: ms,
+            ms,
           },
     );
   }
@@ -211,14 +211,14 @@ export function trackCommentsWithAgent(stateBefore: PageState, state: PageState,
   if (event.kind === 'agentActivityChanged' && stateBefore.isAgentWorking !== state.isAgentWorking) {
     let ms = state.isAgentWorking ? AGENT_CHANGE_MAX_WAIT_MS : COMMENTS_WITH_AGENT_AFTER_WORK_MS;
     return withHandles(commentsWithAgent.handles, {
-      ms: ms,
+      ms,
     });
   }
   if (event.kind !== 'changesByAgentChanged') return state;
   let cellsChanged = event.changes.flatMap(
-    (change: ChangeByAgent) =>
+    (change: ChangeArrivedFromAgent) =>
       change.isOfViewer === true && change.isOfLayoutAlone !== true && isChangeNotYetCounted(stateBefore)(change)
-        ? [change, ...(change.inOtherSheets ?? [])].flatMap(({ cells: cells, groupsApart: groupsApart }: ChangeByAgent) => groupsApart ?? [cells])
+        ? [change, ...(change.inOtherSheets ?? [])].flatMap(({ cells, groupsApart }: CellsChangedInSheet) => groupsApart ?? [cells])
         : [],
   );
   let isCommentChanged = (handle: string) =>

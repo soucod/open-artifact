@@ -36,7 +36,7 @@ function AskRow({ ask }: { ask: LocalAsk }) {
     <li className={cn('wb-ask-row', ask.fading && 'wb-ask-row-leaving')} data-status={ask.status}>
       {pending ? <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin" /> : <span className="wb-ask-dot" aria-hidden="true" />}
       <span className="min-w-0 flex-1 truncate">{clip(ask.text, ASK_ROW_CHARS)}</span>
-      <span className="shrink-0 text-chrome-muted">{askStatusLabel(ask.status, wakesIdle)}</span>
+      <span className="shrink-0 text-chrome-muted">{askStatusLabel(ask.status, wakesIdle, ask.drafted)}</span>
     </li>
   );
 }
@@ -47,7 +47,7 @@ function AskStatusList() {
   const list = [...asks.values()].sort((a, b) => a.at - b.at).slice(-4);
   if (list.length === 0) return null;
   return (
-    <Card className="wb-ask-status">
+    <Card className="wb-ask-status" data-wb-region="ask-status" tabIndex={-1}>
       <ul aria-label="Requests to the agent" aria-live="polite" className="flex w-full flex-col gap-0.5">
         {list.map((ask) => (
           <AskRow key={ask.key} ask={ask} />

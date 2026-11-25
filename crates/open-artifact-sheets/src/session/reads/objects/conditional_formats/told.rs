@@ -8,7 +8,7 @@ use std::fmt::Write;
 use serde_json::{json, Value as Json};
 
 use super::super::range_address;
-use super::records::Around;
+use super::records::{Around, Block};
 use super::renamed;
 use crate::dates::date_from_serial;
 use crate::formula::column_letters;
@@ -18,6 +18,8 @@ use crate::workbook::{Sheet, Workbook};
 const HOW_RULES_ARE_WRITTEN: &str = include_str!("told.txt");
 /// The most rules told.
 const MOST_RULES: usize = 30;
+/// The most groups of rows without records told.
+const MOST_NON_RECORDS: usize = 200;
 
 /// What the agent is told of the conditional formats around some cells.
 pub(super) fn told(workbook: &Workbook, sheet: &Sheet, rows: &[usize], columns: &[usize], now: Option<f64>) -> Json {
@@ -54,12 +56,19 @@ pub(super) fn told(workbook: &Workbook, sheet: &Sheet, rows: &[usize], columns: 
     rules.truncate(MOST_RULES);
     let left_out = over_the_records.saturating_sub(rules.len());
     let columns: Vec<Json> = table.iter().map(|c| c.told(json!(column_letters(c.column)))).collect();
+    let address = |b: Block| range_address((b.top, b.left), (b.bottom, b.right));
+    let no_records = (records.non_records.len() <= MOST_NON_RECORDS).then(|| {
+        records.non_records.iter().map(|&(rows, kind)| json!({"cells": address(rows), "are": kind})).collect::<Vec<_>>()
+    });
     let told = json!({
         "today": today,
         "rowCount": sheet.rows.len(),
         "columnCount": sheet.columns.len(),
-        "selected": range_address((cells.top, cells.left), (cells.bottom, cells.right)),
-        "records": range_address((block.top, block.left), (block.bottom, block.right)),
+        "selected": address(*cells),
+        "table": address(records.table),
+        "records": address(block),
+        "noRecords": no_records,
+        "footer": records.footer.map(address),
         "columns": columns,
         "columnsLeftOut": (block.right - block.left).saturating_add(1).saturating_sub(table.len()),
         "rules": rules,

@@ -1,10 +1,17 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, ShownColor, ValueContents } from '@open-artifact/sheets-core';
+import type { CellOnShow } from '../model/workbook.ts';
+import type { ShownCell } from '../grid/formulas-shown.ts';
 import { booleanText, sanitizeTypedCellInput } from '../model/cell-text.ts';
 import { withDecimalSign } from './number-signs.ts';
 import { generalNumberText } from './general-numbers.ts';
 import { cellValueOf } from '../model/cell-values.ts';
-export function trimTrailingNewlines(text?: Dynamic) {
-  let end: Dynamic = text.length;
+/** The text a cell shows, and the color its number format gives that text. */
+export interface ShownCellText {
+  text: string;
+  textColor: ShownColor | null;
+}
+export function trimTrailingNewlines(text: string): string {
+  let end = text.length;
   while (
     text[end - 1] ===
     `
@@ -13,11 +20,11 @@ export function trimTrailingNewlines(text?: Dynamic) {
     end -= 1;
   return text.slice(0, end);
 }
-export function toPrecisionText(number?: Dynamic, precision?: Dynamic) {
+export function toPrecisionText(number: number, precision: number): string {
   let rounded = Number(number.toPrecision(precision));
   return String(Number.isFinite(rounded) ? rounded : number).toUpperCase();
 }
-export function generalValueText(value?: Dynamic, maxChars?: Dynamic, decimalSign?: Dynamic) {
+export function generalValueText(value: ValueContents | null, maxChars: number, decimalSign: DecimalSignName): string {
   switch (value?.kind) {
     case undefined:
       return '';
@@ -30,14 +37,19 @@ export function generalValueText(value?: Dynamic, maxChars?: Dynamic, decimalSig
       return withDecimalSign(generalNumberText(value.value, Math.min(maxChars, GENERAL_FORMAT_MAX_CHARS)), decimalSign);
   }
 }
-export function shownCellText(cell?: Dynamic, maxChars?: Dynamic, decimalSign?: Dynamic, overflows: Dynamic = () => false) {
+export function shownCellText(
+  cell: ShownCell | null,
+  maxChars: number,
+  decimalSign: DecimalSignName,
+  overflows: (text: string) => boolean = () => false,
+): ShownCellText {
   let shown = cell?.shown;
   if (shown?.kind === 'text')
     return {
       text: shown.text,
       textColor: shown.textColor,
     };
-  let charLimit: Dynamic = Math.floor(maxChars);
+  let charLimit = Math.floor(maxChars);
   if (shown !== undefined && shown.reason !== 'notPrintedYet') {
     let fillCount = Math.max(1, Math.min(charLimit, GENERAL_FORMAT_MAX_CHARS));
     return {
@@ -46,10 +58,10 @@ export function shownCellText(cell?: Dynamic, maxChars?: Dynamic, decimalSign?: 
     };
   }
   let value = cellValueOf(cell);
-  let text: Dynamic = generalValueText(value, charLimit, decimalSign);
+  let text = generalValueText(value, charLimit, decimalSign);
   if (value?.kind !== 'number')
     return {
-      text: text,
+      text,
       textColor: null,
     };
   while (text.length <= charLimit && overflows(text)) {
@@ -57,11 +69,11 @@ export function shownCellText(cell?: Dynamic, maxChars?: Dynamic, decimalSign?: 
     text = generalValueText(value, charLimit, decimalSign);
   }
   return {
-    text: text,
+    text,
     textColor: null,
   };
 }
-export function isNegativeShownByColorAlone(cell?: Dynamic) {
+export function isNegativeShownByColorAlone(cell: ShownCell | null): boolean {
   let value = cellValueOf(cell);
   let shown = cell?.shown;
   return (
@@ -73,27 +85,27 @@ export function isNegativeShownByColorAlone(cell?: Dynamic) {
     !NEGATIVE_SIGN_PATTERN.test(shown.text)
   );
 }
-export const normalizeLineBreaks = (input?: Dynamic) =>
-  input.replaceAll(
+export const normalizeLineBreaks = (text: string): string =>
+  text.replaceAll(
     /\r\n?/g,
     `
 `,
   );
-export const cleanEnteredCellText = (input?: Dynamic) => sanitizeTypedCellInput(trimTrailingNewlines(input));
-export const flattenEnteredText = (input?: Dynamic) =>
-  trimTrailingNewlines(input).replaceAll(
+export const cleanEnteredCellText = (text: string): string => sanitizeTypedCellInput(trimTrailingNewlines(text));
+export const flattenEnteredText = (text: string): string =>
+  trimTrailingNewlines(text).replaceAll(
     `
 `,
     ' ',
   );
-export const toExponentialText = (input?: Dynamic, options?: Dynamic) =>
-  input
-    .toExponential(options)
+export const toExponentialText = (number: number, fractionDigits: number): string =>
+  number
+    .toExponential(fractionDigits)
     .toUpperCase()
     .replace(/\.?0*E/, 'E');
 export const GENERAL_FORMAT_MAX_CHARS = 11;
 export const MAX_EXPONENT_FRACTION_DIGITS = 5;
 export const OVERFLOW_FILL_CHAR = '#';
-export const isCellShownBlank = (cell?: Dynamic) => shownCellText(cell, 1 / 0, 'point').text.trim() === '';
+export const isCellShownBlank = (cell: CellOnShow | null): boolean => shownCellText(cell, 1 / 0, 'point').text.trim() === '';
 export const NEGATIVE_SIGN_PATTERN = /(?:^|[^Ee])[-\u2212(]/;
 export { MAX_SIGNIFICANT_DIGITS } from './shown-text-values.ts';

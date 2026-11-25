@@ -71,6 +71,8 @@ async function openEvents(page: string, client: string): Promise<EventStream> {
 interface DbEvent {
   changes: Record<string, Record<string, unknown> | null>;
   author?: string;
+  epoch?: string;
+  seq?: number;
 }
 
 interface PageThread {
@@ -192,14 +194,20 @@ describe('whiteboard type server', () => {
     try {
       const data = { type: 'note', x: 1, y: 2, text: 'From a' };
       await write('a', [{ op: 'set', path: 'elements/e1', data }]);
-      const seen = await b.next((name) => name === 'db');
-      assert.deepEqual(seen.data, { changes: { 'elements/e1': data }, author: 'a' });
+      const seen = (await b.next((name) => name === 'db')).data as DbEvent;
+      // Each event carries its place in the store's order.
+      const { epoch, seq, ...rest } = seen;
+      assert.deepEqual(rest, { changes: { 'elements/e1': data }, author: 'a' });
+      assert.equal(typeof epoch, 'string');
+      assert.equal(typeof seq, 'number');
 
       // An edit straight to disk (the agent's file tools).
       await writeFile(join(root, 'db', 'elements', 'e2.json'), JSON.stringify({ type: 'note', x: 5, y: 5, text: 'From disk' }));
       // a's first db event is the agent's: its own write was never echoed, nor re-reported by the watcher.
       const agent = (await a.next((name) => name === 'db')).data as DbEvent;
       assert.equal(agent.author, 'agent');
+      assert.equal(agent.epoch, epoch);
+      assert.equal(agent.seq, seq! + 1, 'the next change in the order');
       assert.deepEqual(agent.changes, { 'elements/e2': { type: 'note', x: 5, y: 5, text: 'From disk' } });
       assert.deepEqual(((await b.next((name) => name === 'db')).data as DbEvent).changes, agent.changes);
 
@@ -321,7 +329,7 @@ describe('whiteboard type server', () => {
       ).json()) as { writes: { op: string; path: string; created?: boolean }[] };
       assert.deepEqual(ok.writes.map((w) => [w.op, w.path, w.created]), [['set', 'elements/a1', true]]);
       const heard = (await events.next((name) => name === 'db')).data as DbEvent;
-      assert.deepEqual(heard, { changes: { 'elements/a1': { type: 'note', x: 0, y: 0, text: 'Agent', color: 'blue' } }, author: 'agent' });
+      assert.deepEqual({ changes: heard.changes, author: heard.author }, { changes: { 'elements/a1': { type: 'note', x: 0, y: 0, text: 'Agent', color: 'blue' } }, author: 'agent' });
 
       // A set over an existing document without if_match is refused when the daemon asks; a stale one conflicts.
       const unguarded = await action('open-artifact.db.write', { writes: [{ op: 'set', path: 'elements/a1', data: { type: 'note', x: 0, y: 0, text: 'X' } }], require_if_match: true });
@@ -402,6 +410,41 @@ describe('whiteboard type server', () => {
     assert.equal(clean.check.problems, 0);
   });
 
+  it('writes and checks drawing styles, placeholders, table tints and ended claims', async () => {
+    const board = join(dir, 'Tints');
+    await mkdir(join(board, 'db', 'board'), { recursive: true });
+    await writeFile(join(board, 'db', 'board', 'meta.json'), JSON.stringify({ v: 1, title: 'Tints', order: [] }));
+    const drawing = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="4" height="4"/></svg>').toString('base64')}`;
+    const table = { type: 'table', x: 0, y: 200, cols: { c1: { at: 1 }, c2: { at: 2 } }, rows: { r1: { at: 1, c1: 'Name', c2: 'Score' }, r2: { at: 2, c1: 'a', c2: '12' } } };
+    const writes = [
+      { op: 'set', path: 'elements/d1', data: { type: 'image', x: 0, y: 0, w: 100, h: 100, src: drawing, style: 'comic' } },
+      { op: 'set', path: 'elements/t1', data: { type: 'text', x: 200, y: 0, text: '', placeholder: 'Write the goal' } },
+      { op: 'set', path: 'elements/tb', data: { ...table, fills: { r2: { c1: 'blue' } }, heat: { cols: { c2: 'green' } } } },
+      { op: 'update', path: 'board/meta', data: { order: ['d1', 't1', 'tb'] } },
+      { op: 'set', path: 'board/claim-c1234567', data: { x: 0, y: 0, w: 300, h: 200 } },
+    ];
+    assert.equal((await action('open-artifact.db.write', { writes }, board)).status, 200);
+    type Check = { check: { problems: number; findings: { file: string; level: string; message: string }[] } };
+    const claimed = (await (await action('check', {}, board)).json()) as Check;
+    assert.deepEqual(
+      claimed.check.findings.map((finding) => [finding.level, finding.file]),
+      [['warning', 'db/board/claim-c1234567.json']],
+      'a claim that still frames an area asks to be ended',
+    );
+
+    // Ending the claim with {} is accepted and leaves the board clean.
+    assert.equal((await action('open-artifact.db.write', { writes: [{ op: 'set', path: 'board/claim-c1234567', data: {} }] }, board)).status, 200);
+    assert.deepEqual(JSON.parse(await readFile(join(board, 'db', 'board', 'claim-c1234567.json'), 'utf8')), {});
+    const ended = (await (await action('check', {}, board)).json()) as Check;
+    assert.deepEqual(ended.check.findings, []);
+    assert.equal(ended.check.problems, 0);
+
+    await action('open-artifact.db.write', { writes: [{ op: 'update', path: 'elements/d1', data: { style: 'oil' } }] }, board);
+    const styled = (await (await action('check', {}, board)).json()) as Check;
+    assert.equal(styled.check.problems, 1);
+    assert.match(styled.check.findings[0]!.message, /watercolor, comic/);
+  });
+
   it('reads and writes a board from the CLI', async () => {
     const lines: string[] = [];
     const log = console.log;
@@ -457,12 +500,26 @@ describe('whiteboard type server', () => {
       room2.onMessage((message) => heard2.push(message));
       await until(() => sockets.length === 2 && sockets.every((socket) => socket.readyState === Native.OPEN));
 
+      // Every stream starts with where the documents stand.
+      await until(() => changes1.length > 0 && changes2.length > 0);
+      const start = changes2.shift()!;
+      assert.deepEqual(changes1.shift(), start);
+      assert.equal(start.resync, true);
+      assert.deepEqual(start.changes, {});
+      assert.equal(typeof start.epoch, 'string');
+      assert.equal(typeof start.seq, 'number');
+
+      // A write is answered with its place in the order and the documents as stored; the event carries the same place.
       const data = { type: 'note', x: 7, y: 7, text: 'Provider' };
-      await db1.write([{ op: 'set', path: 'elements/lp', data }]);
+      const receipt = await db1.write([{ op: 'set', path: 'elements/lp', data }]);
+      assert.deepEqual(receipt, { epoch: start.epoch, seq: start.seq! + 1, documents: { 'elements/lp': data } });
       await until(() => changes2.length > 0);
-      assert.deepEqual(changes2[0], { changes: { 'elements/lp': data }, author: await room1.self() });
+      assert.deepEqual(changes2[0], { changes: { 'elements/lp': data }, author: await room1.self(), epoch: start.epoch, seq: start.seq! + 1 });
       assert.deepEqual(await db2.get('elements/lp'), data);
       assert.ok((await db2.list('elements')).some((d) => d.path === 'elements/lp'));
+      const listing = await db2.listing!('elements');
+      assert.deepEqual({ epoch: listing.epoch, seq: listing.seq }, { epoch: start.epoch, seq: start.seq! + 1 });
+      assert.ok(listing.documents.some((d) => d.path === 'elements/lp'));
 
       // Room messages reach the other page; the writer heard no echo of its write before it.
       await room2.emit('cursor', { x: 1 });

@@ -83,6 +83,16 @@ export interface ManifestHostHints {
    * quickstart lists the person's artifacts of those types as `related`.
    */
   uses?: string[];
+  /**
+   * The page is worth opening right after the first playable batch (e.g. a rough cut) so the person watches
+   * progress live as later writes land, rather than waiting until everything is written and checked.
+   */
+  openEarly?: boolean;
+  /**
+   * The `https://` origins an installed type's page may reach (`["https://api.example.com"]`); without it, an
+   * installed type's page reaches only its own origin. Types of the other scopes are not limited by it.
+   */
+  network?: string[];
   [key: string]: unknown;
 }
 
@@ -90,6 +100,12 @@ export interface ManifestHostHints {
 export interface ArtifactTypeManifest {
   /** Stable id; defaults to the folder name. */
   slug?: string;
+  /**
+   * A random id (a UUID) written once when the type is made (`open-artifact types new`): it tells two types of the
+   * same slug apart. An artifact records the uid of the type it was made with (`typeUid`), and is opened and written
+   * only by a type of that uid.
+   */
+  uid?: string;
   /** Display name, e.g. `Design`. */
   name?: string;
   /** Longer display title. */
@@ -140,8 +156,11 @@ export type ResolvedEntry =
  */
 export type TypeRuntime = 'static' | 'url' | 'server' | 'frame';
 
-/** Where a type was found. */
-export type TypeScope = 'project' | 'user' | 'extra' | 'builtin';
+/**
+ * Where a type was found. `installed`: a type package the person installed (`open-artifact types install`), kept in
+ * `<OPEN_ARTIFACT_HOME>/types/`: never trusted to run its own server.
+ */
+export type TypeScope = 'project' | 'user' | 'extra' | 'installed' | 'builtin';
 
 /** True for a {@link ServerEntry}. */
 export function isServerEntry(entry: ManifestEntry | undefined): entry is ServerEntry {
@@ -151,4 +170,45 @@ export function isServerEntry(entry: ManifestEntry | undefined): entry is Server
 /** True for a {@link UrlEntry} (without `start`). */
 export function isUrlEntry(entry: ManifestEntry | undefined): entry is UrlEntry {
   return !!entry && typeof entry === 'object' && !isServerEntry(entry) && typeof (entry as UrlEntry).url === 'string';
+}
+
+/**
+ * Whether a type's (or a page's) host, as a URL's `hostname` gives it, counts as this computer: `localhost`,
+ * `*.localhost`, `127.0.0.0/8` in dotted form and `[::1]`, spelled that way. The one definition behind `remote`
+ * (`entryLocation`) and the embed origins; anything else is another computer, even when it happens to reach this one
+ * (`0.0.0.0`, IPv4-mapped `[::ffff:7f00:1]`, a name in the hosts file).
+ *
+ * It differs on purpose from `isLoopbackHostName` (`network.ts`), which parses every spelling of an address and says
+ * `[::ffff:127.0.0.1]` is loopback: that one decides where plain `http` may go, and is right to recognise this
+ * computer however it is written. This one decides what is trusted as local, so an unusual spelling falls on the
+ * cautious side and is treated as remote (asked about, given no paths); a type that wants to be local writes
+ * `localhost` or `127.0.0.1`.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, '');
+  return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+/** Where a type's page lives, as types are described to agents, adapters and pages. */
+export interface TypeLocation {
+  /** The type's page and its `/__open-artifact/*` routes are on another computer (a URL entry that is not loopback). */
+  remote: boolean;
+  /** With `remote`: the origin they are on (`https://slides.example.com`). */
+  origin?: string;
+}
+
+/**
+ * Whether a resolved entry is remote: a URL entry whose address is not loopback ({@link isLoopbackHost}). Static and
+ * server entries are always on this computer (a server entry's `url` must be loopback). Placeholders in the URL
+ * template are ignored.
+ */
+export function entryLocation(entry: ResolvedEntry | null | undefined): TypeLocation {
+  if (!entry || entry.kind !== 'url') return { remote: false };
+  try {
+    const at = new URL(entry.url.replace(/\{[a-z]+\}/g, 'x'));
+    if (at.protocol !== 'http:' && at.protocol !== 'https:') return { remote: false };
+    return isLoopbackHost(at.hostname) ? { remote: false } : { remote: true, origin: at.origin };
+  } catch {
+    return { remote: false };
+  }
 }

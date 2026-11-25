@@ -13,8 +13,8 @@ export function moveSheetToPlace(state: PageState, reads: WorkbookReads, sheetId
     state,
     {
       kind: 'moveSheet',
-      sheetId: sheetId,
-      afterSheet: afterSheet,
+      sheetId,
+      afterSheet,
     },
     {
       ...IF_QUEUED_DEFAULTS,
@@ -31,7 +31,7 @@ export function lastDoneOfSheetMove(reads: WorkbookReads, sheetId: SheetId): She
     ? null
     : {
         what: 'sheetMoved',
-        name: name,
+        name,
         place: sheetIndex + 1,
         sheetCount: sheets.length,
       };

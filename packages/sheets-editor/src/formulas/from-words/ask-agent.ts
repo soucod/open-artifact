@@ -1,7 +1,7 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { readsAsStored } from '../../model/workbook.ts';
 import { canAskAgentForFormula, withFormulaFromWordsStage, FRESH_FORMULA_OFFER } from './offer.ts';
 import { withNoEffects } from '../../state/transitions.ts';
+import type { EditingMode, PageTransition } from '../../state/transitions.ts';
 import { activeAnchorCell, areaOfPosition } from '../../selection/model.ts';
 import { describeSheetForAgent, formulaFromWordsPrompt } from '../agent-prompt.ts';
 import { lineRunsOfSheet } from '../../format/conditional/ask-agent.ts';
@@ -15,12 +15,27 @@ import { isSameJsonValue } from '../../model/same-json.ts';
 import { formulasInAnswer } from '../fix-prompt.ts';
 import { findFormulaReferences, resolveFormulaReference } from '../references.ts';
 import { tokenizeFormulaText, upperCaseAsciiLetters } from '../tokenizer.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
-import type { PageState } from '../../state/initial-state.ts';
+import type { DecimalSignName, ValueContents } from '@open-artifact/sheets-core';
+import type { CellId, WorkbookReads } from '../../model/workbook.ts';
+import type {
+  FormulaAsked,
+  FormulaWithResult,
+  OthersMayFitBecause,
+  PageState,
+  ProposedFormulaResult,
+  WhyFixCameToNothing,
+} from '../../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../../state/controller.ts';
-export function askAgentForFormula(state: PageState, workbookSeen?: Dynamic) {
+import type { CellPosition } from '../../selection/model.ts';
+import type { ProposedFormulaResultRead } from '../proposed-result.ts';
+import type { NumberFormatReply } from '../../format/custom-number-format.ts';
+/** What a formula comes to in a cell, or why it cannot be taken. */
+export type FormulaResultChecked = ProposedFormulaResultRead | 'ranOutOfTime' | 'error' | 'noFormula' | 'makesAnAddress';
+/** A formula the agent answered with, or why it cannot be offered. */
+export type FormulaFromAnswer = FormulaWithResult | 'noFormula' | 'ranOutOfTime' | 'makesAnAddress';
+export function askAgentForFormula(state: PageState, workbookSeen: WorkbookReads): PageTransition {
   let workbook = readsAsStored(workbookSeen);
-  let { mode: mode, formulaFromWords: formulaFromWords } = state;
+  let { mode, formulaFromWords } = state;
   if (mode.kind !== 'editing' || !canAskAgentForFormula(state)) return withNoEffects(state);
   let words = mode.text;
   let activeCell = activeAnchorCell(state, workbook);
@@ -31,7 +46,7 @@ export function askAgentForFormula(state: PageState, workbookSeen?: Dynamic) {
     return withNoEffects(
       withFormulaFromWordsStage(state, {
         kind: 'cameToNothing',
-        words: words,
+        words,
         why: 'sheetTooLarge',
       }),
     );
@@ -47,9 +62,9 @@ export function askAgentForFormula(state: PageState, workbookSeen?: Dynamic) {
       state,
       {
         kind: 'asked',
-        askId: askId,
-        words: words,
-        linesAsTold: linesAsTold,
+        askId,
+        words,
+        linesAsTold,
       },
       {
         askCount: askId,
@@ -58,30 +73,35 @@ export function askAgentForFormula(state: PageState, workbookSeen?: Dynamic) {
     effects: [
       {
         kind: 'askAgentForAFormula',
-        askId: askId,
-        asked: asked,
+        askId,
+        asked,
       },
     ],
   };
 }
-export function checkFormulaResult(workbook: WorkbookReads, cellId?: Dynamic, formula?: Dynamic) {
-  let result = proposedFormulaResult(workbook, cellId, formula);
-  if (result === 'ranOutOfTime' || result === 'error') return result;
-  if (result === null) return 'noFormula';
-  if (result.fillsOtherCells === true && !isSafeArrayFormula(formula, workbook.decimalSign)) return 'noFormula';
-  let shownText = `${result.shown} ${result.text ?? ''}`;
-  return ADDRESS_LIKE_PATTERN.test(`${formula} ${shownText} ${shownText.replace(/[\t\n\r]/g, '')}`) ? 'makesAnAddress' : result;
+export function checkFormulaResult(workbook: WorkbookReads, cellId: CellId, formula: string): FormulaResultChecked {
+  let comesTo = proposedFormulaResult(workbook, cellId, formula);
+  if (comesTo === 'ranOutOfTime' || comesTo === 'error') return comesTo;
+  if (comesTo === null) return 'noFormula';
+  if (comesTo.fillsOtherCells === true && !isSafeArrayFormula(formula, workbook.decimalSign)) return 'noFormula';
+  let shownText = `${comesTo.shown} ${comesTo.text ?? ''}`;
+  return ADDRESS_LIKE_PATTERN.test(`${formula} ${shownText} ${shownText.replace(/[\t\n\r]/g, '')}`) ? 'makesAnAddress' : comesTo;
 }
-export function differsFromResult({ result: result }: Dynamic, cameTo?: Dynamic) {
+export function differsFromResult({ result }: ProposedFormulaResult, cameTo: ValueContents | null): boolean {
   if (cameTo === null) return false;
   if (cameTo.kind !== 'number' || result?.kind !== 'number') return cameTo.kind !== result?.kind || cameTo.value !== result.value;
   return Math.abs(cameTo.value - result.value) > numberTolerance(cameTo.value, result.value);
 }
-export function withEntryFormulaText(state: PageState, workbook: ReadsWithTextMeasurer, text?: Dynamic, formulaOfAgent?: Dynamic) {
+export function withEntryFormulaText(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  text: string,
+  formulaOfAgent?: EditingMode['formulaOfAgent'],
+): PageState {
   if (state.mode.kind !== 'editing') return state;
   let started = startEntryEditing(state, workbook, text, state.mode.typingIn);
   let caret = {
-    text: text,
+    text,
     start: text.length,
     end: text.length,
   };
@@ -91,7 +111,7 @@ export function withEntryFormulaText(state: PageState, workbook: ReadsWithTextMe
       formulaOfAgent !== undefined && {
         mode: {
           ...started.mode,
-          formulaOfAgent: formulaOfAgent,
+          formulaOfAgent,
           ...(formulaOfAgent === 'mayBeHeld' &&
             started.mode.textOfOthersHeld
               ?.split(
@@ -106,31 +126,47 @@ ${text}`,
       }),
     formulaHelp: {
       ...started.formulaHelp,
-      caret: caret,
+      caret,
       caretAfterPick: caret,
     },
   };
 }
-export function takeAgentsFormulaAnswer(state: PageState, workbook: WorkbookReads, askId?: Dynamic, answer?: Dynamic) {
+export function takeAgentsFormulaAnswer(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  askId: number,
+  answer: NumberFormatReply,
+): PageTransition {
   let taken = proposeFormulaFromAnswer(state, workbook, askId, answer);
-  let { stage: stage } = state.formulaFromWords;
+  const { stage } = state.formulaFromWords;
   if (!(stage?.kind === 'asked' && stage.askId === askId && stage.isFix === true) || taken.state.formulaFromWords.stage?.kind === 'proposed')
     return taken;
   let stageAfter = taken.state.formulaFromWords.stage;
   let hasCallFailed = stageAfter?.kind === 'offered' && stageAfter.hasCallFailed;
   let isAnsweredWithNothing = answer.kind === 'answered' && !hasCallFailed;
-  let whyFailed = answer.kind === 'failed' ? whyCallFailed(answer) : 'other';
-  let why = isAnsweredWithNothing ? 'noFormula' : whyFailed;
+  const whyFailed = answer.kind === 'failed' ? whyCallFailed(answer) : 'other';
+  const why = isAnsweredWithNothing ? 'noFormula' : whyFailed;
   return {
     ...taken,
     state: endFixThatCameToNothing(taken.state, workbook, why, hasCallFailed),
   };
 }
-export function endFixThatCameToNothing(state: PageState, workbook: WorkbookReads, why?: Dynamic, mayGoBetterAgain: Dynamic = false) {
+export function endFixThatCameToNothing(
+  state: PageState,
+  workbook: WorkbookReads,
+  why: WhyFixCameToNothing,
+  mayGoBetterAgain = false,
+): PageState {
   let activeCell = activeAnchorCell(state, workbook);
   return withFixThatCameToNothing(cancelEntryIfEditing(state, workbook), activeCell, why, mayGoBetterAgain);
 }
-export function formulaFromAnswer(workbook: WorkbookReads, activeCell?: Dynamic, position?: Dynamic, stage?: Dynamic, answer?: Dynamic) {
+export function formulaFromAnswer(
+  workbook: WorkbookReads,
+  activeCell: CellId,
+  position: CellPosition,
+  stage: FormulaAsked,
+  answer: unknown,
+): FormulaFromAnswer {
   let formula = acceptFormulaFromAgent(answer, workbook, activeCell.sheetId, position);
   if (
     formula === null ||
@@ -148,49 +184,55 @@ export function formulaFromAnswer(workbook: WorkbookReads, activeCell?: Dynamic,
   )
     return 'noFormula';
   if ((countCellsRead(formula, workbook.decimalSign) ?? 1 / 0) < (stage.fewestCellsToRead ?? 0)) return 'noFormula';
-  let result = checkFormulaResult(workbook, activeCell, formula);
-  if (stage.isFix === true && stage.areOwnWords !== true && fillsOtherCells(result)) return 'noFormula';
-  if (typeof result === 'string') return result === 'error' ? 'noFormula' : result;
-  return differsFromResult(result, stage.cameToBeforeASort ?? null)
+  let comesTo = checkFormulaResult(workbook, activeCell, formula);
+  if (stage.isFix === true && stage.areOwnWords !== true && fillsOtherCells(comesTo)) return 'noFormula';
+  if (typeof comesTo === 'string') return comesTo === 'error' ? 'noFormula' : comesTo;
+  return differsFromResult(comesTo, stage.cameToBeforeASort ?? null)
     ? 'noFormula'
     : {
-        formula: formula,
-        value: result,
+        formula,
+        value: comesTo,
       };
 }
-export function isTrulyOtherFix(workbook: WorkbookReads, activeCell?: Dynamic, othersMayFit?: Dynamic, formula?: Dynamic, other?: Dynamic) {
-  let { decimalSign: decimalSign } = workbook;
+export function isTrulyOtherFix(
+  workbook: WorkbookReads,
+  activeCell: CellId,
+  othersMayFit: OthersMayFitBecause,
+  formula: string,
+  other: string,
+): boolean {
+  let { decimalSign } = workbook;
   let [lines, otherLines] = [formulaTokenLines(formula, decimalSign), formulaTokenLines(other, decimalSign)];
   if (lines.includes(otherLines) || otherLines.includes(lines)) return false;
   if (othersMayFit === 'cellsDeleted') return areasReadOnlyBy(workbook, activeCell, formula, [other]).length > 0;
   let [calls, otherCalls] = [functionsCalledIn(formula, decimalSign), functionsCalledIn(other, decimalSign)];
-  return calls.some((name?: Dynamic) => !otherCalls.includes(name)) || otherCalls.some((name?: Dynamic) => !calls.includes(name));
+  return calls.some((name) => !otherCalls.includes(name)) || otherCalls.some((name) => !calls.includes(name));
 }
 export function otherFixesOfAnswer(
-  others: Dynamic,
-  main: Dynamic,
+  others: { formula: string }[],
+  main: FormulaWithResult,
   workbook: WorkbookReads,
-  activeCell?: Dynamic,
-  position?: Dynamic,
-  stage?: Dynamic,
-  othersMayFit?: Dynamic,
-) {
-  if (others.some(({ formula: formula }: Dynamic) => ADDRESS_LIKE_PATTERN.test(formula))) return 'makesAnAddress';
+  activeCell: CellId,
+  position: CellPosition,
+  stage: FormulaAsked,
+  othersMayFit: OthersMayFitBecause,
+): FormulaWithResult[] | 'makesAnAddress' {
+  if (others.some(({ formula }) => ADDRESS_LIKE_PATTERN.test(formula))) return 'makesAnAddress';
   if (
     others
-      .map((answer?: Dynamic) => acceptFormulaFromAgent(answer, workbook, activeCell.sheetId, position))
-      .map((formula?: Dynamic) => formula !== null && checkFormulaResult(workbook, activeCell, formula))
+      .map((answer) => acceptFormulaFromAgent(answer, workbook, activeCell.sheetId, position))
+      .map((formula) => formula !== null && checkFormulaResult(workbook, activeCell, formula))
       .includes('makesAnAddress')
   )
     return 'makesAnAddress';
-  let kept: Dynamic = [];
-  for (let answer of others as Dynamic) {
+  let kept: FormulaWithResult[] = [];
+  for (const answer of others) {
     let fix = formulaFromAnswer(workbook, activeCell, position, stage, answer);
     if (typeof fix === 'string' || quotesSpacedTextNotInWords(fix.formula, stage.words, workbook.decimalSign)) continue;
     if (fix.value.text !== null && main.value.text === null) continue;
     if (
       [main, ...kept].every(
-        ({ formula: formula, value: value }: Dynamic) =>
+        ({ formula, value }) =>
           isTrulyOtherFix(workbook, activeCell, othersMayFit, fix.formula, formula) && !comeToSameValue(fix.value, value),
       )
     )
@@ -198,18 +240,23 @@ export function otherFixesOfAnswer(
   }
   return kept;
 }
-export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynamic, askId?: Dynamic, answer?: Dynamic) {
+export function proposeFormulaFromAnswer(
+  state: PageState,
+  workbookSeen: ReadsWithTextMeasurer,
+  askId: number,
+  answer: NumberFormatReply,
+): PageTransition {
   let workbook = readsAsStored(workbookSeen);
-  let { stage: stage } = state.formulaFromWords;
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'asked' || stage.askId !== askId) return withNoEffects(state);
-  let { words: words, linesAsTold: linesAsTold } = stage;
+  let { words, linesAsTold } = stage;
   if (answer.kind === 'notToBeHad')
     return withNoEffects(
       withFormulaFromWordsStage(
         state,
         {
           kind: 'cameToNothing',
-          words: words,
+          words,
           why: 'notAvailable',
         },
         {
@@ -236,7 +283,7 @@ export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynami
     return withNoEffects(
       withFormulaFromWordsStage(state, {
         kind: 'cameToNothing',
-        words: words,
+        words,
         why: 'noFormula',
       }),
     );
@@ -245,7 +292,7 @@ export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynami
     return withNoEffects(
       withFormulaFromWordsStage(state, {
         kind: 'cameToNothing',
-        words: words,
+        words,
         why: main,
       }),
     );
@@ -254,15 +301,15 @@ export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynami
     return withNoEffects(
       withFormulaFromWordsStage(state, {
         kind: 'cameToNothing',
-        words: words,
+        words,
         why: others,
       }),
     );
   let fixes = othersMayFit === 'nameNotKnown' ? withWhatSetsFixesApart([main, ...others], workbook.decimalSign) : [main, ...others];
-  let { formula: formula, value: result } = main;
-  let typedAreaKeys = new (Set as Dynamic)(state.referencesInEntry.map(({ area: area }: Dynamic) => areaToA1AsStored(area, null)));
-  let lightsAtPart: Dynamic = {};
-  for (let reference of findFormulaReferences(formula, workbook.decimalSign).references as Dynamic) {
+  let { formula, value: comesTo } = main;
+  let typedAreaKeys = new Set(state.referencesInEntry.map(({ area }) => areaToA1AsStored(area, null)));
+  let lightsAtPart: Record<string, number> = {};
+  for (const reference of findFormulaReferences(formula, workbook.decimalSign).references) {
     let area = resolveFormulaReference(reference, activeCell.sheetId, workbookSeen.listSheets())?.area;
     let areaKey = area === undefined ? null : areaToA1AsStored(area, null);
     if (areaKey !== null && !typedAreaKeys.has(areaKey)) lightsAtPart[areaKey] ??= reference.start / formula.length;
@@ -270,12 +317,12 @@ export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynami
   return withNoEffects(
     withFormulaFromWordsStage(withEntryFormulaText(state, workbookSeen, formula, 'mayBeHeld'), {
       kind: 'proposed',
-      words: words,
-      formula: formula,
+      words,
+      formula,
       isArriving: true,
       isDiscardHighlighted: false,
-      lightsAtPart: lightsAtPart,
-      value: result,
+      lightsAtPart,
+      value: comesTo,
       ...(stage.isFix === true && {
         isFix: true,
       }),
@@ -283,36 +330,42 @@ export function proposeFormulaFromAnswer(state: PageState, workbookSeen?: Dynami
         areOwnWords: true,
       }),
       ...(others.length > 0 && {
-        fixes: fixes,
+        fixes,
       }),
     }),
   );
 }
 export const ADDRESS_LIKE_PATTERN = /:\/\/|\b(?:https?|ftp|wss?):|\bwww\.|\bmailto:|\.[a-z]{2,}[/?]/i;
-export const fillsOtherCells = (result?: Dynamic) => typeof result !== 'string' && result.fillsOtherCells === true;
-export const numberTolerance = (value?: Dynamic, other?: Dynamic) =>
+export const fillsOtherCells = (comesTo: FormulaResultChecked): boolean => typeof comesTo !== 'string' && comesTo.fillsOtherCells === true;
+export const numberTolerance = (value: number, other: number): number =>
   0.000000000001 * Math.max(1e6, Math.abs(value), Math.abs(other));
-export const whyCallFailed = (failure?: Dynamic) => (failure.isRateLimited === true ? 'rateLimited' : 'callFailed');
-export const withFixThatCameToNothing = (state: PageState, cellId?: Dynamic, why?: Dynamic, mayGoBetterAgain: Dynamic = false) => ({
+export const whyCallFailed = (failure: Extract<NumberFormatReply, { kind: 'failed' }>): Extract<WhyFixCameToNothing, 'rateLimited' | 'callFailed'> =>
+  failure.isRateLimited === true ? 'rateLimited' : 'callFailed';
+export const withFixThatCameToNothing = (
+  state: PageState,
+  cellId: CellId,
+  why: WhyFixCameToNothing,
+  mayGoBetterAgain = false,
+): PageState => ({
   ...state,
   formulaFromWords: {
     ...state.formulaFromWords,
     stage: null,
     fixThatCameToNothing: {
-      cellId: cellId,
+      cellId,
       atChangeCount: state.workbookChangeCount,
       isNoticeUp: true,
-      mayGoBetterAgain: mayGoBetterAgain,
-      why: why,
+      mayGoBetterAgain,
+      why,
     },
   },
 });
 export const TOO_MANY_OTHER_FIXES = 3;
-export const functionsCalledIn = (text?: Dynamic, decimalSign?: Dynamic, withNameArgumentOnly: Dynamic = false) => {
-  let { tokens: tokens } = tokenizeFormulaText(text, decimalSign);
-  let isCallAt = (index?: Dynamic) => tokens[index]?.kind === 'name' && tokens[index + 1]?.kind === 'open';
-  let takesNameArgument = (index?: Dynamic) => {
-    for (let at: Dynamic = index + 1, depth: Dynamic = 0; at < tokens.length; at += 1) {
+export const functionsCalledIn = (text: string, decimalSign: DecimalSignName, withNameArgumentOnly = false): string[] => {
+  let { tokens } = tokenizeFormulaText(text, decimalSign);
+  let isCallAt = (index: number) => tokens[index]?.kind === 'name' && tokens[index + 1]?.kind === 'open';
+  let takesNameArgument = (index: number) => {
+    for (let at = index + 1, depth = 0; at < tokens.length; at += 1) {
       if (tokens[at]?.kind === 'open') depth += 1;
       if (tokens[at]?.kind === 'close' && (depth -= 1) === 0) return false;
       if (tokens[at]?.kind === 'name' && !isCallAt(at)) return true;
@@ -320,44 +373,44 @@ export const functionsCalledIn = (text?: Dynamic, decimalSign?: Dynamic, withNam
     return false;
   };
   return tokens.flatMap(
-    ({ text: text2 }: Dynamic, index?: Dynamic) =>
-      isCallAt(index) && (!withNameArgumentOnly || takesNameArgument(index)) ? [upperCaseAsciiLetters(text2)] : [],
+    ({ text: tokenText }, index) =>
+      isCallAt(index) && (!withNameArgumentOnly || takesNameArgument(index)) ? [upperCaseAsciiLetters(tokenText)] : [],
   );
 };
-export const withWhatSetsFixesApart = (fixes?: Dynamic, decimalSign?: Dynamic) =>
-  fixes.map(({ formula: formula, value: value }: Dynamic) => {
-    let others = fixes.filter((other?: Dynamic) => other.formula !== formula);
-    let calledByOthers = new (Set as Dynamic)(others.flatMap((other?: Dynamic) => functionsCalledIn(other.formula, decimalSign)));
-    let [only, ...more] = [...new (Set as Dynamic)(functionsCalledIn(formula, decimalSign))].filter(
-      (name?: Dynamic) => !calledByOthers.has(name),
+export const withWhatSetsFixesApart = (fixes: FormulaWithResult[], decimalSign: DecimalSignName): FormulaWithResult[] =>
+  fixes.map(({ formula, value }) => {
+    let others = fixes.filter((other) => other.formula !== formula);
+    let calledByOthers = new Set(others.flatMap((other) => functionsCalledIn(other.formula, decimalSign)));
+    let [only, ...more] = [...new Set(functionsCalledIn(formula, decimalSign))].filter(
+      (name) => !calledByOthers.has(name),
     );
     return only === undefined || more.length > 0 || !functionsCalledIn(formula, decimalSign, true).includes(only)
       ? {
-          formula: formula,
-          value: value,
+          formula,
+          value,
         }
       : {
-          formula: formula,
-          value: value,
+          formula,
+          value,
           setApartBy: only,
         };
   });
-export const comeToSameValue = (value?: Dynamic, other?: Dynamic) =>
+export const comeToSameValue = (value: ProposedFormulaResult, other: ProposedFormulaResult): boolean =>
   value.shown === other.shown || (other.result !== undefined && !differsFromResult(value, other.result));
-export const formulaTokenLines = (text?: Dynamic, decimalSign?: Dynamic) => `
-${tokenizeFormulaText(text, decimalSign).tokens.map(({ text: text2 }: Dynamic) => upperCaseAsciiLetters(text2).replaceAll('$', '')).join(`
+export const formulaTokenLines = (text: string, decimalSign: DecimalSignName): string => `
+${tokenizeFormulaText(text, decimalSign).tokens.map(({ text: tokenText }) => upperCaseAsciiLetters(tokenText).replaceAll('$', '')).join(`
 `)}
 `;
-export const quotedTextsOf = (text?: Dynamic, decimalSign?: Dynamic) =>
-  tokenizeFormulaText(text, decimalSign).tokens.flatMap(({ kind: kind, text: text2 }: Dynamic) => (kind === 'text' ? [text2] : []));
-export const quotesSpacedTextNotInWords = (formula?: Dynamic, words?: Dynamic, decimalSign?: Dynamic) =>
-  quotedTextsOf(formula, decimalSign).some((text?: Dynamic) => /\s/.test(text) && !quotedTextsOf(words, decimalSign).includes(text));
+export const quotedTextsOf = (text: string, decimalSign: DecimalSignName): string[] =>
+  tokenizeFormulaText(text, decimalSign).tokens.flatMap(({ kind, text: tokenText }) => (kind === 'text' ? [tokenText] : []));
+export const quotesSpacedTextNotInWords = (formula: string, words: string, decimalSign: DecimalSignName): boolean =>
+  quotedTextsOf(formula, decimalSign).some((text) => /\s/.test(text) && !quotedTextsOf(words, decimalSign).includes(text));
 export const PLAIN_NUMBER_SHOWN_PATTERN = /^(?:[\p{Nd}\p{Zs}\p{Sc}.,'%()+\-/:]|(?<=\p{Nd})E(?=[+\-\p{Nd}]))*$/u;
 export const TWO_CURRENCY_SIGNS_PATTERN = /\p{Sc}.*\p{Sc}/u;
 export const UNSHOWABLE_CHARACTER_PATTERN =
   /(?!\u00AD|\u061C|[\u180B-\u180D]|\u180F|[\u200B-\u200F]|[\uFE00-\uFE0F]|[\u{E0100}-\u{E01EF}])[\u2800\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
 export const UNSHOWABLE_CHARACTER_STAND_IN = String.fromCharCode(65533);
-export const quoteShownText = (shown?: Dynamic) =>
+export const quoteShownText = (shown: string): string =>
   `"${shown
     .replaceAll(/[\t\n\r]+/g, ' ')
     .replaceAll(UNSHOWABLE_CHARACTER_PATTERN, UNSHOWABLE_CHARACTER_STAND_IN)

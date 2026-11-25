@@ -79,7 +79,7 @@ export function settleSelectionSeen(before: PageState | null, state: PageState, 
       : decimalPlaceChanges(workbook, {
           sheetId: state.sheetId,
           ranges: areasOfAllRanges(shownSelection, workbook),
-          activeCell: activeCell,
+          activeCell,
           shared: sharedFormat,
         }),
     hasConvertibleTexts(state, workbook),
@@ -130,25 +130,25 @@ export const makeFormatOfSelection = (
   holdsTextToConvert: boolean = false,
   checkboxesToSet: CheckboxesToSet = NO_CHECKBOXES_TO_TOGGLE,
 ): FormatOfSelection => ({
-  shared: shared,
+  shared,
   togglesOn: fontMarksOfFormat(shared),
   numberFormat: formatChoiceOf(shared, workbook),
-  decimalPlaces: decimalPlaces,
-  formatsThatFit: formatsThatFit,
-  takesDropdownFromInsert: takesDropdownFromInsert,
-  holdsTextToConvert: holdsTextToConvert,
+  decimalPlaces,
+  formatsThatFit,
+  takesDropdownFromInsert,
+  holdsTextToConvert,
   alignmentOfActiveCellAsDrawn: alignmentAsDrawn,
   bordersOfBlock: borders.lines,
   areBordersOfBlockFromSample: borders.isFromSample,
-  checkboxesToSet: checkboxesToSet,
+  checkboxesToSet,
 });
 export const bordersOfSelectedBlock = (workbook: WorkbookReads, sheetId: SheetId, area: CellArea): BordersOfBlock => {
   let formatsByPlace = new Map<string, WholeCellFormat | null>();
   return readAreaBorders({
-    area: area,
+    area,
     mergedAreas: workbook.mergedAreasIn(sheetId, area),
     bordersMayChangeBefore: workbook.bordersMayChangeBefore(sheetId, area),
-    formatAt: ({ rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition) => {
+    formatAt: ({ rowIndex, columnIndex }: CellPosition) => {
       let key = `${rowIndex} ${columnIndex}`;
       let cached = formatsByPlace.get(key);
       if (cached !== undefined) return cached;

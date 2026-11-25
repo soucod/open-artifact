@@ -39,7 +39,7 @@ export const GRAYSCALE_COLORS: Color[] = [
     (shade): Color => ({
       kind: 'standard',
       hue: 'gray',
-      shade: shade,
+      shade,
     }),
   ),
   BLACK_COLOR,
@@ -49,8 +49,8 @@ export const STANDARD_HUE_COLORS: Color[] = HUE_SHADES.flatMap(
     STANDARD_HUES.map(
       (hue): Color => ({
         kind: 'standard',
-        hue: hue,
-        shade: shade,
+        hue,
+        shade,
       }),
     ),
 );

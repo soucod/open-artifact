@@ -1,15 +1,26 @@
 import { PIE_MAX_SLICES, BAR_CHART_MAX_POINTS } from './chart-kind-fit.ts';
 export { PIE_MAX_SLICES, BAR_CHART_MAX_POINTS };
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetId } from '@open-artifact/sheets-core';
 import { nonEmptyValueOfCell, DATE_TIME_FORMAT_KINDS, isYearCell } from '../selection/figures.ts';
 import { numberFormatOfCell } from '../model/workbook.ts';
 import { MAX_CHART_SOURCE_ROWS } from './placement.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export let CHART_OFFER_MAX_ROWS: Dynamic;
-export let CHART_OFFER_MAX_COLUMNS: Dynamic;
-export function chartCellKind(reads: WorkbookReads, sheetId?: Dynamic, rowIndex?: Dynamic, columnIndex?: Dynamic) {
-  let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
-  let value = nonEmptyValueOfCell(reads, cellId);
+import type { CellArea } from '../selection/model.ts';
+import type { ChartOnOffer } from '../state/initial-state.ts';
+import type { ChartSketch } from './chart-thumbnail-paths.ts';
+import type { ChartKindOrAny } from './chart-words.ts';
+import type { StockKind } from './stock-programs.ts';
+/** What a cell is to a chart offered for it: a label, or a number that is a time, a year or an amount. */
+export type ChartCellRole = { is: 'text'; value: string } | { is: 'time'; value: number } | { is: 'year'; value: number } | { is: 'amount'; value: number };
+/** A cell whose number a chart can draw. */
+export type ChartNumberCell = Extract<ChartCellRole, { is: 'year' | 'amount' }>;
+/** A kind of chart offered for the cells selected, with the series its thumbnail draws. */
+export type ChartOfferOfCells = ChartOnOffer & ChartSketch;
+export let CHART_OFFER_MAX_ROWS: number;
+export let CHART_OFFER_MAX_COLUMNS: number;
+export function chartCellKind(reads: WorkbookReads, sheetId: SheetId, rowIndex: number, columnIndex: number): ChartCellRole | null {
+  const cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
+  const value = nonEmptyValueOfCell(reads, cellId);
   if (cellId === null || value === null) return null;
   if (value.kind !== 'number')
     return {
@@ -23,160 +34,162 @@ export function chartCellKind(reads: WorkbookReads, sheetId?: Dynamic, rowIndex?
     };
   return {
     is: isYearCell(reads, sheetId, {
-      rowIndex: rowIndex,
-      columnIndex: columnIndex,
+      rowIndex,
+      columnIndex,
     })
       ? 'year'
       : 'amount',
     value: value.value,
   };
 }
-export function hasRepeatedLabels(cells?: Dynamic) {
-  let labels = cells.flatMap((cell?: Dynamic) => (cell === null || cell.value === '' ? [] : [cell.value]));
-  return new (Set as Dynamic)(labels).size < labels.length;
+export function hasRepeatedLabels(cells: readonly (ChartCellRole | null)[]): boolean {
+  const labels = cells.flatMap((cell) => (cell === null || cell.value === '' ? [] : [cell.value]));
+  return new Set(labels).size < labels.length;
 }
-export function isRepeatingCycle(labels?: Dynamic) {
-  let cycleLength = labels.indexOf(labels[0], 1);
+export function isRepeatingCycle(labels: readonly (string | number | undefined)[]): boolean {
+  const cycleLength = labels.indexOf(labels[0], 1);
   return (
     cycleLength > 1 &&
-    new (Set as Dynamic)(labels.slice(0, cycleLength)).size === cycleLength &&
-    labels.every((label?: Dynamic, index?: Dynamic) => label === labels[index % cycleLength])
+    new Set(labels.slice(0, cycleLength)).size === cycleLength &&
+    labels.every((label, index) => label === labels[index % cycleLength])
   );
 }
-export function looksLikeAxisLabels(cells?: Dynamic) {
-  let numbers = cells.filter(isChartNumber).map(({ value: value }: Dynamic) => value);
-  let steps = numbers.slice(1).map((number?: Dynamic, index?: Dynamic) => number - (numbers[index] ?? 0));
-  let isMonotonic =
-    steps.some((input?: Dynamic) => input !== 0) &&
-    (steps.every((input?: Dynamic) => input >= 0) || steps.every((input?: Dynamic) => input <= 0));
-  return !cells.some(isChartAmount) && cells.some((input?: Dynamic) => input !== null) && (numbers.length < 2 || isMonotonic);
+export function looksLikeAxisLabels(cells: readonly (ChartCellRole | null)[]): boolean {
+  const numbers = cells.filter(isChartNumber).map(({ value }) => value);
+  const steps = numbers.slice(1).map((number, index) => number - (numbers[index] ?? 0));
+  const isMonotonic =
+    steps.some((step) => step !== 0) &&
+    (steps.every((step) => step >= 0) || steps.every((step) => step <= 0));
+  return !cells.some(isChartAmount) && cells.some((cell) => cell !== null) && (numbers.length < 2 || isMonotonic);
 }
-export function sampleChartPointsEvenly(points?: Dynamic, count?: Dynamic) {
+export function sampleChartPointsEvenly<Point>(points: readonly Point[], count: number): readonly Point[] {
   if (points.length <= count) return points;
-  let keptIndexes = new (Set as Dynamic)(
-    Array.from<Dynamic, Dynamic>(
+  const keptIndexes = new Set(
+    Array.from(
       {
         length: count,
       },
-      (input?: Dynamic, index?: Dynamic) => Math.round((index * (points.length - 1)) / (count - 1)),
+      (_slot, index) => Math.round((index * (points.length - 1)) / (count - 1)),
     ),
   );
-  return points.filter((input?: Dynamic, index?: Dynamic) => keptIndexes.has(index));
+  return points.filter((_point, index) => keptIndexes.has(index));
 }
-export function chartKindsOfferedForCells(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = area;
-  let grid = Array.from<Dynamic, Dynamic>(
+export function chartKindsOfferedForCells(reads: WorkbookReads, sheetId: SheetId, area: CellArea): ChartOfferOfCells[] {
+  const { topRowIndex, leftColumnIndex, rowCount, columnCount } = area;
+  const grid = Array.from(
     {
       length: Math.min(rowCount, CHART_OFFER_MAX_ROWS),
     },
-    (input?: Dynamic, rowOffset?: Dynamic) =>
-      Array.from<Dynamic, Dynamic>(
+    (_row, rowOffset) =>
+      Array.from(
         {
           length: Math.min(columnCount, CHART_OFFER_MAX_COLUMNS),
         },
-        (input2?: Dynamic, columnOffset?: Dynamic) => chartCellKind(reads, sheetId, topRowIndex + rowOffset, leftColumnIndex + columnOffset),
+        (_cell, columnOffset) => chartCellKind(reads, sheetId, topRowIndex + rowOffset, leftColumnIndex + columnOffset),
       ),
   );
-  let filledRows = grid.filter((input?: Dynamic) => input.some((input2?: Dynamic) => input2 !== null));
-  let isLabelRow = (row?: Dynamic, rowIndex?: Dynamic) =>
+  const filledRows = grid.filter((row) => row.some((cell) => cell !== null));
+  const isLabelRow = (row: (ChartCellRole | null)[], rowIndex: number) =>
     rowIndex < filledRows.length - 1 &&
     looksLikeAxisLabels(row) &&
     !row.some(
-      (input?: Dynamic, options?: Dynamic) => isChartNumber(input) && isChartTimeOrYear(filledRows[rowIndex + 1]?.[options] ?? null),
+      (cell, columnIndex) => isChartNumber(cell) && isChartTimeOrYear(filledRows[rowIndex + 1]?.[columnIndex] ?? null),
     );
-  let rows = filledRows.slice(
+  const rows = filledRows.slice(
     Math.max(
       0,
-      filledRows.findIndex((input?: Dynamic, options?: Dynamic) => !isLabelRow(input, options)),
+      filledRows.findIndex((row, rowIndex) => !isLabelRow(row, rowIndex)),
     ),
   );
-  let firstColumn = rows.map((input?: Dynamic) => input[0] ?? null);
-  let hasLabelColumn = (rows[0]?.length ?? 0) > 1 && looksLikeAxisLabels(firstColumn);
-  let columns = (rows[0] ?? [])
-    .map((input?: Dynamic, columnIndex?: Dynamic) => rows.map((input2?: Dynamic) => input2[columnIndex] ?? null))
+  const firstColumn = rows.map((row) => row[0] ?? null);
+  const hasLabelColumn = (rows[0]?.length ?? 0) > 1 && looksLikeAxisLabels(firstColumn);
+  const columns = (rows[0] ?? [])
+    .map((_cell, columnIndex) => rows.map((row) => row[columnIndex] ?? null))
     .slice(hasLabelColumn ? 1 : 0);
-  let series = rows.length === 1 ? [columns.flat()] : columns;
-  let hasAmounts = series.some((input?: Dynamic) => input.some(isChartAmount));
-  let numberSeries = series
-    .filter((input?: Dynamic) => input.filter(isChartNumber).length >= 2 && !(hasAmounts && looksLikeAxisLabels(input)))
-    .map((input?: Dynamic) => input.map((input2?: Dynamic) => (isChartNumber(input2) ? input2.value : 0)));
-  let skippedRows = filledRows.length - rows.length;
-  let isYear = (cell?: Dynamic) => isChartNumber(cell) && Number.isInteger(cell.value) && cell.value > 1800 && cell.value < 2200;
-  let isTableShaped =
+  const series = rows.length === 1 ? [columns.flat()] : columns;
+  const hasAmounts = series.some((cells) => cells.some(isChartAmount));
+  const numberSeries = series
+    .filter((cells) => cells.filter(isChartNumber).length >= 2 && !(hasAmounts && looksLikeAxisLabels(cells)))
+    .map((cells) => cells.map((cell) => (isChartNumber(cell) ? cell.value : 0)));
+  const skippedRows = filledRows.length - rows.length;
+  const isYear = (cell: ChartCellRole | null) => isChartNumber(cell) && Number.isInteger(cell.value) && cell.value > 1800 && cell.value < 2200;
+  const isTableShaped =
     columnCount <= CHART_OFFER_MAX_COLUMNS &&
     rows.length > 1 &&
     skippedRows <= 1 &&
     (filledRows[0] ?? []).some(isChartNumber) === (skippedRows === 0) &&
     hasLabelColumn === ((rows[0]?.length ?? 0) > 1 && (!firstColumn.some(isChartNumber) || firstColumn.every(isYear))) &&
     !(hasLabelColumn && firstColumn.includes(null)) &&
-    series.filter((input?: Dynamic) => input.some(isChartNumber)).length === numberSeries.length;
-  let pointCount = numberSeries[0]?.length ?? 0;
-  let allNumbers = numberSeries.flat();
+    series.filter((cells) => cells.some(isChartNumber)).length === numberSeries.length;
+  const pointCount = numberSeries[0]?.length ?? 0;
+  const allNumbers = numberSeries.flat();
   if (pointCount === 0 || !Number.isFinite(sumOfNumbers(allNumbers.map(Math.abs)))) return [];
-  let positives = allNumbers.filter((input?: Dynamic) => input > 0);
-  let isAllPositive = allNumbers.every((input?: Dynamic) => input >= 0) && positives.length > 0;
-  let isOverTime = hasLabelColumn && firstColumn.some(isChartTimeOrYear);
-  let prefersLine = isOverTime || pointCount > LINE_CHART_MIN_POINTS;
-  let sourceArea = {
+  const positives = allNumbers.filter((number) => number > 0);
+  const isAllPositive = allNumbers.every((number) => number >= 0) && positives.length > 0;
+  const isOverTime = hasLabelColumn && firstColumn.some(isChartTimeOrYear);
+  const prefersLine = isOverTime || pointCount > LINE_CHART_MIN_POINTS;
+  const sourceArea = {
     ...area,
     rowCount: Math.min(rowCount, MAX_CHART_SOURCE_ROWS + 1),
   };
-  let shownArea = rowCount > grid.length ? reads.areaOnShowIn(sheetId, sourceArea) : null;
-  let rowsBeyond = shownArea === null ? 0 : Math.max(0, shownArea.topRowIndex + shownArea.rowCount - topRowIndex - grid.length);
-  let isBarOffered = pointCount + rowsBeyond <= BAR_CHART_MAX_POINTS;
-  let isForPage = isTableShaped && grid.length + rowsBeyond <= MAX_CHART_SOURCE_ROWS;
-  let isCycle = isRepeatingCycle(firstColumn.map((input?: Dynamic) => input?.value)) && series.length === numberSeries.length;
-  let isLabelsRepeated = hasLabelColumn && hasRepeatedLabels(firstColumn) && !isCycle;
-  let isTooBigForPage =
+  const shownArea = rowCount > grid.length ? reads.areaOnShowIn(sheetId, sourceArea) : null;
+  const rowsBeyond = shownArea === null ? 0 : Math.max(0, shownArea.topRowIndex + shownArea.rowCount - topRowIndex - grid.length);
+  const isBarOffered = pointCount + rowsBeyond <= BAR_CHART_MAX_POINTS;
+  const isForPage = isTableShaped && grid.length + rowsBeyond <= MAX_CHART_SOURCE_ROWS;
+  const isCycle = isRepeatingCycle(firstColumn.map((cell) => cell?.value)) && series.length === numberSeries.length;
+  const isLabelsRepeated = hasLabelColumn && hasRepeatedLabels(firstColumn) && !isCycle;
+  const isTooBigForPage =
     !isOverTime &&
     (hasLabelColumn ? 1 : 0) +
-      series.filter((input?: Dynamic) => input.some((input2?: Dynamic) => input2 !== null && input2.value !== '')).length >
+      series.filter((cells) => cells.some((cell) => cell !== null && cell.value !== '')).length >
       1 &&
     pointCount + rowsBeyond > LEFT_TO_AGENT_MIN_POINTS;
-  let isBestLeftToAgent = isLabelsRepeated || isTooBigForPage;
+  const isBestLeftToAgent = isLabelsRepeated || isTooBigForPage;
   // Numbers in the first column that are amounts, not labels, with more numbers beside them: points of a scatter.
-  let isScatterShaped =
+  const isScatterShaped =
     !hasLabelColumn && rows.length > 2 && firstColumn.every(isChartAmount) && numberSeries.length > 1 && series[0] !== undefined;
   // Labels too long to sit under bars read better down the side of a horizontal bar chart.
-  let hasLongLabels =
-    hasLabelColumn && firstColumn.some((cell?: Dynamic) => cell?.is === 'text' && String(cell.value).length > LONG_LABEL_LENGTH);
-  return [
-    isScatterShaped && 'scatter',
-    prefersLine && 'line',
-    isBarOffered && hasLongLabels && 'horizontalBar',
-    isBarOffered && 'bar',
-    !prefersLine && 'line',
-    // A stack adds up its series; with numbers down the first column, that column would be stacked as one of them.
-    isBarOffered && !isScatterShaped && numberSeries.length > 1 && isAllPositive && 'stackedBar',
-    numberSeries.length === 1 && isAllPositive && pointCount <= PIE_MAX_SLICES && positives.length > 1 && 'pie',
-    isOverTime && isAllPositive && 'area',
-    isBarOffered && !hasLongLabels && 'horizontalBar',
-  ]
-    .flatMap((input?: Dynamic) => (input === false ? [] : [input]))
+  const hasLongLabels =
+    hasLabelColumn && firstColumn.some((cell) => cell?.is === 'text' && String(cell.value).length > LONG_LABEL_LENGTH);
+  return (
+    [
+      isScatterShaped && 'scatter',
+      prefersLine && 'line',
+      isBarOffered && hasLongLabels && 'horizontalBar',
+      isBarOffered && 'bar',
+      !prefersLine && 'line',
+      // A stack adds up its series; with numbers down the first column, that column would be stacked as one of them.
+      isBarOffered && !isScatterShaped && numberSeries.length > 1 && isAllPositive && 'stackedBar',
+      numberSeries.length === 1 && isAllPositive && pointCount <= PIE_MAX_SLICES && positives.length > 1 && 'pie',
+      isOverTime && isAllPositive && 'area',
+      isBarOffered && !hasLongLabels && 'horizontalBar',
+    ] satisfies (StockKind | false)[]
+  )
+    .flatMap((kind) => (kind === false ? [] : [kind]))
     .slice(0, MAX_CHART_OFFERS)
     .map(
-      (kind?: Dynamic) => ({
-        kind: kind,
-        isForPage: isForPage,
-        isBestLeftToAgent: isBestLeftToAgent,
+      (kind) => ({
+        kind,
+        isForPage,
+        isBestLeftToAgent,
         series: numberSeries
           .slice(0, CHART_PREVIEW_SAMPLE_SIZES[kind].series)
-          .map((input?: Dynamic) => sampleChartPointsEvenly(input, CHART_PREVIEW_SAMPLE_SIZES[kind].points)),
+          .map((points) => sampleChartPointsEvenly(points, CHART_PREVIEW_SAMPLE_SIZES[kind].points)),
       }),
     );
 }
 export const INSERT_CHART_LABEL = 'Insert chart';
-export const chartAskPayload = (chartKind?: Dynamic, request?: Dynamic) => ({
-  chartKind: chartKind,
+export const chartAskPayload = (chartKind: ChartKindOrAny, request: string) => ({
+  chartKind,
   ...(request !== '' && {
-    request: request,
+    request,
   }),
 });
 export const IS_CHART_OFFER_AT_SELECTION_ON = false;
 [CHART_OFFER_MAX_ROWS, CHART_OFFER_MAX_COLUMNS] = [100, 8];
 export const MAX_CHART_OFFERS = 4;
 export const LONG_LABEL_LENGTH = 12;
-export const CHART_PREVIEW_SAMPLE_SIZES = {
+export const CHART_PREVIEW_SAMPLE_SIZES: Readonly<Record<StockKind, { series: number; points: number }>> = {
   bar: {
     series: 2,
     points: 4,
@@ -208,15 +221,15 @@ export const CHART_PREVIEW_SAMPLE_SIZES = {
 };
 export const LINE_CHART_MIN_POINTS = 8;
 export const LEFT_TO_AGENT_MIN_POINTS = 24;
-export const isChartNumber = (role?: Dynamic) => role?.is === 'amount' || role?.is === 'year';
-export const isChartAmount = (role?: Dynamic) => role?.is === 'amount';
-export const isChartTimeOrYear = (role?: Dynamic) => role?.is === 'time' || role?.is === 'year';
-export const sumOfNumbers = (numbers?: Dynamic) =>
-  numbers.reduce((total?: Dynamic, number?: Dynamic) => total + number, 0);
-export const isChartMadeByPage = (offer?: Dynamic, canLeaveToAgent?: Dynamic) =>
+export const isChartNumber = (role: ChartCellRole | null): role is ChartNumberCell => role?.is === 'amount' || role?.is === 'year';
+export const isChartAmount = (role: ChartCellRole | null): boolean => role?.is === 'amount';
+export const isChartTimeOrYear = (role: ChartCellRole | null): boolean => role?.is === 'time' || role?.is === 'year';
+export const sumOfNumbers = (numbers: readonly number[]) =>
+  numbers.reduce((total, number) => total + number, 0);
+export const isChartMadeByPage = (offer: ChartOnOffer | undefined, canLeaveToAgent: boolean): boolean =>
   offer?.isForPage === true && !(offer.isBestLeftToAgent && canLeaveToAgent);
-export const NO_CHART_OFFERS: Dynamic = [];
-export const chartOffersForPage = (offers?: Dynamic, canLeaveToAgent?: Dynamic) =>
+export const NO_CHART_OFFERS: readonly never[] = [];
+export const chartOffersForPage = <Offer extends ChartOnOffer>(offers: readonly Offer[], canLeaveToAgent: boolean): readonly Offer[] =>
   isChartMadeByPage(offers[0], canLeaveToAgent) ? offers : NO_CHART_OFFERS;
-export const chartOfferAtSelection = (offers?: Dynamic, isOn: Dynamic = IS_CHART_OFFER_AT_SELECTION_ON) =>
+export const chartOfferAtSelection = <Offer extends ChartOnOffer>(offers: readonly Offer[], isOn: boolean = IS_CHART_OFFER_AT_SELECTION_ON): Offer | undefined =>
   isOn ? offers[0] : undefined;

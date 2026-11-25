@@ -1,0 +1,13 @@
+# What the editor writes into an artifact folder while it runs
+_agent/
+history/
+.artifact*
+.sharing.json
+*.tmp
+# the editor's own .gitignore, written again on every open
+/*/*/.gitignore
+# the test home page's daemon (home.mjs)
+/.home/
+# Browser reports and test notes written while using the Data fixtures
+/data/*/db/data/users/
+/data/saved-rows/db/data/team/notes/

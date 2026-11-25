@@ -6,13 +6,13 @@ export function watchAnotherRangeKey(ownWindow: Window): () => void {
     signal: controller.signal,
     capture: true,
   };
-  let onPointerMove = ({ metaKey: metaKey, ctrlKey: ctrlKey }: PointerEvent) => {
+  let onPointerMove = ({ metaKey, ctrlKey }: PointerEvent) => {
     documentElement.toggleAttribute(MAKES_ROOM_FOR_ANOTHER_RANGE_ATTRIBUTE, metaKey || (ctrlKey && !IS_APPLE_PLATFORM));
   };
   ownWindow.addEventListener('pointermove', onPointerMove, listenerOptions);
   ownWindow.addEventListener(
     'keyup',
-    ({ key: key }: KeyboardEvent) => {
+    ({ key }: KeyboardEvent) => {
       if (key === 'Meta' || key === 'Control') documentElement.removeAttribute(MAKES_ROOM_FOR_ANOTHER_RANGE_ATTRIBUTE);
     },
     listenerOptions,

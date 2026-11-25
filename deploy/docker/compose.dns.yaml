@@ -1,0 +1,18 @@
+# One wildcard certificate for the content hosts by DNS-01, instead of one certificate per content host on demand.
+# Use it on top of compose.yaml:  COMPOSE_FILE=compose.yaml:compose.dns.yaml  (in .env)
+#
+# Caddy needs a plugin for your DNS provider, so this builds a Caddy with it (caddy/Dockerfile; Cloudflare by default,
+# set CADDY_DNS_MODULE for another) and uses Caddyfile.dns. The token goes in .env (CLOUDFLARE_API_TOKEN), never in a
+# file you commit.
+
+services:
+  caddy:
+    build:
+      context: caddy
+      args:
+        CADDY_DNS_MODULE: ${CADDY_DNS_MODULE:-github.com/caddy-dns/cloudflare@v0.2.4}
+    image: open-artifact-caddy-dns:local
+    environment:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env (or change Caddyfile.dns for your provider)}
+    volumes:
+      - ./Caddyfile.dns:/etc/caddy/Caddyfile:ro

@@ -1,56 +1,79 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SheetController } from '../state/controller.ts';
+import type { PageView } from '../view/page-view.ts';
 import * as React from 'react';
-export function createPressGuardAfterViewMove(now?: Dynamic) {
-  let viewMovedAtMs: Dynamic = null;
-  let swallowedPress: Dynamic = null;
-  let wasPressSwallowed: Dynamic = false;
-  let isSoonAfter = (atMs?: Dynamic) => atMs !== null && now() - atMs < PRESS_AFTER_VIEW_MOVE_MS;
-  let isPressSettling = () => swallowedPress !== null && now() - swallowedPress.atMs < SWALLOWED_PRESS_SETTLE_MS;
+/** Swallows a press that lands just after the view moved by itself, when it was most likely aimed at what was there before. */
+export interface PressGuardAfterViewMove {
+  viewMovedByItself(): void;
+  /** Notes a press going down, and tells whether it is swallowed. */
+  isPressSwallowed(isPressing: boolean, isOfFinger: boolean): boolean;
+  isRestOfPressSwallowed(): boolean;
+  isClickSwallowed(isPartOfPress: boolean): boolean;
+  isDoubleClickSwallowed(): boolean;
+  isMenuSwallowed(): boolean;
+}
+interface SwallowedPress {
+  atMs: number;
+  isSoonAfterMove: boolean;
+  isOfFinger: boolean;
+}
+export function createPressGuardAfterViewMove(now: () => number): PressGuardAfterViewMove {
+  let viewMovedAtMs: number | null = null;
+  let swallowedPress: SwallowedPress | null = null;
+  let wasPressSwallowed = false;
+  const isSoonAfter = (atMs: number | null) => atMs !== null && now() - atMs < PRESS_AFTER_VIEW_MOVE_MS;
+  const isPressSettling = () => swallowedPress !== null && now() - swallowedPress.atMs < SWALLOWED_PRESS_SETTLE_MS;
   return {
     viewMovedByItself: () => void (viewMovedAtMs = now()),
-    isPressSwallowed(isPressing?: Dynamic, isOfFinger?: Dynamic) {
-      let isSoonAfterMove = isSoonAfter(viewMovedAtMs);
-      let isSoonAfterSwallowed = swallowedPress !== null && swallowedPress.isSoonAfterMove && isSoonAfter(swallowedPress.atMs);
+    isPressSwallowed(isPressing: boolean, isOfFinger: boolean) {
+      const isSoonAfterMove = isSoonAfter(viewMovedAtMs);
+      const isSoonAfterSwallowed = swallowedPress !== null && swallowedPress.isSoonAfterMove && isSoonAfter(swallowedPress.atMs);
       wasPressSwallowed = swallowedPress !== null;
       swallowedPress =
         isPressing && (isSoonAfterMove || isSoonAfterSwallowed)
           ? {
               atMs: now(),
-              isSoonAfterMove: isSoonAfterMove,
-              isOfFinger: isOfFinger,
+              isSoonAfterMove,
+              isOfFinger,
             }
           : null;
       return swallowedPress !== null;
     },
     isRestOfPressSwallowed: () => swallowedPress !== null,
-    isClickSwallowed: (isPartOfPress?: Dynamic) =>
+    isClickSwallowed: (isPartOfPress: boolean) =>
       swallowedPress !== null && (isPartOfPress || (swallowedPress.isOfFinger && isPressSettling())),
     isDoubleClickSwallowed: () => swallowedPress !== null || wasPressSwallowed,
     isMenuSwallowed: isPressSettling,
   };
 }
-export function watchViewMovesByItself(store?: Dynamic, pressGuard?: Dynamic) {
-  let wasGliding: Dynamic = false;
+export function watchViewMovesByItself(
+  store: Pick<SheetController, 'subscribe' | 'getView'>,
+  pressGuard: Pick<PressGuardAfterViewMove, 'viewMovedByItself'>,
+) {
+  let wasGliding = false;
   return store.subscribe(() => {
-    let { grid: grid, isFollowingAgent: isFollowingAgent, isFollowingPerson: isFollowingPerson } = store.getView();
-    let isGliding = grid.yetToGlide !== null;
+    const { grid, isFollowingAgent, isFollowingPerson } = store.getView();
+    const isGliding = grid.yetToGlide !== null;
     if (isGliding || (wasGliding && (isFollowingAgent || isFollowingPerson))) pressGuard.viewMovedByItself();
     wasGliding = isGliding;
   });
 }
-export function usePressGuardAfterViewMove(store?: Dynamic, movesOfViewByItself?: Dynamic, gridRef?: Dynamic) {
-  let [pressGuard] = React.useState(() => createPressGuardAfterViewMove(() => performance.now()));
+export function usePressGuardAfterViewMove(
+  store: Pick<SheetController, 'subscribe' | 'getView'>,
+  movesOfViewByItself: PageView['movesOfViewByItself'],
+  gridRef: React.RefObject<HTMLElement | null>,
+) {
+  const [pressGuard] = React.useState(() => createPressGuardAfterViewMove(() => performance.now()));
   React.useEffect(() => watchViewMovesByItself(store, pressGuard), [store, pressGuard]);
   React.useLayoutEffect(() => {
     if (movesOfViewByItself === 0) return;
     pressGuard.viewMovedByItself();
-    let ownWindow = gridRef.current?.ownerDocument.defaultView ?? null;
+    const ownWindow = gridRef.current?.ownerDocument.defaultView ?? null;
     if (ownWindow === null) return;
-    let noteFollowing = () => {
-      let { isFollowingAgent: isFollowingAgent, isFollowingPerson: isFollowingPerson } = store.getView();
+    const noteFollowing = () => {
+      const { isFollowingAgent, isFollowingPerson } = store.getView();
       if (isFollowingAgent || isFollowingPerson) pressGuard.viewMovedByItself();
     };
-    let frame: Dynamic = ownWindow.requestAnimationFrame(() => {
+    let frame = ownWindow.requestAnimationFrame(() => {
       noteFollowing();
       frame = ownWindow.requestAnimationFrame(noteFollowing);
     });

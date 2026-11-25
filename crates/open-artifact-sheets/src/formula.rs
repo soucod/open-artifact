@@ -6,6 +6,7 @@
 //! now (`formulaText`). Everything between the references (function names, operators, literals) stays as typed.
 
 pub mod parse;
+pub(crate) mod pivot;
 
 use serde::{Deserialize, Serialize};
 

@@ -31,7 +31,7 @@ export function positionAfterKeyMove(
   view: LayoutView,
   book: ReadsWithTextMeasurer,
   cellId: CellId,
-  { rowDelta: rowDelta, columnDelta: columnDelta }: KeyMove,
+  { rowDelta, columnDelta }: KeyMove,
   isExtending: boolean,
 ): CellPosition {
   let position = shownPositionInMerge(
@@ -51,8 +51,8 @@ export function positionAfterKeyMove(
     columnIndex: Math.max(0, Math.min(columnOrigin + columnDelta, layout.columnCount - 1)),
   };
   let skipped = skipHiddenLines(layout, target, {
-    rowDelta: rowDelta,
-    columnDelta: columnDelta,
+    rowDelta,
+    columnDelta,
   });
   if (!isExtending) return skipped;
   return {
@@ -82,7 +82,7 @@ export function extendSelectionByKey(view: PageState, book: ReadsWithTextMeasure
     let area = selectedArea(
       {
         ...view,
-        selectionCorner: selectionCorner,
+        selectionCorner,
       },
       book,
     );
@@ -94,7 +94,7 @@ export function extendSelectionByKey(view: PageState, book: ReadsWithTextMeasure
       return scrollAfterExtendingSelection(
         {
           ...view,
-          selectionCorner: selectionCorner,
+          selectionCorner,
         },
         book,
         target,
@@ -129,14 +129,14 @@ export function sharedFormatOfSelection(view: PageState, book: WorkbookReads): S
   return book.sharedFormatBetween(selection.activeCell, isSelectionOneCell(view, book) ? selection.activeCell : selection.selectionCorner);
 }
 export function selectAllCells(view: PageState, book: ReadsWithTextMeasurer): PageState {
-  let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(view, book);
+  let { rowCount, columnCount } = layoutOfView(view, book);
   return {
     ...view,
     ...selectionOfArea(view, book, {
       topRowIndex: 0,
       leftColumnIndex: 0,
-      rowCount: rowCount,
-      columnCount: columnCount,
+      rowCount,
+      columnCount,
     }),
   };
 }
@@ -145,7 +145,7 @@ export function selectWholeLines(view: PageState, book: ReadsWithTextMeasurer, w
   let corner = book.positionOfCell(view.selectionCorner);
   let area = selectedArea(view, book);
   if (active === null || corner === null || area === null) return view;
-  let { rowCount: rowCount, columnCount: columnCount, rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(view, book);
+  let { rowCount, columnCount, rowEdges, columnEdges } = layoutOfView(view, book);
   let firstRow = shownLineAtOrAfter(rowEdges, area.topRowIndex);
   let firstColumn = shownLineAtOrAfter(columnEdges, area.leftColumnIndex);
   let [lastRow, lastColumn] = [
@@ -182,12 +182,12 @@ export function selectWholeLines(view: PageState, book: ReadsWithTextMeasurer, w
 export const stepOriginInMerge = (delta: number, first: number, count: number, index: number): number =>
   delta === 0 ? index : first + (delta > 0 ? count - 1 : 0);
 export const skipHiddenLines = (
-  { rowEdges: rowEdges, columnEdges: columnEdges, rowCount: rowCount, columnCount: columnCount }: Pick<
+  { rowEdges, columnEdges, rowCount, columnCount }: Pick<
     GridLayout,
     'rowEdges' | 'columnEdges' | 'rowCount' | 'columnCount'
   >,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition,
-  { rowDelta: rowDelta, columnDelta: columnDelta }: KeyMove,
+  { rowIndex, columnIndex }: CellPosition,
+  { rowDelta, columnDelta }: KeyMove,
 ): CellPosition => ({
   rowIndex: nearestShownLine(rowEdges, rowCount, rowIndex, rowDelta),
   columnIndex: nearestShownLine(columnEdges, columnCount, columnIndex, columnDelta),

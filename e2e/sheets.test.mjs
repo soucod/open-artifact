@@ -1,15 +1,20 @@
 // End-to-end tests of the sheets type: update and read on a folder with no server (a read there is refused, a
 // first update makes the Sheet), refusals as JSON on stderr, check, export to Excel and CSV, then open: the page shows the workbook, an
 // update sent while it is open reaches it at once, a chart made with batch is drawn in its frame, comments, and stop.
+// In the page as a person uses it: an interactive tab's controls, its defaults kept and brought back, and the keys in and
+// out of it; a link to cells and a walkthrough from the agent; a page opened again on an edited workbook, a copy, and a
+// value cleared from a drawn row; columns of a table dragged and undone; a pivot table and its aggregate; saved views,
+// kept over a reload, updated after their sort was left out; and undo of a sort of one's own.
 //
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { until } from './lib/http.mjs';
+import { expectStatus, postJson, until } from './lib/http.mjs';
 import { after, before, describe, it } from 'node:test';
 import { launch } from './lib/browser.mjs';
 import { cli } from './lib/cli.mjs';
+import { textIn } from './lib/editor.mjs';
 import { browserOff, install, removeTmp, tmpDir, typePath } from './lib/target.mjs';
 
 const T = { timeout: 90000 };
@@ -18,7 +23,7 @@ const TYPE = 'sheets';
 function skip() {
   const dir = typePath(TYPE);
   if (!fs.existsSync(path.join(dir, 'SKILL.md'))) return `${TYPE} is not in ${dir}`;
-  const missing = ['scripts/cli.mjs', 'scripts/sheets.wasm', 'scripts/editors/sheets/index.html', 'scripts/editors/sheets/assets/chart-frame.txt'].filter(f => !fs.existsSync(path.join(dir, f)));
+  const missing = ['scripts/cli.mjs', 'scripts/sheets.wasm', 'scripts/editors/sheets/index.html', 'scripts/editors/sheets/assets/chart-frame.txt', 'scripts/editors/sheets/assets/interactive-frame.txt'].filter(f => !fs.existsSync(path.join(dir, f)));
   return missing.length ? `${TYPE} is not built (npm run build): no ${missing.join(', ')}` : false;
 }
 
@@ -70,6 +75,31 @@ describe(TYPE, { skip: skip() }, () => {
     const cells = await ctx.cli.json(['read', ctx.root, JSON.stringify({ kind: 'readCells', sheet: 'Budget', range: 'A1:B4' })]);
     assert.deepEqual(cells.rows['2'], ['Rent', 1200]);
     assert.deepEqual(cells.rows['4'], ['Total', { formula: '=SUM(B2:B3)', value: 1500 }]);
+  });
+
+  // JimLiu/open-artifact#17: the page shows a formula with many words of its own to the person before pasting it
+  // (toBeShownFirst, and more than 50 such texts refuse); an agent's writeCells shows nothing first.
+  it('writeCells takes formulas with many words of their own, in any script, and more than 50 of them at once', T, async () => {
+    const root = path.join(tmpDir('sheets-long-texts'), 'orders');
+    fs.mkdirSync(root, { recursive: true });
+    const summary = '="数据区间 "&TEXT(MIN(A:A),"yyyy-mm-dd")&" 至 "&TEXT(MAX(A:A),"yyyy-mm-dd")&" · 共 "&C1&" 笔订单"';
+    const cjk = '=IF(C1>=40,"高毛利核心产品线","常规需优化产品线")';
+    const ascii = '=IF(C1>=40,"a high margin core product line","a regular line to optimize")';
+    const many = Array.from({ length: 60 }, (_, i) => [`=IF(C1>=40,"第${i + 1}组高毛利核心产品线","常规需优化产品线")`]);
+    const out = await ctx.cli.run(['update', root, edits(1, [
+      { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: [[{ date: '2026-01-05' }, summary, 42], [{ date: '2026-03-31' }, cjk, null], [null, ascii, null]] },
+      { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'E1', rows: many },
+    ])]);
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(JSON.parse(out.stdout).revision, 2);
+    const cells = await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readCells', sheet: 'Sheet1', range: 'B1:B3' })]);
+    assert.deepEqual(cells.rows, {
+      1: [{ formula: summary, value: '数据区间 2026-01-05 至 2026-03-31 · 共 42 笔订单' }],
+      2: [{ formula: cjk, value: '高毛利核心产品线' }],
+      3: [{ formula: ascii, value: 'a high margin core product line' }],
+    });
+    const last = await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readCells', sheet: 'Sheet1', range: 'E60' })]);
+    assert.deepEqual(last.rows, { 60: [{ formula: many[59][0], value: '第60组高毛利核心产品线' }] });
   });
 
   it('formats go in and read back as formatCells takes them', T, async () => {
@@ -360,6 +390,411 @@ describe(TYPE, { skip: skip() }, () => {
         if (original === undefined) delete process.env[key];
         else process.env[key] = original;
       }
+    }
+  });
+
+  // The cases below drive the page as a person does. `open` serves the Shell, and the sheet page runs in its frame.
+  const SHELL = "document.querySelector('iframe[name=open-artifact-shell]')";
+  /** Statements run in the tab, with `shell` the Shell's frame and `document` the sheet page's own. */
+  const inShellFrame = body => `((shell) => ((document) => { ${body} })(shell?.contentDocument))(${SHELL})`;
+  /** `expression`, asked of the sheet page alone: the Shell around it has no cells, so a check that something is gone needs it. */
+  const onGrid = expression => `(document.querySelector('[role=grid]') !== null && (${expression}))`;
+  const cellWith = text => `[...document.querySelectorAll('[role=gridcell]')].find(cell => cell.textContent === ${JSON.stringify(text)})`;
+  const tabNamed = name => `[...document.querySelectorAll('[role=tab]')].find(tab => tab.textContent.includes(${JSON.stringify(name)}))`;
+  const menuItem = label => `[...document.querySelectorAll('[role^=menuitem]')].find(item => item.textContent.trim() === ${JSON.stringify(label)})`;
+  const VIEWS_BUTTON = "[...document.querySelectorAll('button')].find(b => (b.getAttribute('aria-label') ?? b.textContent.trim()).startsWith('Views'))";
+  const commandKey = process.platform === 'darwin' ? { meta: true } : { ctrl: true };
+  const SALES = [['City', 'Amount'], ['Leeds', 10], ['Leeds', 25], ['York', 30], ['Bath', 20]];
+  const linesOf = root => fs.readFileSync(path.join(root, 'sheet', 'edits.jsonl'), 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+  const opsOf = root => linesOf(root).flatMap(line => line.ops);
+  /** The table of a Sheet's one sheet, as the log has it: {sheetId, cellTableId, cellTable}. */
+  const tableOf = root => {
+    const { sheetId, cellTables: [table] } = opsOf(root).findLast(op => op.kind === 'setCellTables');
+    return { sheetId, ...table };
+  };
+
+  const openSheet = async (url, ready = "document.querySelector('[role=gridcell]')") =>
+    (await (ctx.browserPromise ??= launch())).load(url, { ready, settle: 500, ignore: [/\/favicon\.ico$/] });
+
+  /** Click `element` (an expression on the sheet page) with the real mouse, once it holds still and nothing covers it. */
+  async function clickOnSheet(page, element, { right = false, shift = false } = {}) {
+    let at = null;
+    const steady = async () => {
+      const was = at;
+      at = await page.evaluate(inShellFrame(`
+        const el = document && (${element});
+        const r = el?.getBoundingClientRect();
+        if (!r?.width) return null;
+        const x = r.x + r.width / 2, y = r.y + r.height / 2, hit = document.elementFromPoint(x, y);
+        if (!hit || !(hit === el || el.contains(hit))) return null;
+        const offset = shell.getBoundingClientRect();
+        return [offset.x + x, offset.y + y];`));
+      return at && was && at[0] === was[0] && at[1] === was[1];
+    };
+    assert.ok(await until(steady, 10000), `nothing to click: ${element}`);
+    if (right) await page.rightClick(...at);
+    else await page.click(...at, { shift });
+  }
+
+  /** Pick a saved view from the Filter card of the table, as its list of saved views offers it. */
+  async function pickView(page, name) {
+    await clickOnSheet(page, cellWith('Leeds'), { right: true });
+    await clickOnSheet(page, menuItem('Filter'));
+    await clickOnSheet(page, `[...document.querySelectorAll('[role=option]')].find(option => option.textContent.trim() === ${JSON.stringify(name)})`);
+  }
+
+  /**
+   * Save views of the table on `root`'s sheet the way a page does once a person has saved them: one edit of the page's
+   * own, sent to the server. No call of the agent's makes a view. Returns the revision it made.
+   */
+  async function saveViews(root, url, views) {
+    const { revision, newestFormatVersion: v } = await expectStatus(await postJson(new URL('_api/sheet/read', url).href, { kind: 'snapshot' }), 200);
+    const { sheetId, cellTableId } = tableOf(root);
+    const namedViews = views.map((namedView, n) => ({ namedViewId: `nvw_testviewsa.${n}`, namedView: { cellTableId, ...namedView } }));
+    const response = await postJson(new URL('_api/sheet/send', url).href, { opId: `views-${revision}`, v, base: revision, ops: [{ kind: 'setNamedViews', sheetId, namedViews }] });
+    const answer = await expectStatus(response, 200);
+    assert.equal(answer.kind, 'saved', JSON.stringify(answer));
+    return answer.revision;
+  }
+
+  it('an interactive tab writes its cells from its controls, and keeps or brings back their defaults', { ...T, skip: browserOff }, async () => {
+    const dir = tmpDir('sheets-interactive');
+    const root = path.join(dir, 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    const { revision } = await ctx.cli.json(['update', root, edits(1, [
+      { kind: 'renameSheet', sheet: 'Sheet1', name: 'Inputs' },
+      { kind: 'writeCells', sheet: 'Inputs', topLeft: 'A1', rows: [[7]] },
+      { kind: 'addSheet', name: 'Panel' },
+    ])]);
+    // `presses` counts every click the button hears, so a click the page refuses to write still shows.
+    fs.writeFileSync(path.join(dir, 'stepper.jsx'), `export default () => <sheet.Visualize data-component='stepper' sources={{count:{kind:'ref', ref:'input/count', adapter:{kind:'cells'}}, interactive:{kind:'data', data:[]}}}>{({count, interactive}) => {
+      const panel = interactive.at(0);
+      const held = count.at(0)?.at(0)?.value;
+      const n = typeof held === 'number' ? held : 0;
+      const [presses, setPresses] = useState(0);
+      return <div role='group' aria-label='Stepper'><button id='step' data-presses={presses} disabled={panel?.canWrite !== true} onClick={() => { setPresses(presses + 1); panel.setCells({count: n + 1}); }}>Count {n}</button></div>;
+    }}</sheet.Visualize>;`);
+    const inputs = [{ name: 'count', cells: { sheet: 'Inputs', range: 'A1' } }];
+    const calls = path.join(dir, 'stepper.json');
+    fs.writeFileSync(calls, JSON.stringify([
+      { $lid: 'w', verb: 'create', payload: { codeFile: 'stepper.jsx' } },
+      { verb: 'update', payload: { kind: 'applyEdits', base: revision, edits: [{ kind: 'addInteractive', interactive: { sheet: 'Panel', name: 'Stepper', caption: '', widget: '$lid:w', inputs, writable: ['count'] } }] } },
+    ]));
+    const made = await ctx.cli.json(['batch', root, calls]);
+    assert.equal(made.acks[1].data.revision, revision + 1, JSON.stringify(made));
+    const { interactive } = await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readInteractive', sheet: 'Panel' })]);
+    assert.deepEqual([interactive.widget, interactive.inputs, interactive.writable], [made.lids.w, inputs, ['count']]);
+
+    const page = await openSheet(opened.url, tabNamed('Panel'));
+    const countIs = async () => (await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readCells', sheet: 'Inputs', range: 'A1' })])).rows['1']?.[0];
+    const step = "document.querySelector('#step')";
+    const shows = n => `${step}?.textContent === 'Count ${n}'`;
+    const footButton = label => `Array.from(document.querySelectorAll('[data-stands=footBar] button')).find(button => button.textContent.trim() === ${JSON.stringify(label)})`;
+    const panelTab = "document.querySelector('.sheet-interactive')";
+    const panelFrame = "document.querySelector('.sheet-interactive-frame')";
+    const pressStep = async () => {
+      const frame = await page.evaluate(inShellFrame(`
+        const a = shell.getBoundingClientRect(), b = (${panelFrame}).getBoundingClientRect();
+        return [a.x + b.x, a.y + b.y];`));
+      const button = (await page.evaluateAll(`(() => { const r = ${step}?.getBoundingClientRect(); return r?.width ? [r.x + r.width / 2, r.y + r.height / 2] : null; })()`)).find(Array.isArray);
+      assert.ok(button, 'the panel draws no button');
+      await page.click(frame[0] + button[0], frame[1] + button[1]);
+    };
+    const expectCount = async n => {
+      assert.ok(await page.waitFor(shows(n), 8000), `the panel does not show ${n}`);
+      assert.ok(await until(async () => (await countIs()) === n, 8000), `Inputs!A1 is not ${n}`);
+    };
+    try {
+      await clickOnSheet(page, tabNamed('Panel'));
+      assert.ok(await page.waitFor(panelFrame, 15000), 'the interactive tab shows no panel');
+      assert.ok(await page.waitFor(`${shows(7)} && !${step}.disabled`, 15000), 'the panel did not get its input');
+      // A click made by a script in the panel, with no person behind it, writes nothing.
+      await page.evaluateAll(`${step}?.click()`);
+      assert.ok(await page.waitFor(`${step}?.dataset.presses === '1' && ${shows(7)}`, 8000), 'a scripted click was not taken back');
+      assert.equal(await countIs(), 7);
+
+      await pressStep();
+      await expectCount(8);
+      await clickOnSheet(page, footButton('Save as default'));
+      assert.ok(await page.waitFor(`${footButton('Save as default')}?.disabled`, 8000), 'Save as default stayed on after saving');
+      await pressStep();
+      await expectCount(9);
+      await clickOnSheet(page, footButton('Reset'));
+      await expectCount(8);
+      assert.ok(await page.waitFor(`${footButton('Reset')}?.disabled`, 8000), 'Reset stayed on with the defaults back');
+
+      // Enter on the panel's tab hands the keys to the panel, and Escape takes them back.
+      await page.evaluate(inShellFrame(`${panelTab}.focus();`));
+      assert.ok(await page.waitFor(`document.activeElement === ${panelTab}`, 5000), 'the panel\'s tab did not take focus');
+      await page.press('Enter');
+      assert.ok(await page.waitFor(`document.activeElement === ${panelFrame}`, 5000), 'Enter did not go into the panel');
+      await page.press('Escape');
+      assert.ok(await page.waitFor(`document.activeElement === ${panelTab}`, 5000), 'Escape did not leave the panel');
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('a link to cells selects them without editing, and a walkthrough the agent sends steps through its stops', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-links'), 'book');
+    await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    await ctx.cli.json(['update', root, edits(1, [
+      { kind: 'addSheet', name: 'Summary' },
+      { kind: 'writeCells', sheet: 'Summary', topLeft: 'B10', rows: [['Profit', 420]] },
+    ])]);
+    const book = await ctx.cli.json(['read', root]);
+    const [sheet1, summary] = book.sheets;
+    const stops = [
+      { at: `#${summary.linkFragment}~B10-C10~E14`, say: 'The profit, worked out below.' },
+      { at: `#${sheet1.linkFragment}~A3`, say: 'The assumptions go here.' },
+    ];
+    const showGuide = () => ctx.cli.json(['read', root, JSON.stringify({ kind: 'showGuide', guide: { stops } })]);
+    assert.deepEqual(await showGuide(), { shown: false }, 'a walkthrough with no page open was shown');
+    const page = await openSheet(book.frame.artifactUrl + stops[0].at);
+    const marked = "document.querySelectorAll('.sheet-cells-lit-by-link')";
+    const tabOnShow = "document.querySelector('[role=tab][aria-selected=true]')?.textContent";
+    const guide = "document.querySelector('[data-guide-card]')";
+    const guideButton = label => `[...(${guide}?.querySelectorAll('button') ?? [])].find(b => b.textContent.trim() === ${JSON.stringify(label)})`;
+    try {
+      assert.ok(await page.waitFor(`${tabOnShow}?.includes('Summary') && ${marked}.length === 2`, 15000), 'the link did not mark its two ranges on Summary');
+      assert.ok(await page.waitFor(`${formulaBar}?.value === 'Profit'`, 5000), 'the link did not select B10');
+      assert.ok(await page.waitFor(`(() => {
+        const r = ${cellWith('Profit')}?.getBoundingClientRect();
+        return r && [...${marked}].some(box => { const b = box.getBoundingClientRect(); return b.left <= r.x + 1 && b.right >= r.right - 1 && b.top <= r.y + 1 && b.bottom >= r.bottom - 1; });
+      })()`, 5000), 'no marked range covers B10');
+      // The keys go to the Shell until the person is in the sheet: a press on its own tab puts them there and leaves the
+      // marks (a press on a cell would select it, and clear them).
+      await clickOnSheet(page, tabNamed('Summary'));
+      assert.equal((await page.evaluateAll(onGrid(`${marked}.length`))).find(Number.isInteger), 2, 'a press on the tab on show cleared the marks');
+      await page.press('Escape');
+      assert.ok(await page.waitFor(onGrid(`${marked}.length === 0`), 5000), 'Escape did not clear the marks');
+
+      assert.deepEqual(await showGuide(), { shown: true });
+      assert.ok(await page.waitFor(`${guide}?.textContent.includes('The profit, worked out below.')`, 10000), 'the guide guide did not show its first stop');
+      // A stop that is not on screen yet offers to go to its cells first.
+      if ((await page.evaluateAll(`Boolean(${guideButton('Go to cells')})`)).includes(true)) await clickOnSheet(page, guideButton('Go to cells'));
+      await clickOnSheet(page, guideButton('Next'));
+      assert.ok(await page.waitFor(`${guide}?.textContent.includes('The assumptions go here.') && ${tabOnShow}?.includes('Sheet1')`, 10000), 'Next did not go to the stop on Sheet1');
+      await clickOnSheet(page, guideButton('Done'));
+      assert.ok(await page.waitFor(onGrid(`!${guide} && ${marked}.length === 0`), 5000), 'the guide guide or its marks stayed after Done');
+      assert.equal((await ctx.cli.json(['info', root, '--json'])).revision, book.revision, 'the link or the walkthrough edited the workbook');
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('a page opened again on an edited workbook shows it, copies a cell, and clears a value from a drawn row', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-reopen'), 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    const label = 'Groceries 🧺';
+    let { revision } = await ctx.cli.json(['update', root, edits(1, [{ kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: [[label, 5, '=B1+7']] }])]);
+    const rowOne = "Array.from(document.querySelectorAll('[role=gridcell]'), cell => cell.textContent).slice(0, 3)";
+    const shows = values => `JSON.stringify(${rowOne}) === ${JSON.stringify(JSON.stringify(values))}`;
+    const before = await openSheet(opened.url, shows([label, '5', '12']));
+    assert.deepEqual(before.problems, []);
+    await before.close();
+    ({ revision } = await ctx.cli.json(['update', root, edits(revision, [{ kind: 'writeCells', sheet: 'Sheet1', topLeft: 'B1', rows: [[6]] }])]));
+    const page = await openSheet(opened.url, shows([label, '6', '13']));
+    try {
+      assert.ok(await page.waitFor(shows([label, '6', '13']), 5000), 'the page opened again does not show the edit made while it was shut');
+      await clickOnSheet(page, cellWith(label));
+      assert.ok(await page.waitFor(`${formulaBar}?.value === ${JSON.stringify(label)}`, 5000), 'A1 is not selected');
+      // Keep what the page puts on the clipboard when the copy key is pressed; a headless browser has no clipboard to read.
+      await page.evaluateAll(`document.querySelector('[role=grid]') && window.addEventListener('copy', event => { window.__copiedText = event.clipboardData?.getData('text/plain'); })`);
+      await page.press('c', { ...commandKey, commands: ['copy'] });
+      assert.ok(await page.waitFor(`window.__copiedText === ${JSON.stringify(label)}`, 5000), `the copy key did not copy A1: ${JSON.stringify(await page.evaluateAll('window.__copiedText'))}`);
+      await ctx.cli.json(['update', root, edits(revision, [{ kind: 'writeCells', sheet: 'Sheet1', topLeft: 'B1', rows: [[null]] }])]);
+      assert.ok(await page.waitFor(shows([label, '', '7']), 10000), `B1 was not cleared on the page: ${JSON.stringify((await page.evaluateAll(rowOne)).find(Array.isArray))}`);
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('dragging columns of a table moves them, leaving cells outside the table in place, and undo puts them back', { ...T, skip: browserOff }, async () => {
+    const headings = ['First', 'Second', 'Third'];
+    const outside = ['Note A', 'Note B', 'Note C'];
+    for (const withCellsAbove of [true, false]) {
+      const root = path.join(tmpDir('sheets-column-drag'), 'book');
+      const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+      const { revision } = await ctx.cli.json(['update', root, edits(1, [
+        ...(withCellsAbove ? [{ kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: [outside] }] : []),
+        { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A3', rows: [headings, [1, 2, 3], [4, 5, 6]] },
+        { kind: 'setCellTable', sheet: 'Sheet1', cellTable: { columns: 'A:C', headerRows: '3', footerRows: null } },
+      ])]);
+      const columnGrips = "[...document.querySelectorAll('.sheet-grip-of-column')]";
+      const order = `[...document.querySelectorAll('[role=gridcell]')].map(cell => cell.textContent).filter(text => ${JSON.stringify(headings)}.includes(text))`;
+      const inOrder = names => `JSON.stringify(${order}) === ${JSON.stringify(JSON.stringify(names))}`;
+      const page = await openSheet(opened.url, `${inOrder(headings)} && ${columnGrips}.length === 3`);
+      try {
+        const [from, to] = await page.evaluate(inShellFrame(`
+          const at = shell.getBoundingClientRect(), grip = ${columnGrips}[0].getBoundingClientRect(), last = ${cellWith('Third')}.getBoundingClientRect();
+          return [[at.x + grip.x + grip.width / 2, at.y + grip.y + grip.height / 2], [at.x + last.right - 8, at.y + grip.y + grip.height / 2]];`));
+        await page.hover(...from);
+        assert.ok(await page.waitFor("document.querySelector('.sheet-grip-of-column[data-is-called]')", 5000), 'the grip of the first column did not show under the pointer');
+        await page.dragMouse(from, to);
+        assert.ok(await page.waitFor(inOrder(['Second', 'Third', 'First']), 10000), `the columns did not move: ${JSON.stringify((await page.evaluateAll(order)).find(Array.isArray))}`);
+        assert.ok(await until(async () => (await ctx.cli.json(['info', root, '--json'])).revision > revision, 10000), 'the move was not saved');
+        const lastOps = JSON.parse(fs.readFileSync(path.join(root, 'sheet', 'edits.jsonl'), 'utf8').trimEnd().split('\n').at(-1)).ops;
+        // With cells above the table, only the table's own cells move; with none, whole columns do.
+        assert.ok(lastOps.some(op => op.kind === (withCellsAbove ? 'setCells' : 'moveColumns')), JSON.stringify(lastOps.map(op => op.kind)));
+        const cells = await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readCells', sheet: 'Sheet1', range: 'A1:C3' })]);
+        assert.deepEqual(cells.rows['3'], ['Second', 'Third', 'First']);
+        if (withCellsAbove) assert.deepEqual(cells.rows['1'], outside);
+        await page.press('z', commandKey);
+        assert.ok(await page.waitFor(inOrder(headings), 10000), 'undo did not put the columns back');
+        assert.ok(await until(async () => (await ctx.cli.json(['read', root, JSON.stringify({ kind: 'readCells', sheet: 'Sheet1', range: 'A3:C3' })])).rows['3']?.join() === headings.join(), 10000), 'undo was not saved');
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    }
+  });
+
+  it('a pivot table made from selected data lands on a sheet named Pivot table and follows its aggregate', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-pivot'), 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    await ctx.cli.json(['update', root, edits(1, [{ kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: SALES }])]);
+    const page = await openSheet(opened.url, cellWith('City'));
+    try {
+      await clickOnSheet(page, cellWith('City'));
+      await clickOnSheet(page, cellWith('20'), { shift: true });
+      await clickOnSheet(page, cellWith('City'), { right: true });
+      await clickOnSheet(page, menuItem('Pivot table'));
+      const summarize = `document.querySelector('button[aria-label="Summarize by, Amount: Sum"]')`;
+      assert.ok(await page.waitFor(summarize, 10000), 'no pivot table pane came up with the sum');
+      assert.ok(await page.waitFor(cellWith('35'), 10000), 'the pivot table does not sum Leeds');
+      await clickOnSheet(page, summarize);
+      await clickOnSheet(page, `[...document.querySelectorAll('[role=menuitemradio], [role=menuitem], [role=option]')].find(el => el.textContent.trim().startsWith('Average'))`);
+      assert.ok(await page.waitFor(cellWith('17.5'), 10000), 'the pivot table does not show the average of Leeds');
+      assert.ok(await page.waitFor(`document.querySelector('button[aria-label="Summarize by, Amount: Average"]')`, 5000));
+      const { sheets } = await ctx.cli.json(['read', root]);
+      assert.deepEqual(sheets.map(sheet => sheet.name), ['Sheet1', 'Pivot table']);
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('a saved view is kept with the workbook, and picking it after a reload filters the rows again', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-views'), 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    await ctx.cli.json(['update', root, edits(1, [
+      { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: SALES },
+      { kind: 'setCellTable', sheet: 'Sheet1', cellTable: { columns: 'A:B', headerRows: '1', footerRows: null } },
+    ])]);
+    const viewsSaved = () => opsOf(root).filter(op => op.kind === 'setNamedViews');
+    let page = await openSheet(opened.url, cellWith('Leeds'));
+    try {
+      await clickOnSheet(page, cellWith('Leeds'), { right: true });
+      await clickOnSheet(page, menuItem('Show only Leeds'));
+      assert.ok(await page.waitFor(onGrid(`!${cellWith('York')}`), 5000), 'the filter did not leave York out');
+      await clickOnSheet(page, VIEWS_BUTTON);
+      await clickOnSheet(page, menuItem('Save as new view'));
+      assert.ok(await page.waitFor("document.activeElement?.closest('[role=dialog]')", 5000), 'the name of the new view has no field');
+      await page.type('Leeds alone');
+      await page.press('Enter');
+      assert.ok(await page.waitFor(`${VIEWS_BUTTON}?.getAttribute('aria-label') === 'Views: Leeds alone'`, 10000), 'the new view is not the one on show');
+      assert.ok(await until(() => viewsSaved().length === 1, 10000), 'the view was not saved to the workbook');
+      await clickOnSheet(page, "document.querySelector('[aria-label=\"Clear all filters\"]')");
+      assert.ok(await page.waitFor(cellWith('York'), 5000), 'clearing the filter did not bring York back');
+      await page.close();
+
+      page = await openSheet(opened.url, cellWith('Leeds'));
+      assert.ok(await page.waitFor(cellWith('York'), 5000), 'the filter that was cleared came back');
+      await pickView(page, 'Leeds alone');
+      assert.ok(await page.waitFor(onGrid(`!${cellWith('York')}`), 10000), 'the saved view did not filter the rows');
+      assert.ok(await page.waitFor(cellWith('Leeds'), 5000));
+      assert.equal(viewsSaved().length, 1, 'picking a view saved it again');
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('updating a saved view whose sort the page could not use keeps that sort', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-view-sort'), 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    const { revision } = await ctx.cli.json(['update', root, edits(1, [
+      { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: SALES },
+      { kind: 'setCellTable', sheet: 'Sheet1', cellTable: { columns: 'A:B', headerRows: '1', footerRows: null } },
+      // A merged range in the table's rows: the page can filter them, but not sort them.
+      { kind: 'mergeCells', sheet: 'Sheet1', ranges: ['D2:D3'] },
+    ])]);
+    const { cellTable } = tableOf(root);
+    const sortBy = [{ c: cellTable.lastColumn, direction: 'descending' }];
+    // The view filters too: one with a sort alone would not stay on once its sort is left out.
+    const filter = { allOf: [{ anyOf: [{ c: cellTable.firstColumn, asked: { kind: 'isOneOf', values: [{ kind: 'text', value: 'Leeds' }, { kind: 'text', value: 'York' }] } }] }] };
+    assert.equal(await saveViews(root, opened.url, [{ name: 'Largest first', filter, sortBy }]), revision + 1);
+    const views = () => opsOf(root).filter(op => op.kind === 'setNamedViews');
+    const amountsShown = `[...document.querySelectorAll('[role=gridcell]')].map(cell => cell.textContent).filter(text => /^(10|20|25|30)$/.test(text))`;
+    const amountsShownAre = list => `JSON.stringify(${amountsShown}) === ${JSON.stringify(JSON.stringify(list))}`;
+    let page = await openSheet(opened.url, cellWith('Leeds'));
+    try {
+      await pickView(page, 'Largest first');
+      assert.ok(await page.waitFor(textIn('but not its sort'), 5000), 'the page did not say it left the sort out');
+      assert.ok(await page.waitFor(amountsShownAre(['10', '25', '30']), 5000), `the rows are not filtered and unsorted: ${JSON.stringify((await page.evaluateAll(amountsShown)).find(Array.isArray))}`);
+      await clickOnSheet(page, cellWith('Leeds'), { right: true });
+      await clickOnSheet(page, menuItem('Show only Leeds'));
+      assert.ok(await page.waitFor(amountsShownAre(['10', '25']), 5000), 'the filter did not leave York out');
+      assert.ok(await page.waitFor(`/Largest first/.test(${VIEWS_BUTTON}?.getAttribute('aria-label') ?? '')`, 5000), 'the view went off when its filter changed');
+
+      const { revision: now } = await ctx.cli.json(['info', root, '--json']);
+      await ctx.cli.json(['update', root, edits(now, [
+        { kind: 'unmergeCells', sheet: 'Sheet1', ranges: ['D2:D3'] },
+        { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'D2', rows: [['Split']] },
+      ])]);
+      assert.ok(await page.waitFor(cellWith('Split'), 10000), 'the page did not get the unmerge');
+      assert.ok(await page.waitFor(amountsShownAre(['10', '25']), 5000), 'the unmerge changed the rows on show');
+      await clickOnSheet(page, VIEWS_BUTTON);
+      await clickOnSheet(page, menuItem('Update “Largest first”'));
+      assert.ok(await until(() => views().length === 2, 10000), 'the update of the view was not saved');
+      const updated = views().at(-1).namedViews[0].namedView;
+      assert.notDeepEqual(updated.filter, filter, 'the update did not take the filter on show');
+      assert.deepEqual(updated.sortBy, sortBy, 'the update dropped the sort the page had left out');
+
+      await clickOnSheet(page, "document.querySelector('[aria-label=\"Clear all filters\"]')");
+      await page.close();
+      page = await openSheet(opened.url, cellWith('Leeds'));
+      await pickView(page, 'Largest first');
+      assert.ok(await page.waitFor(amountsShownAre(['25', '10']), 10000), 'the updated view does not filter and sort');
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('undo after a sort of one\'s own brings back the sort before it and leaves the workbook as it was', { ...T, skip: browserOff }, async () => {
+    const root = path.join(tmpDir('sheets-undo-sort'), 'book');
+    const opened = await ctx.cli.json(['open', root, '--type', 'sheets', '--json']);
+    await ctx.cli.json(['update', root, edits(1, [
+      { kind: 'writeCells', sheet: 'Sheet1', topLeft: 'A1', rows: SALES },
+      { kind: 'setCellTable', sheet: 'Sheet1', cellTable: { columns: 'A:B', headerRows: '1', footerRows: null } },
+    ])]);
+    const { cellTable } = tableOf(root);
+    const revision = await saveViews(root, opened.url, [
+      { name: 'Cities Z to A', filter: null, sortBy: [{ c: cellTable.firstColumn, direction: 'descending' }] },
+      { name: 'Largest first', filter: null, sortBy: [{ c: cellTable.lastColumn, direction: 'ascending' }] },
+    ]);
+    const regions = `[...document.querySelectorAll('[role=gridcell]')].map(cell => cell.textContent).filter(text => /^(Leeds|York|Bath)$/.test(text))`;
+    const regionsAre = list => `JSON.stringify(${regions}) === ${JSON.stringify(JSON.stringify(list))}`;
+    const page = await openSheet(opened.url, cellWith('City'));
+    try {
+      await pickView(page, 'Cities Z to A');
+      assert.ok(await page.waitFor(regionsAre(['York', 'Leeds', 'Leeds', 'Bath']), 10000), 'the rows are not sorted by city');
+      await pickView(page, 'Largest first');
+      assert.ok(await page.waitFor(regionsAre(['Leeds', 'Bath', 'Leeds', 'York']), 10000), 'the rows are not sorted by amount');
+      await clickOnSheet(page, cellWith('City'));
+      await page.press('z', commandKey);
+      assert.ok(await page.waitFor(regionsAre(['York', 'Leeds', 'Leeds', 'Bath']), 10000), `undo did not bring back the sort by city: ${JSON.stringify((await page.evaluateAll(regions)).find(Array.isArray))}`);
+      // An edit the undo sent by mistake reaches the log a moment later, so watch it for a while.
+      const edited = await until(async () => (await ctx.cli.json(['info', root, '--json'])).revision !== revision, 1500, 250);
+      assert.ok(!edited, 'the sorts or the undo edited the workbook');
+      assert.deepEqual(page.problems, []);
+    } finally {
+      await page.close();
     }
   });
 

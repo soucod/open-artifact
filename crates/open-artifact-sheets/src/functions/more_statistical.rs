@@ -314,7 +314,6 @@ fn ranked_numbers(arg: &Arg) -> Result<Vec<f64>, CellError> {
         Arg::Value(_) => Ok(Vec::new()),
         Arg::Cells(cells) => Ok(cells
             .values()
-            .iter()
             .filter_map(|v| match v {
                 Value::Number(v) => Some(*v),
                 _ => None,
@@ -448,12 +447,11 @@ fn pairs(a: &Arg, b: &Arg) -> Result<Vec<(f64, f64)>, CellError> {
         return Err(CellError::Value);
     }
     for cells in [&a, &b] {
-        if let Some(e) = cells.values().iter().find_map(Value::error) {
+        if let Some(e) = cells.values().find_map(Value::error) {
             return Err(e);
         }
     }
     Ok(a.values()
-        .iter()
         .zip(b.values())
         .filter_map(|(x, y)| match (x, y) {
             (Value::Number(x), Value::Number(y)) => Some((*x, *y)),
@@ -612,7 +610,7 @@ fn count_unique(args: &[Arg]) -> Answer {
             Arg::Missing | Arg::Place(_) => return Err(CellError::Value),
             Arg::Value(Value::Error(e)) => return Err(*e),
             Arg::Value(v) => seen.extend(distinct(v)),
-            Arg::Cells(cells) => seen.extend(cells.values().iter().filter_map(distinct)),
+            Arg::Cells(cells) => seen.extend(cells.values().filter_map(distinct)),
         }
     }
     number(seen.len() as f64)
@@ -636,7 +634,7 @@ fn count_unique_ifs(args: &[Arg], locale: &Locale) -> Answer {
         }
     }
     let seen: HashSet<Distinct> =
-        cells.values().iter().zip(&matched).filter(|(_, m)| **m).filter_map(|(v, _)| distinct(v)).collect();
+        cells.values().zip(&matched).filter(|(_, m)| **m).filter_map(|(v, _)| distinct(v)).collect();
     number(seen.len() as f64)
 }
 

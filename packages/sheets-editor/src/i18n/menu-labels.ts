@@ -1,5 +1,6 @@
 import { AGENT_NAME } from '../agent/agent-name.ts';
-import type { Dynamic } from '../dynamic.ts';
+import type { LocalizedDropdownPreset } from './chip-labels.ts';
+import type { CellFormatChoiceName } from './format-labels.ts';
 import { translateMessage, MESSAGE_LOCALE } from './messages.ts';
 import { localizedDropdownPresets, localizeDropdownPreset } from './chip-labels.ts';
 import { dropdownPaneMessages, numberFormatChoiceLabel } from './format-labels.ts';
@@ -7,7 +8,29 @@ import { STATUS_OPTION_SET } from '../chips/dropdown-presets.ts';
 import { sheetMessages } from './sheet-messages.ts';
 import { isoDayOfDate } from '../chips/calendar.ts';
 import { truncateGraphemes, PERSON_NAME_IN_NOTICE_MAX_CHARACTERS } from './grid-action-labels.ts';
-export function atMenuSectionTitle(section?: Dynamic) {
+/** An offer of the @ menu to make cells a dropdown of a preset set of options. */
+export interface DropdownOfSetOffer {
+  kind: 'dropdownOfSet';
+  set: LocalizedDropdownPreset;
+  label: string;
+  /** Words besides the label that find the offer when searched for. */
+  alsoFoundBy: string;
+}
+/** An offer of the @ menu, besides the people it lists. */
+export type AtMenuOffer =
+  | AskAgentAtMenuOffer
+  | { kind: 'calendar'; label: string }
+  | { kind: 'day'; day: string; label: string }
+  | { kind: 'newDropdown'; set: LocalizedDropdownPreset; label: string }
+  | DropdownOfSetOffer
+  | { kind: 'several'; offers: DropdownOfSetOffer[]; label: string; spokenLabel: string }
+  | { kind: 'checkbox'; label: string };
+/** The offer of the @ menu to ask the agent. */
+export interface AskAgentAtMenuOffer {
+  kind: 'askAgent';
+  label: string;
+}
+export function atMenuSectionTitle(section: string): string | null | undefined {
   switch (section) {
     case 'agent':
       return null;
@@ -33,12 +56,12 @@ export function atMenuSectionTitle(section?: Dynamic) {
       });
   }
 }
-export function atMenuOffers(today2?: Dynamic, isAskAgentOffered: Dynamic = false) {
+export function atMenuOffers(today: Date, isAskAgentOffered: boolean = false): AtMenuOffer[] {
   let presetOffers = localizedDropdownPresets().map(
-    ({ label: label, set: set }: Dynamic) => ({
+    ({ label, set }): DropdownOfSetOffer => ({
       kind: 'dropdownOfSet',
-      set: set,
-      label: label,
+      set,
+      label,
       alsoFoundBy: dropdownPaneMessages.presets(),
     }),
   );
@@ -53,7 +76,7 @@ export function atMenuOffers(today2?: Dynamic, isAskAgentOffered: Dynamic = fals
     },
     {
       kind: 'day',
-      day: dayOffsetFrom(today2, 0),
+      day: dayOffsetFrom(today, 0),
       label: translateMessage({
         defaultMessage: 'Today’s date',
         id: 'eYlK1+Lopf',
@@ -61,7 +84,7 @@ export function atMenuOffers(today2?: Dynamic, isAskAgentOffered: Dynamic = fals
     },
     {
       kind: 'day',
-      day: dayOffsetFrom(today2, 1),
+      day: dayOffsetFrom(today, 1),
       label: translateMessage({
         defaultMessage: 'Tomorrow’s date',
         id: 'gfuloSQ26K',
@@ -69,7 +92,7 @@ export function atMenuOffers(today2?: Dynamic, isAskAgentOffered: Dynamic = fals
     },
     {
       kind: 'day',
-      day: dayOffsetFrom(today2, -1),
+      day: dayOffsetFrom(today, -1),
       label: translateMessage({
         defaultMessage: 'Yesterday’s date',
         id: 'KW4hqJrARz',
@@ -102,7 +125,7 @@ export function atMenuOffers(today2?: Dynamic, isAskAgentOffered: Dynamic = fals
     },
   ];
 }
-export function peopleOnSheetText(names?: Dynamic) {
+export function peopleOnSheetText(names: readonly string[]): string {
   let namedPeople = names.slice(0, MAX_PEOPLE_NAMED_ON_SHEET);
   let othersCount = names.length - namedPeople.length;
   if (othersCount === 0)
@@ -113,7 +136,7 @@ export function peopleOnSheetText(names?: Dynamic) {
       },
       {
         count: namedPeople.length,
-        people: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(namedPeople),
+        people: new Intl.ListFormat(MESSAGE_LOCALE).format(namedPeople),
       },
     );
   return translateMessage(
@@ -123,98 +146,98 @@ export function peopleOnSheetText(names?: Dynamic) {
     },
     {
       count: othersCount,
-      people: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE, {
+      people: new Intl.ListFormat(MESSAGE_LOCALE, {
         type: 'unit',
       }).format(namedPeople),
     },
   );
 }
-export const dayOffsetFrom = (date?: Dynamic, days?: Dynamic) =>
-  isoDayOfDate(new (Date as Dynamic)(date.getFullYear(), date.getMonth(), date.getDate() + days));
+export const dayOffsetFrom = (date: Date, days: number): string =>
+  isoDayOfDate(new Date(date.getFullYear(), date.getMonth(), date.getDate() + days));
 export const PRESET_OFFERS_SHOWN = 3;
-export const askAgentAtMenuOffer = () => ({
+export const askAgentAtMenuOffer = (): AskAgentAtMenuOffer => ({
   kind: 'askAgent',
   label: translateMessage({
     defaultMessage: 'Ask Agent',
     id: 'pwtGzlHJMi',
   }),
 });
-export const opensMoreRowsLabel = (label?: Dynamic) =>
+export const opensMoreRowsLabel = (label: string): string =>
   translateMessage(
     {
       defaultMessage: '{label}, opens more rows',
       id: 'oXICBakKDO',
     },
     {
-      label: label,
+      label,
     },
   );
-export const editCardHeadingLabel = (option?: Dynamic) =>
+export const editCardHeadingLabel = (option: string): string =>
   translateMessage(
     {
       defaultMessage: 'Edit {option}',
       id: 'WVUwMFglWP',
     },
     {
-      option: option,
+      option,
     },
   );
-export const cardAndRowLabel = (card?: Dynamic, row?: Dynamic) =>
+export const cardAndRowLabel = (card: string, row: string): string =>
   translateMessage(
     {
       defaultMessage: '{card}. {row}',
       id: 'fSKAM1cnMI',
     },
     {
-      card: card,
-      row: row,
+      card,
+      row,
     },
   );
-export const deleteCardHeadingLabel = (option?: Dynamic) =>
+export const deleteCardHeadingLabel = (option: string): string =>
   translateMessage(
     {
       defaultMessage: 'Delete {option}',
       id: '7y6U7TetAq',
     },
     {
-      option: option,
+      option,
     },
   );
-export const optionPlaceInListLabel = (option?: Dynamic, place?: Dynamic, optionCount?: Dynamic) =>
+export const optionPlaceInListLabel = (option: string, place: number, optionCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{option}, {place, number} of {optionCount, number}',
       id: '4kKFlX4npa',
     },
     {
-      option: option,
-      place: place,
-      optionCount: optionCount,
+      option,
+      place,
+      optionCount,
     },
   );
-export const optionRightArrowToEditLabel = (option?: Dynamic, place?: Dynamic, optionCount?: Dynamic) =>
+export const optionRightArrowToEditLabel = (option: string, place: number, optionCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{option}, {place, number} of {optionCount, number}. Right arrow to edit',
       id: 'QwfwnEkvai',
     },
     {
-      option: option,
-      place: place,
-      optionCount: optionCount,
+      option,
+      place,
+      optionCount,
     },
   );
-export const currentColorLabel = (label?: Dynamic) =>
+export const currentColorLabel = (label: string): string =>
   translateMessage(
     {
       defaultMessage: '{label}, current color',
       id: 'WhCMCmtTnC',
     },
     {
-      label: label,
+      label,
     },
   );
-export const keepAsTextLabel = (text?: Dynamic) =>
+export const keepAsTextLabel = (text: string): string =>
   translateMessage(
     {
       defaultMessage: 'Keep “{text}” as text',
@@ -224,37 +247,37 @@ export const keepAsTextLabel = (text?: Dynamic) =>
       text: truncateGraphemes(text, PERSON_NAME_IN_NOTICE_MAX_CHARACTERS),
     },
   );
-export const peopleForCellLabel = (cell?: Dynamic) =>
+export const peopleForCellLabel = (cell: string): string =>
   translateMessage(
     {
       defaultMessage: 'People for {cell}',
       id: 'zPCqem0JFu',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const personAlreadyInCellText = (name?: Dynamic) =>
+export const personAlreadyInCellText = (name: string): string =>
   translateMessage(
     {
       defaultMessage: '{name} is already in this cell.',
       id: 'II4UxahKqO',
     },
     {
-      name: name,
+      name,
     },
   );
-export const personChipRemoveHint = (name?: Dynamic) =>
+export const personChipRemoveHint = (name: string): string =>
   translateMessage(
     {
       defaultMessage: '{name}. Press Backspace or Delete to remove.',
       id: 'DjP1zpZgSM',
     },
     {
-      name: name,
+      name,
     },
   );
-export const cellsAddedToMessageText = (cells?: Dynamic, isPauseToBeTold?: Dynamic) =>
+export const cellsAddedToMessageText = (cells: string, isPauseToBeTold: boolean): string =>
   isPauseToBeTold
     ? translateMessage(
         {
@@ -263,7 +286,7 @@ export const cellsAddedToMessageText = (cells?: Dynamic, isPauseToBeTold?: Dynam
           id: 'sM+EzWDy/k',
         },
         {
-          cells: cells,
+          cells,
         },
       )
     : translateMessage(
@@ -272,40 +295,40 @@ export const cellsAddedToMessageText = (cells?: Dynamic, isPauseToBeTold?: Dynam
           id: '/uD0bjYgMc',
         },
         {
-          cells: cells,
+          cells,
         },
       );
-export const removeItemLabel = (item?: Dynamic) =>
+export const removeItemLabel = (item: string): string =>
   translateMessage(
     {
       defaultMessage: 'Remove {item}',
       id: '+oQ+9icbbr',
     },
     {
-      item: item,
+      item,
     },
   );
-export const insertInCellLabel = (cell?: Dynamic) =>
+export const insertInCellLabel = (cell: string): string =>
   translateMessage(
     {
       defaultMessage: 'Insert in {cell}',
       id: 'KPbSQMBZ0/',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const foldedFlagsCountText = (count?: Dynamic) =>
+export const foldedFlagsCountText = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {+#} other {+#}}',
       id: 'znKBNLz3SP',
     },
     {
-      count: count,
+      count,
     },
   );
-export const sheetTabCommentsLabel = (name?: Dynamic, count?: Dynamic) =>
+export const sheetTabCommentsLabel = (name: string, count: number): string | undefined =>
   count === 0
     ? undefined
     : translateMessage(
@@ -314,23 +337,23 @@ export const sheetTabCommentsLabel = (name?: Dynamic, count?: Dynamic) =>
           id: 'qs1Fjy3o4Q',
         },
         {
-          name: name,
-          count: count,
+          name,
+          count,
         },
       );
 export const MAX_PEOPLE_NAMED_ON_SHEET = 7;
-export const agentFlagName = () => AGENT_NAME;
-export const timesForCellLabel = (cell?: Dynamic) =>
+export const agentFlagName = (): string => AGENT_NAME;
+export const timesForCellLabel = (cell: string): string =>
   translateMessage(
     {
       defaultMessage: 'Times for {cell}',
       id: '0X6RnZlcBJ',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const suggestionHeardAs = (words?: Dynamic, isKeyDrawn?: Dynamic) =>
+export const suggestionHeardAs = (words: string, isKeyDrawn: boolean): string =>
   isKeyDrawn
     ? translateMessage(
         {
@@ -338,7 +361,7 @@ export const suggestionHeardAs = (words?: Dynamic, isKeyDrawn?: Dynamic) =>
           id: 'PrniwBoBqs',
         },
         {
-          words: words,
+          words,
         },
       )
     : translateMessage(
@@ -347,41 +370,41 @@ export const suggestionHeardAs = (words?: Dynamic, isKeyDrawn?: Dynamic) =>
           id: 'bSqv9WVmSQ',
         },
         {
-          words: words,
+          words,
         },
       );
-export const useSuggestionLabel = (words?: Dynamic) =>
+export const useSuggestionLabel = (words: string): string =>
   translateMessage(
     {
       defaultMessage: 'Use “{words}”',
       id: 'EF/PCUg7m9',
     },
     {
-      words: words,
+      words,
     },
   );
-export const suggestionGoneText = () =>
+export const suggestionGoneText = (): string =>
   translateMessage({
     defaultMessage: 'The suggestion is gone.',
     id: 'WZWzllJlbg',
   });
-export const tabKeyLabel = () =>
+export const tabKeyLabel = (): string =>
   translateMessage({
     defaultMessage: 'Tab',
     id: '3e4DfmbESG',
   });
-export const numberFormatButtonLabel = (format?: Dynamic) =>
+export const numberFormatButtonLabel = (format: CellFormatChoiceName | 'person'): string =>
   translateMessage(
     {
-      defaultMessage: '{format}, Number format',
-      id: 'pT4EJYrulE',
+      defaultMessage: '{format}, Cell type',
+      id: 'f5LKZHNQyt',
     },
     {
       format: format === 'person' ? sheetMessages.personCells() : numberFormatChoiceLabel(format),
     },
   );
-export const fontSizeText = (size?: Dynamic) => (size === null ? sheetMessages.signOfMixedFontSizes() : String(size));
-export const numberFormatExampleLabel = (format?: Dynamic, example?: Dynamic) =>
+export const fontSizeText = (size: number | null): string => (size === null ? sheetMessages.signOfMixedFontSizes() : String(size));
+export const numberFormatExampleLabel = (format: CellFormatChoiceName, example: string): string =>
   translateMessage(
     {
       defaultMessage: '{format}, {example}',
@@ -389,10 +412,10 @@ export const numberFormatExampleLabel = (format?: Dynamic, example?: Dynamic) =>
     },
     {
       format: numberFormatChoiceLabel(format),
-      example: example,
+      example,
     },
   );
-export const fontSizeButtonLabel = (size?: Dynamic) =>
+export const fontSizeButtonLabel = (size: number | null): string =>
   translateMessage(
     {
       defaultMessage: '{isMixed, select, true {Font size, Mixed} other {Font size, {size}}}',

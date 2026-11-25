@@ -21,7 +21,9 @@
  */
 
 import { tableContentBytes } from '../edits.ts';
-import type { BoardContent, ElementId, TableElement } from '../schema.ts';
+import { canonicalValuesEqual } from '../json.ts';
+import type { BoardContent, ElementId, FillColor, TableElement } from '../schema.ts';
+import { setTableFillsWhereUnchanged, setTableHeatWhereUnchanged, tableCellFill, tableFillSwaps, withTableHeat } from '../table-tints.ts';
 import {
   COLUMN_WIDTH_LIMITS,
   TABLE_LIMITS,
@@ -40,8 +42,10 @@ import {
   setTableCells,
   tableCellValue,
   tableColumnIds,
+  tableColumnIsTinted,
   tableInsertPosition,
   tableRowIds,
+  tableRowIsTinted,
   widenColumnToFit,
   type TableAxis,
 } from '../table.ts';
@@ -75,16 +79,24 @@ export function setCellsWhereUnchanged(edits: readonly TableCellSwap[]): TableCh
   return (table) => setTableCells(table, edits.flatMap(([row, col, expected, value]) => (tableCellValue(table, row, col) === expected ? [[row, col, value] as const] : [])));
 }
 
-/** Removes the rows `rowIds` that are empty. */
+/** Removes the rows `rowIds` that are empty (no text, fill or heat map). */
 export function dropEmptyTableRows(rowIds: readonly string[]): TableChange {
   return (start) =>
-    rowIds.reduce((table, rowId) => (tableColumnIds(table).every((colId) => tableCellValue(table, rowId, colId) === '') ? removeTableRow(table, rowId) : table), start);
+    rowIds.reduce(
+      (table, rowId) =>
+        !tableRowIsTinted(table, rowId) && tableColumnIds(table).every((colId) => tableCellValue(table, rowId, colId) === '') ? removeTableRow(table, rowId) : table,
+      start,
+    );
 }
 
-/** Removes the columns `colIds` that are empty. */
+/** Removes the columns `colIds` that are empty (no text, fill or heat map). */
 export function dropEmptyTableColumns(colIds: readonly string[]): TableChange {
   return (start) =>
-    colIds.reduce((table, colId) => (tableRowIds(table).every((rowId) => tableCellValue(table, rowId, colId) === '') ? removeTableColumn(table, colId) : table), start);
+    colIds.reduce(
+      (table, colId) =>
+        !tableColumnIsTinted(table, colId) && tableRowIds(table).every((rowId) => tableCellValue(table, rowId, colId) === '') ? removeTableColumn(table, colId) : table,
+      start,
+    );
 }
 
 /** Fills cells that are empty now. */
@@ -124,6 +136,16 @@ export function replaceTableElement(
   if (normalized === undefined || tableRowIds(normalized).length < tableRowIds(next).length || tableColumnIds(normalized).length < tableColumnIds(next).length) return refuse();
   doc.setContent(nextContent);
   return true;
+}
+
+/** Brings back the fills and heat map a deleted row or column had, where nothing took their place. */
+function bringBackTints(table: TableElement, axis: TableAxis, line: string): TableChange {
+  const color = table.heat?.[axis]?.[line];
+  const lineFills = Object.entries(table.fills ?? {}).flatMap(([rowId, cells]) =>
+    axis === 'rows' ? (rowId === line ? [[rowId, cells] as const] : []) : cells[line] !== undefined ? [[rowId, { [line]: cells[line] }] as const] : [],
+  );
+  const swaps = tableFillSwaps({}, { fills: Object.fromEntries(lineFills) });
+  return (current) => setTableFillsWhereUnchanged(color !== undefined && current.heat?.[axis]?.[line] === undefined ? withTableHeat(current, axis, line, color) : current, swaps);
 }
 
 /** Options of {@link createTableEditor}. */
@@ -172,6 +194,10 @@ export interface TableEditor {
    * past its limits.
    */
   fill(id: ElementId, row: string, col: string, grid: readonly (readonly string[])[]): boolean;
+  /** Sets cells' fills (`""` clears one) as one step. */
+  setFills(id: ElementId, cells: readonly (readonly [row: string, col: string, color: FillColor | ''])[]): boolean;
+  /** Sets a heat map on a column or row (`""` takes it off) as one step; see {@link withTableHeat}. */
+  setHeat(id: ElementId, axis: TableAxis, line: string, color: FillColor | ''): boolean;
 }
 
 /** Creates a table editor over a document and a history. */
@@ -187,6 +213,17 @@ export function createTableEditor(doc: StepDocument, history: StepHistory, optio
     if (!replace(id, redo, refusal)) return false;
     seedUndo(id, label, redo, undo);
     return true;
+  };
+  /** Records the step from `table` to `next` in fills and heat maps, changing only what is still as it was. */
+  const seedTints = (id: ElementId, label: string, table: TableElement, next: TableElement): boolean => {
+    const swaps = tableFillSwaps(table, next);
+    const back = swaps.map(([row, col, from, to]) => [row, col, to, from] as const);
+    return applyAndSeed(
+      id,
+      label,
+      (current) => setTableFillsWhereUnchanged(setTableHeatWhereUnchanged(current, table.heat, next.heat), swaps),
+      (current) => setTableFillsWhereUnchanged(setTableHeatWhereUnchanged(current, next.heat, table.heat), back),
+    );
   };
   /** Makes room for a new row or column at `index` (renumbering when needed); returns its order key. */
   const insertAt = (id: ElementId, axis: TableAxis, index: number): number | undefined => {
@@ -250,11 +287,12 @@ export function createTableEditor(doc: StepDocument, history: StepHistory, optio
       const at = table?.rows[rowId]?.at;
       if (table === undefined || typeof at !== 'number') return false;
       const cells = tableColumnIds(table).map((colId) => [rowId, colId, tableCellValue(table, rowId, colId)] as const);
+      const tints = bringBackTints(table, 'rows', rowId);
       return applyAndSeed(
         id,
         'Delete row',
         (current) => removeTableRow(current, rowId),
-        (current) => fillEmptyCells(cells)(setTableAxisOrder(addTableRows(current, [[rowId, at]], true), 'rows', rowId, at)),
+        (current) => tints(fillEmptyCells(cells)(setTableAxisOrder(addTableRows(current, [[rowId, at]], true), 'rows', rowId, at))),
       );
     },
 
@@ -264,11 +302,12 @@ export function createTableEditor(doc: StepDocument, history: StepHistory, optio
       const width = table && columnWidth(table, colId);
       if (table === undefined || typeof at !== 'number' || width === undefined) return false;
       const cells = tableRowIds(table).map((rowId) => [rowId, colId, tableCellValue(table, rowId, colId)] as const);
+      const tints = bringBackTints(table, 'cols', colId);
       return applyAndSeed(
         id,
         'Delete column',
         (current) => removeTableColumn(current, colId),
-        (current) => fillEmptyCells(cells)(addTableColumns(current, [[colId, at, width]], true)),
+        (current) => tints(fillEmptyCells(cells)(addTableColumns(current, [[colId, at, width]], true))),
       );
     },
 
@@ -337,6 +376,20 @@ export function createTableEditor(doc: StepDocument, history: StepHistory, optio
           ),
         TABLE_STEP_MESSAGES.tooBigPaste,
       );
+    },
+
+    setFills(id, cells) {
+      const table = tableOf(id);
+      if (table === undefined) return false;
+      const next = setTableFillsWhereUnchanged(table, cells.map(([row, col, color]) => [row, col, tableCellFill(table, row, col), color] as const));
+      return next !== table && seedTints(id, 'Fill cells', table, next);
+    },
+
+    setHeat(id, axis, line, color) {
+      const table = tableOf(id);
+      if (table === undefined) return false;
+      const next = withTableHeat(table, axis, line, color);
+      return next !== table && !canonicalValuesEqual(next, table) && seedTints(id, 'Heat map', table, next);
     },
   };
 }

@@ -1,12 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { KeyShortcutAct, KeyShortcutGroupName } from '../keys/shortcut-list.ts';
 import { translateMessage } from '../i18n/messages.ts';
 import { sheetMessages, textStyleLabel } from '../i18n/sheet-messages.ts';
 import { findBarMessages } from '../i18n/find-labels.ts';
 import { expandGroupsLabel, collapseGroupsLabel } from './line-groups.ts';
-import { linkEditMessages } from '../links/link-hover-card.ts';
+import { linkEditMessages } from '../links/link-hover-card.tsx';
 import { listKindName } from './import.ts';
 import { numberFormatChoiceLabel } from '../i18n/format-labels.ts';
-export function shortcutGroupLabel(group?: Dynamic) {
+export function shortcutGroupLabel(group: KeyShortcutGroupName): string {
   switch (group) {
     case 'general':
       return translateMessage({
@@ -57,7 +57,8 @@ export function shortcutGroupLabel(group?: Dynamic) {
       });
   }
 }
-export function shortcutActionLabel(action?: Dynamic) {
+/** The label of a listed key's act. */
+export function shortcutActionLabel(action: KeyShortcutAct): string {
   switch (action) {
     case 'listKeys':
       return shortcutListMessages.title();
@@ -435,7 +436,7 @@ export const shortcutListMessages = {
       defaultMessage: 'Keyboard shortcuts',
       id: '5quANI3nS3',
     }),
-  keyThatOpensIt: (isMac?: Dynamic) =>
+  keyThatOpensIt: (isMac: boolean): string =>
     isMac
       ? translateMessage({
           defaultMessage: 'Press Command+Slash for keyboard shortcuts.',

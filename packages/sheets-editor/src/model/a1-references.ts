@@ -68,7 +68,7 @@ export function parseA1AreasAsSeen(reference: string, sheetLayout: SheetSizeAndO
   let area = parseA1Area(reference, sheetLayout);
   return area === null ? null : areasAsSeen(area, sheetLayout.ownRowOrder);
 }
-export function isA1CellInSheet(reference: string, { rowCount: rowCount, columnCount: columnCount }: SheetSize): boolean {
+export function isA1CellInSheet(reference: string, { rowCount, columnCount }: SheetSize): boolean {
   let [, letters = '', digits = ''] = A1_CELL_PATTERN.exec(reference) ?? [];
   let [columnIndex, rowNumber] = [columnIndexFromLetters(letters), Number(digits)];
   return columnIndex >= 0 && columnIndex < columnCount && rowNumber >= 1 && rowNumber <= rowCount;
@@ -87,18 +87,18 @@ export function spanOfIndexes(indexes: Iterable<number>): LineSpan {
 export const CHAR_CODE_OF_A = 65;
 export const LETTERS_IN_ALPHABET = 26;
 export const rowNumberAsStored = (index: number, ownRowOrder: OwnRowOrder | null): number => rowIndexIn('stored', ownRowOrder, index) + 1;
-export const rowSpanOfArea = ({ topRowIndex: topRowIndex, rowCount: rowCount }: Pick<CellArea, 'topRowIndex' | 'rowCount'>): LineSpan => ({
+export const rowSpanOfArea = ({ topRowIndex, rowCount }: Pick<CellArea, 'topRowIndex' | 'rowCount'>): LineSpan => ({
   firstIndex: topRowIndex,
   count: rowCount,
 });
-export const areaWithRowSpan = <A extends CellArea>(area: A, { firstIndex: firstIndex, count: count }: LineSpan): A => ({
+export const areaWithRowSpan = <A extends CellArea>(area: A, { firstIndex, count }: LineSpan): A => ({
   ...area,
   topRowIndex: firstIndex,
   rowCount: count,
 });
 export const isAreaSplitWhenStored = (area: CellArea, ownRowOrder: OwnRowOrder | null): boolean =>
   ownRowOrder !== null && rowStretchesIn('stored', ownRowOrder, rowSpanOfArea(area)).length > 1;
-export const columnLabelEnds = ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Pick<CellArea, 'leftColumnIndex' | 'columnCount'>): LabelEnds => ({
+export const columnLabelEnds = ({ leftColumnIndex, columnCount }: Pick<CellArea, 'leftColumnIndex' | 'columnCount'>): LabelEnds => ({
   first: columnLetters(leftColumnIndex),
   last: columnLetters(leftColumnIndex + columnCount - 1),
 });

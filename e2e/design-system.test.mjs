@@ -410,5 +410,231 @@ editorSuite({
         await page.close();
       }
     });
+
+    it('a link in the README opens a card that edits and removes it, and saves the Markdown', T, async () => {
+      const { root, url } = await ctx.openNew('link-card');
+      const readme = path.join(root, README);
+      fs.appendFileSync(readme, '\nSee [the guide](https://example.com/guide) first.\n');
+      const page = await (await ctx.browser()).load(url, { ready: textIn('See the guide first.') });
+      const link = `document.querySelector('[role=textbox] a[data-target]')`;
+      const card = `document.querySelector('[data-link-card]')`;
+      try {
+        await clickOn(page, link, 'the README link');
+        assert.ok(await page.waitFor(`${card}?.textContent.includes('example.com/guide')`, 5000), 'no link card at the caret');
+        assert.ok(await page.evaluate(`!!${card}.querySelector('button[aria-label="Open link"]')`));
+        await clickOn(page, `${card}.querySelector('button[aria-label="Edit link"]')`, 'Edit link');
+        assert.ok(await page.waitFor(`document.activeElement?.getAttribute('aria-label') === 'Link address'`, 5000));
+        await page.evaluate(`document.activeElement.select()`);
+        await page.type('javascript:alert(1)');
+        await page.press('Enter');
+        assert.ok(await page.waitFor(`${card}?.querySelector('[role=alert]')`, 3000), 'an unsafe address was taken');
+        await page.evaluate(`document.activeElement.select()`);
+        await page.type('Example.org/new page');
+        await page.press('Escape');
+        assert.ok(await page.waitFor(`document.activeElement?.getAttribute('role') === 'textbox' && ${card}?.textContent.includes('example.com/guide')`, 5000), 'Escape did not put the address back');
+        await clickOn(page, `${card}.querySelector('button[aria-label="Edit link"]')`, 'Edit link');
+        await page.evaluate(`document.activeElement.select()`);
+        await page.type('example.org/new');
+        await page.press('Enter');
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See [the guide](https://example.org/new) first.'), 10000), fs.readFileSync(readme, 'utf8'));
+        await clickOn(page, link, 'the edited link');
+        await clickOn(page, `${card}.querySelector('button[aria-label="Remove link"]')`, 'Remove link');
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See the guide first.'), 10000), fs.readFileSync(readme, 'utf8'));
+        assert.ok(await page.waitFor(`!${card}`, 3000), 'the card stayed after the link went');
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    const linkPage = async (label) => {
+      const { root, url } = await ctx.openNew(label);
+      const readme = path.join(root, README);
+      fs.appendFileSync(readme, '\nSee [the guide](https://example.com/guide) first.\n');
+      const page = await (await ctx.browser()).load(url, { ready: textIn('See the guide first.') });
+      return { readme, page };
+    };
+    const readmeLink = `document.querySelector('[role=textbox] a[data-target]')`;
+    const linkCard = `document.querySelector('[data-link-card]')`;
+    const undoKey = process.platform === 'darwin' ? { meta: true } : { ctrl: true };
+    const redoKey = undoKey;
+
+    it('in comment mode a README link opens no link card', T, async (t) => {
+      const { startDaemon } = await import('../packages/daemon/src/daemon.ts');
+      const workspace = tmpDir('ds-link-comment');
+      const root = path.join(workspace, 'system');
+      copyFixture('design-system', root);
+      fs.appendFileSync(path.join(root, README), '\nSee [the guide](https://example.com/guide) first.\n');
+      const previous = process.env.OPEN_ARTIFACT_HOME;
+      process.env.OPEN_ARTIFACT_HOME = path.join(workspace, 'daemon');
+      t.after(() => {
+        if (previous === undefined) delete process.env.OPEN_ARTIFACT_HOME;
+        else process.env.OPEN_ARTIFACT_HOME = previous;
+      });
+      const daemon = await startDaemon({ port: 0, quiet: true, builtinTypesDir: ctx.work });
+      const browser = await ctx.browser();
+      let page;
+      // The editor runs in the Shell's frame: put the caret at the end of the link there.
+      const caretInLink = `(() => { const link = ${readmeLink}; if (!link) return null; const box = link.closest('[role=textbox]'); box.focus(); const range = document.createRange(); range.selectNodeContents(link); range.collapse(false); getSelection().removeAllRanges(); getSelection().addRange(range); return true; })()`;
+      try {
+        const artifact = await daemon.tools.call('Artifact', { action: 'adopt', folder: root, type_url: 'open-artifact://type/design-system' }, { harness: 'cli', session: null, workspace });
+        page = await browser.load(artifact.view_url, { ready: "document.querySelector('[data-comments-button]')" });
+        assert.ok(await page.waitFor(readmeLink, 10000), 'no README link');
+        const shellButton = "document.querySelector('[data-comments-button] button')";
+        await clickOn(page, shellButton, 'Comments');
+        assert.ok(await page.waitFor("document.querySelector('main[data-commenting]')", 5000), 'comment mode did not start');
+        assert.ok((await page.evaluateAll(caretInLink)).includes(true));
+        await new Promise(resolve => setTimeout(resolve, 500));
+        assert.ok(!(await page.evaluateAll(`!!${linkCard}`)).includes(true), 'a link card showed in comment mode');
+        await clickOn(page, shellButton, 'Comments');
+        assert.ok(await page.waitFor("document.querySelector('.ds-pages') && !document.querySelector('main[data-commenting]')", 5000));
+        assert.ok((await page.evaluateAll(caretInLink)).includes(true));
+        assert.ok(await page.waitFor(linkCard, 5000), 'no link card after comment mode ended');
+      } finally {
+        await page?.close();
+        daemon.close();
+      }
+    });
+
+    it('undo puts back a link address changed in the card, and redo makes the change again', T, async () => {
+      const { readme, page } = await linkPage('link-undo');
+      try {
+        await clickOn(page, readmeLink, 'the README link');
+        assert.ok(await page.waitFor(linkCard, 5000), 'no link card');
+        await clickOn(page, `${linkCard}.querySelector('button[aria-label="Edit link"]')`, 'Edit link');
+        assert.ok(await page.waitFor(`document.activeElement?.getAttribute('aria-label') === 'Link address'`, 5000));
+        await page.evaluate(`document.activeElement.select()`);
+        await page.type('example.org/new');
+        await page.press('Enter');
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('(https://example.org/new)'), 10000), fs.readFileSync(readme, 'utf8'));
+        assert.ok(await page.waitFor(`document.activeElement?.getAttribute('role') === 'textbox'`, 3000), 'the text did not get focus back');
+        await page.press('z', undoKey);
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See [the guide](https://example.com/guide) first.'), 10000), fs.readFileSync(readme, 'utf8'));
+        // The card shows again for the restored address.
+        assert.ok(await page.waitFor(linkCard, 3000), 'no link card after undo');
+        await page.press('z', { ...redoKey, shift: true });
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('(https://example.org/new)'), 10000), `redo: ${fs.readFileSync(readme, 'utf8')}`);
+        assert.ok(await page.waitFor(`${linkCard}?.textContent.includes('example.org/new')`, 3000), 'the card shows the redone address');
+        await page.press('z', undoKey);
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See [the guide](https://example.com/guide) first.'), 10000), `undo after redo: ${fs.readFileSync(readme, 'utf8')}`);
+        assert.ok(await page.waitFor(linkCard, 3000), 'no link card after the second undo');
+        await clickOn(page, `${linkCard}.querySelector('button[aria-label="Remove link"]')`, 'Remove link');
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See the guide first.'), 10000), fs.readFileSync(readme, 'utf8'));
+        await page.press('z', undoKey);
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See [the guide](https://example.com/guide) first.'), 10000), `undo after Remove: ${fs.readFileSync(readme, 'utf8')}`);
+        await page.press('z', { ...redoKey, shift: true });
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See the guide first.'), 10000), `redo of Remove: ${fs.readFileSync(readme, 'utf8')}`);
+        assert.ok(await page.waitFor(`!${linkCard}`, 3000), 'the card stayed after the redone Remove');
+        await page.press('z', undoKey);
+        assert.ok(await until(() => fs.readFileSync(readme, 'utf8').includes('See [the guide](https://example.com/guide) first.'), 10000), `undo of the redone Remove: ${fs.readFileSync(readme, 'utf8')}`);
+        // Typing ends the card's undo: redo has nothing left to make again.
+        await page.type('!');
+        await page.press('z', { ...redoKey, shift: true });
+        await new Promise(resolve => setTimeout(resolve, 600));
+        assert.ok(await until(() => /See \[the guide!?\]\(https:\/\/example\.com\/guide\)!? first\./.test(fs.readFileSync(readme, 'utf8')) && fs.readFileSync(readme, 'utf8').includes('!'), 10000), `redo after typing: ${fs.readFileSync(readme, 'utf8')}`);
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('a modifier click on a link while editing opens it', T, async () => {
+      const { page } = await linkPage('link-open');
+      try {
+        await page.evaluate(`window.opened = []; window.open = (href) => { window.opened.push(href); return null; };`);
+        const middle = `(() => { const r = ${readmeLink}.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`;
+        let at = await page.evaluate(middle);
+        await page.click(at.x, at.y);
+        assert.ok(await page.waitFor(linkCard, 5000));
+        assert.deepEqual(await page.evaluate('window.opened'), [], 'a plain click opened the link');
+        // The format bar shows above the text once it is being edited, so the link moved.
+        at = await page.evaluate(middle);
+        await page.click(at.x, at.y, undoKey);
+        assert.ok(await page.waitFor(`window.opened.length === 1`, 3000), 'the modifier click did not open the link');
+        assert.equal(await page.evaluate('window.opened[0]'), 'https://example.com/guide');
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('a typed color previews in the picker, and Escape puts the color back without saving', T, async () => {
+      const { root, url } = await ctx.openNew('picker-draft');
+      const tokens = path.join(root, 'project', 'tokens.json');
+      const page = await (await ctx.browser()).load(url, { ready: `document.querySelector('button[aria-label^="ink in light"]')` });
+      const swatch = `document.querySelector('input[aria-label="Color value"]')?.previousElementSibling?.style.background ?? ''`;
+      try {
+        await page.evaluate(`document.querySelector('button[aria-label^="ink in light"]').scrollIntoView({ block: 'center' })`);
+        await clickOn(page, `document.querySelector('button[aria-label^="ink in light"]')`, 'the ink swatch');
+        assert.ok(await page.waitFor(`document.querySelector('input[aria-label="Color value"]')`, 5000), 'no color picker');
+        const before = fs.readFileSync(tokens, 'utf8');
+        const shown = await page.evaluate(swatch);
+        await page.evaluate(`(() => { const input = document.querySelector('input[aria-label="Color value"]'); input.focus(); input.select(); })()`);
+        await page.type('00ff00');
+        assert.ok(await page.waitFor(`(${swatch}).includes('rgb(0, 255, 0)')`, 3000), 'the typed color did not preview');
+        await page.press('Escape');
+        await new Promise(resolve => setTimeout(resolve, 600));
+        assert.equal(fs.readFileSync(tokens, 'utf8'), before, 'Escape saved the draft');
+        if (!(await page.evaluate(`!!document.querySelector('input[aria-label="Color value"]')`))) {
+          await clickOn(page, `document.querySelector('button[aria-label^="ink in light"]')`, 'the ink swatch again');
+        }
+        assert.ok(await page.waitFor(`(${swatch}) === ${JSON.stringify(shown)}`, 3000), `Escape did not restore the picker: ${shown} → ${await page.evaluate(swatch)}`);
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('a component preview cannot take focus from the page before it is used', T, async () => {
+      const { root, url } = await ctx.openNew('preview-focus');
+      const dir = path.join(root, 'project', 'components', 'Grabby');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'preview.html'), '<!-- @dsCard group="Inputs" height=80 -->\n<input id="grab"><dialog id="pop"><button>Close</button></dialog><script>window.tries = 0; setInterval(function () { window.tries++; document.getElementById("grab").focus(); if (window.tries === 10) document.getElementById("pop").showModal(); }, 40);</script>\n');
+      const page = await (await ctx.browser()).load(url, { ready: textIn('Warm paper surfaces') });
+      const frame = `document.querySelector('iframe[title="Grabby preview"]')`;
+      try {
+        await clickOn(page, `[...document.querySelectorAll('nav button')].find(b => b.textContent.startsWith('Components'))`, 'Components');
+        assert.ok(await page.waitFor(`${frame}?.contentWindow?.tries > 0`, 10000), 'the preview never ran');
+        await page.evaluate(`(() => { const field = document.createElement('input'); field.id = 'typing-here'; document.body.append(field); field.focus(); })()`);
+        const tries = await page.evaluate(`${frame}.contentWindow.tries`);
+        assert.ok(await page.waitFor(`${frame}.contentWindow.tries > ${tries + 5}`, 5000));
+        assert.ok(await page.waitFor(`${frame}.contentWindow.tries > 12`, 5000));
+        assert.equal(await page.evaluate(`document.activeElement?.id`), 'typing-here', 'the preview took focus');
+        assert.equal(await page.evaluate(`${frame}.contentDocument.getElementById('pop').open`), true, 'the dialog did not show');
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
+
+    it('starting a scrub commits the number typed into another field first', T, async () => {
+      const { root, url } = await ctx.openNew('scrub-commit', (c, dir) => {
+        copyFixture('design-system', dir);
+        const file = path.join(dir, 'project', 'tokens.json');
+        const tokens = JSON.parse(fs.readFileSync(file, 'utf8'));
+        tokens.shadow = { tokens: [{ name: 'shadow-sm', value: '0 1px 2px #00000033', usage: 'Cards.' }] };
+        fs.writeFileSync(file, JSON.stringify(tokens));
+      });
+      const file = path.join(root, 'project', 'tokens.json');
+      const saved = () => JSON.parse(fs.readFileSync(file, 'utf8')).shadow.tokens[0].value;
+      const page = await (await ctx.browser()).load(url, { ready: `document.querySelector('button[aria-label^="Edit shadow-sm"]')` });
+      const blur = `document.querySelector('input[aria-label="Shadow 1 blur"]')`;
+      const spread = `document.querySelector('[data-scrub-for="' + document.querySelector('input[aria-label="Shadow 1 spread"]').id + '"]')`;
+      try {
+        await page.evaluate(`document.querySelector('button[aria-label^="Edit shadow-sm"]').scrollIntoView({ block: 'center' })`);
+        await clickOn(page, `document.querySelector('button[aria-label^="Edit shadow-sm"]')`, 'the shadow');
+        assert.ok(await page.waitFor(blur, 5000), 'no shadow editor');
+        await page.evaluate(`(() => { const input = ${blur}; input.focus(); input.select(); })()`);
+        await page.type('9');
+        const at = await page.evaluate(`(() => { const r = ${spread}.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+        await page.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+        await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', buttons: 1, clickCount: 1 });
+        for (let step = 1; step <= 5; step++) await page.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x + step * 4, y: at.y, button: 'left', buttons: 1 });
+        await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x + 20, y: at.y, button: 'left', buttons: 0, clickCount: 1 });
+        assert.ok(await until(() => /^0(?:px)? 1px 9px [1-9]\d*px /.test(saved()), 10000), `saved ${saved()}`);
+        assert.deepEqual(page.problems, []);
+      } finally {
+        await page.close();
+      }
+    });
   },
 });

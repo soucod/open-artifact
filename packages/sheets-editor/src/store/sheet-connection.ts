@@ -30,7 +30,10 @@ import {
   readRetryAfterMs,
   askRevisionRequest,
   answerOf,
+  revisionOfAnswer,
 } from './requests.ts';
+import { isWrittenByAgentAlone, latestVersionsRequest } from '../history/requests.ts';
+import type { EarlierVersionOpened } from '../history/history-reader.ts';
 import { defaultSheetName } from '../i18n/sheet-names.ts';
 import { isSheetJustMade, readClockFrame, readStreamedEdit, type ClockReading, type StreamedEdit } from './frames.ts';
 import type { SheetStream, SheetStreamOptions, StoreCall, StoreOutcome, StreamEndReason } from './sheet-stream.ts';
@@ -94,7 +97,6 @@ export interface ConnectionListeners {
   streamChanged(): void;
   editByAgentStreamed(revision: number, isOfViewer: boolean, isOfLayoutAlone: boolean): void;
   editsOfOthersMade(edits: EditOfAnother[], before: WorkbookReads | null, after: WorkbookReads): void;
-  editStreamed?(revision: number, made: { maker: ReturnType<typeof makerOfStreamedEdit>; isOfViewer: boolean; rowsInItsOneMove: number | null }): void;
   revisionStated?(revision: number, isMadeUnderSomeone: boolean): void;
   changesMayBeMissed?(): void;
   caughtUpByLoad(caughtUp: CaughtUpByLoad): void;
@@ -140,7 +142,7 @@ export function openSheetConnection(
   localesWanted: () => string[] | null,
   wait: (ms: number) => Promise<void> = (ms) => new Promise<void>((resolve) => void setTimeout(resolve, ms)),
   streamListener?: StreamListener,
-  workbookListener?: { workbookOpened(node: OpenedNode): void },
+  workbookListener?: { workbookOpened(node: OpenedNode): void; asItWas?(revision: number, isStillWanted: () => boolean): Promise<EarlierVersionOpened> },
   nowMs: () => number = () => performance.now(),
   wallNowMs: () => number = () => Date.now(),
   agentRest?: AgentActivity['rest'],
@@ -191,6 +193,7 @@ export function openSheetConnection(
   let timeTold: ClockReading | null = null;
   let isBringingLocale = false;
   let localeTriesLeft = LOCALE_TRIES;
+  let revisionOfLocaleNotBrought = 0;
   let timeToldAt = 0;
   let workbookState = (): WorkbookState => {
     if (opened !== null)
@@ -213,7 +216,7 @@ export function openSheetConnection(
     if (openState !== 'failed')
       return {
         kind: 'opening',
-        partLoaded: partLoaded,
+        partLoaded,
       };
     return {
       kind: 'failed',
@@ -251,8 +254,8 @@ export function openSheetConnection(
       callQueue = callQueue.filter((queued) => !givesWay(queued));
       callQueue.push({
         call: request,
-        isUnasked: isUnasked,
-        settle: settle,
+        isUnasked,
+        settle,
       });
       callNextQueued();
     });
@@ -283,10 +286,10 @@ export function openSheetConnection(
     clearFailure();
     partLoaded = null;
     let { nodeId } = content;
-    let { utilities: utilities, newCore: newCore, startWorkbookWorker: startWorkbookWorker } = loadedSharedCode;
+    let { utilities, newCore, startWorkbookWorker } = loadedSharedCode;
     let canWrite = canViewerEdit(storeState);
     streamedBeforeOpen = {
-      nodeId: nodeId,
+      nodeId,
       edits: [],
     };
     let isCalledOff = async (): Promise<boolean> => {
@@ -314,9 +317,9 @@ export function openSheetConnection(
             return loaded;
           },
         },
-        revision: revision,
-        canWrite: canWrite,
-        timeZoneOfTheBrowser: timeZoneOfTheBrowser,
+        revision,
+        canWrite,
+        timeZoneOfTheBrowser,
         reportFault(fault: SyncFault): void {
           if (fault === FIRST_LOAD_RESTARTED_TOO_OFTEN) {
             if (failureKind !== 'whatStands') failureKind = 'outrun';
@@ -337,14 +340,14 @@ export function openSheetConnection(
         endWorker = worker.end;
         let workbookOnWorker = await openWorkbookOnWorker({
           ...workbookOptions,
-          timeTold: timeTold,
+          timeTold,
           line: worker.line,
           onWorkerEnded: (onEnded: () => void) =>
             worker.onEnded(() => {
               hasWorkerFailed = true;
               onEnded();
             }),
-          utilities: utilities,
+          utilities,
           reportThrown(error: unknown): void {
             hasWorkerFailed = true;
             reportErrorSoftly(error, 'worker');
@@ -356,11 +359,11 @@ export function openSheetConnection(
       }
       let workbookOnThread = await openSyncedWorkbook({
         ...workbookOptions,
-        newCore: newCore,
-        utilities: utilities,
+        newCore,
+        utilities,
         newEditId: () => crypto.randomUUID(),
-        newIdCode: newIdCode,
-        wait: wait,
+        newIdCode,
+        wait,
         nowMs: () => performance.now(),
         calculateLater: (calculate: () => void) => void setTimeout(calculate),
       });
@@ -380,8 +383,8 @@ export function openSheetConnection(
         workbook === null
           ? null
           : {
-              workbook: workbook,
-              nodeId: nodeId,
+              workbook,
+              nodeId,
             };
     } catch (error: unknown) {
       failureKind = 'whatStands';
@@ -398,8 +401,8 @@ export function openSheetConnection(
     else {
       hearWorkbook(opened.workbook);
       workbookListener?.workbookOpened({
-        nodeId: nodeId,
-        call: call,
+        nodeId,
+        call,
         noteFailure: noteWhatOthersFailed,
         async openViewOnly(revision: number, store: WorkbookStore): Promise<ViewOnlyVersion | null> {
           if (hasWorkerFailed) return null;
@@ -407,13 +410,13 @@ export function openSheetConnection(
           if (worker === null) return null;
           let onFailed: (() => void) | null = null;
           let workbook = await openWorkbookOnWorker({
-            store: store,
-            revision: revision,
+            store,
+            revision,
             canWrite: false,
-            timeZoneOfTheBrowser: timeZoneOfTheBrowser,
+            timeZoneOfTheBrowser,
             reportFault: (fault: SyncFault) => reportErrorSoftly(Error(`earlier version fault: ${fault}`), null),
             noteCalculationTookTooLong: noteWhatOthersFailed,
-            timeTold: timeTold,
+            timeTold,
             goesByTimeToldInAnyTimeZone: true,
             line: worker.line,
             onWorkerEnded: (onEnded: () => void) =>
@@ -421,14 +424,14 @@ export function openSheetConnection(
                 onEnded();
                 onFailed?.();
               }),
-            utilities: utilities,
+            utilities,
             reportThrown: reportErrorsSoftlyAt('versionHistory'),
           });
           if (workbook === null) worker.end();
           return workbook === null
             ? null
             : {
-                workbook: workbook,
+                workbook,
                 end: worker.end,
                 onFailed: (whenFailed: () => void) => void (onFailed = whenFailed),
               };
@@ -484,11 +487,16 @@ export function openSheetConnection(
     };
   };
   let bringLocaleOfNewWorkbook = async (revision: number, utilities: SheetsUtilities): Promise<number> => {
-    if (revision !== NEW_WORKBOOK_REVISION || !canViewerEdit(storeState) || isEnded) return revision;
     if (isBringingLocale || localeTriesLeft === 0 || isViewOnlyOrClosed()) return revision;
+    if (!canViewerEdit(storeState) || isEnded) return revision;
+    if (revision === revisionOfLocaleNotBrought) return revision;
+    // A workbook only the agent has written in, still in the locale of a new workbook, is brought to the person's
+    // locale too.
+    let isNew = revision === NEW_WORKBOOK_REVISION;
+    if (!isNew && !isLocaleAsNew(utilities)) return revision;
     let wanted = localesWanted();
     if (wanted === null) return revision;
-    let { locales: locales, localeOfANewWorkbook: localeOfANewWorkbook } = readLocales(utilities);
+    let { locales, localeOfANewWorkbook } = readLocales(utilities);
     let wantedLocale: string | undefined = wanted.flatMap((wantedOne) => locales.filter((locale) => locale === wantedOne))[0];
     if (wantedLocale === undefined || wantedLocale === localeOfANewWorkbook) {
       localeTriesLeft = 0;
@@ -496,14 +504,24 @@ export function openSheetConnection(
     }
     isBringingLocale = true;
     localeTriesLeft -= 1;
-    let sheetsAnswer = await call(readSheetsRequest(), true);
-    let isStillBlank = blankWorkbookRevision(localeOfANewWorkbook, sheetsAnswer) === revision;
-    let maySetLocale = isStillBlank && !hasEnded() && !isViewOnlyOrClosed() && localesWanted() !== null && revisionToBringLocaleTo() !== null;
+    let sheetsAnswer = await call(isNew ? readSheetsRequest() : latestVersionsRequest(), true);
+    let isStillBlank = isNew
+      ? blankWorkbookRevision(localeOfANewWorkbook, sheetsAnswer) === revision
+      : isWrittenByAgentAlone(sheetsAnswer) && (await isFirstVersionAsNew());
+    let maySetLocale =
+      isStillBlank &&
+      !hasEnded() &&
+      !isViewOnlyOrClosed() &&
+      localesWanted() !== null &&
+      revisionToBringLocaleTo() === revision &&
+      (isNew || isLocaleAsNew(utilities));
     let answer = maySetLocale ? await call(setLocaleRequest(revision, wantedLocale, crypto.randomUUID()), true) : sheetsAnswer;
     let revisionSet = maySetLocale ? (readUpdatedRevision(answer) ?? 0) : 0;
     let isHeldBack = isStillBlank && !maySetLocale;
+    let isNotToBringAgain = maySetLocale ? revisionSet > 0 && failureOf(answer, true) !== null : isNew && revisionOfAnswer(sheetsAnswer) > revision;
+    if (isNotToBringAgain) revisionOfLocaleNotBrought = revision;
     if (answer.kind === 'notSent') localeTriesLeft += 1;
-    else if (!isRetryableFailure(answer) && !isHeldBack && !isViewOnlyOrClosed()) localeTriesLeft = 0;
+    else if (!isRetryableFailure(answer) && !isHeldBack && !isNotToBringAgain && !isViewOnlyOrClosed()) localeTriesLeft = 0;
     let failure = answer.kind === 'notSent' || revisionSet > 0 || revisionToBringLocaleTo() === null ? null : failureOf(answer, true);
     if (failure === null || localeTriesLeft === 0) isBringingLocale = false;
     else {
@@ -511,7 +529,19 @@ export function openSheetConnection(
       let askedWaitMs = Math.min(readRetryAfterMs(answer), MAX_LOCALE_RETRY_WAIT_MS);
       wait(Math.max(askedWaitMs, backoffMs)).then(retryLocaleNow);
     }
+    if ((isHeldBack || isNotToBringAgain) && revisionToBringLocaleTo() !== revision) bringLocaleIfDue();
     return Math.max(revision, revisionSet);
+  };
+  let isFirstVersionAsNew = async (): Promise<boolean> => {
+    let read = await workbookListener?.asItWas?.(NEW_WORKBOOK_REVISION, () => !hasEnded());
+    if (read?.kind !== 'read') return false;
+    let reads = read.version.workbook.reads();
+    let isAsNew = reads.listSheets().every(({ sheetId }) => reads.isSheetAsNew(sheetId));
+    return (read.version.end(), isAsNew);
+  };
+  let isLocaleAsNew = (utilities: SheetsUtilities): boolean => {
+    if (opened === null || revisionToBringLocaleTo() === null || agentRest?.isKnown() !== true) return false;
+    return opened.workbook.reads().locale === readLocales(utilities).localeOfANewWorkbook;
   };
   let retryLocaleNow = (): void => {
     isBringingLocale = false;
@@ -558,13 +588,13 @@ export function openSheetConnection(
   let tellPageChanged = (): void => {
     if (isEnded) return;
     onPageChanged({
-      connection: connection,
+      connection,
       workbook: workbookState(),
-      storeTold: storeTold,
+      storeTold,
       content: describeSheet(storeState),
       isSheetJustMade: (): boolean => isSheetJustMade(storeState, timeTold, nowMs() - timeToldAt, wallNowMs()),
-      viewer: viewer,
-      sharedCode: sharedCode,
+      viewer,
+      sharedCode,
     });
   };
   let loadSharedCodeNow = async (): Promise<void> => {
@@ -664,11 +694,6 @@ export function openSheetConnection(
     let streamedEdit = nodeId === undefined || frame.phase !== 'edit' ? null : readStreamedEdit(frame, nodeId);
     if (streamedEdit !== null) {
       listeners.revisionStated?.(streamedEdit.revision, streamedEdit.madeUnder !== null);
-      listeners.editStreamed?.(streamedEdit.revision, {
-        maker: makerOfStreamedEdit(streamedEdit),
-        isOfViewer: viewer !== null && streamedEdit.madeUnder === viewer,
-        rowsInItsOneMove: streamedEdit.rowsInItsOneMove,
-      });
       if (streamedEdit.isByAgent)
         listeners.editByAgentStreamed(streamedEdit.revision, viewer !== null && streamedEdit.madeUnder === viewer, streamedEdit.isOfLayoutAlone);
     }
@@ -693,7 +718,7 @@ export function openSheetConnection(
           };
           opened?.workbook.storeReconnected();
           streamListener?.streamOpened?.({
-            call: call,
+            call,
             noteFailure: noteWhatOthersFailed,
           });
           break;
@@ -736,18 +761,6 @@ export function openSheetConnection(
   };
 }
 
-export const makerOfStreamedEdit = ({ isByAgent, madeUnder }: StreamedEdit): { kind: 'agent' } | { kind: 'person'; userId: string } | null => {
-  if (isByAgent)
-    return {
-      kind: 'agent',
-    };
-  return madeUnder === null
-    ? null
-    : {
-        kind: 'person',
-        userId: madeUnder,
-      };
-};
 export const MAX_OPEN_TRIES = 3;
 export const MAX_OPEN_RETRIES = 5;
 export const RETRIES_BEFORE_RESTING = 2;

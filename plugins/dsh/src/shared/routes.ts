@@ -26,10 +26,15 @@ export const PATHS = Object.freeze({
   restore: `${ROUTE_BASE}.restore`,
   /** GET: the daemon's library events as server-sent events (`data:` is a `LibraryEvent`). */
   events: `${ROUTE_BASE}.events`,
-  /** GET: the daemon's `host.open` requests as server-sent events (`data:` is a {@link HostOpenRequest}). */
+  /**
+   * GET: the daemon's `host.open` requests as server-sent events (`data:` is a {@link HostOpenRequest}), and what the
+   * Shells of the views they opened say (`event: shell`, `data:` is a `ShellEventParams`).
+   */
   hostOpens: `${ROUTE_BASE}.host-opens`,
   /** POST `?id=&opened=1|0`: whether a browser half showed the artifact of one {@link HostOpenRequest}. */
   hostOpened: `${ROUTE_BASE}.host-opened`,
+  /** POST `?view=` with a host message (`HostToShell`: `host_hello` or `goto`): for the Shell of that view. */
+  shellCommand: `${ROUTE_BASE}.shell-command`,
   /** GET: whether this plugin has a newer release on its registry ({@link UpdateCheck}). */
   updates: `${ROUTE_BASE}.updates`,
   /** GET `?upcoming=1`: the release notes of the version installed and the ones before it, and with `upcoming` of a newer release offered (`ChangelogAnswer`, src/shared/changelog.ts). */
@@ -89,10 +94,17 @@ export interface HostOpenRequest {
   id: string;
   /** The DSH session the artifact is opened for. */
   session: string;
-  /** The Shell's address, with any `?panel=` the agent asked for. */
+  /** The Shell's address, with any `?panel=` the agent asked for: the `embed_url` (with its view ticket) when there is a `view`. */
   url: string;
   title: string;
+  /** The top-level view's ticket: the browser half answers its Shell through the shell-command route. */
+  view?: string;
+  /** What the Shell calls the agent. */
+  agentName?: string;
 }
+
+/** The SSE event name of a Shell's message on the host-opens stream. */
+export const SHELL_EVENT = 'shell';
 
 /** One artifact as the list route answers with it. */
 export interface PageArtifact {

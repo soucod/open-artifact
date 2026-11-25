@@ -1,8 +1,8 @@
 # Open Artifact for GitHub Copilot
 
-For the Copilot CLI and VS Code agent mode (the Copilot harness). Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs and design systems as
+For the Copilot CLI and VS Code agent mode (the Copilot harness). Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs, animated films and design systems as
 folders of files that open in one local page where you view, edit and comment: `/open-artifact slides …`,
-`design …`, `whiteboard …`, `sheets …`, `data …` or `docs …`.
+`design …`, `whiteboard …`, `sheets …`, `data …`, `docs …`, `motion …` or `page …`.
 
 ## Install
 
@@ -42,6 +42,13 @@ installing from the new path.
 - `.mcp.json`: the `Artifact`, `ArtifactData` and `ArtifactComments` tools (stdio, through the local daemon);
 - `skills/open-artifact/`: the skill, carrying the daemon;
 - `hooks.json`: `sessionStart`, `userPromptTransformed` and `agentStop`.
+
+## Publish to a server
+
+The Copilot CLI passes its environment to the plugin's MCP server, so `OPEN_ARTIFACT_REMOTE` (and the other
+`OPEN_ARTIFACT_*` preset variables) set where `copilot` starts reach Open Artifact. For VS Code, or an app started from
+the Dock or Start menu, use `~/.agents/open-artifact/preset.json`. See
+[the plugins README](../README.md#use-a-server-instead-of-this-computer).
 
 ## Send to agent
 

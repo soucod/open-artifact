@@ -102,11 +102,6 @@
   pointer-events: none;
 }
 
-/* The canvas engine draws this item's outline. */
-.wb-sel-frame[data-engine]:not([data-locked]) {
-  box-shadow: none;
-}
-
 .wb-sel-frame[data-thin] {
   box-shadow: 0 0 0 1px var(--wb-select);
 }
@@ -630,13 +625,4 @@
   .wb-sel-dot-offer {
     animation: none;
   }
-}
-
-/* ---- “Add a title” over an untitled section the engine draws ------------ */
-
-.wb-sel-title-hint {
-  position: absolute;
-  height: 0;
-  transform-origin: 0 0;
-  pointer-events: none;
 }

@@ -1,4 +1,10 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ColumnId, Edit } from '@open-artifact/sheets-core';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { CellId } from '../model/workbook.ts';
+import type { IfQueued, PageContext, PointerPressedTwice } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { FontToMeasure } from '../state/controller.ts';
+import type { CellFont } from './cell-drawing.tsx';
 import { isCheckboxFormat } from '../chips/checkboxes.ts';
 import { cellValueOf, usersOfCell, richTextBoldItalic } from '../model/cell-values.ts';
 import { profileOfUser, isPeopleCell } from '../chips/people-list.ts';
@@ -21,20 +27,46 @@ import { resizeLineUnderPointer, columnsToResizeForLine, queueResizeEdit } from 
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
-export function textToFitOfCell(state: PageState, workbook: WorkbookReads, cellId?: Dynamic, format?: Dynamic, mergeAnchorOf?: Dynamic) {
+/** A text a column is widened to fit, in its font, with the room it needs beside it. */
+export interface TextToFit {
+  text: string;
+  /** The column the text wraps in, by index, or null when it does not wrap. */
+  wrapsInColumnAt: number | null;
+  font: CellFont;
+  besideText: number;
+}
+/** A text to fit, in the column it is in. */
+export interface TextToFitInColumn extends TextToFit {
+  columnId: ColumnId;
+}
+/** The texts drawn in one font, put together to measure their characters at once. */
+interface TextsInFont {
+  font: CellFont;
+  text: string;
+  widthOfCharacter: (character: string) => number;
+}
+/** The edit that widens columns to fit their text. */
+export type FitColumnsEdit = Extract<Edit, { kind: 'fitColumns' }>;
+export function textToFitOfCell(
+  state: PageState,
+  workbook: WorkbookReads,
+  cellId: CellId,
+  format: WholeCellFormat,
+  mergeAnchorOf: (cellId: CellId) => boolean,
+): TextToFit | TextToFit[] | 'box' | null {
   let cell = workbook.cellOf(cellId);
   let shownCell = cell ?? workbook.spilledCellOf(cellId);
   if (isCheckboxFormat(format) && cellValueOf(shownCell)?.kind === 'boolean') return 'box';
   let users = usersOfCell(cell);
   if (users.length > 0) {
-    let names = users.map((userId?: Dynamic) => profileOfUser(state.profilesById, userId).name);
+    let names = users.map((userId) => profileOfUser(state.profilesById, userId).name);
     let chipsWidth = personChipsWidth(users.length, isPeopleCell(workbook, cellId), format.font.size);
     let besideText = CELL_TEXT_PADDING_X + chipsWidth;
     return {
       text: names.join(''),
       wrapsInColumnAt: null,
       font: format.font,
-      besideText: besideText,
+      besideText,
     };
   }
   let shown = shownCell?.shown;
@@ -56,12 +88,12 @@ export function textToFitOfCell(state: PageState, workbook: WorkbookReads, cellI
   let wrapped = isDropdownOption ? null : wrappedTextOfCell(cellId, mergeAnchorOf(cellId), workbook);
   if (wrapped !== null) {
     let wrapsInColumnAt = wrapped.areLinesCut === true ? null : workbook.columnIndexOf(state.sheetId, cellId.columnId);
-    let { levelsInLists: levelsInLists } = wrapped;
+    let { levelsInLists } = wrapped;
     if (levelsInLists === undefined)
       return {
         text: wrapped.text,
-        wrapsInColumnAt: wrapsInColumnAt,
-        font: font,
+        wrapsInColumnAt,
+        font,
         besideText: TEXT_PADDING_BESIDE_TOTAL,
       };
     return wrapped.text
@@ -70,10 +102,10 @@ export function textToFitOfCell(state: PageState, workbook: WorkbookReads, cellI
 `,
       )
       .map(
-        (line?: Dynamic, lineIndex?: Dynamic) => ({
+        (line, lineIndex) => ({
           text: line,
-          wrapsInColumnAt: wrapsInColumnAt,
-          font: font,
+          wrapsInColumnAt,
+          font,
           besideText: TEXT_PADDING_BESIDE_TOTAL + Math.ceil(listIndentOfLevel(levelsInLists[lineIndex] ?? null, font.size)),
         }),
       );
@@ -81,13 +113,13 @@ export function textToFitOfCell(state: PageState, workbook: WorkbookReads, cellI
   return {
     text: isDropdownOption || hasDropdown ? text.replaceAll(/[ \t\r\n]+/g, ' ').replaceAll(/^ | $/g, '') : flattenLineBreaks(text),
     wrapsInColumnAt: null,
-    font: font,
+    font,
     besideText: (isDropdownOption ? CELL_TEXT_PADDING_X : TEXT_PADDING_BESIDE_TOTAL) + dropdownChipExtraWidth(isDropdownOption, hasDropdown),
   };
 }
-export function cachedCharacterWidths(workbook: ReadsWithTextMeasurer, font?: Dynamic) {
-  let widths = new (Map as Dynamic)();
-  return (text?: Dynamic) => {
+export function cachedCharacterWidths(workbook: ReadsWithTextMeasurer, font: FontToMeasure): (text: string) => number {
+  let widths = new Map<string, number>();
+  return (text: string) => {
     let cached = widths.get(text);
     if (cached !== undefined) return cached;
     let width = workbook.widthOfCharacters(text, font);
@@ -95,12 +127,12 @@ export function cachedCharacterWidths(workbook: ReadsWithTextMeasurer, font?: Dy
     return width;
   };
 }
-export function widestWordAndLine(text?: Dynamic, widthOf?: Dynamic) {
-  let wordWidth: Dynamic = 0;
-  let lineWidth: Dynamic = 0;
-  let widestWord: Dynamic = 0;
-  let widestLine: Dynamic = 0;
-  for (let character of text as Dynamic) {
+export function widestWordAndLine(text: string, widthOf: (character: string) => number): { word: number; line: number } {
+  let wordWidth = 0;
+  let lineWidth = 0;
+  let widestWord = 0;
+  let widestLine = 0;
+  for (let character of text) {
     let isLineBreak =
       character ===
       `
@@ -116,53 +148,58 @@ export function widestWordAndLine(text?: Dynamic, widthOf?: Dynamic) {
     line: widestLine,
   };
 }
-export function fitColumnsEdit(state: PageState, workbook: ReadsWithTextMeasurer, oneColumn?: Dynamic, otherColumn?: Dynamic) {
-  let { sheetId: sheetId } = state;
+export function fitColumnsEdit(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  oneColumn: ColumnId,
+  otherColumn: ColumnId,
+): FitColumnsEdit | null {
+  let { sheetId } = state;
   let oneIndex = workbook.columnIndexOf(sheetId, oneColumn);
   let otherIndex = workbook.columnIndexOf(sheetId, otherColumn);
   let layout = sheetOfView(state, workbook);
   if (oneIndex === null || otherIndex === null || layout === undefined) return null;
-  let { rowCount: rowCount, columnEdges: columnEdges } = layout;
+  let { rowCount, columnEdges } = layout;
   let leftColumnIndex = Math.min(oneIndex, otherIndex);
   let columnCount = Math.abs(oneIndex - otherIndex) + 1;
   let area = {
     topRowIndex: 0,
-    rowCount: rowCount,
-    leftColumnIndex: leftColumnIndex,
-    columnCount: columnCount,
+    rowCount,
+    leftColumnIndex,
+    columnCount,
   };
   let isSkippedCell = mergedCellsToSkipTest(workbook, sheetId, area);
   let mergeAnchorOf = mergeAnchorCellsTest(workbook, sheetId, area);
   let formats = drawnFormatsOf(workbook, sheetId, workbook.formatsGivenIn(sheetId));
   let cells = workbook.cellsOnShowIn(sheetId, area);
-  let texts: Dynamic = [];
-  let hasAny: Dynamic = cells.length > MOST_CELLS_MEASURED_TO_FIT;
-  for (let value of cells.slice(0, MOST_CELLS_MEASURED_TO_FIT) as Dynamic) {
-    let value2 = isSkippedCell(value) ? null : textToFitOfCell(state, workbook, value, formats.formatOf(value), mergeAnchorOf);
-    if (value2 === null) continue;
+  let texts: TextToFitInColumn[] = [];
+  let hasAny = cells.length > MOST_CELLS_MEASURED_TO_FIT;
+  for (let cellId of cells.slice(0, MOST_CELLS_MEASURED_TO_FIT)) {
+    let textOfCell = isSkippedCell(cellId) ? null : textToFitOfCell(state, workbook, cellId, formats.formatOf(cellId), mergeAnchorOf);
+    if (textOfCell === null) continue;
     hasAny = true;
-    if (value2 !== 'box')
-      for (let text of [value2].flat() as Dynamic)
+    if (textOfCell !== 'box')
+      for (let text of [textOfCell].flat())
         texts.push({
           ...text,
-          columnId: value.columnId,
+          columnId: cellId.columnId,
         });
   }
   if (!hasAny) return null;
-  let fontGroups = new (Map as Dynamic)();
-  let fontGroupOf = (font?: Dynamic) => {
+  let fontGroups = new Map<string, TextsInFont>();
+  let fontGroupOf = (font: CellFont) => {
     let key = `${font.size} ${font.bold} ${font.italic}`;
-    let group = fontGroups.get(key) ?? {
-      font: font,
+    let group: TextsInFont = fontGroups.get(key) ?? {
+      font,
       text: '',
       widthOfCharacter: cachedCharacterWidths(workbook, font),
     };
     fontGroups.set(key, group);
     return group;
   };
-  for (let { text: value, font: value2 } of texts as Dynamic) fontGroupOf(value2).text += value;
-  for (let { text: value, font: value2 } of fontGroups.values() as Dynamic) workbook.widthOfCharacters(value, value2);
-  let widthNeeded = ({ text: text, wrapsInColumnAt: wrapsInColumnAt, font: font, besideText: besideText }: Dynamic) => {
+  for (let { text: textInFont, font: fontOfText } of texts) fontGroupOf(fontOfText).text += textInFont;
+  for (let { text: textsOfFont, font: groupFont } of fontGroups.values()) workbook.widthOfCharacters(textsOfFont, groupFont);
+  let widthNeeded = ({ text, wrapsInColumnAt, font, besideText }: TextToFit) => {
     if (wrapsInColumnAt === null) return Math.ceil(workbook.widthOfCharacters(text, font)) + besideText;
     let { word: wordWidth, line: lineWidth } = widestWordAndLine(text, fontGroupOf(font).widthOfCharacter);
     let columnWidth = columnEdges.sizeOf(wrapsInColumnAt);
@@ -171,29 +208,29 @@ export function fitColumnsEdit(state: PageState, workbook: ReadsWithTextMeasurer
       ? Math.min(Math.ceil(lineWidth) + besideText, columnWidth)
       : Math.ceil(wordWidth) + besideText;
   };
-  let widthByColumn = new (Map as Dynamic)();
-  for (let value of texts as Dynamic) widthByColumn.set(value.columnId, Math.max(widthByColumn.get(value.columnId) ?? 0, widthNeeded(value)));
+  let widthByColumn = new Map<ColumnId, number>();
+  for (let textInColumn of texts) widthByColumn.set(textInColumn.columnId, Math.max(widthByColumn.get(textInColumn.columnId) ?? 0, widthNeeded(textInColumn)));
   let noNarrowerThan = [...widthByColumn].map(
-    ([column, width]: Dynamic) => ({
-      column: column,
+    ([column, width]) => ({
+      column,
       widthInPixels: width,
     }),
   );
   return {
     kind: 'fitColumns',
-    sheetId: sheetId,
-    oneColumn: oneColumn,
-    otherColumn: otherColumn,
-    noNarrowerThan: noNarrowerThan,
+    sheetId,
+    oneColumn,
+    otherColumn,
+    noNarrowerThan,
   };
 }
-export function fitSelectedColumnsToText(state: PageState, reads: ReadsWithTextMeasurer) {
+export function fitSelectedColumnsToText(state: PageState, reads: ReadsWithTextMeasurer): PageTransition {
   let area = selectedArea(state, reads);
   let selection = area === null ? null : selectionOfArea(state, reads, area);
   if (selection === null) return withNoEffects(state);
-  let { activeCell: activeCell, selectionCorner: selectionCorner } = selection;
+  let { activeCell, selectionCorner } = selection;
   let fitEdit = fitColumnsEdit(state, reads, activeCell.columnId, selectionCorner.columnId);
-  let queueOptions = {
+  let queueOptions: IfQueued = {
     ...IF_QUEUED_DEFAULTS,
     select: state,
     done: {
@@ -203,12 +240,16 @@ export function fitSelectedColumnsToText(state: PageState, reads: ReadsWithTextM
   };
   return fitEdit === null ? withNoEffects(selectAfterEdit(state, reads, queueOptions, null)) : queueEdit(state, fitEdit, queueOptions);
 }
-export function fitColumnToTextOnDoublePress(state: PageState, action?: Dynamic, context?: Dynamic) {
+export function fitColumnToTextOnDoublePress(
+  state: PageState,
+  action: PointerPressedTwice,
+  context: Pick<PageContext, 'reads' | 'refusalOfEveryEdit' | 'areFormulasLeft'>,
+): PageTransition | null {
   let resizeLine = action.isByFinger ? null : resizeLineUnderPointer(state, action, context)?.line;
   if (resizeLine?.isA !== 'column') return null;
-  let { reads: reads, areFormulasLeft: areFormulasLeft } = context;
+  let { reads, areFormulasLeft } = context;
   if (areFormulasLeft) return withFormulasLeftToWorkOut(state, action);
-  let fitEdit = (fitColumnsEdit as Dynamic)(state, reads, ...columnsToResizeForLine(state, reads, resizeLine));
+  let fitEdit = fitColumnsEdit(state, reads, ...columnsToResizeForLine(state, reads, resizeLine));
   return fitEdit === null ? withNoEffects(state) : queueResizeEdit(state, fitEdit);
 }
 export const MOST_CELLS_MEASURED_TO_FIT = 1e5;

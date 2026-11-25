@@ -32,6 +32,27 @@ export class WorkbookSession {
             wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }
     }
+    /**
+     * A request about this workbook, as JSON; its answer, as JSON, with a packed read's cell blocks sent to `sink`
+     * in index order.
+     * @param {string} request
+     * @param {any} sink
+     * @returns {string}
+     */
+    answerWithCells(request, sink) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(request, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.workbooksession_answerWithCells(this.__wbg_ptr, ptr0, len0, sink);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
     constructor() {
         const ret = wasm.workbooksession_new();
         this.__wbg_ptr = ret >>> 0;
@@ -95,6 +116,9 @@ function __wbg_get_imports() {
             const ret = performance.now();
             return ret;
         },
+        __wbg_take_ef05fcde3118d089: function(arg0, arg1, arg2, arg3, arg4) {
+            arg0.take(getArrayU8FromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
+        },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
@@ -114,6 +138,11 @@ function __wbg_get_imports() {
 const WorkbookSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_workbooksession_free(ptr >>> 0, 1));
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
 
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;

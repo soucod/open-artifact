@@ -17,6 +17,7 @@ import type { AddressInfo } from 'node:net';
 import { hostname } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import type { Duplex } from 'node:stream';
+import { threadId } from 'node:worker_threads';
 import {
   OPEN_ARTIFACT_PROTOCOL,
   OpenArtifactError,
@@ -39,6 +40,7 @@ import {
 import { TypeApi } from './daemon.ts';
 import { LanNetwork, type SiteNetwork } from './lan.ts';
 import { acceptWebSocket, type WebSocketConnection } from './ws.ts';
+import { sendArchive } from './zip.ts';
 
 /** Protocol version this SDK speaks. */
 export const PROTOCOL = OPEN_ARTIFACT_PROTOCOL;
@@ -204,6 +206,11 @@ export const LONG_ACTION_NOTE = 'This action runs in the background: its result 
 /** The record {@link STATE_FILE} holds. */
 export interface ServerStateRecord {
   pid: number;
+  /**
+   * The worker thread the server runs in, when the daemon runs it in one (an Electron host without `RunAsNode`): the
+   * servers in one process share its pid.
+   */
+  thread?: number;
   /** The site's page URL. */
   url: string;
   port: number;
@@ -486,6 +493,11 @@ export interface TypeServerOptions {
    * `*.localhost` to loopback by themselves.
    */
   contentHosts?: boolean;
+  /**
+   * Answers `GET|HEAD /__open-artifact/archive?id=`: the open artifact's folder as a zip, in the shape and with the
+   * path rules of the type server's (`zip.ts`, `sendArchive`). frame-host turns it on.
+   */
+  archive?: boolean;
 }
 
 /** One mounted artifact. */
@@ -718,6 +730,7 @@ export class TypeServer {
     try {
       const record: ServerStateRecord = {
         pid: process.pid,
+        ...(threadId ? { thread: threadId } : {}),
         url: `${this.origin}${site.page}`,
         port: this.port,
         root,
@@ -743,7 +756,7 @@ export class TypeServer {
     try {
       const file = join(entry.root, STATE_FILE);
       const state = JSON.parse(readFileSync(file, 'utf8')) as Partial<ServerStateRecord>;
-      if (state.pid === process.pid) rmSync(file, { force: true });
+      if (state.pid === process.pid && (state.thread ?? 0) === threadId) rmSync(file, { force: true });
     } catch {
       // Nothing written, or someone else's.
     }
@@ -850,6 +863,15 @@ export class TypeServer {
       return sendJson(res, 401, { code: 'unauthorized', message: "The /__open-artifact/* routes are the Open Artifact daemon's." });
     }
     const path = url.pathname;
+    if (path === TYPE_SERVER_ROUTES.archive && this.options.archive) {
+      const entry = this.byId.get(url.searchParams.get('id') ?? '');
+      if (!entry) {
+        req.resume();
+        return sendJson(res, 404, { code: 'not_found', message: `${url.searchParams.get('id')} is not open here.`, fix: 'Open it first (/__open-artifact/open).' });
+      }
+      entry.lastUsed = Date.now();
+      return sendArchive(req, res, entry.root);
+    }
     const get = req.method === 'GET';
     const body = get ? {} : await readJsonBody(req);
     const artifact = (id: unknown): Mounted => {
@@ -1022,6 +1044,6 @@ export async function serve(options: TypeServerOptions): Promise<TypeServer> {
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
   server.ready();
-  server.log(`${server.type} type server at ${server.origin}/ (pid ${process.pid}, ${hostname()})`);
+  server.log(`${server.type} type server at ${server.origin}/ (pid ${process.pid}${threadId ? `, thread ${threadId}` : ''}, ${hostname()})`);
   return server;
 }

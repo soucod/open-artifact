@@ -33,12 +33,8 @@ impl SheetValues {
                 Input::Formula { .. } => match workbook.outcome(&sheet.id, r, c) {
                     Some(outcome) => {
                         if let Some(SpillOutcome::Fills { array, .. }) = &outcome.spill {
-                            for i in 0..array.rows() {
-                                for j in 0..array.columns() {
-                                    if i + j > 0 {
-                                        values.entry((row + i, column + j)).or_insert_with(|| array.get(i, j).clone());
-                                    }
-                                }
+                            for ((i, j), value) in array.stored_entries().filter(|(position, _)| *position != (0, 0)) {
+                                values.entry((row + i, column + j)).or_insert_with(|| value.clone());
                             }
                         }
                         outcome.value.clone()

@@ -21,7 +21,7 @@ import { Fragment, forwardRef, useEffect, useRef, useState, type ButtonHTMLAttri
 import { cn } from '@open-artifact/ui';
 import { Tip } from '@open-artifact/editor-kit/react';
 import { CornerIcon, CornersIcon, SideIcon, SidesIcon, type CornerName, type SideName } from './icons.tsx';
-import { captureNumberScrubPointer, useNumberScrubGesture } from '../../lib/number-scrub.ts';
+import { captureNumberScrubPointer, SCRUBBED, useNumberScrubGesture } from '../../lib/number-scrub.ts';
 
 /* --------------------------------- layout --------------------------------- */
 
@@ -86,7 +86,7 @@ export function Row({ label, children, className, tip, onReset, resetLabel }: Ro
             aria-label={resetLabel ?? `Reset ${typeof label === 'string' ? label : ''}`.trim()}
             title={resetLabel ?? `Reset ${typeof label === 'string' ? label : ''}`.trim()}
             onClick={onReset}
-            className="flex size-4 shrink-0 items-center justify-center rounded-[4px] text-chrome-muted opacity-0 outline-none hover:bg-chrome-hover hover:text-chrome-fg focus-visible:opacity-100 group-hover/row:opacity-100"
+            className="flex size-4 shrink-0 items-center justify-center rounded-[4px] text-chrome-muted opacity-0 outline-none hover:bg-chrome-hover hover:text-chrome-fg focus-visible:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100"
           >
             <RotateCcw className="size-3" strokeWidth={1.75} />
           </button>
@@ -193,6 +193,7 @@ export interface NumberInputProps {
 export function NumberInput({ value, onChange, onCommit, label, unit, min, max, step = 1, placeholder, className, steppers = true, disabled, title, inherited = false, ...aria }: NumberInputProps): ReactNode {
   const [scrubbed, setScrubbed] = useState<number | null>(null);
   const last = useRef<number | null>(null);
+  const input = useRef<HTMLInputElement>(null);
   const scrub = useNumberScrubGesture({
     value: value ?? Number.NaN,
     step,
@@ -209,6 +210,11 @@ export function NumberInput({ value, onChange, onCommit, label, unit, min, max, 
       last.current = null;
       setScrubbed(null);
       if (next !== null && next !== value) onCommit(next);
+      // The field takes the focus, so its keys (and undo, for this drag) are at hand.
+      const field = input.current;
+      if (!field || next === null || next === value) return;
+      field.setAttribute(SCRUBBED, '');
+      field.focus({ preventScroll: true });
     },
   });
   return (
@@ -239,8 +245,11 @@ export function NumberInput({ value, onChange, onCommit, label, unit, min, max, 
         </span>
       ) : null}
       <BaseNumberField.Input
+        ref={input}
         placeholder={placeholder}
         aria-label={aria['aria-label']}
+        onInput={(event) => event.currentTarget.removeAttribute(SCRUBBED)}
+        onBlur={(event) => event.currentTarget.removeAttribute(SCRUBBED)}
         onKeyDown={(event) => {
           // Enter commits what was typed (the field commits on blur), keeping the focus.
           if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;

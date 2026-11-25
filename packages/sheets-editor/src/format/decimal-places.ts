@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { mergedAreaOrCellOf } from '../selection/model.ts';
 import { charsThatFitWidth } from '../grid/cell-metrics.ts';
 import { shownCellText } from './shown-text.ts';
@@ -7,19 +6,45 @@ import { withDecimalPlaces, decimalPlacesOfPattern, MAX_DECIMAL_PLACES, sampleVa
 import { numberFormatOfCell } from '../model/workbook.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { NUMBER_FORMAT_CHOICE_PATTERNS } from './number-format-choices-values.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function numberFormatsBroughtIn(reads: WorkbookReads, { sheetId: sheetId, ranges: ranges }: Dynamic) {
-  let patterns = new (Set as Dynamic)();
-  for (let range of ranges as Dynamic)
-    for (let cellId of reads.cellsOnShowIn(sheetId, range) as Dynamic) {
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { NumberFormatKind, SharedCellFormat, SheetId } from '@open-artifact/sheets-core';
+/** The selection whose decimal places are stepped: its ranges on a sheet, its active cell, and the format its cells share. */
+export interface SelectionForDecimalPlaces {
+  sheetId: SheetId;
+  ranges: CellArea[];
+  activeCell: CellId;
+  shared: SharedCellFormat | null;
+}
+/** A way to step the decimal places of the selection. */
+export type DecimalPlaceChange = 'fewer' | 'more';
+/** Why the decimal places of the selection cannot be stepped either way. */
+export type WhyNoDecimalPlaceChanges = 'noNumbers' | 'formatHasNone' | 'formatsDiffer' | 'dropdownOrCheckbox';
+/** The pattern a step of decimal places gives, and how many places it has. */
+export interface DecimalPlacesStep {
+  count: number;
+  pattern: string;
+}
+/** The steps of decimal places the selection takes, or why it takes neither. */
+export interface DecimalPlaceChanges {
+  more: DecimalPlacesStep | null;
+  fewer: DecimalPlacesStep | null;
+  whyNeither: WhyNoDecimalPlaceChanges | null;
+}
+/** The pattern whose decimal places the selection steps, or why there is none. */
+export type DecimalPatternOfSelection = { why: 'noNumbers' | 'formatHasNone' | 'formatsDiffer' } | { pattern: string };
+export function numberFormatsBroughtIn(reads: WorkbookReads, { sheetId, ranges }: Pick<SelectionForDecimalPlaces, 'sheetId' | 'ranges'>): string[] {
+  let patterns = new Set<string>();
+  for (let range of ranges)
+    for (let cellId of reads.cellsOnShowIn(sheetId, range)) {
       let pattern = reads.cellOnShowIn(cellId)?.numberFormatBrought?.pattern;
       if (pattern !== undefined && isNumberShownIn(reads, cellId)) patterns.add(pattern);
     }
   return [...patterns];
 }
-export function firstNumberCellOf(reads: WorkbookReads, cellIds?: Dynamic) {
-  let [first, firstRowIndex, firstColumnIndex]: Dynamic = [null, 0, 0];
-  for (let cellId of cellIds as Dynamic) {
+export function firstNumberCellOf(reads: WorkbookReads, cellIds: CellId[]): CellId | null {
+  let [first, firstRowIndex, firstColumnIndex]: [CellId | null, number, number] = [null, 0, 0];
+  for (let cellId of cellIds) {
     let position = isNumberShownIn(reads, cellId) ? reads.positionOfCell(cellId) : null;
     if (position === null) continue;
     if (first === null || position.rowIndex < firstRowIndex || (position.rowIndex === firstRowIndex && position.columnIndex < firstColumnIndex))
@@ -27,8 +52,8 @@ export function firstNumberCellOf(reads: WorkbookReads, cellIds?: Dynamic) {
   }
   return first;
 }
-export function firstNumberCellInArea(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
-  for (let rowLimit: Dynamic = 32; ; rowLimit *= 8) {
+export function firstNumberCellInArea(reads: WorkbookReads, sheetId: SheetId, area: CellArea): CellId | null {
+  for (let rowLimit = 32; ; rowLimit *= 8) {
     let topArea = {
       ...area,
       rowCount: Math.min(rowLimit, area.rowCount),
@@ -37,32 +62,32 @@ export function firstNumberCellInArea(reads: WorkbookReads, sheetId?: Dynamic, a
     if (found !== null || rowLimit >= area.rowCount) return found;
   }
 }
-export function firstNumberCellInRanges(reads: WorkbookReads, { sheetId: sheetId, ranges: ranges }: Dynamic) {
-  for (let index: Dynamic = ranges.length - 1; index >= 0; index -= 1) {
+export function firstNumberCellInRanges(reads: WorkbookReads, { sheetId, ranges }: Pick<SelectionForDecimalPlaces, 'sheetId' | 'ranges'>): CellId | null {
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
     let range = ranges[index];
     let found = range === undefined ? null : firstNumberCellInArea(reads, sheetId, range);
     if (found !== null) return found;
   }
   return null;
 }
-export function decimalPlacesShownInWidth(reads: WorkbookReads, sheetId?: Dynamic, cellId?: Dynamic) {
+export function decimalPlacesShownInWidth(reads: WorkbookReads, sheetId: SheetId, cellId: CellId): number | null {
   let area = mergedAreaOrCellOf(reads, cellId);
-  let columnEdges = reads.listSheets().find((sheet?: Dynamic) => sheet.sheetId === sheetId)?.columnEdges;
+  let columnEdges = reads.listSheets().find((sheet) => sheet.sheetId === sheetId)?.columnEdges;
   if (area === null || columnEdges === undefined) return null;
   let rightColumnIndex = area.leftColumnIndex + area.columnCount;
   let width = columnEdges.startOf(rightColumnIndex) - columnEdges.startOf(area.leftColumnIndex);
   let charsThatFit = charsThatFitWidth(width, reads.formatOf(cellId).font);
-  let decimalsShownWith = (maxChars?: Dynamic) =>
+  let decimalsShownWith = (maxChars: number) =>
     /^-?\d+(?:[.,](?<places>\d+))?$/.exec(shownCellText(reads.cellOnShowIn(cellId), maxChars, reads.decimalSign).text);
   let match = decimalsShownWith(1 / 0) === null ? null : decimalsShownWith(charsThatFit);
   return match === null ? null : (match.groups?.places?.length ?? 0);
 }
-export function decimalPatternOfSelection(reads: WorkbookReads, selection?: Dynamic) {
-  let { sheetId: sheetId, ranges: ranges, activeCell: activeCell, shared: shared } = selection;
+export function decimalPatternOfSelection(reads: WorkbookReads, selection: SelectionForDecimalPlaces): DecimalPatternOfSelection {
+  let { sheetId, ranges, activeCell, shared } = selection;
   let isFormatShared = shared !== null && shared.numberFormat !== null && !isGeneralPattern(shared.numberFormat.pattern);
   let patterns = [
-    ...new (Set as Dynamic)([
-      ...ranges.flatMap((range?: Dynamic) => reads.numberFormatPatternsIn(sheetId, range)),
+    ...new Set([
+      ...ranges.flatMap((range) => reads.numberFormatPatternsIn(sheetId, range)),
       ...(isFormatShared ? [] : numberFormatsBroughtIn(reads, selection)),
     ]),
   ];
@@ -81,8 +106,8 @@ export function decimalPatternOfSelection(reads: WorkbookReads, selection?: Dyna
           pattern: withDecimalPlaces(INTEGER_PATTERN, shownPlaces),
         };
   }
-  let [basePattern, ...otherBasePatterns] = new (Set as Dynamic)(
-    patterns.map((pattern?: Dynamic) => withDecimalPlaces(pattern, 0)),
+  let [basePattern, ...otherBasePatterns] = new Set(
+    patterns.map((pattern) => withDecimalPlaces(pattern, 0)),
   );
   if (otherBasePatterns.length > 0)
     return {
@@ -92,14 +117,14 @@ export function decimalPatternOfSelection(reads: WorkbookReads, selection?: Dyna
     !WHOLE_NUMBER_PATTERNS.has(basePattern) &&
     !isFormatShared &&
     ranges.some(
-      (range?: Dynamic) => reads.cellsOnShowIn(sheetId, range).some((cellId?: Dynamic) => isGeneralNumberCell(reads, cellId)),
+      (range) => reads.cellsOnShowIn(sheetId, range).some((cellId) => isGeneralNumberCell(reads, cellId)),
     )
   )
     return {
       why: 'formatsDiffer',
     };
   let mostPlacesPattern = patterns.reduce(
-    (best?: Dynamic, pattern?: Dynamic) => ((decimalPlacesOfPattern(pattern) ?? 0) > (decimalPlacesOfPattern(best) ?? 0) ? pattern : best),
+    (best, pattern) => ((decimalPlacesOfPattern(pattern) ?? 0) > (decimalPlacesOfPattern(best) ?? 0) ? pattern : best),
   );
   let isGeneral = isGeneralNumberCell(reads, activeCell);
   let patternPlaces = isNumberShownIn(reads, activeCell) ? decimalPlacesOfPattern(numberFormatOfCell(reads, activeCell).pattern) : null;
@@ -112,7 +137,7 @@ export function decimalPatternOfSelection(reads: WorkbookReads, selection?: Dyna
     pattern: places === null ? mostPlacesPattern : withDecimalPlaces(mostPlacesPattern, places),
   };
 }
-export function decimalPlaceChanges(reads: WorkbookReads, selection?: Dynamic) {
+export function decimalPlaceChanges(reads: WorkbookReads, selection: SelectionForDecimalPlaces): DecimalPlaceChanges {
   if (selection.shared === null) return noDecimalPlaceChanges(null);
   if (selection.shared.cellControl?.kind !== 'none') return noDecimalPlaceChanges('dropdownOrCheckbox');
   let found = decimalPatternOfSelection(reads, selection);
@@ -120,17 +145,17 @@ export function decimalPlaceChanges(reads: WorkbookReads, selection?: Dynamic) {
   let pattern = found.pattern;
   let places = decimalPlacesOfPattern(pattern);
   if (places === null) {
-    let parts: Dynamic = [];
-    reads.patternRead(pattern, (part?: Dynamic) => parts.push(part));
-    return noDecimalPlaceChanges(NOT_DECIMAL_PATTERN_KINDS.has(parts[0]) ? 'noNumbers' : 'formatHasNone');
+    let kindsRead: NumberFormatKind[] = [];
+    reads.patternRead(pattern, (kind) => kindsRead.push(kind));
+    return noDecimalPlaceChanges(NOT_DECIMAL_PATTERN_KINDS.has(kindsRead[0]) ? 'noNumbers' : 'formatHasNone');
   }
-  let stepTo = (count?: Dynamic) => {
+  let stepTo = (count: number): DecimalPlacesStep | null => {
     if (count < 0 || (count > MAX_DECIMAL_PLACES && count > places)) return null;
     let steppedPattern = withDecimalPlaces(pattern, count);
-    let read = reads.patternRead(steppedPattern, sampleValueOfFormatKind);
-    return read?.kind === 'numberFormat' && read.shown.kind === 'text'
+    let patternRead = reads.patternRead(steppedPattern, sampleValueOfFormatKind);
+    return patternRead?.kind === 'numberFormat' && patternRead.shown.kind === 'text'
       ? {
-          count: count,
+          count,
           pattern: steppedPattern,
         }
       : null;
@@ -141,19 +166,19 @@ export function decimalPlaceChanges(reads: WorkbookReads, selection?: Dynamic) {
     whyNeither: null,
   };
 }
-export const DECIMAL_PLACE_CHANGES = ['fewer', 'more'];
-export const noDecimalPlaceChanges = (why?: Dynamic) => ({
+export const DECIMAL_PLACE_CHANGES: DecimalPlaceChange[] = ['fewer', 'more'];
+export const noDecimalPlaceChanges = (why: WhyNoDecimalPlaceChanges | null): DecimalPlaceChanges => ({
   more: null,
   fewer: null,
   whyNeither: why,
 });
 export const NO_NUMBERS_DECIMAL_CHANGES = noDecimalPlaceChanges('noNumbers');
-export const isNumberShownIn = (reads: WorkbookReads, cellId?: Dynamic) => cellValueOf(reads.cellOnShowIn(cellId))?.kind === 'number';
-export const isGeneralNumberCell = (reads: WorkbookReads, cellId?: Dynamic) =>
+export const isNumberShownIn = (reads: WorkbookReads, cellId: CellId): boolean => cellValueOf(reads.cellOnShowIn(cellId))?.kind === 'number';
+export const isGeneralNumberCell = (reads: WorkbookReads, cellId: CellId): boolean =>
   isNumberShownIn(reads, cellId) && isGeneralPattern(numberFormatOfCell(reads, cellId).pattern);
 export const INTEGER_PATTERN = '0';
-export const WHOLE_NUMBER_PATTERNS = new (Set as Dynamic)([
+export const WHOLE_NUMBER_PATTERNS: ReadonlySet<string> = new Set([
   INTEGER_PATTERN,
   withDecimalPlaces(NUMBER_FORMAT_CHOICE_PATTERNS.number.pattern, 0),
 ]);
-export const NOT_DECIMAL_PATTERN_KINDS = new (Set as Dynamic)(['date', 'time', 'dateAndTime', 'duration', 'text']);
+export const NOT_DECIMAL_PATTERN_KINDS: ReadonlySet<NumberFormatKind> = new Set<NumberFormatKind>(['date', 'time', 'dateAndTime', 'duration', 'text']);

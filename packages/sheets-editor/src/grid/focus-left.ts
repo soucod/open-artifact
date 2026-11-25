@@ -1,38 +1,41 @@
-import type { Dynamic } from '../dynamic.ts';
-export let focusLeftChecksHeld: Dynamic;
-export let windowBlurCount: Dynamic;
+/** Told whether the window still has the focus when it has left the page's own parts. */
+export type OnFocusLeft = (isWindowFocused: boolean) => void;
+export const HAS_PERSON_ATTRIBUTE = 'data-has-person';
+export let focusLeftChecksHeld: number;
+export let windowBlurCount: number;
 export function holdFocusLeftChecksForATick() {
   focusLeftChecksHeld += 1;
   setTimeout(() => {
     focusLeftChecksHeld -= 1;
   });
 }
-export function checkWhereFocusWent(doc?: Dynamic, element?: Dynamic, onLeft?: Dynamic, evenWithoutCharts: Dynamic = false) {
+export function checkWhereFocusWent(doc: Document, element: Element | null, onLeft: OnFocusLeft, evenWithoutCharts = false) {
   if (element === null) windowBlurCount += 1;
   if (focusLeftChecksHeld > 0) return;
-  if (!hasChartFrame(doc) && !evenWithoutCharts) {
+  if (!hasFrameThatTakesFocus(doc) && !evenWithoutCharts) {
     onLeft(false);
     return;
   }
-  let value = windowBlurCount;
+  let blurCountBefore = windowBlurCount;
   setTimeout(() => {
-    let [items, items2] = [doc.activeElement, doc.hasFocus()];
+    let [activeElement, isWindowFocused] = [doc.activeElement, doc.hasFocus()];
     if (
       focusLeftChecksHeld === 0 &&
-      !(items2 && (element === null || (items === element && windowBlurCount !== value))) &&
-      items?.matches('iframe.sheet-chart-frame') !== true
+      !(isWindowFocused && (element === null || (activeElement === element && windowBlurCount !== blurCountBefore))) &&
+      activeElement?.matches('iframe.sheet-chart-frame, .sheet-interactive:not([data-has-person]) iframe') !== true
     )
-      onLeft(items2);
+      onLeft(isWindowFocused);
   });
 }
 focusLeftChecksHeld = 0;
 windowBlurCount = 0;
-export const hasChartFrame = (element?: Dynamic) => element.querySelector('iframe.sheet-chart-frame') !== null;
+export const hasFrameThatTakesFocus = (root: ParentNode) =>
+  root.querySelector('iframe.sheet-chart-frame, .sheet-interactive:not([data-has-person]) iframe') !== null;
 export const areFocusLeftChecksHeld = () => focusLeftChecksHeld > 0;
-export const whenBlurredToNothing = (element?: Dynamic, options?: Dynamic) =>
-  checkWhereFocusWent(element.ownerDocument, element, options);
-export const whenBlurredToNothingChecked = (element?: Dynamic, options?: Dynamic) =>
-  checkWhereFocusWent(element.ownerDocument, element, options, true);
-export const whenWindowBlurred = (input?: Dynamic, options?: Dynamic) => checkWhereFocusWent(input, null, options);
-export const isFocusWithinSameMenu = (input?: Dynamic, options?: Dynamic) =>
-  input.closest('[role="menu"]')?.contains(options) === true;
+export const whenBlurredToNothing = (element: Element, onLeft: OnFocusLeft) =>
+  checkWhereFocusWent(element.ownerDocument, element, onLeft);
+export const whenBlurredToNothingChecked = (element: Element, onLeft: OnFocusLeft) =>
+  checkWhereFocusWent(element.ownerDocument, element, onLeft, true);
+export const whenWindowBlurred = (doc: Document, onLeft: OnFocusLeft) => checkWhereFocusWent(doc, null, onLeft);
+export const isFocusWithinSameMenu = (element: Element, relatedTarget: Node | null) =>
+  element.closest('[role="menu"]')?.contains(relatedTarget) === true;

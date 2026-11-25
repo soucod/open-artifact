@@ -10,7 +10,7 @@ export interface AgentActivity {
   hasShellAnswered(): boolean;
   isTurnSeenFromItsStart(): boolean;
   onChanged(listener: () => void): () => void;
-  rest: { onKnown(listener: () => void): () => void };
+  rest: { isKnown(): boolean; onKnown(listener: () => void): () => void };
 }
 
 /** Follows the agent's turns: it works while busy, and is at rest once it has been idle for a moment. */
@@ -57,6 +57,7 @@ export function createAgentActivityWatcher(source: AgentStatusSource, win: Pick<
       return () => void listeners.delete(listener);
     },
     rest: {
+      isKnown: isAtRest,
       onKnown(listener) {
         restListeners.add(listener);
         return () => void restListeners.delete(listener);

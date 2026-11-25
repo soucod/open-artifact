@@ -92,9 +92,10 @@ const sync = createProjectSync<SentBatch, RemoteRun>({
   beforeUnload: () => saveRecovery(true),
 });
 
-/** Loads the deck into the document store. */
-export async function loadDeck(): Promise<void> {
+/** Loads the deck into the document store; `readOnly` keeps it from writing even when the viewer may edit. */
+export async function loadDeck(options: { readOnly?: boolean } = {}): Promise<void> {
   const { artifact, canEdit } = session();
+  const readOnly = options.readOnly || !canEdit;
   const store = useDeck.getState();
   try {
     const { title, files, items: slides } = await readProject(artifact, { files: [DECK_PATH, DECK_STYLESHEET_PATH], item: slideIdFromPath });
@@ -104,7 +105,7 @@ export async function loadDeck(): Promise<void> {
     deckCssHash = css?.hash ?? null;
     // Slides read through the sheet and at the deck's size from the start.
     if (index) configureDeck(parseDeckIndex(index.text).index, deckCss, Object.keys(slides));
-    store.load({ title, readOnly: !canEdit, index: { text: index?.text ?? null, hash: index?.hash ?? null }, slides });
+    store.load({ title, readOnly, index: { text: index?.text ?? null, hash: index?.hash ?? null }, slides });
   } catch (error) {
     store.fail(error instanceof Error ? error.message : String(error));
     return;

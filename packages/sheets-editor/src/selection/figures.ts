@@ -7,8 +7,7 @@ import { cellValueOf } from '../model/cell-values.ts';
 import { numberFormatOfCell, isFormulaCell } from '../model/workbook.ts';
 import { isGeneralPattern } from '../model/cell-format.ts';
 import { roundToShownPrecision } from '../format/general-numbers.ts';
-import { isCheckboxFormat } from '../chips/checkboxes.ts';
-import { booleanOfValue } from '../chips/checkbox-presses.ts';
+import { isCheckboxFormat, booleanOfValue } from '../chips/checkboxes.ts';
 import { readsOverShownRows } from '../tables/filtered-rows.ts';
 import { hasOtherRanges, areasOfAllRanges } from './several-ranges.ts';
 import { selectedArea, mergedAreaOrCellOf, isSameArea, selectionKindOf, selectionAtCell, areaOfPosition } from './model.ts';
@@ -65,15 +64,15 @@ export function valuedCellsIn(reads: WorkbookReads, sheetId: SheetId, area: Cell
       let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
       let value = nonEmptyValueOfCell(reads, cellId);
       if (cellId === null || value === null) continue;
-      let { cellControl: cellControl } = reads.formatOf(cellId);
+      let { cellControl } = reads.formatOf(cellId);
       let numberFormat = value.kind === 'number' ? numberFormatOfCell(reads, cellId) : null;
       cells.push({
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
-        value: value,
+        rowIndex,
+        columnIndex,
+        value,
         numberFormatKind: numberFormat?.kind ?? null,
         hasNumberFormat: numberFormat !== null && !isGeneralPattern(numberFormat.pattern),
-        cellControl: cellControl,
+        cellControl,
       });
     }
   return cells;
@@ -128,7 +127,7 @@ export function cellForSumBelow(reads: WorkbookReads, sheetId: SheetId, area: Ce
   return merged === null || isMergeStart ? cellId : null;
 }
 export function duplicatesFigure(cells: readonly ValuedCell[]): FigureOfCells | null {
-  let distinctCount = new Set(cells.map(({ value: value }) => value.value)).size;
+  let distinctCount = new Set(cells.map(({ value }) => value.value)).size;
   return distinctCount === cells.length || distinctCount <= cells.length / 2
     ? null
     : {
@@ -167,12 +166,12 @@ export function numberColumnWithHeading(cells: ValuedCell[], headings: readonly 
   );
   if (numberColumns.length === byColumn.size)
     return {
-      cells: cells,
+      cells,
       heading: null,
     };
   let [column] = numberColumns;
   if (numberColumns.length !== 1 || column === undefined || column.length === 1) return null;
-  let heading = headings.find(({ columnIndex: columnIndex }) => columnIndex === column[0]?.columnIndex)?.value.value;
+  let heading = headings.find(({ columnIndex }) => columnIndex === column[0]?.columnIndex)?.value.value;
   if (typeof heading === 'string' && heading.trim() !== '')
     return {
       cells: column,
@@ -189,27 +188,27 @@ export function figuresOfArea(reads: WorkbookReads, sheetId: SheetId, area: Cell
   let cellCount = area.rowCount * area.columnCount;
   if (cellCount > MAX_FIGURE_CELLS) return null;
   let cells = valuedCellsIn(reads, sheetId, area);
-  let errorCount = cells.filter(({ value: value }) => value.kind === 'error').length;
+  let errorCount = cells.filter(({ value }) => value.kind === 'error').length;
   if (errorCount > 0)
     return {
       kind: 'errors',
       count: errorCount,
     };
   if (cells.length === 0 || selectionKind === 'rows') return null;
-  let topRow = cells.filter(({ rowIndex: rowIndex }) => rowIndex === area.topRowIndex);
+  let topRow = cells.filter(({ rowIndex }) => rowIndex === area.topRowIndex);
   let headings = topRow.length < cells.length && topRow.every(isTextOrDate) ? topRow : [];
   let body = cells.slice(headings.length);
   let checked = checkedFigure(body);
   if (checked !== null) return checked;
-  let sumFigure = ({ cells: columnCells, heading: heading }: NumbersUnderHeading): SumFigure | null => {
+  let sumFigure = ({ cells: columnCells, heading }: NumbersUnderHeading): SumFigure | null => {
     let figures = figuresOfCells(columnCells);
     if (figures === null) return null;
-    let rowIndexes = columnCells.map(({ rowIndex: rowIndex }) => rowIndex);
-    let columnIndexes = columnCells.map(({ columnIndex: columnIndex }) => columnIndex);
+    let rowIndexes = columnCells.map(({ rowIndex }) => rowIndex);
+    let columnIndexes = columnCells.map(({ columnIndex }) => columnIndex);
     let [topRowIndex, leftColumnIndex] = [Math.min(...rowIndexes), Math.min(...columnIndexes)];
     let figureArea = {
-      topRowIndex: topRowIndex,
-      leftColumnIndex: leftColumnIndex,
+      topRowIndex,
+      leftColumnIndex,
       rowCount: Math.max(...rowIndexes) - topRowIndex + 1,
       columnCount: Math.max(...columnIndexes) - leftColumnIndex + 1,
     };
@@ -218,9 +217,9 @@ export function figuresOfArea(reads: WorkbookReads, sheetId: SheetId, area: Cell
       kind: 'sum',
       ...figures,
       signsOfNumbers: reads.signsOfNumbers,
-      heading: heading,
+      heading,
       area: figureArea,
-      formulaCell: formulaCell,
+      formulaCell,
     };
   };
   if (area.columnCount === 1) {
@@ -234,7 +233,7 @@ export function figuresOfArea(reads: WorkbookReads, sheetId: SheetId, area: Cell
     return cells.every(isTextOrDate) ? duplicatesFigure(cells) : null;
   }
   let headingsOverBlank = headings.filter(
-    ({ rowIndex: rowIndex, columnIndex: columnIndex }) =>
+    ({ rowIndex, columnIndex }) =>
       nonEmptyValueOfCell(reads, reads.cellIdAt(sheetId, rowIndex - 1, columnIndex)) === null,
   );
   let numberColumn = numberColumnWithHeading(body, headingsOverBlank);
@@ -255,7 +254,7 @@ export function figuresOfRanges(reads: WorkbookReads, sheetId: SheetId, areas: r
   for (let cell of areas.flatMap((area) => valuedCellsIn(reads, sheetId, area)))
     byPlace.set(`${cell.rowIndex} ${cell.columnIndex}`, cell);
   let cells = [...byPlace.values()];
-  let errorCount = cells.filter(({ value: value }) => value.kind === 'error').length;
+  let errorCount = cells.filter(({ value }) => value.kind === 'error').length;
   if (errorCount > 0)
     return {
       kind: 'errors',
@@ -282,8 +281,8 @@ export function figuresOfSelection(state: PageState, reads: ReadsWithTextMeasure
   let formulaCell = area.rowCount > figures.area.rowCount ? null : figures.formulaCell;
   return {
     ...figures,
-    area: area,
-    formulaCell: formulaCell,
+    area,
+    formulaCell,
   };
 }
 export function figuresOfSelectionIn(
@@ -297,7 +296,7 @@ export function figuresOfSelectionIn(
     return figuresOfRanges(
       figureReads,
       state.sheetId,
-      areas.filter(({ rowCount: rowCount }) => rowCount > 0),
+      areas.filter(({ rowCount }) => rowCount > 0),
     );
   }
   let area = selectedArea(state, reads);
@@ -330,7 +329,7 @@ export const isSumWithFormulaCell = (figure: FigureOfCells | null): figure is Su
 export const MAX_FIGURE_CELLS = 2000;
 export const MOSTLY_FILLED_SHARE = 0.8;
 export const DATE_TIME_FORMAT_KINDS = new Set<NumberFormatKind | null>(['date', 'time', 'dateAndTime', 'duration']);
-export const isDateOrTimeCell = ({ numberFormatKind: numberFormatKind }: ValuedCell): boolean => DATE_TIME_FORMAT_KINDS.has(numberFormatKind);
+export const isDateOrTimeCell = ({ numberFormatKind }: ValuedCell): boolean => DATE_TIME_FORMAT_KINDS.has(numberFormatKind);
 export const plainNumbersOf = (cells: readonly ValuedCell[]): number[] =>
   cells.flatMap((cell) => (cell.value.kind === 'number' && !isDateOrTimeCell(cell) ? [cell.value.value] : []));
 export const figuresOfCells = (cells: readonly ValuedCell[]): SumFigures | null =>

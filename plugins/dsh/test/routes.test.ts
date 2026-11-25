@@ -105,8 +105,8 @@ function routesWith(...tokens: string[]) {
 describe('routes', () => {
   it('registers every page path under the base, buffered', () => {
     const { routes } = routesWith(TOKEN);
-    // The host.open, updates and changelog routes come with what they need only.
-    const host: string[] = [PATHS.hostOpens, PATHS.hostOpened, PATHS.updates, PATHS.changelog];
+    // The host.open, shell-command, updates and changelog routes come with what they need only.
+    const host: string[] = [PATHS.hostOpens, PATHS.hostOpened, PATHS.shellCommand, PATHS.updates, PATHS.changelog];
     assert.deepEqual([...routes.keys()].sort(), Object.values(PATHS).filter((p) => !host.includes(p)).sort());
     for (const route of routes.values()) {
       assert.ok(route.path.startsWith(ROUTE_BASE));

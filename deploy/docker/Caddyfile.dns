@@ -1,0 +1,43 @@
+# Caddy in front of the Open Artifact host with one wildcard certificate for every content host (*.CONTENT_DOMAIN),
+# obtained by the DNS-01 challenge through your DNS provider's API. Used by compose.dns.yaml, which builds a Caddy with
+# the provider's plugin (caddy/Dockerfile).
+#
+# Worked example: Cloudflare. Make an API token with Zone / DNS / Edit on the content domain's zone (and the app
+# domain's, if it is on Cloudflare too) and put it in .env as CLOUDFLARE_API_TOKEN.
+#
+# Another provider: pick its module from https://github.com/caddy-dns (e.g. github.com/caddy-dns/route53), set
+# CADDY_DNS_MODULE in .env to it, replace the `dns cloudflare …` line below with that module's settings (its README
+# shows them), and pass its credentials through compose.dns.yaml's `environment:` instead of CLOUDFLARE_API_TOKEN.
+#
+# Set APP_HOST, CONTENT_DOMAIN and ACME_EMAIL in .env. DNS: A/AAAA records for APP_HOST and *.CONTENT_DOMAIN pointing
+# at this server; ports 80 and 443 open (the app host still uses HTTP-01 or TLS-ALPN unless you give it `tls { dns … }` too).
+
+{
+	email {$ACME_EMAIL}
+}
+
+(to_host) {
+	# The host reads the larger of its own limits (an uploaded archive or a Link push: 100 MiB); refuse more here.
+	request_body {
+		max_size 101MiB
+	}
+	reverse_proxy host:4900 {
+		# Server-sent events (the library's and the Link API's streams) go out as they are written.
+		flush_interval -1
+		# Shorter than the host's idle timeout (130 s behind a proxy), so Caddy never reuses a connection it closed.
+		transport http {
+			keepalive 90s
+		}
+	}
+}
+
+{$APP_HOST} {
+	import to_host
+}
+
+*.{$CONTENT_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	import to_host
+}

@@ -4,7 +4,7 @@
  * or a selection, and remembering this tab's camera.
  */
 
-import { centerOn, fitRect, nextZoomStep, panBy, recallCamera, rememberCamera, zoomAround, type Camera, type Point, type Rect } from '../lib/camera.ts';
+import { CAMERA_GLIDE_MS, centerOn, fitRect, glideCameraAt, nextZoomStep, panBy, recallCamera, rememberCamera, sameCamera, zoomAround, type Camera, type Point, type Rect } from '../lib/camera.ts';
 import { useCamera, zoomRange } from '../state/camera.ts';
 
 /** Wheel zoom factor of one wheel delta (pixels), clamped per event. */
@@ -64,10 +64,43 @@ export function setCamera(camera: Camera): void {
   useCamera.getState().setCamera(camera);
 }
 
+/** The glide under way, if any. */
+let glide: number | null = null;
+
+/**
+ * Moves the camera to `target` over a moment (at once when the viewer
+ * prefers less motion). Any other camera move during the glide ends it.
+ */
+export function glideCamera(target: Camera): void {
+  if (glide !== null) cancelAnimationFrame(glide);
+  glide = null;
+  const from = useCamera.getState().camera;
+  if (sameCamera(from, target)) return;
+  if (typeof requestAnimationFrame !== 'function' || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches)) {
+    setCamera(target);
+    return;
+  }
+  const start = performance.now();
+  let shown = from;
+  const step = (now: number): void => {
+    if (!sameCamera(useCamera.getState().camera, shown)) {
+      glide = null;
+      return;
+    }
+    const t = (now - start) / CAMERA_GLIDE_MS;
+    shown = t >= 1 ? target : glideCameraAt(from, target, t);
+    setCamera(shown);
+    // The store may round what it was given; follow what it shows.
+    shown = useCamera.getState().camera;
+    glide = t >= 1 ? null : requestAnimationFrame(step);
+  };
+  glide = requestAnimationFrame(step);
+}
+
 /** Zooms around a screen point (default: the viewport center). */
 export function zoomTo(zoom: number, anchor?: Point): void {
   const state = useCamera.getState();
-  const { min, max } = zoomRange(state);
+  const { min, max } = zoomRange();
   const clamped = Math.min(max, Math.max(min, zoom));
   setCamera(zoomAround(state.camera, clamped, anchor ?? { x: state.width / 2, y: state.height / 2 }));
 }
@@ -75,7 +108,7 @@ export function zoomTo(zoom: number, anchor?: Point): void {
 /** Zooms one step in or out around the viewport center. */
 export function zoomStep(direction: 1 | -1): void {
   const state = useCamera.getState();
-  const { min, max } = zoomRange(state);
+  const { min, max } = zoomRange();
   zoomTo(nextZoomStep(state.camera.zoom, direction, min, max));
 }
 
@@ -86,7 +119,7 @@ export function fitTo(rect: Rect | null, options: { maxZoom?: number } = {}): vo
     setCamera(centerOn({ x: 0, y: 0 }, 1, state.width, state.height));
     return;
   }
-  const { min } = zoomRange(state);
+  const { min } = zoomRange();
   setCamera(fitRect(rect, state.width, state.height, { insets: state.insets, minZoom: min, ...(options.maxZoom !== undefined ? { maxZoom: options.maxZoom } : {}) }));
 }
 
@@ -96,10 +129,12 @@ export function panToPoint(point: Point): void {
   setCamera(centerOn(point, state.camera.zoom, state.width, state.height));
 }
 
-/** Restores this tab's last camera on a board; `false` when there is none. */
+/**
+ * Restores this tab's last camera on a board; `false` when there is none. It can run before the
+ * viewport is measured: the zoom range is the same at every size, so the camera is kept as it was left.
+ */
 export function restoreCamera(key: string): boolean {
-  const { min, max } = zoomRange();
-  const camera = recallCamera(key, min, max);
+  const camera = recallCamera(key);
   if (!camera) return false;
   setCamera(camera);
   return true;
@@ -108,13 +143,23 @@ export function restoreCamera(key: string): boolean {
 /** Remembers the camera on every change (debounced); returns a stop function. */
 export function keepCameraRemembered(key: string): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const flush = (): void => {
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    timer = undefined;
+    rememberCamera(key, useCamera.getState().camera);
+  };
   const unsubscribe = useCamera.subscribe((state, previous) => {
     if (state.camera === previous.camera) return;
     clearTimeout(timer);
-    timer = setTimeout(() => rememberCamera(key, state.camera), 250);
+    timer = setTimeout(flush, 250);
   });
+  window.addEventListener('pagehide', flush);
+  window.addEventListener('beforeunload', flush);
   return () => {
-    clearTimeout(timer);
+    flush();
+    window.removeEventListener('pagehide', flush);
+    window.removeEventListener('beforeunload', flush);
     unsubscribe();
   };
 }
@@ -125,8 +170,6 @@ export interface ViewportGestureOptions {
   /** Called when a two-finger gesture starts (cancel any one-finger gesture in progress). */
   onGestureStart?(): void;
   onGestureEnd?(): void;
-  /** True for wheel events handled elsewhere (the canvas engine's own wheel pan and zoom). */
-  skipWheel?(event: WheelEvent): boolean;
 }
 
 /**
@@ -143,7 +186,6 @@ export function attachViewportGestures(options: ViewportGestureOptions): () => v
   };
 
   const onWheel = (event: WheelEvent): void => {
-    if (options.skipWheel?.(event)) return;
     const decision = wheel.decide(event.timeStamp, event.ctrlKey || event.metaKey, event.deltaX !== 0 || event.deltaY !== 0, () => scrollsNatively(event.target, element));
     if (decision === 'native') return;
     event.preventDefault();
@@ -152,7 +194,7 @@ export function attachViewportGestures(options: ViewportGestureOptions): () => v
     const lineX = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerWidth : 1;
     const state = useCamera.getState();
     if (decision === 'zoom') {
-      const { min, max } = zoomRange(state);
+      const { min, max } = zoomRange();
       const zoom = Math.min(max, Math.max(min, state.camera.zoom * wheelZoomFactor(event.deltaY * lineY)));
       setCamera(zoomAround(state.camera, zoom, local(event.clientX, event.clientY)));
     } else {

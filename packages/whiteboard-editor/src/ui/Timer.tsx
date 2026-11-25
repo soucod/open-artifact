@@ -424,6 +424,7 @@ function TimerLengthInput({
           enterKeyHint="done"
           autoComplete="off"
           value={halves[half]}
+          {...(draft === null ? { 'data-wb-committed': '' } : {})}
           onChange={(event) => onInput(half, event)}
           onPaste={(event) => {
             event.preventDefault();

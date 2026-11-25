@@ -1,0 +1,1 @@
+{"kind":"json","text":"{\"v\":1,\"stage\":\"final\",\"width\":640,\"height\":360,\"fps\":24,\"background\":\"#f5efe6\",\"palettes\":[[\"#eef3f8\",\"#102033\",\"#51748c\",\"#2b5f8c\"]],\"scenes\":[{\"id\":\"intro\",\"name\":\"Intro\",\"dur\":3,\"desc\":\"Opening title and moving SVG shapes.\"},{\"id\":\"outro\",\"name\":\"Outro\",\"dur\":2,\"desc\":\"Closing title.\"}]}"}

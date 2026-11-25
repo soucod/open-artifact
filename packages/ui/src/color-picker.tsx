@@ -10,6 +10,7 @@ import { Pipette, X } from 'lucide-react';
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -21,16 +22,19 @@ import {
 } from 'react';
 import { cn } from './cn.ts';
 import {
+  colorRevertMessage,
   contrastLevel,
   contrastRatio,
   contrastTarget,
   editFormat,
   formatColor,
   hsvaToRgba,
+  hueName,
   parseColor,
   readableShade,
   rgbaToHsva,
   sameColor,
+  withHexHash,
   type ColorFormat,
   type ColorNotation,
   type Hsva,
@@ -306,19 +310,38 @@ export function ColorPickerPanel({
     commit(text(fixed));
   };
 
-  const pickText = (raw: string) => {
-    const typed = raw.trim();
-    if (!typed) return;
-    const hexless = /^[0-9a-f]{3,8}$/i.test(typed) ? `#${typed}` : typed;
+  /** A color typed into the text field and not committed yet: shown in the picker only. */
+  const [typed, setTyped] = useState<Hsva | null>(null);
+  /** Why the last text entered went back (not a color), until the next edit. */
+  const [refused, setRefused] = useState<string | null>(null);
+  const refusedId = useId();
+  const previewText = (raw: string) => {
+    if (raw !== shownText) setRefused(null);
+    const next = raw === shownText ? null : parseColor(withHexHash(raw));
+    setTyped(next ? rgbaToHsva(alpha ? next.rgba : { ...next.rgba, a: 1 }, hsva.h) : null);
+  };
+
+  const pickText = (raw: string): boolean => {
+    setTyped(null);
+    const entered = raw.trim();
+    if (!entered) return false;
+    const hexless = withHexHash(entered);
     const next = parseColor(hexless);
     if (next) {
+      setRefused(null);
       setHsva(rgbaToHsva(alpha ? next.rgba : { ...next.rgba, a: 1 }, hsva.h));
       setFormat(editFormat(next.notation));
       commit(alpha || next.rgba.a === 1 ? hexless : formatColor({ ...next.rgba, a: 1 }, editFormat(next.notation), next.notation));
-      return;
+      return true;
     }
     // Other CSS colors (`var(--x)`, `color-mix()`) pass through when the browser reads them.
-    if (typeof CSS !== 'undefined' && CSS.supports('color', typed)) commit(typed);
+    if (typeof CSS !== 'undefined' && CSS.supports('color', entered)) {
+      setRefused(null);
+      commit(entered);
+      return true;
+    }
+    setRefused(colorRevertMessage(shownText));
+    return false;
   };
 
   const pickSwatch = (swatch: { value: string; css?: string }) => {
@@ -333,7 +356,8 @@ export function ColorPickerPanel({
   };
 
   const dropper = typeof window !== 'undefined' && 'EyeDropper' in window ? (window as unknown as { EyeDropper: new () => EyeDropperLike }).EyeDropper : null;
-  const rgb = hsvaToRgba({ ...hsva, a: 1 });
+  const seen = typed ?? hsva;
+  const rgb = hsvaToRgba({ ...seen, a: 1 });
   const solid = formatColor(rgb, 'hex');
   const shownText = value !== null && !parsed ? value : text(hsva);
   const current = value ?? null;
@@ -349,23 +373,25 @@ export function ColorPickerPanel({
 
   return (
     <div className={cn('flex w-60 flex-col gap-3', className)}>
-      <ColorArea hsva={hsva} onDrag={drag} onSettle={settle} />
+      <ColorArea hsva={seen} onDrag={drag} onSettle={settle} />
       <ColorSlider
         label="Hue"
-        value={hsva.h / 360}
+        value={seen.h / 360}
         background="linear-gradient(to right, #f00 0%, #ff0 16.67%, #0f0 33.33%, #0ff 50%, #00f 66.67%, #f0f 83.33%, #f00 100%)"
-        thumb={`hsl(${hsva.h} 100% 50%)`}
-        valueText={`${Math.round(hsva.h)} degrees`}
+        thumb={`hsl(${seen.h} 100% 50%)`}
+        max={360}
+        largeStep={10 / 360}
+        valueText={`${Math.round(hsva.h)}°, ${hueName(hsva.h)}`}
         onDrag={(t) => drag({ ...hsva, h: Math.min(359.9, t * 360) })}
         onSettle={(t) => settle({ ...hsva, h: Math.min(359.9, t * 360) })}
       />
       {alpha ? (
         <ColorSlider
           label="Opacity"
-          value={hsva.a}
+          value={seen.a}
           background={`linear-gradient(to right, transparent, ${solid}), ${CHECKERBOARD}`}
-          thumb={formatColor({ ...rgb, a: hsva.a }, 'rgb')}
-          valueText={`${Math.round(hsva.a * 100)}%`}
+          thumb={formatColor({ ...rgb, a: seen.a }, 'rgb')}
+          valueText={`${Math.round(hsva.a * 100)}% opaque`}
           onDrag={(t) => drag({ ...hsva, a: Math.round(t * 100) / 100 })}
           onSettle={(t) => settle({ ...hsva, a: Math.round(t * 100) / 100 })}
         />
@@ -375,9 +401,18 @@ export function ColorPickerPanel({
         <span
           aria-hidden="true"
           className="size-7 shrink-0 rounded-control shadow-[inset_0_0_0_1px_rgb(0_0_0/0.12)]"
-          style={{ background: `linear-gradient(${formatColor(hsvaToRgba(hsva), 'rgb')}, ${formatColor(hsvaToRgba(hsva), 'rgb')}), ${CHECKERBOARD}` }}
+          style={{ background: `linear-gradient(${formatColor(hsvaToRgba(seen), 'rgb')}, ${formatColor(hsvaToRgba(seen), 'rgb')}), ${CHECKERBOARD}` }}
         />
-        <CommitInput aria-label="Color value" value={shownText} onCommit={pickText} spellCheck={false} className="font-mono text-[12px]" />
+        <CommitInput
+          aria-label="Color value"
+          aria-invalid={refused ? true : undefined}
+          aria-describedby={refused ? refusedId : undefined}
+          value={shownText}
+          onCommit={pickText}
+          onDraftChange={previewText}
+          spellCheck={false}
+          className="font-mono text-[12px]"
+        />
         {dropper ? (
           <button
             type="button"
@@ -411,6 +446,11 @@ export function ColorPickerPanel({
           </button>
         ) : null}
       </div>
+      {refused ? (
+        <p id={refusedId} role="status" className="-mt-1.5 text-[11px] text-warning">
+          {refused}
+        </p>
+      ) : null}
       {contrastAgainst ? (
         <ContrastBadge
           color={value !== null && !parsed ? value : text(hsva)}
@@ -459,7 +499,7 @@ function relative(event: PointerEvent<HTMLElement>, element: HTMLElement): { x: 
   };
 }
 
-/** Arrow-key step: 1%, Shift 10%. */
+/** Arrow-key step of the area: 1%, Shift 10%. */
 const keyStep = (event: KeyboardEvent) => (event.shiftKey ? 0.1 : 0.01);
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
@@ -522,10 +562,16 @@ function ColorArea({ hsva, onDrag, onSettle }: { hsva: Hsva; onDrag: (next: Hsva
   );
 }
 
-/** A horizontal 0–1 slider painted with `background` (hue, opacity). */
+/**
+ * A horizontal 0–1 slider painted with `background` (hue, opacity). It reads
+ * as 0–`max` (100 for percents, 360 for degrees); an arrow moves one of
+ * those units, Shift + arrow and Page Up/Down move `largeStep`.
+ */
 function ColorSlider({
   label,
   value,
+  max = 100,
+  largeStep = 0.1,
   background,
   thumb,
   valueText,
@@ -534,6 +580,8 @@ function ColorSlider({
 }: {
   label: string;
   value: number;
+  max?: number;
+  largeStep?: number;
   background: string;
   thumb: string;
   valueText: string;
@@ -541,14 +589,14 @@ function ColorSlider({
   onSettle: (value: number) => void;
 }) {
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const d = keyStep(event);
+    const d = event.shiftKey ? largeStep : 1 / max;
     const moves: Record<string, number> = {
       ArrowLeft: value - d,
       ArrowDown: value - d,
       ArrowRight: value + d,
       ArrowUp: value + d,
-      PageDown: value - 0.1,
-      PageUp: value + 0.1,
+      PageDown: value - largeStep,
+      PageUp: value + largeStep,
       Home: 0,
       End: 1,
     };
@@ -563,8 +611,8 @@ function ColorSlider({
       tabIndex={0}
       aria-label={label}
       aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(value * 100)}
+      aria-valuemax={max}
+      aria-valuenow={Math.round(value * max)}
       aria-valuetext={valueText}
       className="relative h-3 w-full cursor-pointer touch-none rounded-full shadow-[inset_0_0_0_1px_rgb(0_0_0/0.1)] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       style={{ background }}

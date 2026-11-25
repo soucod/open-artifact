@@ -32,6 +32,7 @@ import {
   sanitizeText,
 } from './text.ts';
 import { isValidDashboardFilename, isValidDatasetId } from './paths.ts';
+import { isSavedRowsPath } from './saved-rows.ts';
 import { DATA_FILE_FORMATS, inferDataFileFormatOrCsv } from './tables.ts';
 
 export const MAX_ERROR_MESSAGE_CHARACTERS = 400;
@@ -262,6 +263,10 @@ export function parseDatasetSource(record: Record<string, unknown>): DatasetSour
         inferDataFileFormatOrCsv(fileName),
       ),
     };
+  }
+  if (name === 'store') {
+    const path = getOwnProperty(record, 'path');
+    return { kind: 'store', path: isSavedRowsPath(path) ? path : '' };
   }
   return { kind: 'unsupported', rawKind: sanitizeSingleLine(name) };
 }

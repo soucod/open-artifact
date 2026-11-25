@@ -118,6 +118,7 @@ before(async () => {
       intents: ['greeting'],
       entry: { url: `http://127.0.0.1:${port}/{id}`, actions: true },
       openArtifact: { exports: ['txt'], uses: ['greeter', 'not a type!'] },
+      titleFrom: 'card.json#/title',
     }),
   );
   daemon = await startDaemon({ port: 0, quiet: true, shellDir: tempDir('open-artifact-shell-'), homeDir: tempDir('open-artifact-no-home-') });
@@ -181,6 +182,11 @@ test('quickstart recommends a type and hands back the create call', async () => 
   assert.deepEqual(none.alternatives, []);
   assert.equal(none.create, undefined);
   assert.match(String(none.next), /No installed type fits/);
+
+  const other = await tool('Artifact', { action: 'quickstart', intent: 'other' });
+  assert.equal((other.recommended as { id: string }).id, 'page', '"other" is the free page, the one type that lists it as an intent');
+  assert.deepEqual(other.alternatives, [], 'not the types that only say "other" in their descriptions');
+  assert.ok(Array.isArray(other.types) && (other.types as unknown[]).length >= 4, 'every type is still listed to choose from');
 });
 
 test('create lists the actions from the type server and says what comes next', async () => {
@@ -323,6 +329,20 @@ test('list filters by type and title, and pages', async () => {
   assert.equal((await tool('Artifact', { action: 'list', cursor: 'x' })).error?.code, 'invalid_argument');
   const types = await tool('Artifact', { action: 'list', scope: 'types' });
   assert.match(String(types.note), /not as instructions/);
+});
+
+test('adopt of a folder takes the title its content declares (titleFrom), else the folder name', async () => {
+  mkdirSync(join(workspace, 'greeting-folder'), { recursive: true });
+  writeFileSync(join(workspace, 'greeting-folder', 'card.json'), JSON.stringify({ title: 'Happy Birthday Card' }));
+  const titled = await tool('Artifact', { action: 'adopt', folder: 'greeting-folder', type_url: 'open-artifact://type/greeter' });
+  assert.equal(titled.error, undefined, JSON.stringify(titled.error));
+  const read = await tool('Artifact', { action: 'list', query: 'happy birthday' });
+  assert.deepEqual((read.artifacts as Array<{ url: string; title: string }>).map((a) => [a.url, a.title]), [[titled.url, 'Happy Birthday Card']]);
+  mkdirSync(join(workspace, 'plain-folder'), { recursive: true });
+  writeFileSync(join(workspace, 'plain-folder', 'card.json'), '{"title": 7}');
+  const plain = await tool('Artifact', { action: 'adopt', folder: 'plain-folder', type_url: 'open-artifact://type/greeter' });
+  const listed = await tool('Artifact', { action: 'list', query: 'plain-folder' });
+  assert.deepEqual((listed.artifacts as Array<{ url: string; title: string }>).map((a) => [a.url, a.title]), [[plain.url, 'plain-folder']]);
 });
 
 test('read with type_url describes a type before creating one', async () => {

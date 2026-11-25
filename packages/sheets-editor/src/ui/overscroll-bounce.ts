@@ -1,32 +1,66 @@
 import { prefersReducedMotion } from '../kit/platform.ts';
-import type { Dynamic } from '../dynamic.ts';
+import type { GridPoint } from '../grid/geometry.ts';
+import type { ScrollAlongAxis } from '../grid/scrollbars.tsx';
 import * as React from 'react';
-export function overscrollOnAxis({ by: by, most: most }: Dynamic, delta: Dynamic) {
-  let beyond = by + delta - Math.min(Math.max(by + delta, 0), Math.max(most, 0));
+/** The control points of a CSS cubic-bezier easing: x1, y1, x2, y2. */
+export type CubicBezier = [number, number, number, number];
+/** One stretch of a bounce, played from one stretch of the grid to the next. */
+export interface BounceLeg {
+  from: GridPoint;
+  to: GridPoint;
+  ms: number;
+  curve: CubicBezier;
+}
+export type BounceLegTiming = Pick<BounceLeg, 'ms' | 'curve'>;
+/** Something a bounce moves: the grid, or a margin beside it drawn as lying on it. */
+export interface BouncedElement {
+  liesOnGrid?: boolean;
+  style: CSSStyleDeclaration;
+  clientWidth: number;
+  clientHeight: number;
+  animate: (keyframes: Keyframe[], options: KeyframeAnimationOptions) => Animation;
+}
+/** How the grid stretches past its edges when scrolled or flung beyond them, and springs back. */
+export interface OverscrollBounce {
+  /** Takes back the stretch that a scroll toward the middle undoes, and returns the scroll that is left. */
+  easedBy(delta: GridPoint): GridPoint;
+  pulledBy(overscroll: GridPoint, delta: GridPoint): void;
+  /** Springs back, and returns the way a fling should go after it. */
+  letGo(): GridPoint;
+  bumpedAt(speed: GridPoint): void;
+  isOnWayBack(): boolean;
+  heldAgain(): void;
+}
+interface BouncePlaying {
+  legs: BounceLeg[];
+  played: Animation[];
+}
+export function overscrollOnAxis({ by, most }: Pick<ScrollAlongAxis, 'by' | 'most'>, delta: number) {
+  const beyond = by + delta - Math.min(Math.max(by + delta, 0), Math.max(most, 0));
   return delta > 0 ? Math.min(Math.max(beyond, 0), delta) : Math.max(Math.min(beyond, 0), delta);
 }
-export function easedProgress([x1, y1, x2, y2]: Dynamic, progress: Dynamic) {
-  let [low, high]: Dynamic = [0, 1];
-  for (let step: Dynamic = 0; step < 24; step += 1) {
-    let middle = (low + high) / 2;
+export function easedProgress([x1, y1, x2, y2]: CubicBezier, progress: number) {
+  let [low, high] = [0, 1];
+  for (let step = 0; step < 24; step += 1) {
+    const middle = (low + high) / 2;
     if (cubicBezierAt(x1, x2, middle) < progress) low = middle;
     else high = middle;
   }
   return cubicBezierAt(y1, y2, (low + high) / 2);
 }
 export function createOverscrollBounce(
-  isOn: Dynamic,
-  elementsOf: Dynamic,
-  zoomOf: Dynamic,
-  now: Dynamic,
-  isMotionReduced: Dynamic = () => false,
-) {
+  isOn: boolean,
+  elementsOf: () => BouncedElement[],
+  zoomOf: () => number,
+  now: () => number,
+  isMotionReduced: () => boolean = () => false,
+): OverscrollBounce {
   if (!isOn) return INERT_OVERSCROLL_BOUNCE;
-  let pulled: Dynamic = NO_STRETCH;
-  let playing: Dynamic = null;
-  let pullSpeed: Dynamic = NO_STRETCH;
-  let roomOf = () => {
-    let [first] = elementsOf();
+  let pulled = NO_STRETCH;
+  let playing: BouncePlaying | null = null;
+  let pullSpeed = NO_STRETCH;
+  const roomOf = () => {
+    const [first] = elementsOf();
     return first === undefined
       ? NO_STRETCH
       : {
@@ -34,17 +68,17 @@ export function createOverscrollBounce(
           y: first.clientHeight * zoomOf(),
         };
   };
-  let stretchOfPull = ({ x: x, y: y }: Dynamic) => ({
+  const stretchOfPull = ({ x, y }: GridPoint) => ({
     x: -rubberBandOffset(x, roomOf().x),
     y: -rubberBandOffset(y, roomOf().y),
   });
-  let stretchPlayingNow = () => {
+  const stretchPlayingNow = () => {
     if (playing === null) return NO_STRETCH;
-    let startTime = playing.played[0]?.startTime;
-    let elapsed: Dynamic = typeof startTime === 'number' ? now() - startTime : 0;
-    for (let { from: from, to: to, ms: ms, curve: curve } of playing.legs) {
+    const startTime = playing.played[0]?.startTime;
+    let elapsed = typeof startTime === 'number' ? now() - startTime : 0;
+    for (const { from, to, ms, curve } of playing.legs) {
       if (elapsed < ms) {
-        let eased = easedProgress(curve, Math.max(elapsed, 0) / ms);
+        const eased = easedProgress(curve, Math.max(elapsed, 0) / ms);
         return {
           x: from.x + (to.x - from.x) * eased,
           y: from.y + (to.y - from.y) * eased,
@@ -55,40 +89,40 @@ export function createOverscrollBounce(
     playing = null;
     return NO_STRETCH;
   };
-  let stopPlaying = () => {
-    for (let animation of playing?.played ?? []) animation.cancel();
+  const stopPlaying = () => {
+    for (const animation of playing?.played ?? []) animation.cancel();
     playing = null;
   };
-  let play = (legs?: Dynamic) => {
+  const play = (legs: BounceLeg[]) => {
     stopPlaying();
-    let duration = legs.reduce((total: Dynamic, { ms: ms }: Dynamic) => total + ms, 0);
-    let played = elementsOf().map((element?: Dynamic) => {
+    const duration = legs.reduce((total, { ms }) => total + ms, 0);
+    const played = elementsOf().map((element) => {
       Object.assign(element.style, {
         translate: '',
         zIndex: '',
       });
-      let offset: Dynamic = 0;
-      let keyframes = legs.map(({ from: from, ms: ms, curve: curve }: Dynamic) => {
-        let keyframe = {
+      let offset = 0;
+      const keyframes = legs.map(({ from, ms, curve }) => {
+        const keyframe = {
           ...stretchStyle(from, element),
-          offset: offset,
+          offset,
           easing: `cubic-bezier(${curve.join(', ')})`,
         };
         offset += ms / duration;
         return keyframe;
       });
       return element.animate([...keyframes, stretchStyle(legs.at(-1)?.to ?? NO_STRETCH, element)], {
-        duration: duration,
+        duration,
       });
     });
     playing = {
-      legs: legs,
-      played: played,
+      legs,
+      played,
     };
   };
-  let drawPulled = () => {
+  const drawPulled = () => {
     stopPlaying();
-    for (let element of elementsOf())
+    for (const element of elementsOf())
       Object.assign(
         element.style,
         {
@@ -98,8 +132,8 @@ export function createOverscrollBounce(
         isNoStretch(pulled) ? {} : stretchStyle(stretchOfPull(pulled), element),
       );
   };
-  let holdAgain = () => {
-    let stretch = stretchPlayingNow();
+  const holdAgain = () => {
+    const stretch = stretchPlayingNow();
     if (!isStretchShown(stretch)) return;
     pulled = {
       x: pullOfRubberBandOffset(-stretch.x, roomOf().x),
@@ -108,9 +142,9 @@ export function createOverscrollBounce(
     drawPulled();
   };
   return {
-    easedBy(delta?: Dynamic) {
+    easedBy(delta: GridPoint) {
       holdAgain();
-      let takenBack = {
+      const takenBack = {
         x: stretchTakenBack(delta.x, pulled.x),
         y: stretchTakenBack(delta.y, pulled.y),
       };
@@ -125,12 +159,12 @@ export function createOverscrollBounce(
         y: delta.y - takenBack.y,
       };
     },
-    pulledBy(overscroll?: Dynamic, delta?: Dynamic) {
+    pulledBy(overscroll: GridPoint, delta: GridPoint) {
       pullSpeed = {
         x: pullSpeed.x * PULL_AXIS_DECAY + Math.abs(delta.x),
         y: pullSpeed.y * PULL_AXIS_DECAY + Math.abs(delta.y),
       };
-      let pull = {
+      const pull = {
         x: pullSpeed.y >= pullSpeed.x * PULL_AXIS_DOMINANCE ? 0 : overscroll.x,
         y: pullSpeed.x >= pullSpeed.y * PULL_AXIS_DOMINANCE ? 0 : overscroll.y,
       };
@@ -143,7 +177,7 @@ export function createOverscrollBounce(
     },
     letGo() {
       pullSpeed = NO_STRETCH;
-      let stretch = isNoStretch(pulled) ? stretchPlayingNow() : stretchOfPull(pulled);
+      const stretch = isNoStretch(pulled) ? stretchPlayingNow() : stretchOfPull(pulled);
       if (!isNoStretch(pulled))
         play([
           {
@@ -158,8 +192,8 @@ export function createOverscrollBounce(
         y: flingAfterLetGo(stretch.y),
       };
     },
-    bumpedAt(speed?: Dynamic) {
-      let bump = {
+    bumpedAt(speed: GridPoint) {
+      const bump = {
         x: bumpOffsetOfSpeed(speed.x),
         y: bumpOffsetOfSpeed(speed.y),
       };
@@ -181,25 +215,25 @@ export function createOverscrollBounce(
     heldAgain: holdAgain,
   };
 }
-export function useOverscrollBounce(gridRef: Dynamic, zoomOf: Dynamic, isOn: Dynamic) {
-  let bounce = React.useMemo(
+export function useOverscrollBounce(gridRef: React.RefObject<HTMLElement | null>, zoomOf: () => number, isOn: boolean) {
+  const bounce = React.useMemo(
     () =>
       createOverscrollBounce(
         isOn,
         () => {
           if (gridRef.current === null) return [];
-          let withMargins = gridRef.current.closest('.sheet-with-group-margins');
-          let margins = [...(withMargins?.querySelectorAll('.sheet-group-margin') ?? [])];
+          const withMargins = gridRef.current.closest('.sheet-with-group-margins');
+          const margins = [...(withMargins?.querySelectorAll<HTMLElement>('.sheet-group-margin') ?? [])];
           return [
             gridRef.current,
-            ...(withMargins?.querySelectorAll('.sheet-import-proposal > *') ?? []),
+            ...(withMargins?.querySelectorAll<HTMLElement>('.sheet-import-proposal > *') ?? []),
             ...margins.map(
-              (margin?: Dynamic) => ({
+              (margin) => ({
                 liesOnGrid: true,
                 style: margin.style,
                 clientWidth: margin.clientWidth,
                 clientHeight: margin.clientHeight,
-                animate: (keyframes?: Dynamic, options?: Dynamic) => margin.animate(keyframes, options),
+                animate: (keyframes: Keyframe[], options: KeyframeAnimationOptions) => margin.animate(keyframes, options),
               }),
             ),
           ];
@@ -211,61 +245,64 @@ export function useOverscrollBounce(gridRef: Dynamic, zoomOf: Dynamic, isOn: Dyn
     [gridRef, zoomOf, isOn],
   );
   React.useEffect(() => {
-    let letGo = () => void bounce.letGo();
-    for (let type of ['blur', 'pagehide', 'resize']) window.addEventListener(type, letGo);
+    const letGo = () => void bounce.letGo();
+    for (const type of ['blur', 'pagehide', 'resize']) window.addEventListener(type, letGo);
     document.addEventListener('visibilitychange', letGo);
     return () => {
-      for (let type of ['blur', 'pagehide', 'resize']) window.removeEventListener(type, letGo);
+      for (const type of ['blur', 'pagehide', 'resize']) window.removeEventListener(type, letGo);
       document.removeEventListener('visibilitychange', letGo);
     };
   }, [bounce]);
   return bounce;
 }
 export const RUBBER_BAND_FACTOR = 0.5;
-export const SPRING_BACK_LEG = {
+export const SPRING_BACK_LEG: BounceLegTiming = {
   ms: 500,
   curve: [0.45, 0.9, 0.45, 0.95],
 };
 export const BUMP_PX_PER_SPEED_SQUARED = 12.5;
 export const BUMP_MAX_PX = 120;
 export const BUMP_MIN_PX = 3;
-export const BUMP_OUT_LEG = {
+export const BUMP_OUT_LEG: BounceLegTiming = {
   ms: 100,
   curve: [0, 0.6, 0.4, 1],
 };
 export const PULL_AXIS_DECAY = 0.7;
 export const PULL_AXIS_DOMINANCE = 2;
 export const STRETCH_SHOWN_PX = 2;
-export const rubberBandOffset = (pull?: Dynamic, room?: Dynamic) =>
+export const rubberBandOffset = (pull: number, room: number) =>
   room <= 0 ? 0 : Math.sign(pull) * (1 - 1 / ((Math.abs(pull) * RUBBER_BAND_FACTOR) / room + 1)) * room;
-export const pullOfRubberBandOffset = (offset?: Dynamic, room?: Dynamic) =>
+export const pullOfRubberBandOffset = (offset: number, room: number) =>
   room <= 0 || Math.abs(offset) >= room ? 0 : (Math.sign(offset) * (1 / (1 - Math.abs(offset) / room) - 1) * room) / RUBBER_BAND_FACTOR;
-export const overscrollOf = ({ rows: rows, columns: columns }: Dynamic, delta?: Dynamic) => ({
+export const overscrollOf = (
+  { rows, columns }: Record<'rows' | 'columns', Pick<ScrollAlongAxis, 'by' | 'most'>>,
+  delta: GridPoint,
+): GridPoint => ({
   x: columns.most <= 0 ? 0 : overscrollOnAxis(columns, delta.x),
   y: overscrollOnAxis(rows, delta.y),
 });
-export const cubicBezierAt = (p1?: Dynamic, p2?: Dynamic, t?: Dynamic) =>
+export const cubicBezierAt = (p1: number, p2: number, t: number) =>
   3 * (1 - t) ** 2 * t * p1 + 3 * (1 - t) * t ** 2 * p2 + t ** 3;
-export const stretchTakenBack = (delta?: Dynamic, pull?: Dynamic) =>
+export const stretchTakenBack = (delta: number, pull: number) =>
   delta * pull < 0 ? Math.sign(delta) * Math.min(Math.abs(delta), Math.abs(pull)) : 0;
-export const bumpOffsetOfSpeed = (speed?: Dynamic) =>
+export const bumpOffsetOfSpeed = (speed: number) =>
   -Math.sign(speed) * Math.min(BUMP_PX_PER_SPEED_SQUARED * speed ** 2, BUMP_MAX_PX);
-export const flingAfterLetGo = (stretch?: Dynamic) => (Math.abs(stretch) > STRETCH_SHOWN_PX ? -Math.sign(stretch) : 0);
+export const flingAfterLetGo = (stretch: number) => (Math.abs(stretch) > STRETCH_SHOWN_PX ? -Math.sign(stretch) : 0);
 export const bounceClockNow = () => performance.now();
-export const NO_STRETCH = {
+export const NO_STRETCH: GridPoint = {
   x: 0,
   y: 0,
 };
-export const isNoStretch = ({ x: x, y: y }: Dynamic) => x === 0 && y === 0;
-export const isStretchShown = ({ x: x, y: y }: Dynamic) => Math.hypot(x, y) > STRETCH_SHOWN_PX;
-export const stretchStyle = ({ x: x, y: y }: Dynamic, { liesOnGrid: liesOnGrid }: Dynamic) => ({
+export const isNoStretch = ({ x, y }: GridPoint) => x === 0 && y === 0;
+export const isStretchShown = ({ x, y }: GridPoint) => Math.hypot(x, y) > STRETCH_SHOWN_PX;
+export const stretchStyle = ({ x, y }: GridPoint, { liesOnGrid }: Pick<BouncedElement, 'liesOnGrid'>) => ({
   translate: `${x}px ${y}px`,
   ...(liesOnGrid && {
     zIndex: '1',
   }),
 });
-export const INERT_OVERSCROLL_BOUNCE = {
-  easedBy: (delta?: Dynamic) => delta,
+export const INERT_OVERSCROLL_BOUNCE: OverscrollBounce = {
+  easedBy: (delta: GridPoint) => delta,
   pulledBy: () => {},
   letGo: () => NO_STRETCH,
   bumpedAt: () => {},

@@ -1,7 +1,24 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { NumberFormatChoice } from '../format/number-format-choices.ts';
+import type { Color, HorizontalAlignment, NumberFormat, Underline, VerticalAlignment, Wrap } from '@open-artifact/sheets-core';
+import type {
+  DropdownClearedCellsOffer,
+  DropdownOptionDeletedOffer,
+  FontMark,
+  LinesDeletedOffer,
+  LinesDone,
+  OptionsGoneClearedCellsOffer,
+  ResultsChanged,
+  UndoOffer,
+} from '../state/initial-state.ts';
+import type { FormulasReadingSheet } from '../state/places.ts';
+import type { ThemeMode } from '../kit/theme.tsx';
+import type { ChangesByAgent } from './agent-turn-labels.ts';
+import type { ColorProperty } from './format-labels.ts';
 import { translateMessage } from './messages.ts';
-import { cellColorName } from './format-labels.ts';
-import { PHONE_NUMBER_FORMAT } from '../format/number-format-choices.ts';
+import { cellColorName, currencyName } from './format-labels.ts';
+import { PHONE_NUMBER_FORMAT, isCurrencyCodeOffered } from '../format/number-format-choices.ts';
+import { wrappingOfWrapText } from '../grid/text-overflow.ts';
+import { namedViewDeletedLabels } from '../tables/named-view-messages.ts';
 import {
   truncateGraphemes,
   SHEET_NAME_IN_NOTICE_MAX_CHARACTERS,
@@ -13,7 +30,36 @@ import { matchesNotReplacedText } from './notice-labels.ts';
 import { placedViewDeletedNotice } from '../messages/charts.ts';
 import { importDoneWords } from '../messages/import.ts';
 import { agentUpdatedCellsText } from './agent-turn-labels.ts';
-export function markToTypeText(mark?: Dynamic, isOn?: Dynamic) {
+/** A format chosen for cells, one property at a time. */
+export interface CellFormatChoice {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: Underline;
+  strikethrough?: boolean;
+  fontSizeInPoints?: number;
+  fillColor?: Color;
+  textColor?: Color;
+  customNumberFormat?: NumberFormat;
+  decimalPlaces?: { pattern: string; count: number };
+  numberFormatChoice?: NumberFormatChoice;
+  verticalAlignment?: VerticalAlignment;
+  wrapText?: Wrap;
+  horizontalAlignment?: HorizontalAlignment;
+}
+/** The words of a toast that offers to undo a change. */
+export interface UndoOfferWords {
+  title: string;
+  description?: string;
+  undoLabel: string;
+}
+/** The words of the notice that the sheet now follows the user's theme. */
+export interface ThemeFollowedNoticeWords {
+  title: string;
+  whereToChange: string;
+  keepOther: string;
+  said: string;
+}
+export function markToTypeText(mark: FontMark, isOn: boolean): string {
   switch (mark) {
     case 'bold':
       return translateMessage(
@@ -57,7 +103,7 @@ export function markToTypeText(mark?: Dynamic, isOn?: Dynamic) {
       );
   }
 }
-export function markInEntryText(mark?: Dynamic, isOn?: Dynamic) {
+export function markInEntryText(mark: FontMark, isOn: boolean): string {
   switch (mark) {
     case 'bold':
       return translateMessage(
@@ -101,7 +147,7 @@ export function markInEntryText(mark?: Dynamic, isOn?: Dynamic) {
       );
   }
 }
-export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
+export function cellFormatChangeText(format: CellFormatChoice, cells: string): string {
   if (format.bold !== undefined)
     return translateMessage(
       {
@@ -110,7 +156,7 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         isOn: String(format.bold),
-        cells: cells,
+        cells,
       },
     );
   if (format.italic !== undefined)
@@ -121,7 +167,7 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         isOn: String(format.italic),
-        cells: cells,
+        cells,
       },
     );
   if (format.underline !== undefined)
@@ -132,7 +178,7 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         isOn: String(format.underline !== 'none'),
-        cells: cells,
+        cells,
       },
     );
   if (format.strikethrough !== undefined)
@@ -143,7 +189,7 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         isOn: String(format.strikethrough),
-        cells: cells,
+        cells,
       },
     );
   if (format.fontSizeInPoints !== undefined)
@@ -154,11 +200,13 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         size: format.fontSizeInPoints,
-        cells: cells,
+        cells,
       },
     );
   if (format.fillColor !== undefined || format.textColor !== undefined) {
-    let [property, color] = format.fillColor !== undefined ? ['fillColor', format.fillColor] : ['textColor', format.textColor];
+    // Without a fill color, the check above leaves a text color.
+    let [property, color]: [ColorProperty, Color] =
+      format.fillColor !== undefined ? ['fillColor', format.fillColor] : ['textColor', format.textColor!];
     let isNone = color.kind === 'none';
     return translateMessage(
       {
@@ -169,7 +217,7 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       {
         what: property === 'fillColor' ? (isNone ? 'noFill' : 'fill') : isNone ? 'automaticText' : 'text',
         color: cellColorName(property, color),
-        cells: cells,
+        cells,
       },
     );
   }
@@ -177,11 +225,11 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
     return translateMessage(
       {
         defaultMessage: '{isPhoneNumber, select, true {US phone number format for {cells}} other {Custom format for {cells}}}',
-        id: '5S2aEatNY7',
+        id: 'sj8iKxKHZe',
       },
       {
         isPhoneNumber: String(format.customNumberFormat.pattern === PHONE_NUMBER_FORMAT.pattern),
-        cells: cells,
+        cells,
       },
     );
   if (format.decimalPlaces !== undefined)
@@ -192,19 +240,30 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         count: format.decimalPlaces.count,
-        cells: cells,
+        cells,
+      },
+    );
+  if (format.numberFormatChoice !== undefined && isCurrencyCodeOffered(format.numberFormatChoice))
+    return translateMessage(
+      {
+        defaultMessage: '{currency} format for {cells}',
+        id: 'Gp32k/AU3+',
+      },
+      {
+        currency: currencyName(format.numberFormatChoice),
+        cells,
       },
     );
   if (format.numberFormatChoice !== undefined)
     return translateMessage(
       {
         defaultMessage:
-          '{choice, select, general {Automatic format for {cells}} number {Number format for {cells}} roundedNumber {Number (rounded) format for {cells}} numberInParentheses {Number (parentheses) format for {cells}} currency {Currency format for {cells}} roundedCurrency {Currency (rounded) format for {cells}} percent {Percent format for {cells}} scientific {Scientific format for {cells}} date {Date format for {cells}} mediumDate {Date (short month) format for {cells}} longDate {Date (full month) format for {cells}} monthAndDay {Month and day format for {cells}} monthAndYear {Month and year format for {cells}} time {Time format for {cells}} dateAndTime {Date and time format for {cells}} other {Duration format for {cells}}}',
-        id: 'V5nyRo4mO0',
+          '{choice, select, general {Automatic format for {cells}} text {Plain text format for {cells}} number {Number format for {cells}} roundedNumber {Number (rounded) format for {cells}} numberInParentheses {Number (parentheses) format for {cells}} currency {Currency format for {cells}} roundedCurrency {Currency (rounded) format for {cells}} percent {Percent format for {cells}} roundedPercent {Percent (rounded) format for {cells}} scientific {Scientific format for {cells}} date {Date format for {cells}} mediumDate {Date (short month) format for {cells}} longDate {Date (full month) format for {cells}} monthAndDay {Month and day format for {cells}} monthAndYear {Month and year format for {cells}} time {Time format for {cells}} dateAndTime {Date and time format for {cells}} other {Duration format for {cells}}}',
+        id: '/WYZrwcsN4',
       },
       {
         choice: format.numberFormatChoice,
-        cells: cells,
+        cells,
       },
     );
   if (format.verticalAlignment !== undefined)
@@ -216,18 +275,18 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
       },
       {
         verticalAlignment: format.verticalAlignment,
-        cells: cells,
+        cells,
       },
     );
   if (format.wrapText !== undefined)
     return translateMessage(
       {
-        defaultMessage: '{isOn, select, true {Wrap text on for {cells}} other {Wrap text off for {cells}}}',
-        id: 'lKGzHDtuJo',
+        defaultMessage: '{wrapping, select, wrap {Wrap text on for {cells}} clip {Clipped text for {cells}} other {Overflowing text for {cells}}}',
+        id: '6RfxDTuS+1',
       },
       {
-        isOn: String(format.wrapText),
-        cells: cells,
+        wrapping: wrappingOfWrapText(format.wrapText),
+        cells,
       },
     );
   return translateMessage(
@@ -238,11 +297,17 @@ export function cellFormatChangeText(format?: Dynamic, cells?: Dynamic) {
     },
     {
       horizontalAlignment: format.horizontalAlignment,
-      cells: cells,
+      cells,
     },
   );
 }
-export function deletedRowsOrColumnsTitle({ kind: kind, first: first, last: last, isSaved: isSaved, countInView: countInView }: Dynamic) {
+export function deletedRowsOrColumnsTitle({
+  kind,
+  first,
+  last,
+  isSaved,
+  countInView,
+}: LinesDeletedOffer & { countInView?: number }): string {
   if (countInView !== undefined)
     return isSaved
       ? translateMessage(
@@ -291,8 +356,8 @@ export function deletedRowsOrColumnsTitle({ kind: kind, first: first, last: last
             id: 'Thdo29tfj1',
           },
           {
-            first: first,
-            last: last,
+            first,
+            last,
           },
         )
       : translateMessage(
@@ -301,8 +366,8 @@ export function deletedRowsOrColumnsTitle({ kind: kind, first: first, last: last
             id: '4jjzkLRWrC',
           },
           {
-            first: first,
-            last: last,
+            first,
+            last,
           },
         );
   }
@@ -333,8 +398,8 @@ export function deletedRowsOrColumnsTitle({ kind: kind, first: first, last: last
           id: 'diXZDcTu1n',
         },
         {
-          first: first,
-          last: last,
+          first,
+          last,
         },
       )
     : translateMessage(
@@ -343,18 +408,18 @@ export function deletedRowsOrColumnsTitle({ kind: kind, first: first, last: last
           id: 'QYMTn2ib/L',
         },
         {
-          first: first,
-          last: last,
+          first,
+          last,
         },
       );
 }
 export function dropdownClearedCellsOffer({
-  cells: cells,
-  isOneCell: isOneCell,
-  formulaCount: formulaCount,
-  otherCount: otherCount,
-  isSaved: isSaved,
-}: Dynamic) {
+  cells,
+  isOneCell,
+  formulaCount,
+  otherCount,
+  isSaved,
+}: DropdownClearedCellsOffer): UndoOfferWords {
   return {
     title: isSaved
       ? translateMessage(
@@ -363,7 +428,7 @@ export function dropdownClearedCellsOffer({
             id: 'wtUnstj58D',
           },
           {
-            cells: cells,
+            cells,
           },
         )
       : translateMessage(
@@ -372,7 +437,7 @@ export function dropdownClearedCellsOffer({
             id: 'smFuhkw9x5',
           },
           {
-            cells: cells,
+            cells,
           },
         ),
     description:
@@ -407,7 +472,7 @@ export function dropdownClearedCellsOffer({
     }),
   };
 }
-export function optionsGoneClearedCellsOffer({ count: count, isSaved: isSaved }: Dynamic) {
+export function optionsGoneClearedCellsOffer({ count, isSaved }: OptionsGoneClearedCellsOffer): UndoOfferWords {
   return {
     title: isSaved
       ? translateMessage(
@@ -416,7 +481,7 @@ export function optionsGoneClearedCellsOffer({ count: count, isSaved: isSaved }:
             id: 'Q7wjV+HFRr',
           },
           {
-            count: count,
+            count,
           },
         )
       : translateMessage(
@@ -425,7 +490,7 @@ export function optionsGoneClearedCellsOffer({ count: count, isSaved: isSaved }:
             id: 'obwmvczgTn',
           },
           {
-            count: count,
+            count,
           },
         ),
     description: translateMessage({
@@ -438,7 +503,10 @@ export function optionsGoneClearedCellsOffer({ count: count, isSaved: isSaved }:
     }),
   };
 }
-export function dropdownOptionDeletedTitle({ isSaved: isSaved, onlyIn: onlyIn, ...offer }: Dynamic, maxLabelLength?: Dynamic) {
+export function dropdownOptionDeletedTitle(
+  { isSaved, onlyIn, ...offer }: DropdownOptionDeletedOffer,
+  maxLabelLength: number,
+): string {
   let label = truncateGraphemes(offer.label, maxLabelLength);
   if (onlyIn !== null)
     return isSaved
@@ -448,7 +516,7 @@ export function dropdownOptionDeletedTitle({ isSaved: isSaved, onlyIn: onlyIn, .
             id: 'yV9oBiRiUN',
           },
           {
-            label: label,
+            label,
             cells: onlyIn,
           },
         )
@@ -458,7 +526,7 @@ export function dropdownOptionDeletedTitle({ isSaved: isSaved, onlyIn: onlyIn, .
             id: 'h6z10u/jmS',
           },
           {
-            label: label,
+            label,
             cells: onlyIn,
           },
         );
@@ -469,7 +537,7 @@ export function dropdownOptionDeletedTitle({ isSaved: isSaved, onlyIn: onlyIn, .
           id: 'EsZNf0WCEy',
         },
         {
-          label: label,
+          label,
         },
       )
     : translateMessage(
@@ -478,11 +546,11 @@ export function dropdownOptionDeletedTitle({ isSaved: isSaved, onlyIn: onlyIn, .
           id: 'bmXYoKa3hm',
         },
         {
-          label: label,
+          label,
         },
       );
 }
-export function sheetThemeFollowedNotice(theme?: Dynamic) {
+export function sheetThemeFollowedNotice(theme: ThemeMode): ThemeFollowedNoticeWords {
   return {
     title:
       theme === 'dark'
@@ -520,7 +588,7 @@ export function sheetThemeFollowedNotice(theme?: Dynamic) {
           }),
   };
 }
-export function changedResultsText({ count: count, errorCount: errorCount, firstCell: firstCell }: Dynamic) {
+export function changedResultsText({ count, errorCount, firstCell }: ResultsChanged): string {
   let othersCount = count - 1;
   if (errorCount === 0)
     return translateMessage(
@@ -558,7 +626,7 @@ export function changedResultsText({ count: count, errorCount: errorCount, first
         },
       );
 }
-export function columnsMovedResultsText({ count: count, errorCount: errorCount, firstCell: firstCell }: Dynamic) {
+export function columnsMovedResultsText({ count, errorCount, firstCell }: ResultsChanged): string {
   let othersCount = count - 1;
   if (errorCount === 0)
     return translateMessage(
@@ -596,7 +664,7 @@ export function columnsMovedResultsText({ count: count, errorCount: errorCount, 
         },
       );
 }
-export function describeUndoOffer(offer?: Dynamic) {
+export function describeUndoOffer(offer: UndoOffer): UndoOfferWords {
   if (offer.kind === 'versionRestored') return versionRestoredToast(offer, Date.now());
   if (offer.kind === 'sheetDeleted') {
     let sheetName = truncateGraphemes(offer.name, SHEET_NAME_IN_NOTICE_MAX_CHARACTERS);
@@ -679,6 +747,11 @@ export function describeUndoOffer(offer?: Dynamic) {
     };
   if (offer.kind === 'placedViewDeleted')
     return placedViewDeletedNotice({
+      ...offer,
+      name: truncateGraphemes(offer.name, PLACED_VIEW_NAME_IN_NOTICE_MAX_CHARACTERS),
+    });
+  if (offer.kind === 'namedViewDeleted')
+    return namedViewDeletedLabels({
       ...offer,
       name: truncateGraphemes(offer.name, PLACED_VIEW_NAME_IN_NOTICE_MAX_CHARACTERS),
     });
@@ -818,13 +891,14 @@ export function describeUndoOffer(offer?: Dynamic) {
   if (offer.kind === 'optionsGoneClearedCells') return optionsGoneClearedCellsOffer(offer);
   if (offer.kind !== 'mergeClearedCells')
     return {
-      title: deletedRowsOrColumnsTitle(offer),
+      // The kinds handled above leave only deleted rows or columns.
+      title: deletedRowsOrColumnsTitle(offer as LinesDeletedOffer),
       undoLabel: translateMessage({
         defaultMessage: 'Undo delete',
         id: 'BCG/htqIVD',
       }),
     };
-  let { cells: cells, keptCell: keptCell } = offer;
+  let { cells, keptCell } = offer;
   return {
     title: translateMessage(
       {
@@ -832,7 +906,7 @@ export function describeUndoOffer(offer?: Dynamic) {
         id: 'ig0AgQHdd8',
       },
       {
-        cells: cells,
+        cells,
       },
     ),
     description: translateMessage(
@@ -850,7 +924,7 @@ export function describeUndoOffer(offer?: Dynamic) {
     }),
   };
 }
-export function insertedRowsOrColumnsText({ what: what, first: first, last: last }: Dynamic) {
+export function insertedRowsOrColumnsText({ what, first, last }: LinesDone): string {
   if (what === 'rowsInserted')
     return first === last
       ? translateMessage(
@@ -868,8 +942,8 @@ export function insertedRowsOrColumnsText({ what: what, first: first, last: last
             id: 'ulVqhizKGy',
           },
           {
-            first: first,
-            last: last,
+            first,
+            last,
           },
         );
   return first === last
@@ -888,12 +962,12 @@ export function insertedRowsOrColumnsText({ what: what, first: first, last: last
           id: 'rdYIkyL9D1',
         },
         {
-          first: first,
-          last: last,
+          first,
+          last,
         },
       );
 }
-export function rowHeightSetText({ heightInPixels: heightInPixels, first: first, last: last, lineCount: lineCount }: Dynamic) {
+export function rowHeightSetText({ heightInPixels, first, last, lineCount }: LinesDone): string {
   if (lineCount !== undefined)
     return heightInPixels === null
       ? translateMessage(
@@ -932,8 +1006,8 @@ export function rowHeightSetText({ heightInPixels: heightInPixels, first: first,
             id: 'GlZBdtQ04o',
           },
           {
-            first: first,
-            last: last,
+            first,
+            last,
           },
         );
   return first === last
@@ -955,12 +1029,12 @@ export function rowHeightSetText({ heightInPixels: heightInPixels, first: first,
         },
         {
           height: heightInPixels,
-          first: first,
-          last: last,
+          first,
+          last,
         },
       );
 }
-export function columnWidthSetText({ widthInPixels: widthInPixels, first: first, last: last, lineCount: lineCount }: Dynamic) {
+export function columnWidthSetText({ widthInPixels, first, last, lineCount }: LinesDone): string {
   if (lineCount !== undefined)
     return widthInPixels === null
       ? translateMessage(
@@ -1000,8 +1074,8 @@ export function columnWidthSetText({ widthInPixels: widthInPixels, first: first,
             id: '3MFTvJR1Lq',
           },
           {
-            first: first,
-            last: last,
+            first,
+            last,
           },
         );
   return first === last
@@ -1024,12 +1098,12 @@ export function columnWidthSetText({ widthInPixels: widthInPixels, first: first,
         },
         {
           width: widthInPixels,
-          first: first,
-          last: last,
+          first,
+          last,
         },
       );
 }
-export const fixErrorsLabel = (count?: Dynamic) =>
+export const fixErrorsLabel = (count: number | null): string =>
   count === null
     ? translateMessage({
         defaultMessage: 'Fix errors',
@@ -1041,22 +1115,22 @@ export const fixErrorsLabel = (count?: Dynamic) =>
           id: 'rntFkkJGAw',
         },
         {
-          count: count,
+          count,
         },
       );
-export const undoAgentChangesLabel = () =>
+export const undoAgentChangesLabel = (): string =>
   translateMessage({
     defaultMessage: 'Undo Agent’s changes',
     id: 'WlJnv4M875',
   });
-export const agentTurnUndoOffer = (turn?: Dynamic) => ({
+export const agentTurnUndoOffer = (turn: ChangesByAgent): UndoOfferWords => ({
   title: agentUpdatedCellsText(turn),
   undoLabel: undoAgentChangesLabel(),
 });
 export const dropdownOptionDeletedOffer = (
-  offer?: Dynamic,
-  maxLabelLength: Dynamic = DROPDOWN_OPTION_IN_NOTICE_MAX_CHARACTERS,
-) => ({
+  offer: DropdownOptionDeletedOffer,
+  maxLabelLength: number = DROPDOWN_OPTION_IN_NOTICE_MAX_CHARACTERS,
+): UndoOfferWords => ({
   title: dropdownOptionDeletedTitle(offer, maxLabelLength),
   description: translateMessage(
     {
@@ -1078,7 +1152,7 @@ export const dropdownOptionDeletedOffer = (
           id: 'E6UbwYDRil',
         }),
 });
-export const formulasAffectedText = ({ count: count, sheetNames: [firstSheet, ...otherSheets] }: Dynamic) =>
+export const formulasAffectedText = ({ count, sheetNames: [firstSheet, ...otherSheets] }: FormulasReadingSheet): string =>
   otherSheets.length === 0
     ? translateMessage(
         {
@@ -1086,7 +1160,7 @@ export const formulasAffectedText = ({ count: count, sheetNames: [firstSheet, ..
           id: '0KPPSW2Qc3',
         },
         {
-          count: count,
+          count,
           sheet: truncateGraphemes(firstSheet, SHEET_NAME_IN_NOTICE_MAX_CHARACTERS),
         },
       )
@@ -1096,6 +1170,6 @@ export const formulasAffectedText = ({ count: count, sheetNames: [firstSheet, ..
           id: 'oU3rhp8bfS',
         },
         {
-          count: count,
+          count,
         },
       );

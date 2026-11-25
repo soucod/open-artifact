@@ -27,7 +27,6 @@ fn matrix(arg: &Arg) -> Result<(usize, usize, Vec<f64>), CellError> {
     let cells = arg.cells();
     let n = cells
         .values()
-        .iter()
         .map(|v| match v {
             Value::Number(n) => Ok(*n),
             _ => Err(CellError::Value),
@@ -152,7 +151,7 @@ fn sum_of_pairs(args: &[Arg], term: fn(f64, f64) -> f64) -> Answer {
         return Err(CellError::Value);
     }
     let mut sum = 0.0;
-    for (a, b) in x.values().iter().zip(y.values()) {
+    for (a, b) in x.values().zip(y.values()) {
         if let (Value::Number(a), Value::Number(b)) = (a, b) {
             sum = add(sum, term(*a, *b));
         }

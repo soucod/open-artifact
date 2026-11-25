@@ -38,6 +38,18 @@ export const SMALL_SNAPSHOT_WIDTH = 256;
 /** Whether an artboard is drawn from the small copy of its snapshot at a zoom (device pixels counted). */
 export const smallSnapshot = (entry: BoardEntry, zoom: number, dpr: number): boolean => entry.w * zoom * dpr <= SMALL_SNAPSHOT_WIDTH * 1.25;
 
+/**
+ * The scale an artboard's snapshot is taken at: `side` image pixels on its
+ * longest side, or more where that would be blurry at `sharpZoom` (the
+ * highest zoom at which snapshots stand for every artboard) on a display of
+ * `dpr` (counted up to 2); never above the artboard's own size, nor `limit`
+ * pixels on its longest side.
+ */
+export function snapshotScale(entry: Pick<BoardEntry, 'w' | 'h'>, { side, limit, sharpZoom, dpr }: { side: number; limit: number; sharpZoom: number; dpr: number }): number {
+  const longest = Math.max(entry.w, entry.h, 1);
+  return Math.min(1, limit / longest, Math.max(side / longest, sharpZoom * Math.min(Math.max(dpr, 1), 2)));
+}
+
 /** How an artboard is drawn. */
 export interface BoardLook {
   /** Its live frame shows through a hole in the canvas. */

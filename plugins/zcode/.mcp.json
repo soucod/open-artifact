@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "open-artifact": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/skills/open-artifact/scripts/open-artifact.mjs", "mcp", "--harness", "zcode"]
+    }
+  }
+}

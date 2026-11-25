@@ -1,0 +1,85 @@
+# The Open Artifact host behind Caddy, which terminates HTTPS for the app host and every content host.
+#
+#   cp .env.example .env      # then fill it in (see the comments there)
+#   docker compose up -d --build
+#   docker compose logs host  # the one-time owner sign-in address, on the first start
+#
+# TLS: by default Caddy gets a certificate for each content host when it is first visited (on-demand, HTTP-01; it asks
+# the host first, see Caddyfile.on-demand). For one wildcard certificate by DNS-01 instead, add compose.dns.yaml:
+#   COMPOSE_FILE=compose.yaml:compose.dns.yaml   (in .env)
+#
+# Data lives in two named volumes: oa-data (the artifacts and the catalog: back it up, see ../backup.sh) and
+# caddy-data (certificates and ACME account; losing it only means certificates are fetched again).
+
+name: open-artifact
+
+services:
+  host:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${OA_IMAGE:-open-artifact-host:local}
+    restart: unless-stopped
+    init: true
+    environment:
+      OA_APP_ORIGIN: https://${APP_HOST:?set APP_HOST in .env}
+      OA_CONTENT_ORIGIN: https://{id}.${CONTENT_DOMAIN:?set CONTENT_DOMAIN in .env}
+      # true only when CONTENT_DOMAIN is APP_HOST's own domain (docs/hosting.md, "One domain for both").
+      OA_CONTENT_SAME_SITE: ${OA_CONTENT_SAME_SITE:-false}
+      OA_SIGNING_KEYS: ${OA_SIGNING_KEYS:?set OA_SIGNING_KEYS in .env}
+      OA_OWNER_KEY: ${OA_OWNER_KEY:-}
+      OA_OWNER_NAME: ${OA_OWNER_NAME:-}
+      OA_AUTH: ${OA_AUTH:-}
+      OA_OWNERS: ${OA_OWNERS:-}
+      OA_SIGNUP: ${OA_SIGNUP:-invite}
+      OA_LINK_MAX_ROLE: ${OA_LINK_MAX_ROLE:-editor}
+      OA_PUBLIC_ACCESS: ${OA_PUBLIC_ACCESS:-true}
+      OA_MCP_ORIGINS: ${OA_MCP_ORIGINS:-}
+      OA_OAUTH_CLIENTS: ${OA_OAUTH_CLIENTS:-}
+      # Host plugins (docs/plugins.md): the list inline (JSON), or a list file other than /data/plugins.json. Plugin
+      # files go in the oa-data volume (e.g. /data/plugins/header-auth.mjs); they import @open-artifact/host-plugin
+      # without installing it. A setting written {"env": "NAME"} reads NAME: add it here too (NAME: ${NAME:-}).
+      OA_PLUGINS: ${OA_PLUGINS:-}
+      OA_PLUGINS_FILE: ${OA_PLUGINS_FILE:-}
+      # Only Caddy reaches the host (its ports are not published), and Caddy sets X-Forwarded-Host/-Proto itself.
+      OA_TRUST_PROXY: "1"
+      # The on-demand TLS ask endpoint, for Caddy on this private network only.
+      OA_INTERNAL_PORT: "4901"
+      OA_INTERNAL_BIND: 0.0.0.0
+    volumes:
+      - oa-data:/data
+    # No `ports:`: nothing but Caddy can reach 4900 or 4901.
+    expose:
+      - "4900"
+      - "4901"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.11.9}
+    restart: unless-stopped
+    depends_on:
+      host:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_HOST: ${APP_HOST}
+      CONTENT_DOMAIN: ${CONTENT_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./${CADDYFILE:-Caddyfile.on-demand}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }
+
+volumes:
+  oa-data:
+  caddy-data:
+  caddy-config:

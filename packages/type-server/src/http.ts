@@ -3,6 +3,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { FrameDeniedReason } from '@open-artifact/protocol';
 
 /** Media types by extension. */
 export const MIME: Record<string, string> = {
@@ -16,6 +17,9 @@ export const MIME: Record<string, string> = {
   mdx: 'text/markdown; charset=utf-8',
   txt: 'text/plain; charset=utf-8',
   csv: 'text/csv; charset=utf-8',
+  tsv: 'text/tab-separated-values; charset=utf-8',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xls: 'application/vnd.ms-excel',
   ts: 'text/plain; charset=utf-8',
   svg: 'image/svg+xml',
   png: 'image/png',
@@ -27,6 +31,8 @@ export const MIME: Record<string, string> = {
   ico: 'image/x-icon',
   mp4: 'video/mp4',
   webm: 'video/webm',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
   pdf: 'application/pdf',
   woff2: 'font/woff2',
   woff: 'font/woff',
@@ -147,6 +153,34 @@ export function sendBytes(req: IncomingMessage, res: ServerResponse, body: Buffe
   }
   const part = body.subarray(span.start, span.end + 1);
   send(res, 206, part, contentType, { ...ranged, 'content-range': `bytes ${span.start}-${span.end}/${body.length}` });
+}
+
+/** `cache-control` of a file whose name carries its content's hash: it never changes under that name. */
+export const IMMUTABLE = 'public, max-age=31536000, immutable';
+
+/** True for a built file named with its content hash, as Vite names them (`index-Ca_9xNA0.js`). */
+export function isHashedName(path: string): boolean {
+  return /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/.test(path.slice(path.lastIndexOf('/') + 1));
+}
+
+/** True when the request is a navigation inside a frame (`Sec-Fetch-Dest: iframe` or `frame`). */
+export function isFramedNavigation(req: IncomingMessage): boolean {
+  const dest = req.headers['sec-fetch-dest'];
+  return (req.method === 'GET' || req.method === 'HEAD') && (dest === 'iframe' || dest === 'frame');
+}
+
+const escHtml = (text: string): string => text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+/**
+ * The page a frame gets when it cannot be shown: one line for whoever looks at it, and a script that tells the
+ * Shell framing it (`frame_denied`, see `@open-artifact/protocol`'s `PageToShell`) so the Shell can open it again or
+ * say why. The message carries no secret, so it goes to any parent. `ancestors` is who may frame it (a host: its app
+ * origin); without it, anyone (no `frame-ancestors`: `*` would leave out an app whose page is `file://`).
+ */
+export function sendFrameDenied(res: ServerResponse, status: number, reason: FrameDeniedReason, title: string, message: string, ancestors?: string): void {
+  const script = `parent.postMessage({ openArtifact: 'frame_denied', reason: ${JSON.stringify(reason)} }, '*');`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escHtml(title)}</title></head><body><p>${escHtml(message)}</p><script>${script}</script></body></html>`;
+  send(res, status, html, MIME.html!, { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'${ancestors ? `; frame-ancestors ${ancestors}` : ''}` });
 }
 
 /** Sends an error as `{code, message, …}`. */

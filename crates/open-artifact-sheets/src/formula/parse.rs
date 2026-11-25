@@ -93,6 +93,18 @@ enum Token {
 }
 
 /// Reads a stored formula: its pieces of text, with reference `i` between piece `i` and piece `i + 1`.
+/// Whether a name is written as a cell's address within the largest sheet (`XFD1048576`): a name of a cell past the
+/// sheet's end, which a LET may not give a value to and a cause of error tells as `noSuchCell`.
+pub fn looks_like_a_cell(name: &str) -> bool {
+    let letters = name.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let (column, row) = name.split_at(letters);
+    if !(1..=3).contains(&letters) || row.is_empty() || !row.bytes().all(|b| b.is_ascii_digit()) || row.starts_with('0') {
+        return false;
+    }
+    let column = column.bytes().fold(0u32, |n, b| n * 26 + u32::from(b.to_ascii_uppercase() - b'A' + 1));
+    column <= 16_384 && row.len() <= 7 && row.parse::<u32>().is_ok_and(|row| row <= 1_048_576)
+}
+
 pub fn parse(pieces: &[String]) -> Result<Expr, ParseError> {
     let mut tokens = Vec::new();
     for (i, piece) in pieces.iter().enumerate() {

@@ -1,4 +1,8 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Color, Hue, Shade } from '@open-artifact/sheets-core';
+import type { ChipPaints, PaintPair } from '../grid/cell-drawing.tsx';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { ColorProperty } from '../i18n/format-labels.ts';
+import type { Oklch } from './color-space.ts';
 import {
   hexToOklch,
   contrastRatio,
@@ -11,19 +15,41 @@ import {
   hexToRgbUnit,
 } from './color-space.ts';
 import { colorKey, LIGHT_GRAY_COLOR, NO_COLOR } from '../model/colors.ts';
-export function darkModeTextForRgb(hex?: Dynamic) {
+/** A palette shade: the ones a cell can be given, and the two between them used for dark pages. */
+export type PaletteShade = Shade | 500 | 700;
+/** A gray lightness on a light page and the lightness it maps to on a dark one. */
+export interface LightnessAnchor {
+  onLight: number;
+  onDark: number;
+}
+/** A color in OKLab: lightness and the two color axes. */
+export type Oklab = [lightness: number, a: number, b: number];
+/** A stop of a color scale: where it lies, from 0 to 1, and its color. */
+export interface ColorScaleStop {
+  at: number;
+  color: Color;
+}
+/** The step a value takes between two colors of a color scale, out of `COLOR_SCALE_STEP_COUNT`. */
+export interface ColorScaleStep {
+  from: Color;
+  to: Color;
+  step: number;
+}
+/** The fill and text color of a chip on one page. */
+export type ChipFillAndText = [fill: string, text: string];
+export function darkModeTextForRgb(hex: string): string {
   let oklch = hexToOklch(hex);
   let contrastOnLight = contrastRatio(hex, PAGE_BACKGROUND_COLORS.onLight);
-  let low: Dynamic = hexToOklch(PAGE_BACKGROUND_COLORS.onDark).lightness;
-  let high: Dynamic = 1;
-  for (let step: Dynamic = 0; step < 16; step += 1) {
+  let low = hexToOklch(PAGE_BACKGROUND_COLORS.onDark).lightness;
+  let high = 1;
+  for (let step = 0; step < 16; step += 1) {
     let middle = (low + high) / 2;
     if (contrastRatio(hexAtLightness(oklch, middle), PAGE_BACKGROUND_COLORS.onDark) < contrastOnLight) low = middle;
     else high = middle;
   }
   return hexAtLightness(oklch, high);
 }
-export function standardFillColors(hue?: Dynamic, shade?: Dynamic) {
+export function standardFillColors(hue: Hue, shade: Shade): PaintPair {
   let [lowerDarkShade, upperDarkShade] = DARK_FILL_SHADES_FOR_SHADE[shade];
   let shades = CELL_COLOR_PALETTE[hue];
   return {
@@ -31,8 +57,8 @@ export function standardFillColors(hue?: Dynamic, shade?: Dynamic) {
     onDark: lowerDarkShade === upperDarkShade ? shades[lowerDarkShade] : mixColorsInOklab(shades[lowerDarkShade], shades[upperDarkShade], 0.5),
   };
 }
-export function paletteSwatchesOfHue(hue?: Dynamic) {
-  let swatchAt = (shade?: Dynamic) => standardTextColors(hue, shade).onLight;
+export function paletteSwatchesOfHue(hue: Hue): Record<Shade, string> {
+  let swatchAt = (shade: Shade) => standardTextColors(hue, shade).onLight;
   return {
     100: swatchAt(100),
     200: swatchAt(200),
@@ -42,7 +68,7 @@ export function paletteSwatchesOfHue(hue?: Dynamic) {
     800: swatchAt(800),
   };
 }
-export function listPaletteSwatches() {
+export function listPaletteSwatches(): Record<Hue, Record<Shade, string>> {
   return {
     gray: paletteSwatchesOfHue('gray'),
     red: paletteSwatchesOfHue('red'),
@@ -55,7 +81,7 @@ export function listPaletteSwatches() {
     magenta: paletteSwatchesOfHue('magenta'),
   };
 }
-export function fillColorPair(color?: Dynamic) {
+export function fillColorPair(color: Color): PaintPair | null {
   switch (color.kind) {
     case 'none':
       return null;
@@ -68,7 +94,7 @@ export function fillColorPair(color?: Dynamic) {
       };
   }
 }
-export function textColorPair(color?: Dynamic) {
+export function textColorPair(color: Color): PaintPair | null {
   switch (color.kind) {
     case 'none':
       return null;
@@ -81,10 +107,10 @@ export function textColorPair(color?: Dynamic) {
       };
   }
 }
-export function lightenedFillColor(color?: Dynamic) {
+export function lightenedFillColor(color: Color): Color | null {
   let hex = fillColorPair(color)?.onLight;
   if (hex === undefined) return null;
-  let lightenChannel = (start?: Dynamic) =>
+  let lightenChannel = (start: number) =>
     Math.round((Number.parseInt(hex.slice(start, start + 2), 16) + 255) / 2)
       .toString(16)
       .padStart(2, '0');
@@ -93,9 +119,9 @@ export function lightenedFillColor(color?: Dynamic) {
     hex: `#${lightenChannel(1)}${lightenChannel(3)}${lightenChannel(5)}`,
   };
 }
-export function mapLightnessToDark(lightness?: Dynamic, anchors: Dynamic = TEXT_LIGHTNESS_MAP) {
-  let previous: Dynamic = PAGE_LIGHTNESS_ANCHOR;
-  for (let anchor of anchors as Dynamic) {
+export function mapLightnessToDark(lightness: number, anchors: LightnessAnchor[] = TEXT_LIGHTNESS_MAP): number {
+  let previous = PAGE_LIGHTNESS_ANCHOR;
+  for (let anchor of anchors) {
     if (lightness > anchor.onLight) {
       let fraction = (previous.onLight - lightness) / (previous.onLight - anchor.onLight);
       return previous.onDark + fraction * (anchor.onDark - previous.onDark);
@@ -104,66 +130,66 @@ export function mapLightnessToDark(lightness?: Dynamic, anchors: Dynamic = TEXT_
   }
   return previous.onDark;
 }
-export function capChromaToPalette(oklch?: Dynamic, lightness?: Dynamic, shade?: Dynamic) {
+export function capChromaToPalette(oklch: Oklch, lightness: number, shade: PaletteShade): string {
   let hex = hexAtLightness(oklch, lightness);
-  let paletteChromas = Object.values(CELL_COLOR_PALETTE).map((swatches?: Dynamic) => hexToOklch(swatches[shade]).chroma);
-  let maxChroma = (Math.max as Dynamic)(oklch.chroma, ...paletteChromas);
+  let paletteChromas = Object.values(CELL_COLOR_PALETTE).map((swatches) => hexToOklch(swatches[shade]).chroma);
+  let maxChroma = Math.max(oklch.chroma, ...paletteChromas);
   return hexToOklch(hex).chroma <= maxChroma
     ? hex
     : rgbUnitToHex(
         oklchToSrgb({
           ...oklch,
-          lightness: lightness,
+          lightness,
           chroma: maxChroma,
         }),
       );
 }
-export function darkFillForRgb(hex?: Dynamic) {
+export function darkFillForRgb(hex: string): string {
   let oklch = hexToOklch(hex);
   let darkLightness = mapLightnessToDark(oklch.lightness, FILL_LIGHTNESS_MAP);
   return capChromaToPalette(oklch, darkLightness, 500);
 }
-export function keepTextChromaOnDark(hex?: Dynamic, darkHex?: Dynamic) {
-  let { lightness: lightness, chroma: chroma, hue: hue } = hexToOklch(hex);
+export function keepTextChromaOnDark(hex: string, darkHex: string): string {
+  let { lightness, chroma, hue } = hexToOklch(hex);
   let darkOklch = hexToOklch(darkHex);
   if (contrastRatio(hex, PAGE_BACKGROUND_COLORS.onLight) < MIN_TEXT_CONTRAST || chroma < ACHROMATIC_CHROMA_LIMIT || darkOklch.chroma >= chroma)
     return darkHex;
   let floorLightness = mapLightnessToDark(lightness);
-  let { lightness: darkLightness }: Dynamic = darkOklch;
+  let { lightness: darkLightness } = darkOklch;
   while (darkLightness > floorLightness && maxChromaInGamut(darkLightness, hue) < chroma)
     darkLightness = Math.max(floorLightness, darkLightness - LIGHTNESS_SEARCH_STEP);
   return rgbUnitToHex(
     oklchToSrgb({
       lightness: darkLightness,
       chroma: Math.min(chroma, maxChromaInGamut(darkLightness, hue)),
-      hue: hue,
+      hue,
     }),
   );
 }
-export function shiftLightnessForContrast(background?: Dynamic, hex?: Dynamic, minContrast?: Dynamic) {
+export function shiftLightnessForContrast(background: string, hex: string, minContrast: number): string | null {
   let oklch = hexToOklch(hex);
-  for (let offset: Dynamic = LIGHTNESS_SEARCH_STEP; offset <= 1; offset += LIGHTNESS_SEARCH_STEP)
-    for (let lightness of [oklch.lightness + offset, oklch.lightness - offset] as Dynamic) {
+  for (let offset = LIGHTNESS_SEARCH_STEP; offset <= 1; offset += LIGHTNESS_SEARCH_STEP)
+    for (let lightness of [oklch.lightness + offset, oklch.lightness - offset]) {
       if (lightness < 0 || lightness > 1) continue;
       let candidate = hexAtLightness(oklch, lightness);
       if (contrastRatio(candidate, background) >= minContrast) return candidate;
     }
   return null;
 }
-export function matchContrastOnDark(darkHex?: Dynamic, lightHex?: Dynamic, contrast?: Dynamic) {
+export function matchContrastOnDark(darkHex: string, lightHex: string, contrast: number): string {
   if (contrast < 1.01) return darkHex;
   let oklch = hexToOklch(lightHex);
-  for (let { lightness: lightness }: Dynamic = hexToOklch(darkHex); lightness <= 1; lightness += LIGHTNESS_SEARCH_STEP) {
+  for (let { lightness } = hexToOklch(darkHex); lightness <= 1; lightness += LIGHTNESS_SEARCH_STEP) {
     let candidate = hexAtLightness(oklch, lightness);
     if (contrastRatio(candidate, darkHex) >= contrast) return candidate;
   }
   return hexAtLightness(oklch, 1);
 }
-export function defaultTextColorOn(background?: Dynamic) {
+export function defaultTextColorOn(background: string): string {
   let pageText = moreContrastingColor(background, PAGE_TEXT_COLORS.onLight, PAGE_TEXT_COLORS.onDark);
   return contrastRatio(pageText, background) >= MIN_TEXT_CONTRAST ? pageText : moreContrastingColor(background, '#000000', '#ffffff');
 }
-export function resolveTextColors(fontColor?: Dynamic, fill?: Dynamic) {
+export function resolveTextColors(fontColor: Color, fill: PaintPair | null): PaintPair | null {
   if (fontColor.kind === 'none')
     return fill === null
       ? null
@@ -188,14 +214,14 @@ export function resolveTextColors(fontColor?: Dynamic, fill?: Dynamic) {
     onDark: ensureTextContrast(darkText, fillOrPage.onDark),
   };
 }
-export function cellColorsOfFormat(format?: Dynamic) {
+export function cellColorsOfFormat(format: WholeCellFormat): ChipPaints {
   let cached = CELL_COLORS_CACHE.get(format);
   if (cached !== undefined) return cached;
   let colors = cellColorPair(format.fillColor, format.font.color);
   CELL_COLORS_CACHE.set(format, colors);
   return colors;
 }
-export function cellColorPair(fillColor?: Dynamic, fontColor?: Dynamic) {
+export function cellColorPair(fillColor: Color, fontColor: Color): ChipPaints {
   let [fill, text] = [fillColorPair(fillColor), textColorPair(fontColor)];
   if (
     !(
@@ -206,7 +232,7 @@ export function cellColorPair(fillColor?: Dynamic, fontColor?: Dynamic) {
     )
   )
     return {
-      fill: fill,
+      fill,
       text: resolveTextColors(fontColor, fill),
     };
   let darkFill = darkFillUnderLightText(fillColor, fill.onLight);
@@ -221,7 +247,7 @@ export function cellColorPair(fillColor?: Dynamic, fontColor?: Dynamic) {
     },
   };
 }
-export function darkFillUnderLightText(fillColor?: Dynamic, lightHex?: Dynamic) {
+export function darkFillUnderLightText(fillColor: Color, lightHex: string): string {
   if (fillColor.kind === 'standard' && fillColor.shade === 600) return CELL_COLOR_PALETTE[fillColor.hue][700];
   if (fillColor.kind === 'standard' && fillColor.shade === 800)
     return mixColorsInOklab(CELL_COLOR_PALETTE[fillColor.hue][700], CELL_COLOR_PALETTE[fillColor.hue][800], 0.5);
@@ -229,20 +255,20 @@ export function darkFillUnderLightText(fillColor?: Dynamic, lightHex?: Dynamic) 
   let darkLightness = mapLightnessToDark(oklch.lightness, INVERTED_FILL_LIGHTNESS_MAP);
   return capChromaToPalette(oklch, darkLightness, 700);
 }
-export function contrastingShade(hex?: Dynamic) {
+export function contrastingShade(hex: string): string {
   let cached = CONTRASTING_SHADE_CACHE.get(hex);
   if (cached !== undefined) return cached;
   let shade = shiftLightnessForContrast(hex, hex, MIN_TEXT_CONTRAST) ?? defaultTextColorOn(hex);
   CONTRASTING_SHADE_CACHE.set(hex, shade);
   return shade;
 }
-export function turnsChipsWhite({ fill: fill, text: text }: Dynamic) {
+export function turnsChipsWhite({ fill, text }: ChipPaints): boolean {
   if (fill === null || text === null) return false;
   let [red, green, blue] = hexToRgbUnit(fill.onLight);
   let tintedFill = rgbUnitToHex([tintChannelTowardWhite(red), tintChannelTowardWhite(green), tintChannelTowardWhite(blue)]);
   return relativeLuminance(text.onLight) > relativeLuminance(fill.onLight) && contrastRatio(text.onLight, tintedFill) >= MIN_TEXT_CONTRAST;
 }
-export function mixColorsInOklab(fromHex?: Dynamic, toHex?: Dynamic, amount?: Dynamic) {
+export function mixColorsInOklab(fromHex: string, toHex: string, amount: number): string {
   let [[fromLightness, fromA, fromB], [toLightness, toA, toB]] = [hexToOklab(fromHex), hexToOklab(toHex)];
   let [mixedA, mixedB] = [interpolateNumber(fromA, toA, amount), interpolateNumber(fromB, toB, amount)];
   return rgbUnitToHex(
@@ -253,63 +279,63 @@ export function mixColorsInOklab(fromHex?: Dynamic, toHex?: Dynamic, amount?: Dy
     }),
   );
 }
-export function colorScaleStepAt([firstStop, ...otherStops]: Dynamic, value?: Dynamic) {
-  let [lower, upper]: Dynamic = [firstStop, firstStop];
-  for (let stop of otherStops as Dynamic) if ((([lower, upper] = [upper, stop]), value <= stop.at)) break;
+export function colorScaleStepAt([firstStop, ...otherStops]: ColorScaleStop[], value: number): ColorScaleStep {
+  let [lower, upper] = [firstStop, firstStop];
+  for (let stop of otherStops) if ((([lower, upper] = [upper, stop]), value <= stop.at)) break;
   let fraction = upper.at === lower.at ? (value < lower.at ? 0 : 1) : (value - lower.at) / (upper.at - lower.at);
   let step = Math.round(Math.min(1, Math.max(0, fraction)) * COLOR_SCALE_STEP_COUNT);
   return {
     from: lower.color,
     to: upper.color,
-    step: step,
+    step,
   };
 }
-export function colorScaleCellColors({ from: from, to: to, step: step }: Dynamic, fontColor?: Dynamic) {
+export function colorScaleCellColors({ from, to, step }: ColorScaleStep, fontColor: Color): ChipPaints {
   let key = [from, to, fontColor].map(colorKey).join('|') + `|${step}`;
   let cached = COLOR_SCALE_COLORS_CACHE.get(key);
   if (cached !== undefined) return cached;
   let [fromColors, toColors] = [fillColorPair(from) ?? PAGE_BACKGROUND_COLORS, fillColorPair(to) ?? PAGE_BACKGROUND_COLORS];
   let amount = step / COLOR_SCALE_STEP_COUNT;
-  let fill = {
+  let fill: PaintPair = {
     onLight: mixColorsInOklab(fromColors.onLight, toColors.onLight, amount),
     onDark: mixColorsInOklab(fromColors.onDark, toColors.onDark, amount),
   };
   let colors = {
-    fill: fill,
+    fill,
     text: resolveTextColors(fontColor, fill),
   };
   COLOR_SCALE_COLORS_CACHE.set(key, colors);
   return colors;
 }
-export function chipTextColorOfHue(fill?: Dynamic, hue?: Dynamic) {
+export function chipTextColorOfHue(fill: string, hue: Hue | null): string {
   return (
     (hue === null
       ? shiftLightnessForContrast(fill, fill, CHIP_TEXT_MIN_CONTRAST)
       : Object.values(CELL_COLOR_PALETTE[hue])
-          .filter((swatch?: Dynamic) => contrastRatio(swatch, fill) >= CHIP_TEXT_MIN_CONTRAST)
-          .reduce(
-            (best?: Dynamic, swatch?: Dynamic) => (best === null || contrastRatio(swatch, fill) < contrastRatio(best, fill) ? swatch : best),
+          .filter((swatch) => contrastRatio(swatch, fill) >= CHIP_TEXT_MIN_CONTRAST)
+          .reduce<string | null>(
+            (best, swatch) => (best === null || contrastRatio(swatch, fill) < contrastRatio(best, fill) ? swatch : best),
             null,
           )) ?? defaultTextColorOn(fill)
   );
 }
-export function optionChipColors(color?: Dynamic) {
+export function optionChipColors(color: Color): ChipPaints {
   let fill = fillColorPair(color);
   if (fill === null)
     return {
-      fill: fill,
+      fill,
       text: null,
     };
   let hue = color.kind === 'standard' ? color.hue : null;
   return {
-    fill: fill,
+    fill,
     text: {
       onLight: chipTextColorOfHue(fill.onLight, hue),
       onDark: chipTextColorOfHue(fill.onDark, hue),
     },
   };
 }
-export function cachedOptionChipColors(color?: Dynamic) {
+export function cachedOptionChipColors(color: Color): ChipPaints {
   let key = colorKey(color);
   let cached = OPTION_CHIP_COLORS_CACHE.get(key);
   if (cached !== undefined) return cached;
@@ -317,40 +343,40 @@ export function cachedOptionChipColors(color?: Dynamic) {
   OPTION_CHIP_COLORS_CACHE.set(key, colors);
   return colors;
 }
-export function mixHexToward(target?: Dynamic, amount?: Dynamic, hex?: Dynamic) {
+export function mixHexToward(target: number, amount: number, hex: string): string {
   let [red, green, blue] = hexToRgbUnit(hex);
   return rgbUnitToHex([interpolateNumber(red, target, amount), interpolateNumber(green, target, amount), interpolateNumber(blue, target, amount)]);
 }
 export function chipColorsApartFromFill(
-  cellFill: Dynamic,
-  [chipFill, chipText]: Dynamic,
-  hue?: Dynamic,
-  edgeOf?: Dynamic,
-  minDistance?: Dynamic,
-) {
+  cellFill: string,
+  [chipFill, chipText]: ChipFillAndText,
+  hue: Hue | null,
+  edgeOf: (fill: string) => string,
+  minDistance: number,
+): ChipFillAndText {
   let cellOklab = hexToOklab(cellFill);
-  let distanceFromCell = (hex?: Dynamic) =>
-    (Math.hypot as Dynamic)(...hexToOklab(hex).map((input?: Dynamic, options?: Dynamic) => input - (cellOklab[options] ?? 0)));
+  let distanceFromCell = (hex: string) =>
+    Math.hypot(...hexToOklab(hex).map((channel, index) => channel - (cellOklab[index] ?? 0)));
   let chipDistance = distanceFromCell(chipFill);
   if (chipDistance >= minDistance) return [chipFill, chipText];
   let isApartAlready = chipDistance >= MIN_CHIP_FILL_DISTANCE;
-  let isApart = (hex?: Dynamic) => distanceFromCell(hex) >= MIN_CHIP_FILL_DISTANCE && distanceFromCell(hex) > chipDistance;
-  let withEdge = (input?: Dynamic) => [input, edgeOf(input)];
-  let findShifted = (target?: Dynamic, step?: Dynamic) =>
+  let isApart = (hex: string) => distanceFromCell(hex) >= MIN_CHIP_FILL_DISTANCE && distanceFromCell(hex) > chipDistance;
+  let withEdge = (fill: string) => [fill, edgeOf(fill)];
+  let findShifted = (target: number, step: number) =>
     [1, 2, 3]
-      .map((input?: Dynamic) => mixHexToward(target, input * step, chipFill))
-      .find((input?: Dynamic) => withEdge(input).every(isApart)) ?? null;
+      .map((times) => mixHexToward(target, times * step, chipFill))
+      .find((shifted) => withEdge(shifted).every(isApart)) ?? null;
   let isChipDarker = relativeLuminance(chipText) < relativeLuminance(chipFill);
-  let textFor = (fill?: Dynamic) => {
-    let [chipFill2, chipEdge] = [fill, edgeOf(fill)];
-    let candidates = [chipText, chipTextColorOfHue(chipFill2, hue), chipTextColorOfHue(chipEdge, hue), '#ffffff']
-      .filter((input?: Dynamic) => relativeLuminance(input) < relativeLuminance(fill) === isChipDarker)
-      .filter((input?: Dynamic) => hasTextContrast(input, chipFill2));
+  let textFor = (fill: string) => {
+    let [shiftedFill, chipEdge] = [fill, edgeOf(fill)];
+    let candidates = [chipText, chipTextColorOfHue(shiftedFill, hue), chipTextColorOfHue(chipEdge, hue), '#ffffff']
+      .filter((text) => relativeLuminance(text) < relativeLuminance(fill) === isChipDarker)
+      .filter((text) => hasTextContrast(text, shiftedFill));
     let fallbackText = isChipDarker || isApartAlready ? null : candidates[0];
-    return candidates.find((input?: Dynamic) => hasTextContrast(input, chipEdge)) ?? fallbackText ?? null;
+    return candidates.find((text) => hasTextContrast(text, chipEdge)) ?? fallbackText ?? null;
   };
   let [darker, lighter] = [findShifted(0, CHIP_DARKEN_STEP), findShifted(1, CHIP_LIGHTEN_STEP)];
-  for (let candidate of (isChipDarker ? [darker, lighter] : [lighter, darker]) as Dynamic) {
+  for (let candidate of isChipDarker ? [darker, lighter] : [lighter, darker]) {
     let candidateText = candidate === null ? null : textFor(candidate);
     if (candidate !== null && candidateText !== null) return [candidate, candidateText];
   }
@@ -358,7 +384,7 @@ export function chipColorsApartFromFill(
   let fallbackFill = lighter ?? darker ?? chipFill;
   return [fallbackFill, chipTextColorOfHue(fallbackFill, hue)];
 }
-export function dropdownChipColors(cellFill?: Dynamic, optionColor?: Dynamic) {
+export function dropdownChipColors(cellFill: PaintPair | null, optionColor: Color): ChipPaints {
   let chipColors = cachedOptionChipColors(optionColor);
   if (cellFill === null || chipColors.fill === null || chipColors.text === null) return chipColors;
   let key = [colorKey(optionColor), cellFill.onLight, cellFill.onDark].join('|');
@@ -370,14 +396,14 @@ export function dropdownChipColors(cellFill?: Dynamic, optionColor?: Dynamic) {
       cellFill.onLight,
       [chipColors.fill.onLight, chipColors.text.onLight],
       hue,
-      (hex?: Dynamic) => mixHexToward(0, CHIP_EDGE_DARKEN_AMOUNT, hex),
+      (hex) => mixHexToward(0, CHIP_EDGE_DARKEN_AMOUNT, hex),
       MIN_CHIP_FILL_DISTANCE,
     ),
     chipColorsApartFromFill(
       cellFill.onDark,
       [chipColors.fill.onDark, chipColors.text.onDark],
       hue,
-      (hex?: Dynamic) => mixHexToward(1, CHIP_EDGE_LIGHTEN_AMOUNT, hex),
+      (hex) => mixHexToward(1, CHIP_EDGE_LIGHTEN_AMOUNT, hex),
       MIN_CHIP_FILL_DISTANCE_ON_DARK,
     ),
   ];
@@ -397,14 +423,14 @@ export function dropdownChipColors(cellFill?: Dynamic, optionColor?: Dynamic) {
   DROPDOWN_CHIP_COLORS_CACHE.set(key, colors);
   return colors;
 }
-export function setSwatchColors(color?: Dynamic) {
+export function setSwatchColors(color: Color): PaintPair {
   let hue = color.kind === 'standard' ? color.hue : 'gray';
   return {
     onLight: CELL_COLOR_PALETTE[hue][300],
     onDark: CELL_COLOR_PALETTE[hue][400],
   };
 }
-export const CELL_COLOR_PALETTE = {
+export const CELL_COLOR_PALETTE: Record<Hue, Record<PaletteShade, string>> = {
   gray: {
     100: '#e0e0e0',
     200: '#c2c2c2',
@@ -496,15 +522,15 @@ export const CELL_COLOR_PALETTE = {
     800: '#390f1f',
   },
 };
-export const PAGE_BACKGROUND_COLORS = {
+export const PAGE_BACKGROUND_COLORS: PaintPair = {
   onLight: '#ffffff',
   onDark: '#1a1a19',
 };
-export const PAGE_TEXT_COLORS = {
+export const PAGE_TEXT_COLORS: PaintPair = {
   onLight: '#0b0b0b',
   onDark: '#f0efec',
 };
-export const DARK_TEXT_SHADE_FOR_SHADE = {
+export const DARK_TEXT_SHADE_FOR_SHADE: Record<Shade, PaletteShade> = {
   100: 800,
   200: 700,
   300: 600,
@@ -512,11 +538,11 @@ export const DARK_TEXT_SHADE_FOR_SHADE = {
   600: 400,
   800: 100,
 };
-export const standardTextColors = (hue?: Dynamic, shade?: Dynamic) => ({
+export const standardTextColors = (hue: Hue, shade: Shade): PaintPair => ({
   onLight: CELL_COLOR_PALETTE[hue][shade],
   onDark: CELL_COLOR_PALETTE[hue][DARK_TEXT_SHADE_FOR_SHADE[shade]],
 });
-export const DARK_FILL_SHADES_FOR_SHADE = {
+export const DARK_FILL_SHADES_FOR_SHADE: Record<Shade, [lower: PaletteShade, upper: PaletteShade]> = {
   100: [700, 800],
   200: [700, 700],
   300: [600, 700],
@@ -526,14 +552,14 @@ export const DARK_FILL_SHADES_FOR_SHADE = {
 };
 export const MIN_TEXT_CONTRAST = 4.5;
 export const LIGHTNESS_SEARCH_STEP = 0.005;
-export const grayShadeLightness = (shade?: Dynamic) => hexToOklch(CELL_COLOR_PALETTE.gray[shade]).lightness;
-export const PAGE_LIGHTNESS_ANCHOR = {
+export const grayShadeLightness = (shade: PaletteShade): number => hexToOklch(CELL_COLOR_PALETTE.gray[shade]).lightness;
+export const PAGE_LIGHTNESS_ANCHOR: LightnessAnchor = {
   onLight: 1,
   onDark: hexToOklch(PAGE_BACKGROUND_COLORS.onDark).lightness,
 };
-export const TEXT_LIGHTNESS_MAP = [
-  ...[100, 200, 300, 400, 600, 800].map(
-    (shade?: Dynamic) => ({
+export const TEXT_LIGHTNESS_MAP: LightnessAnchor[] = [
+  ...([100, 200, 300, 400, 600, 800] satisfies Shade[]).map(
+    (shade) => ({
       onLight: grayShadeLightness(shade),
       onDark: grayShadeLightness(DARK_TEXT_SHADE_FOR_SHADE[shade]),
     }),
@@ -544,12 +570,12 @@ export const TEXT_LIGHTNESS_MAP = [
   },
 ];
 export const DARK_DEFAULT_FILL_HEX = '#252525';
-export const FILL_LIGHTNESS_MAP = [
+export const FILL_LIGHTNESS_MAP: LightnessAnchor[] = [
   {
     onLight: hexToOklch(LIGHT_GRAY_COLOR.hex).lightness,
     onDark: hexToOklch(DARK_DEFAULT_FILL_HEX).lightness,
   },
-  ...[100, 200, 300, 400, 600, 800].map((shade?: Dynamic) => {
+  ...([100, 200, 300, 400, 600, 800] satisfies Shade[]).map((shade) => {
     let [lowerShade, upperShade] = DARK_FILL_SHADES_FOR_SHADE[shade];
     return {
       onLight: grayShadeLightness(shade),
@@ -561,7 +587,7 @@ export const FILL_LIGHTNESS_MAP = [
     onDark: grayShadeLightness(500),
   },
 ];
-export const INVERTED_FILL_LIGHTNESS_MAP = [
+export const INVERTED_FILL_LIGHTNESS_MAP: LightnessAnchor[] = [
   {
     onLight: grayShadeLightness(300),
     onDark: (grayShadeLightness(600) + grayShadeLightness(700)) / 2,
@@ -579,41 +605,41 @@ export const INVERTED_FILL_LIGHTNESS_MAP = [
     onDark: (grayShadeLightness(700) + 3 * grayShadeLightness(800)) / 4,
   },
 ];
-export const ensureTextContrast = (text?: Dynamic, background?: Dynamic) =>
+export const ensureTextContrast = (text: string, background: string): string =>
   contrastRatio(text, background) >= MIN_TEXT_CONTRAST ? text : (shiftLightnessForContrast(background, text, MIN_TEXT_CONTRAST) ?? text);
-export const moreContrastingColor = (background?: Dynamic, first?: Dynamic, second?: Dynamic) =>
+export const moreContrastingColor = (background: string, first: string, second: string): string =>
   contrastRatio(first, background) >= contrastRatio(second, background) ? first : second;
-export const textColorsOnFill = (fontColor?: Dynamic, fillColor?: Dynamic) =>
+export const textColorsOnFill = (fontColor: Color, fillColor: Color): PaintPair | null =>
   resolveTextColors(fontColor, fillColorPair(fillColor));
-export const shownCellColor = (property?: Dynamic, color?: Dynamic, otherColor: Dynamic = NO_COLOR) =>
+export const shownCellColor = (property: ColorProperty, color: Color, otherColor: Color = NO_COLOR): PaintPair | null =>
   property === 'fillColor' ? cellColorPair(color, otherColor).fill : cellColorPair(otherColor, color).text;
-export const NO_CELL_COLORS = {
+export const NO_CELL_COLORS: ChipPaints = {
   fill: null,
   text: null,
 };
-export const CELL_COLORS_CACHE = new (WeakMap as Dynamic)();
-export const contrastingShades = (pair?: Dynamic) => ({
+export const CELL_COLORS_CACHE = new WeakMap<WholeCellFormat, ChipPaints>();
+export const contrastingShades = (pair: PaintPair): PaintPair => ({
   onLight: contrastingShade(pair.onLight),
   onDark: contrastingShade(pair.onDark),
 });
-export const CONTRASTING_SHADE_CACHE = new (Map as Dynamic)();
-export const defaultTextColorsOnFill = (fill?: Dynamic) => resolveTextColors(NO_COLOR, fill);
+export const CONTRASTING_SHADE_CACHE = new Map<string, string>();
+export const defaultTextColorsOnFill = (fill: PaintPair | null): PaintPair | null => resolveTextColors(NO_COLOR, fill);
 export const CHIP_TINT_AMOUNT = 0.15;
-export const tintChannelTowardWhite = (channel?: Dynamic) => interpolateNumber(channel, 1, CHIP_TINT_AMOUNT);
-export const hexToOklab = (hex?: Dynamic) => {
-  let { lightness: lightness, chroma: chroma, hue: hue } = hexToOklch(hex);
+export const tintChannelTowardWhite = (channel: number): number => interpolateNumber(channel, 1, CHIP_TINT_AMOUNT);
+export const hexToOklab = (hex: string): Oklab => {
+  let { lightness, chroma, hue } = hexToOklch(hex);
   return [lightness, chroma * Math.cos(hue), chroma * Math.sin(hue)];
 };
-export const interpolateNumber = (from?: Dynamic, to?: Dynamic, amount?: Dynamic) => from + (to - from) * amount;
+export const interpolateNumber = (from: number, to: number, amount: number): number => from + (to - from) * amount;
 export const COLOR_SCALE_STEP_COUNT = 32;
-export const COLOR_SCALE_COLORS_CACHE = new (Map as Dynamic)();
+export const COLOR_SCALE_COLORS_CACHE = new Map<string, ChipPaints>();
 export const CHIP_TEXT_MIN_CONTRAST = 5.5;
-export const OPTION_CHIP_COLORS_CACHE = new (Map as Dynamic)();
+export const OPTION_CHIP_COLORS_CACHE = new Map<string, ChipPaints>();
 export const MIN_CHIP_FILL_DISTANCE = 0.03;
 export const MIN_CHIP_FILL_DISTANCE_ON_DARK = 0.065;
 export const CHIP_DARKEN_STEP = 0.06;
 export const CHIP_LIGHTEN_STEP = 0.1;
 export const CHIP_EDGE_DARKEN_AMOUNT = 0.05;
 export const CHIP_EDGE_LIGHTEN_AMOUNT = 0.075;
-export const hasTextContrast = (text?: Dynamic, background?: Dynamic) => contrastRatio(text, background) >= MIN_TEXT_CONTRAST;
-export const DROPDOWN_CHIP_COLORS_CACHE = new (Map as Dynamic)();
+export const hasTextContrast = (text: string, background: string): boolean => contrastRatio(text, background) >= MIN_TEXT_CONTRAST;
+export const DROPDOWN_CHIP_COLORS_CACHE = new Map<string, ChipPaints>();

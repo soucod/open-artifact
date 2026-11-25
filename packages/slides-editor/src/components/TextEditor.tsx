@@ -21,7 +21,7 @@ import {
   type TextBoxNode,
   type TextNode,
 } from '@open-artifact/slides-core';
-import { toReactStyle } from '../render/css.ts';
+import { toReactStyle, withItemMargin } from '../render/css.ts';
 import { useTextFit } from '../render/fit.ts';
 import { RunsView, useRenderOptions } from '../render/SlideView.tsx';
 import { blocksToHtml, indentItems, itemsToHtml, readBlocks, readItems, readRuns, runsToHtml } from '../lib/richtext.ts';
@@ -87,9 +87,19 @@ export function editorHasMark(command: 'bold' | 'italic' | 'underline'): boolean
   }
 }
 
-/** True when a focus change stays within the editing session (format bar, its popovers). */
+/** Marks the card of the link the caret is in (`TextLinkCard`). */
+export const LINK_CARD = 'data-open-artifact-link-card';
+
+/** Moves the focus to the link card, when one is showing. */
+function focusLinkCard(): boolean {
+  const first = document.querySelector<HTMLElement>(`[${LINK_CARD}] button`);
+  first?.focus();
+  return Boolean(first);
+}
+
+/** True when a focus change stays within the editing session (format bar, its popovers, the link card). */
 function staysInSession(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest('[data-open-artifact-format-bar]'));
+  return target instanceof Element && Boolean(target.closest(`[data-open-artifact-format-bar],[${LINK_CARD}]`));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -224,6 +234,14 @@ function useEditable(
         document.execCommand('insertLineBreak');
         return;
       }
+      // Tab goes to the card of the link the caret is in, where Tab does not already nest items or move between cells.
+      if (event.key === 'Tab' && !event.shiftKey && !event.isComposing && props.node.kind !== 'list' && props.node.kind !== 'table') {
+        const list = window.getSelection()?.anchorNode?.parentElement?.closest('ul,ol');
+        if (!(list && el.contains(list)) && focusLinkCard()) {
+          event.preventDefault();
+          return;
+        }
+      }
       if (event.key === 'Tab' && !event.isComposing && (props.node.kind === 'list' || props.node.kind === 'textbox')) {
         // Tab / Shift+Tab nest list items (up to nine levels).
         const list = props.node.kind === 'list' ? el : (window.getSelection()?.anchorNode?.parentElement?.closest('ul,ol') as HTMLElement | null);
@@ -306,7 +324,7 @@ function ListEditor(props: TextEditorProps & { node: ListNode }): ReactNode {
   useEditable(ref, props, () => itemsToHtml(node), { lineBreakOnEnter: false, placeholder: false });
   useTextFit(ref, node.fit, [node]);
   const Tag = node.tag;
-  return <Tag ref={ref as RefObject<never>} className="open-artifact-list" data-open-artifact-path={pathKey(path)} data-open-artifact-kind="list" style={toReactStyle(node.style, { resolveUrl: options.resolveSrc })} {...editableProps} />;
+  return <Tag ref={ref as RefObject<never>} className="open-artifact-list" data-open-artifact-path={pathKey(path)} data-open-artifact-kind="list" style={withItemMargin(toReactStyle(node.style, { resolveUrl: options.resolveSrc }), node.itemMargin)} start={node.start} reversed={node.reversed} {...editableProps} />;
 }
 
 function TextBoxEditor(props: TextEditorProps & { node: TextBoxNode }): ReactNode {

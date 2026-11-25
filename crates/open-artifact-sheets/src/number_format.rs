@@ -16,8 +16,10 @@ use crate::dates;
 use crate::locale::{self, Locale};
 use crate::value::{number_text, significant_digits, SIGNIFICANT_DIGITS};
 
+mod fraction;
 pub(crate) mod names;
 
+use fraction::Fraction;
 use names::Names;
 
 /// Why a pattern is refused.
@@ -252,6 +254,13 @@ impl NumberFormat {
         matches!(&self.sections[0].body, Body::Date(dates) if dates.twelve_hours)
     }
 
+    /// Whether a number is shown by a section of fractions (`# ?/?`, `0.00;# ?/?` for one below 0).
+    pub fn shows_as_a_fraction(&self, n: f64) -> bool {
+        let numbers: Vec<&Section> =
+            self.sections.iter().enumerate().filter(|(i, _)| Some(*i) != self.text).map(|(_, s)| s).collect();
+        !numbers.is_empty() && choose(&numbers, n).is_ok_and(|(section, _)| matches!(section.body, Body::Fraction(_)))
+    }
+
     /// A number shown with the pattern as text, the en-US way: what TEXT gives.
     pub fn show_number(&self, n: f64) -> Result<Shown, NotShown> {
         self.show_number_in(n, locale::en_us(), Room::AsText)
@@ -272,7 +281,7 @@ impl NumberFormat {
         }
         let negative = n < 0.0 && !drop_sign;
         let text = match &section.body {
-            Body::Fraction => return Err(NotShown::NotPrintedYet),
+            Body::Fraction(fraction) => fraction.show(n.abs(), negative, locale),
             Body::Plain(pieces) => {
                 let mut out = String::from(if negative { "-" } else { "" });
                 for piece in pieces {
@@ -290,11 +299,11 @@ impl NumberFormat {
     }
 
     /// Whether every number the pattern may show is printed: none of its sections for numbers names another
-    /// calendar or numeral system, writes a fraction, or names months and days in a language dates aren't printed
+    /// calendar or numeral system, or names months and days in a language dates aren't printed
     /// in. A cell is given only such a pattern (`numberFormatNotPrintedYet`).
     pub fn is_printed(&self) -> bool {
         self.sections.iter().enumerate().filter(|(i, _)| Some(*i) != self.text).all(|(_, s)| {
-            !s.calendar && !matches!(&s.body, Body::Fraction | Body::Date(Dates { language: Language::Unknown, .. }))
+            !s.calendar && !matches!(&s.body, Body::Date(Dates { language: Language::Unknown, .. }))
         })
     }
 
@@ -537,7 +546,7 @@ enum Tok {
     Slash,
     Exponent { upper: bool, plus: bool },
     /// 1 to 9, which only a fraction's denominator may hold.
-    Digit,
+    Digit(char),
     /// A date or time code: `y`, `m`, `d`, `h` or `s`, and how many.
     Code(u8, usize),
     AmPm,
@@ -614,7 +623,7 @@ fn lex(chars: &[char]) -> Result<Vec<Tok>, Refusal> {
             '%' => Tok::Percent,
             '/' => Tok::Slash,
             '@' => Tok::At,
-            '1'..='9' => Tok::Digit,
+            '1'..='9' => Tok::Digit(c),
             ' ' | '!' | '&' | '\'' | '(' | ')' | '+' | '-' | ':' | '<' | '=' | '>' | '^' | '{' | '}' | '~' | '$' => {
                 Tok::Literal(c.into())
             }
@@ -787,7 +796,7 @@ enum Body {
     /// Text around General or `@` (or around nothing).
     Plain(Vec<Piece>),
     Number(Numbers),
-    Fraction,
+    Fraction(Fraction),
     Date(Dates),
 }
 
@@ -860,7 +869,7 @@ fn section(tokens: &[Tok]) -> Result<Section, Refusal> {
         kind: Kind::Number,
         has_at: group == Group::Text,
         numeric: false,
-        body: Body::Fraction,
+        body: Body::Plain(Vec::new()),
     };
     match group {
         Group::Text | Group::General => {
@@ -886,11 +895,11 @@ fn section(tokens: &[Tok]) -> Result<Section, Refusal> {
             });
             section.numeric = body.iter().any(|t| is_placeholder(t) || matches!(t, Tok::Point | Tok::Percent));
             if let Some(slash) = fraction_slash(&body) {
-                check_fraction(&body, slash)?;
+                section.body = Body::Fraction(Fraction::read(&body, slash)?);
                 section.kind = Kind::Fraction;
                 return Ok(section);
             }
-            if body.contains(&Tok::Digit) {
+            if body.iter().any(|t| matches!(t, Tok::Digit(_))) {
                 return Err(Refusal::CharacterNeedsQuotes);
             }
             check_number(&body)?;
@@ -972,7 +981,7 @@ fn scan(body: &[Tok], group: Group) -> Result<(), Refusal> {
                     }
                     i += zeros;
                 }
-                Tok::Digit => return Err(Refusal::CharacterNeedsQuotes),
+                Tok::Digit(_) => return Err(Refusal::CharacterNeedsQuotes),
                 t if is_date_part(t) || matches!(t, Tok::Point | Tok::Comma | Tok::Slash) => {}
                 _ => return mixes,
             },
@@ -985,40 +994,10 @@ fn scan(body: &[Tok], group: Group) -> Result<(), Refusal> {
 /// The `/` of a fraction: right after a placeholder, right before a placeholder or a digit.
 fn fraction_slash(body: &[Tok]) -> Option<usize> {
     (1..body.len().saturating_sub(1)).find(|&i| {
-        body[i] == Tok::Slash && is_placeholder(&body[i - 1]) && (is_placeholder(&body[i + 1]) || body[i + 1] == Tok::Digit)
+        body[i] == Tok::Slash
+            && is_placeholder(&body[i - 1])
+            && (is_placeholder(&body[i + 1]) || matches!(body[i + 1], Tok::Digit(_)))
     })
-}
-
-/// A fraction holds placeholders, then `/`, then placeholders or a number (`0/10`), and literals; no point, comma,
-/// percent or exponent.
-fn check_fraction(body: &[Tok], slash: usize) -> Result<(), Refusal> {
-    let bad = Err(Refusal::FractionNotWellFormed);
-    for t in &body[..slash] {
-        match t {
-            Tok::Digit => return Err(Refusal::CharacterNeedsQuotes),
-            Tok::Point | Tok::Comma | Tok::Percent | Tok::Exponent { .. } | Tok::Slash => return bad,
-            _ => {}
-        }
-    }
-    let mut i = slash + 1;
-    if body[i] == Tok::Digit {
-        while i < body.len() && matches!(body[i], Tok::Digit | Tok::Zero) {
-            i += 1;
-        }
-    } else {
-        while i < body.len() && is_placeholder(&body[i]) {
-            i += 1;
-        }
-    }
-    for t in &body[i..] {
-        if is_placeholder(t) || matches!(t, Tok::Digit | Tok::Point | Tok::Comma | Tok::Percent | Tok::Slash) {
-            return bad;
-        }
-        if matches!(t, Tok::Exponent { .. }) {
-            return bad;
-        }
-    }
-    Ok(())
 }
 
 /// One point, commas only after placeholders (grouping between them, scaling after the last), one exponent, and no
@@ -1072,6 +1051,17 @@ enum Ph {
     Question,
 }
 
+impl Ph {
+    fn read(token: &Tok) -> Option<Ph> {
+        match token {
+            Tok::Zero => Some(Ph::Zero),
+            Tok::Hash => Some(Ph::Hash),
+            Tok::Question => Some(Ph::Question),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Item {
     Text(String),
@@ -1110,13 +1100,7 @@ impl Numbers {
         };
         let (mut point, mut exponent) = (false, false);
         for (i, t) in body.iter().enumerate() {
-            let ph = match t {
-                Tok::Zero => Some(Ph::Zero),
-                Tok::Hash => Some(Ph::Hash),
-                Tok::Question => Some(Ph::Question),
-                _ => None,
-            };
-            if let Some(ph) = ph {
+            if let Some(ph) = Ph::read(t) {
                 n.items.push(if exponent {
                     n.powers += 1;
                     Item::Power(ph, 0)
@@ -1688,12 +1672,26 @@ mod tests {
     }
 
     #[test]
+    fn fractions() {
+        assert_eq!(show("# ?/?", -0.01), "0    ");
+        assert_eq!(show("# ?/?", 0.95), "1    ");
+        assert_eq!(show("# ?/?", -1.5), "-1 1/2");
+        assert_eq!(show("# ?/16", 1.125), "1 2/16");
+        assert_eq!(show("??/??", 0.051), " 5/98");
+        assert_eq!(show("??/??", 1.5), " 3/2 ");
+        assert_eq!(show("??/??0", 0.5), " 1/02 ");
+        assert_eq!(show("?/????????", 1e-7), "1/9999999 ");
+        assert_eq!(show("0/4294967295", 0.5), "2147483648/4294967295");
+        assert_eq!(show("0/10", 1.234567890123456e21), "12345678901234600000000/10");
+    }
+
+    #[test]
     fn refusals() {
         assert_eq!(show("0.0.0", 1.0), "secondDecimalPoint");
         assert_eq!(show("x", 1.0), "characterNeedsQuotes");
         assert_eq!(show("@;0", 1.0), "textSectionNotLast");
         assert_eq!(show("h 0", 1.0), "sectionMixesKinds");
         assert_eq!(show("[h] [m]", 1.0), "elapsedTimeNotWellFormed");
-        assert_eq!(show("# ?/?", 1.0), "notPrintedYet");
+        assert_eq!(show("# ?/4294967296", 1.0), "fractionNotWellFormed");
     }
 }

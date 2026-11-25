@@ -1,10 +1,19 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as ReactDOM from 'react-dom';
 import { eventsToPickFunction } from './autocomplete.ts';
-export function pickFunctionWhenSettled(functionName?: Dynamic, store?: Dynamic, onPicked?: Dynamic, isStale?: Dynamic) {
+import type { SheetController } from '../state/controller.ts';
+/**
+ * Picks a function once the events before are done: lists every function, then chooses `functionName` in the list.
+ * `onPicked` runs once the page shows the pick; nothing happens once `isStale` says the pick is no longer wanted.
+ */
+export function pickFunctionWhenSettled(
+  functionName: string,
+  store: SheetController,
+  onPicked: () => void,
+  isStale: () => boolean,
+): void {
   store.onceEventsAreFinished(() => {
     if (isStale()) return;
-    for (let event of eventsToPickFunction(functionName) as Dynamic) store.dispatch(event);
+    for (let event of eventsToPickFunction(functionName)) store.dispatch(event);
     store.lookOnceEventsAreFinished(() => {
       if (isStale()) return;
       ReactDOM.flushSync(() => {

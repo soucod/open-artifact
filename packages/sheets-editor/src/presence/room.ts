@@ -1,11 +1,46 @@
-import type { Dynamic } from '../dynamic.ts';
-import type { PageApi } from '../host/sheets-host.ts';
+import type { PageApi, PageRoom, PeerOfRoom, RoomPeersEvent } from '../host/sheets-host.ts';
+import { CHROME_PEER_KEY, MAX_CHROME_PEERS, type ChromePeer } from '@open-artifact/runtime';
+import type { SheetId } from '@open-artifact/sheets-core';
+import type { CellId } from '../model/workbook.ts';
+
+import type { SelectedToldToAgent } from '../state/initial-state.ts';
+import type { SelectionCorners } from './selections.ts';
+import type { PeopleDirectory } from './people.ts';
 import { SHEETS_NEVER_GIVEN_COLORS } from './colors.ts';
 import { isNonNullObject } from '../utils/objects.ts';
 import { createPeerColorKeeper, normalizePeerColor, type PeerColorClaim } from '@open-artifact/editor-kit';
 import { reportErrorSoftly } from '../engine/loader.ts';
 import { isViewId } from '../agent/view-context.ts';
-export function readOwnColor(storage?: Dynamic) {
+/** A cell of a selection told in presence, where the sheet is told once for both corners. */
+export type CellIdsOnSheet = Pick<CellId, 'rowId' | 'columnId'>;
+/** Where a viewer's selection is, as told to the room under `CURSOR_PRESENCE_KEY`. */
+export interface CursorInPresence {
+  sheetId: SheetId;
+  activeCell: CellIdsOnSheet;
+  selectionCorner: CellIdsOnSheet;
+  at: number;
+}
+/** Another viewer's selection, heard from the room. */
+export interface HeardSelection {
+  tabKey: string;
+  userId: string;
+  colorClaimed: string | null;
+  selection: SelectionCorners;
+}
+/** A heard selection and when that viewer's tab was last at the page. */
+export interface PeerCursor {
+  heard: HeardSelection;
+  at: number;
+}
+/** What the page tells the room about itself, and hears from it about the other viewers. */
+export interface RoomPresence {
+  tellOwnSelection(selection: SelectionCorners | null): void;
+  tellAgentWhatIsSelected(selected: SelectedToldToAgent): void;
+  tellWhomViewFollows(tabKey: string | null): void;
+  personWithTab(tabKey: string): string | null;
+  onSelectionsChanged(onChange: (selections: HeardSelection[]) => void): () => void;
+}
+export function readOwnColor(storage: () => Storage): string | null {
   try {
     let color = storage().getItem(OWN_COLOR_STORAGE_KEY);
     return color === null || SHEETS_NEVER_GIVEN_COLORS.includes(color.toLowerCase()) ? null : color;
@@ -13,25 +48,25 @@ export function readOwnColor(storage?: Dynamic) {
     return null;
   }
 }
-export function claimedColorOfPresence(presence?: Dynamic) {
+export function claimedColorOfPresence(presence: Readonly<Record<string, unknown>>): string | null {
   let who = presence[PRESENCE_WHO_KEY];
   return isNonNullObject(who) && typeof who.c === 'string' ? who.c : null;
 }
-export function peerOfRoom(peer?: Dynamic) {
+export function peerOfRoom(peer: unknown): RoomPeer[] {
   if (!isNonNullObject(peer)) return [];
-  let { peer: peerId, by: by, isMe: isMe, sameTab: sameTab, kind: kind, presence: presence } = peer;
+  let { peer: peerId, by, isMe, sameTab, kind, presence } = peer;
   if (typeof peerId !== 'string' || typeof by !== 'string' || kind !== 'viewer') return [];
   return [
     {
       peer: peerId,
-      by: by,
+      by,
       isMe: isMe === true,
       sameTab: sameTab === true,
       presence: isNonNullObject(presence) ? presence : {},
     },
   ];
 }
-interface RoomPeer {
+export interface RoomPeer {
   peer: string;
   by: string;
   isMe: boolean;
@@ -53,8 +88,9 @@ export interface PeerColorKeeping {
 function colorClaimOf(peer: RoomPeer): PeerColorClaim | undefined {
   const who = peer.presence[PRESENCE_WHO_KEY];
   if (!isNonNullObject(who)) return undefined;
-  const color = normalizePeerColor((who as { c?: unknown }).c);
-  const at = (who as { t?: unknown }).t;
+  const color = normalizePeerColor(who.c);
+  const at = who.t;
+
   return color !== undefined && typeof at === 'number' && Number.isFinite(at)
     ? { key: peer.by, peer: peer.peer, own: peer.isMe, c: color, t: at }
     : undefined;
@@ -70,7 +106,7 @@ export function startPeerColorKeeper(
   if (typeof peers !== 'function') return null;
   const roomPeers = (): RoomPeer[] => {
     const listed = peers.call(room);
-    return Array.isArray(listed) ? (listed.flatMap(peerOfRoom) as RoomPeer[]) : [];
+    return Array.isArray(listed) ? listed.flatMap(peerOfRoom) : [];
   };
   let published: Record<string, unknown> = {};
   const keeper = createPeerColorKeeper({
@@ -121,89 +157,89 @@ export function startPeerColorKeeper(
   }
   return { roomChanged: () => void (isDisposed || keeper.heard()), dispose };
 }
-export function readCellIds(cell?: Dynamic) {
+export function readCellIds(cell: unknown): CellIdsOnSheet | null {
   if (!isNonNullObject(cell)) return null;
-  let { rowId: rowId, columnId: columnId } = cell;
+  let { rowId, columnId } = cell;
   return typeof rowId === 'string' && typeof columnId === 'string'
     ? {
-        rowId: rowId,
-        columnId: columnId,
+        rowId,
+        columnId,
       }
     : null;
 }
-export function readPresenceSelection(selection?: Dynamic) {
+export function readPresenceSelection(selection: unknown): SelectionCorners | null {
   if (!isNonNullObject(selection) || typeof selection.sheetId !== 'string') return null;
-  let { sheetId: sheetId } = selection;
+  let { sheetId } = selection;
   let [activeCell, selectionCorner] = [readCellIds(selection.activeCell), readCellIds(selection.selectionCorner)];
   if (activeCell === null || selectionCorner === null) return null;
   return {
     activeCell: {
-      sheetId: sheetId,
+      sheetId,
       ...activeCell,
     },
     selectionCorner: {
-      sheetId: sheetId,
+      sheetId,
       ...selectionCorner,
     },
   };
 }
-export function readPeerCursor(peer?: Dynamic) {
+export function readPeerCursor(peer: unknown): PeerCursor | null {
   if (!isNonNullObject(peer)) return null;
-  let { peer: tabKey, by: userId, isMe: isMe, kind: kind, presence: presence } = peer;
+  let { peer: tabKey, by: userId, isMe, kind, presence } = peer;
   if (typeof tabKey !== 'string' || typeof userId !== 'string') return null;
   if (isMe !== false || kind !== 'viewer' || !isNonNullObject(presence)) return null;
   let cursor = presence[CURSOR_PRESENCE_KEY];
   let selection = readPresenceSelection(cursor);
   if (selection === null) return null;
-  let at2 = isNonNullObject(cursor) && Number.isFinite(cursor.at) ? Number(cursor.at) : 0;
+  let at = isNonNullObject(cursor) && Number.isFinite(cursor.at) ? Number(cursor.at) : 0;
   return {
     heard: {
-      tabKey: tabKey,
-      userId: userId,
+      tabKey,
+      userId,
       colorClaimed: claimedColorOfPresence(presence),
-      selection: selection,
+      selection,
     },
-    at: at2,
+    at,
   };
 }
-export function latestPeerCursor(cursors?: Dynamic) {
-  let isLater = (one?: Dynamic, other?: Dynamic) =>
+export function latestPeerCursor(cursors: readonly PeerCursor[]): HeardSelection {
+  let isLater = (one: PeerCursor, other: PeerCursor) =>
     one.at === other.at ? one.heard.tabKey > other.heard.tabKey : one.at > other.at;
-  return cursors.reduce((latest?: Dynamic, next?: Dynamic) => (isLater(next, latest) ? next : latest)).heard;
+  return cursors.reduce((latest, next) => (isLater(next, latest) ? next : latest)).heard;
 }
-export function selectionsOfOthersFrom(peers?: Dynamic) {
-  let cursorsByUser = new (Map as Dynamic)();
-  for (let cursor of peers.map(readPeerCursor) as Dynamic)
+export function selectionsOfOthersFrom(peers: readonly unknown[]): HeardSelection[] {
+  let cursorsByUser = new Map<string, PeerCursor[]>();
+  for (let cursor of peers.map(readPeerCursor))
     if (cursor !== null) cursorsByUser.set(cursor.heard.userId, [...(cursorsByUser.get(cursor.heard.userId) ?? []), cursor]);
   return [...cursorsByUser.values()].map(latestPeerCursor);
 }
-export function peerTabEntries(peer?: Dynamic) {
+export function peerTabEntries(peer: unknown): Array<[tabKey: string, userId: string]> {
   if (!isNonNullObject(peer)) return [];
-  let { peer: tabKey, by: userId, isMe: isMe, kind: kind } = peer;
+  let { peer: tabKey, by: userId, isMe, kind } = peer;
   return isMe === false && kind === 'viewer' && typeof tabKey === 'string' && typeof userId === 'string' ? [[tabKey, userId]] : [];
 }
 export function createRoomPresence(
   hostWindow: Window,
   page: PageApi,
-  people?: Dynamic,
-  storage: Dynamic = () => sessionStorage,
-  now: Dynamic = Date.now,
-) {
-  let roomLoading: Dynamic = null;
+  people: PeopleDirectory,
+  storage: () => Storage = () => sessionStorage,
+  now: () => number = Date.now,
+): RoomPresence {
+  let roomLoading: Promise<PageRoom | null> | null = null;
   let loadRoom = () => (
-    (roomLoading ??= (async (): Promise<Dynamic> => {
+    (roomLoading ??= (async (): Promise<PageRoom | null> => {
       try {
         let room = await page.use('room');
         return isNonNullObject(room) && room.available !== false ? room : null;
-      } catch (value: Dynamic) {
-        reportErrorSoftly(value, 'otherViewers');
+      } catch (error) {
+        reportErrorSoftly(error, 'otherViewers');
         return null;
       }
     })()),
     roomLoading
   );
-  let pending: Dynamic = {};
-  let publishPresence = async (fields?: Dynamic): Promise<Dynamic> => {
+  let pending: Record<string, unknown> = {};
+  let publishPresence = async (fields: Record<string, unknown>): Promise<void> => {
     pending = {
       ...pending,
       ...fields,
@@ -215,12 +251,12 @@ export function createRoomPresence(
     pending = {};
     try {
       await setPresence.call(room, toSend);
-    } catch (error: Dynamic) {
+    } catch (error) {
       if (isNonNullObject(error) && error.code === 'invalid_argument') reportErrorSoftly(error, 'otherViewers');
     }
   };
-  let ownSelection: Dynamic = null;
-  let timeAtPage: Dynamic = null;
+  let ownSelection: SelectionCorners | null = null;
+  let timeAtPage: number | null = null;
   let markTimeAtPage = () => {
     timeAtPage = now();
     try {
@@ -229,15 +265,15 @@ export function createRoomPresence(
   };
   let readTimeAtPage = () => {
     try {
-      let value = storage().getItem(TIME_AT_PAGE_STORAGE_KEY);
-      return value === null || !Number.isFinite(Number(value)) ? null : Number(value);
+      let storedTime = storage().getItem(TIME_AT_PAGE_STORAGE_KEY);
+      return storedTime === null || !Number.isFinite(Number(storedTime)) ? null : Number(storedTime);
     } catch {
       return null;
     }
   };
   let currentTimeAtPage = () => {
-    let value = timeAtPage === null ? readTimeAtPage() : null;
-    if (value !== null) timeAtPage = value + 1;
+    let storedTime = timeAtPage === null ? readTimeAtPage() : null;
+    if (storedTime !== null) timeAtPage = storedTime + 1;
     if (hostWindow.document.hasFocus() || (timeAtPage === null && !hostWindow.document.hidden)) markTimeAtPage();
     timeAtPage ??= 0;
     return timeAtPage;
@@ -246,7 +282,7 @@ export function createRoomPresence(
     void publishPresence({
       [CURSOR_PRESENCE_KEY]: ownSelection === null ? null : cursorPresence(ownSelection, currentTimeAtPage()),
     });
-  let isBlurred: Dynamic = true;
+  let isBlurred = true;
   let onFocus = () => {
     if (!isBlurred || !hostWindow.document.hasFocus()) return;
     isBlurred = false;
@@ -255,34 +291,34 @@ export function createRoomPresence(
   };
   hostWindow.addEventListener('blur', () => void (isBlurred = true));
   hostWindow.addEventListener('focus', onFocus, true);
-  let userByTab: Dynamic = new (Map as Dynamic)();
-  let startColorKeeper = async (room?: Dynamic): Promise<Dynamic> => {
+  let userByTab = new Map<string, string>();
+  let startColorKeeper = async (room: PageRoom): Promise<PeerColorKeeping | null | undefined> => {
     try {
-      let value = await people.viewer();
-      let [profile] = value === null ? [] : await people.profiles([value.userId]);
+      let viewer = await people.viewer();
+      let [profile] = viewer === null ? [] : await people.profiles([viewer.userId]);
       return startPeerColorKeeper(
         room,
         {
-          userId: value?.userId ?? '',
+          userId: viewer?.userId ?? '',
           usualColor: profile?.color ?? '',
         },
-        (colorClaim?: Dynamic) =>
+        (colorClaim) =>
           void publishPresence({
             [PRESENCE_WHO_KEY]: colorClaim,
           }),
         storage,
       );
-    } catch (value: Dynamic) {
-      reportErrorSoftly(value, 'otherViewers');
+    } catch (error) {
+      reportErrorSoftly(error, 'otherViewers');
     }
   };
   return {
-    tellOwnSelection(selection?: Dynamic) {
+    tellOwnSelection(selection) {
       ownSelection = selection;
       publishCursor();
     },
-    tellAgentWhatIsSelected: (selected?: Dynamic) => void publishPresence(contextPresence(selected)),
-    tellWhomViewFollows: (followed?: Dynamic) =>
+    tellAgentWhatIsSelected: (selected) => void publishPresence(contextPresence(selected)),
+    tellWhomViewFollows: (followed) =>
       void publishPresence({
         [FOLLOW_PRESENCE_KEY]:
           followed === null
@@ -291,27 +327,27 @@ export function createRoomPresence(
                 of: followed,
               },
       }),
-    personWithTab: (tabKey?: Dynamic) => userByTab.get(tabKey) ?? null,
-    onSelectionsChanged(onChange?: Dynamic) {
-      let colorKeeper: Dynamic = null;
-      let isStopped: Dynamic = false;
-      let stopListening: Dynamic = null;
-      let heardPeers = (peers?: Dynamic) => {
+    personWithTab: (tabKey) => userByTab.get(tabKey) ?? null,
+    onSelectionsChanged(onChange) {
+      let colorKeeper: PeerColorKeeping | null | undefined = null;
+      let isStopped = false;
+      let stopListening: (() => void) | null = null;
+      let heardPeers = (peers: readonly unknown[]) => {
         try {
-          userByTab = new (Map as Dynamic)(peers.flatMap(peerTabEntries));
+          userByTab = new Map(peers.flatMap(peerTabEntries));
           onChange(selectionsOfOthersFrom(peers));
           colorKeeper?.roomChanged();
-        } catch (error: Dynamic) {
+        } catch (error) {
           reportErrorSoftly(error, 'otherViewers');
         }
       };
-      (async (): Promise<Dynamic> => {
+      (async (): Promise<void> => {
         let room = await loadRoom();
         let onPeers = room?.onPeers;
         if (isStopped || room === null || typeof onPeers !== 'function') return;
         let stopPeers = onPeers.call(
           room,
-          (event?: Dynamic) => heardPeers(isNonNullObject(event) && Array.isArray(event.peers) ? event.peers : []),
+          (event) => heardPeers(isNonNullObject(event) && Array.isArray(event.peers) ? event.peers : []),
           () => heardPeers([]),
         );
         if (typeof stopPeers === 'function') stopListening = () => void Reflect.apply(stopPeers, undefined, []);
@@ -329,16 +365,17 @@ export function createRoomPresence(
 }
 export const PRESENCE_WHO_KEY = 'who';
 export const OWN_COLOR_STORAGE_KEY = 'sheets-own-color';
+/** Wraps a function the room or a timer calls, so that what it throws is reported and goes no further. */
 export const guardCallback =
-  (callback?: Dynamic) =>
-  (...args: Dynamic[]) => {
+  <Args extends unknown[]>(run: (...args: Args) => void) =>
+  (...args: Args): void => {
     try {
-      (callback as Dynamic)(...args);
-    } catch (error: Dynamic) {
+      run(...args);
+    } catch (error) {
       reportErrorSoftly(error, 'ownColor');
     }
   };
-export const cursorPresence = ({ activeCell: activeCell, selectionCorner: selectionCorner }: Dynamic, at?: Dynamic) => ({
+export const cursorPresence = ({ activeCell, selectionCorner }: SelectionCorners, at: number): CursorInPresence => ({
   sheetId: activeCell.sheetId,
   activeCell: {
     rowId: activeCell.rowId,
@@ -348,18 +385,71 @@ export const cursorPresence = ({ activeCell: activeCell, selectionCorner: select
     rowId: selectionCorner.rowId,
     columnId: selectionCorner.columnId,
   },
-  at: at,
+  at,
 });
 export const CURSOR_PRESENCE_KEY = 'cursor';
 export const FOLLOW_PRESENCE_KEY = 'follow';
 export const CONTEXT_PRESENCE_KEY = 'context';
-export const contextPresence = ({ byAddress: byAddress, chartId: chartId }: Dynamic) => ({
+export const contextPresence = ({ byAddress, chartId, ownSort }: SelectedToldToAgent) => ({
+
   [CONTEXT_PRESENCE_KEY]: {
     sheetNumber: byAddress?.sheetNumber ?? null,
     range: byAddress?.range ?? null,
     activeCell: byAddress?.activeCell ?? null,
     revision: byAddress?.revision ?? null,
     chartId: chartId !== null && isViewId(chartId) ? chartId : null,
+    ownSortSheetNumber: ownSort?.sheetNumber ?? null,
+    ownSortBy: ownSort?.by ?? null,
   },
 });
 export const TIME_AT_PAGE_STORAGE_KEY = 'sheets-time-at-page';
+/**
+ * The others viewing the sheet, for the Shell's list beside History and Share (with Follow, which calls the page's
+ * follow handler with their tab key): each viewer's tab but this one, named as the room names them, in the colour
+ * they claimed, marked when it is another tab of this viewer or when it follows this tab.
+ */
+export function chromePeersOf(peers: readonly PeerOfRoom[]): ChromePeer[] {
+  let me = peers.find((peer) => peer.isMe);
+  let list: ChromePeer[] = peers.flatMap((peer) => {
+    if (peer.isMe || peer.kind !== 'viewer' || !CHROME_PEER_KEY.test(peer.peer)) return [];
+    let color = normalizePeerColor(claimedColorOfPresence(peer.presence));
+    let follow = peer.presence[FOLLOW_PRESENCE_KEY];
+    let followsYou = me !== undefined && isNonNullObject(follow) && follow.of === me.peer;
+    return [
+      {
+        key: peer.peer,
+        name: peer.name.trim() || peer.by,
+        ...(color !== undefined && { color }),
+        ...(me !== undefined && peer.by === me.by && { self: true }),
+        ...(followsYou && { followsYou: true }),
+      },
+    ];
+  });
+  return list.slice(0, MAX_CHROME_PEERS);
+}
+/** Hears who else views the sheet until stopped; `null` while the room is not there. */
+export function watchPeersHere(page: PageApi, heard: (peers: ChromePeer[] | null) => void): () => void {
+  let stopped = false;
+  let stop: (() => void) | null = null;
+  void page.use('room').then(
+    (room) => {
+      if (stopped || !isNonNullObject(room) || typeof room.onPeers !== 'function') return;
+      stop = room.onPeers(
+        (event: RoomPeersEvent) => {
+          try {
+            heard(chromePeersOf(Array.isArray(event?.peers) ? event.peers : []));
+          } catch (error) {
+            reportErrorSoftly(error, 'otherViewers');
+          }
+        },
+        () => heard(null),
+      );
+    },
+    () => {},
+  );
+  return () => {
+    stopped = true;
+    stop?.();
+    heard(null);
+  };
+}

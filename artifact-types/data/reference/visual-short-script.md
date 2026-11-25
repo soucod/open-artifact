@@ -127,11 +127,13 @@ const mo = new MutationObserver(() => {
 });
 mo.observe(root, {subtree: true, attributes: true, attributeFilter: ['data-dash-read-phase', 'data-dash-read-now']});
 
+let printing = false;
 // Lays each caption over the row its chapter keeps for it under the headline; with no row, over the top of the drawing.
 function seat() {
   const top = vs.querySelector('.vs-in').getBoundingClientRect().top;
   chs.forEach((ch, i) => { const row = ch.querySelector('.vs-say, .vs-draw'); if (row && caps[i]) caps[i].style.top = row.getBoundingClientRect().top - top + 'px'; }); // a person may have deleted either
   if (durs.length) frame();
+  if (printing && durs.length) scenes.forEach((scene) => scene(Infinity));
 }
 
 let box = vs.parentElement; // the box the page scrolls in
@@ -140,6 +142,14 @@ const fit = () => vs.style.setProperty('--room', Math.max(240, box.getBoundingCl
   - parseFloat(getComputedStyle(root).paddingBottom) - parseFloat(getComputedStyle(box).paddingBottom)) + 'px'); // the box may be padded for a bar that floats over its foot
 const ro = new ResizeObserver(() => (vs.isConnected ? (fit(), seat()) : ro.disconnect())); for (const el of [box, stage, ...vs.querySelectorAll('.vs-draw')]) ro.observe(el); // the stage too: when only its width changes, the dashboard draws each chart again, whole, without settle, and this puts the chapter showing back at t; each drawing's box, which changes height when a headline above it rewraps, as under Translate
 document.fonts.ready.then(() => vs.isConnected && seat()); // a web font that comes late moves the rows
+addEventListener('beforeprint', () => {
+  if (!vs.isConnected) return;
+  printing = true;
+  play(false);
+  show(cur, Infinity);
+  seat();
+});
+addEventListener('afterprint', () => { printing = false; });
 
 dash.onData(fit);
 dash.draw('settle', () => { timing(); show(cur, t); seat(); }); // the last drawing in the HTML, so it runs once the others have

@@ -1,6 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { FontMark } from '../state/initial-state.ts';
 import { translateMessage } from './messages.ts';
-export function textStyleLabel(textStyle?: Dynamic) {
+/** A run of characters a cell holds but does not show: the first one, how many, and how they read when spelled out. */
+export interface CharactersNotSeen {
+  codePoint: number;
+  count: number;
+  spelled: string | null;
+}
+export function textStyleLabel(textStyle: FontMark): string {
   switch (textStyle) {
     case 'bold':
       return translateMessage({
@@ -25,24 +31,24 @@ export function textStyleLabel(textStyle?: Dynamic) {
   }
 }
 export const sheetMessages = {
-  comments: (count?: Dynamic) =>
+  comments: (count: number): string =>
     translateMessage(
       {
         defaultMessage: '{count, plural, =0 {Comment} one {Comment (#)} other {Comment (#)}}',
         id: 'UAqKP0k5te',
       },
       {
-        count: count,
+        count,
       },
     ),
-  openComments: (count?: Dynamic) =>
+  openComments: (count: number): string =>
     translateMessage(
       {
         defaultMessage: '{count, plural, one {Comment, # open} other {Comment, # open}}',
         id: 'IoEOsPCMVh',
       },
       {
-        count: count,
+        count,
       },
     ),
   barOfReader: () =>
@@ -65,7 +71,7 @@ export const sheetMessages = {
       defaultMessage: 'Some cells you’re pasting contain text they don’t show, which Agent can still read.',
       id: 'bnMD1Cd2h4',
     }),
-  charactersNotSeen: ({ codePoint: codePoint, count: count, spelled: spelled }: Dynamic) => {
+  charactersNotSeen: ({ codePoint, count, spelled }: CharactersNotSeen): string => {
     let character = `U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}`;
     if (spelled !== null)
       return translateMessage(
@@ -74,9 +80,9 @@ export const sheetMessages = {
           id: '6yJrZKUeES',
         },
         {
-          character: character,
-          count: count,
-          spelled: spelled,
+          character,
+          count,
+          spelled,
         },
       );
     return count === 1
@@ -87,8 +93,8 @@ export const sheetMessages = {
             id: 'daxGotp6m2',
           },
           {
-            character: character,
-            count: count,
+            character,
+            count,
           },
         );
   },
@@ -110,32 +116,37 @@ export const sheetMessages = {
   customFormat: () =>
     translateMessage({
       defaultMessage: 'Custom format',
-      id: 'AKXTaL9f+f',
+      id: 'qAQQ2itY1t',
     }),
   phoneNumber: () =>
     translateMessage({
       defaultMessage: 'US phone number',
-      id: 'H/2WLNkgBM',
+      id: 'SEqrWEd4fR',
     }),
   findNumberFormat: () =>
     translateMessage({
-      defaultMessage: 'Find a format, or describe one',
-      id: 'kuFpVZ/6tD',
+      defaultMessage: 'Find a type or format, or describe one',
+      id: 'fhYdFphSU5',
+    }),
+  otherCurrencies: () =>
+    translateMessage({
+      defaultMessage: 'Other currencies',
+      id: 'ASv+O+O/4q',
     }),
   sheetSettings: () =>
     translateMessage({
       defaultMessage: 'Sheet settings',
-      id: 'Jge/+25t8O',
+      id: 'ro/k/465hO',
     }),
   decreaseDecimalPlaces: () =>
     translateMessage({
       defaultMessage: 'Decrease decimal places',
-      id: '+uHH1F8UTf',
+      id: 'yp/2WlutyP',
     }),
   increaseDecimalPlaces: () =>
     translateMessage({
       defaultMessage: 'Increase decimal places',
-      id: 'Qf2T9GFv/D',
+      id: 'q3Jek0wH6S',
     }),
   decimalPlacesOfNoNumbers: () =>
     translateMessage({
@@ -232,24 +243,24 @@ export const sheetMessages = {
       defaultMessage: 'Dark',
       id: 'hGmCyGhtuL',
     }),
-  zoomPercent: (percent?: Dynamic) =>
+  zoomPercent: (percent: number): string =>
     translateMessage(
       {
         defaultMessage: '{percent}%',
         id: 'eBqb+3H9qP',
       },
       {
-        percent: percent,
+        percent,
       },
     ),
-  zoomButton: (percent?: Dynamic) =>
+  zoomButton: (percent: number): string =>
     translateMessage(
       {
         defaultMessage: '{percent}%, Zoom',
         id: 'mvdhKnhzUj',
       },
       {
-        percent: percent,
+        percent,
       },
     ),
   zoom: () =>
@@ -277,24 +288,24 @@ export const sheetMessages = {
       defaultMessage: 'Zoom to chart',
       id: 'Y4bcJ60ZC9',
     }),
-  zoomNow: (percent?: Dynamic) =>
+  zoomNow: (percent: number): string =>
     translateMessage(
       {
         defaultMessage: 'Now {percent}%',
         id: 'i6l9Psr7s3',
       },
       {
-        percent: percent,
+        percent,
       },
     ),
-  zoomSaid: (percent?: Dynamic) =>
+  zoomSaid: (percent: number): string =>
     translateMessage(
       {
         defaultMessage: 'Zoom {percent}%',
         id: '479HjoGpJ8',
       },
       {
-        percent: percent,
+        percent,
       },
     ),
   signOfMixedFontSizes: () =>
@@ -305,27 +316,27 @@ export const sheetMessages = {
   signOfMixedTextWrappings: () =>
     translateMessage({
       defaultMessage: '–',
-      id: 'vNcLsh5O9I',
+      id: 'qY8NFW0ADL',
     }),
   insert: () =>
     translateMessage({
       defaultMessage: 'Insert',
-      id: 'Xm4nctRn+S',
+      id: 'khl0YP8a4D',
     }),
   personCells: () =>
     translateMessage({
       defaultMessage: 'Person',
-      id: '4meR4GbwHb',
+      id: 'X57wu8ePX4',
     }),
   dateCells: () =>
     translateMessage({
       defaultMessage: 'Date',
-      id: 'kaZDXA/FE8',
+      id: 'jrDTRhARyA',
     }),
   checkboxCells: () =>
     translateMessage({
       defaultMessage: 'Checkbox',
-      id: 'P094YhAVgm',
+      id: '1tWBmKyazs',
     }),
   borders: () =>
     translateMessage({
@@ -609,8 +620,8 @@ export const sheetMessages = {
     }),
   allNumberFormats: () =>
     translateMessage({
-      defaultMessage: 'More number formats',
-      id: 'EqEFeIc1Zn',
+      defaultMessage: 'More cell types',
+      id: 'a/W/ysctBI',
     }),
   allTextColors: () =>
     translateMessage({
@@ -630,7 +641,7 @@ export const sheetMessages = {
   textWrapping: () =>
     translateMessage({
       defaultMessage: 'Text wrapping',
-      id: 'zCU2dge2i4',
+      id: 'VqF4bcyLXB',
     }),
   cellColor: () =>
     translateMessage({
@@ -850,12 +861,42 @@ export const sheetMessages = {
   removeDropdown: () =>
     translateMessage({
       defaultMessage: 'Remove dropdown',
-      id: 'oQDLETooaY',
+      id: 'bs3tOquKTr',
     }),
-  insertLines: () =>
+  insertRows: () =>
     translateMessage({
-      defaultMessage: 'Insert rows or columns',
-      id: 'eREGRD7w6Q',
+      defaultMessage: 'Insert rows',
+      id: 'N4GE+1em9+',
+    }),
+  insertColumns: () =>
+    translateMessage({
+      defaultMessage: 'Insert columns',
+      id: 'zXESP0AP68',
+    }),
+  cellType: () =>
+    translateMessage({
+      defaultMessage: 'Cell type',
+      id: 'WsDA8ILZS7',
+    }),
+  numberFormatFormerly: () =>
+    translateMessage({
+      defaultMessage: 'Number format',
+      id: 'NucKwmuHHD',
+    }),
+  pickADate: () =>
+    translateMessage({
+      defaultMessage: 'Pick a date',
+      id: '8XPX7M2TBY',
+    }),
+  editOptionsOfDropdown: () =>
+    translateMessage({
+      defaultMessage: 'Edit options',
+      id: 'obRYDIXhAz',
+    }),
+  noPersonInDropdown: () =>
+    translateMessage({
+      defaultMessage: 'Remove dropdown to add a person.',
+      id: '/OkhRmgqsu',
     }),
   deleteLines: () =>
     translateMessage({
@@ -876,11 +917,6 @@ export const sheetMessages = {
     translateMessage({
       defaultMessage: 'Select 2 or more cells to merge.',
       id: 'V0W65x1SLD',
-    }),
-  oneRangeNeededToInsertLines: () =>
-    translateMessage({
-      defaultMessage: 'Select just one group of cells to insert rows or columns.',
-      id: 'nj7afpQBRN',
     }),
   oneRangeNeededToDeleteLines: () =>
     translateMessage({
@@ -962,11 +998,6 @@ export const sheetMessages = {
       defaultMessage: 'Cancel what you’re typing first.',
       id: 'VQgU7jVClF',
     }),
-  numberFormat: () =>
-    translateMessage({
-      defaultMessage: 'Number format',
-      id: '7Lk7EMX9Pn',
-    }),
   reload: () =>
     translateMessage({
       defaultMessage: 'Reload',
@@ -1017,14 +1048,14 @@ export const sheetMessages = {
       defaultMessage: 'Freeze',
       id: 'L0UrgvAPGu',
     }),
-  addRowsAtFoot: (count?: Dynamic) =>
+  addRowsAtFoot: (count: number): string =>
     translateMessage(
       {
         defaultMessage: '{count, plural, one {Add # row} other {Add # rows}}',
         id: '+szT/KeuWL',
       },
       {
-        count: count,
+        count,
       },
     ),
   add: () =>
@@ -1068,7 +1099,7 @@ export const sheetMessages = {
       id: 'oD8rWNa3wF',
     }),
 };
-export const moreOptionsForSheetLabel = (sheetName?: Dynamic) =>
+export const moreOptionsForSheetLabel = (sheetName: string): string =>
   translateMessage(
     {
       defaultMessage: 'More options for {name}',

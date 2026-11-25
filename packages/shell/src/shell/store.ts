@@ -6,10 +6,36 @@
 
 import { create } from 'zustand';
 import type { ArtifactDetail, ArtifactView, ChromeExportItem, ChromeReport, ShareView, ShellBoot } from '@open-artifact/protocol';
-import { hasExportTab, type HostInfo, type SentMessage } from './model.ts';
+import type { DataPublishInfo } from '../lib/api.ts';
+import type { CloudInfo, ConnectStart, RemoteInfo } from '../lib/publish.ts';
+import { hasExportTab, normalizeReport, type HostInfo, type SentMessage } from './model.ts';
 
 /** Which tab of the Share panel shows. */
 export type ShareTab = 'share' | 'export';
+
+type RememberedChrome = Pick<ChromeReport, 'history' | 'comments'>;
+
+function rememberSlots(report: ChromeReport, previous: RememberedChrome): RememberedChrome {
+  const waiting = report.ready === false;
+  const history = (report.history ?? (waiting && previous.history)) || undefined;
+  const comments = report.comments;
+  let slot = waiting && !comments ? previous.comments : undefined;
+  if (comments?.available === true && comments.pageButton === false) {
+    const count = Number.isFinite(comments.count) ? Math.max(0, Math.floor(comments.count)) : 0;
+    slot = previous.comments?.count === count ? previous.comments
+      : { available: true, pageButton: false, count, on: false, open: false };
+  }
+  if (history === previous.history && slot === previous.comments) return previous;
+  return { ...(history && { history }), ...(slot && { comments: slot }) };
+}
+
+function restoreSlots(id: string): RememberedChrome {
+  try {
+    return rememberSlots(normalizeReport(JSON.parse(sessionStorage.getItem(`oa-shell-chrome:${id}`) ?? 'null')), {});
+  } catch {
+    return {};
+  }
+}
 
 /** The Share panel's data. */
 export interface ShareState {
@@ -25,16 +51,49 @@ export interface ShareState {
   copied: string | null;
 }
 
+/** Connecting a site to publish to, step by step (the Share panel's "Connect a site…" form). */
+export type ConnectStep =
+  | { step: 'closed' }
+  | { step: 'form'; host: string; name: string; error: string }
+  | { step: 'starting'; host: string; name: string }
+  | { step: 'code'; start: ConnectStart }
+  | { step: 'done'; host: string; user: string }
+  | { step: 'failed'; host: string; name: string; error: string };
+
+/** Publishing to the web: the daemon's sites and what this artifact does there. */
+export interface PublishState {
+  /** `GET remotes`; `null` until loaded. */
+  remotes: RemoteInfo[] | null;
+  /** `GET remotes`'s `cloud` (the default site, publishing by itself); `null` until loaded or from an older daemon. */
+  cloud: CloudInfo | null;
+  /** The daemon has no publishing (an older daemon): the panel leaves the section out. */
+  missing: boolean;
+  connect: ConnectStep;
+  /** What runs now: `publish:<remote>`, `unpublish` or `cloud` (a change of the default site or publishing by itself). */
+  busy: string | null;
+  /** The last publish or unpublish failure, in plain words. */
+  error: string;
+  /** A Data dashboard's live data on its site (`artifacts.data`); `null` for other types or until read. */
+  data: DataPublishInfo | null;
+}
+
 /** State of the Shell. */
 export interface ShellState {
   /** What the daemon injected; `null` until known. */
   boot: ShellBoot | null;
   /** Set when no boot could be had. */
   bootError: string | null;
+  /** Counts boots set: a new one is a new frame, even at the same address. */
+  bootGen: number;
+  /** The problem state offers to try again (the boot request failed, or the frame was refused). */
+  canRetry: boolean;
+  /** The page in the frame said it is ready (or its `load` stands for that): the cover over it goes. */
+  pageReady: boolean;
   /** The artifact as the library has it (owner status, pinned, size). */
   artifact: ArtifactDetail | null;
   /** What the page reports (chrome protocol). */
   report: ChromeReport;
+  rememberedChrome: RememberedChrome;
   /** The embedding host, once it said hello. */
   host: HostInfo | null;
   /** Every artifact, for Switch artifact; `null` until loaded or after a change. */
@@ -52,6 +111,7 @@ export interface ShellState {
    */
   exportWanted: boolean;
   share: ShareState;
+  publish: PublishState;
   /** The "Ask agent" pane is open. */
   askOpen: boolean;
   /** Messages sent from the ask pane. */
@@ -66,11 +126,14 @@ export interface ShellState {
 
 /** Changes to the Shell's state. */
 export interface ShellActions {
-  setBoot(boot: ShellBoot | null, error?: string | null): void;
+  /** Sets the boot (a new frame); `canRetry` offers to try again from its problem state. */
+  setBoot(boot: ShellBoot | null, error?: string | null, canRetry?: boolean): void;
+  setPageReady(ready: boolean): void;
   setArtifact(artifact: ArtifactDetail | null): void;
   /** Merges a library answer (e.g. after `artifacts.update`) into the artifact. */
   mergeArtifact(patch: Partial<ArtifactDetail>): void;
   setReport(report: ChromeReport): void;
+  setFrameLoading(): void;
   setHost(host: HostInfo): void;
   setLibrary(library: ArtifactView[] | null): void;
   setBarHidden(hidden: boolean): void;
@@ -85,6 +148,7 @@ export interface ShellActions {
   closeShare(): void;
   setShareTab(tab: ShareTab): void;
   patchShare(patch: Partial<ShareState>): void;
+  patchPublish(patch: Partial<PublishState>): void;
   setAskOpen(open: boolean): void;
   setSent(sent: SentMessage[]): void;
   setAskStatus(status: string): void;
@@ -95,13 +159,18 @@ export interface ShellActions {
 }
 
 const EMPTY_SHARE: ShareState = { view: null, unsupported: false, error: '', exports: null, copied: null };
+const EMPTY_PUBLISH: PublishState = { remotes: null, cloud: null, missing: false, connect: { step: 'closed' }, busy: null, error: '', data: null };
 
 /** The Shell's store. */
 export const useShell = create<ShellState & ShellActions>()((set, get) => ({
   boot: null,
   bootError: null,
+  bootGen: 0,
+  canRetry: false,
+  pageReady: false,
   artifact: null,
   report: {},
+  rememberedChrome: {},
   host: null,
   library: null,
   barHidden: false,
@@ -110,20 +179,39 @@ export const useShell = create<ShellState & ShellActions>()((set, get) => ({
   shareTab: 'share',
   exportWanted: false,
   share: EMPTY_SHARE,
+  publish: EMPTY_PUBLISH,
   askOpen: false,
   sent: [],
   askStatus: '',
   renaming: false,
   confirmingDelete: false,
 
-  setBoot: (boot, error = null) => set({ boot, bootError: error }),
+  setBoot: (boot, error = null, canRetry = false) => set((state) => ({
+    boot, bootError: error, canRetry, bootGen: state.bootGen + 1,
+    pageReady: !boot?.pending && (!boot?.page || !!boot.empty || !!boot.problem),
+    report: {}, rememberedChrome: boot && (boot.pending || (boot.page && !boot.empty && !boot.problem)) ? restoreSlots(boot.id) : {},
+  })),
+  setFrameLoading: () => set({ report: {}, pageReady: false }),
+  setPageReady: (pageReady) => set({ pageReady }),
   setArtifact: (artifact) => set({ artifact }),
   mergeArtifact: (patch) => {
     const current = get().artifact;
     if (current) set({ artifact: { ...current, ...patch } });
   },
-  setReport: (report) =>
-    set((state) => (state.exportWanted && state.shareOpen && hasExportTab(report) ? { report, shareTab: 'export', exportWanted: false } : { report })),
+  setReport: (report) => set((state) => {
+    const rememberedChrome = rememberSlots(report, state.rememberedChrome);
+    if (state.boot && rememberedChrome !== state.rememberedChrome) {
+      try {
+        const key = `oa-shell-chrome:${state.boot.id}`;
+        if (rememberedChrome.history || rememberedChrome.comments) sessionStorage.setItem(key, JSON.stringify(rememberedChrome));
+        else sessionStorage.removeItem(key);
+      } catch { /* Storage-restricted tabs keep these slots in memory. */ }
+    }
+    return {
+      report, rememberedChrome,
+      ...(state.exportWanted && state.shareOpen && hasExportTab(report) && { shareTab: 'export', exportWanted: false }),
+    };
+  }),
   setHost: (host) => set({ host }),
   setLibrary: (library) => set({ library }),
   setBarHidden: (barHidden) => set({ barHidden }),
@@ -142,6 +230,7 @@ export const useShell = create<ShellState & ShellActions>()((set, get) => ({
   closeShare: () => set({ shareOpen: false, exportWanted: false }),
   setShareTab: (tab) => set((state) => ({ shareTab: tab === 'export' && !hasExportTab(state.report) ? 'share' : tab, exportWanted: false })),
   patchShare: (patch) => set((state) => ({ share: { ...state.share, ...patch } })),
+  patchPublish: (patch) => set((state) => ({ publish: { ...state.publish, ...patch } })),
   setAskOpen: (askOpen) => set({ askOpen }),
   setSent: (sent) => set({ sent }),
   setAskStatus: (askStatus) => set({ askStatus }),

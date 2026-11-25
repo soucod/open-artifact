@@ -66,6 +66,7 @@ use crate::number_format::{names, Kind, NumberFormat};
 use crate::session::place::Place;
 use crate::session::reads::clipboard::{copied, copied_formats, CellsBetween};
 use crate::typing::{formula, unseen, were_shown, TextThatNoCellShows};
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{read_format, sorted_runs, write_format, Leaf};
 use crate::workbook::layout::{written, CellIds};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
@@ -153,6 +154,22 @@ pub enum Values {
 }
 
 impl Edit {
+    /// The sheet a paste or a fill down or up lays out in the order the person sees its rows (`seen`); a fill's block
+    /// is looked for first.
+    pub fn in_seen_order(&self, workbook: &Workbook) -> Option<&str> {
+        match self {
+            Edit::PasteCopiedCells(edit) => Some(&edit.selected.sheet_id),
+            Edit::PasteValuesOfCopiedCells(edit) => Some(&edit.selected.sheet_id),
+            Edit::PasteCellsOfAnotherProgram(edit) => Some(&edit.selected.sheet_id),
+            Edit::FillCells(edit @ FillCells { lines_to_fill: LinesToFill::Rows { .. }, .. }) => {
+                let s = workbook.sheet_index(&edit.source.sheet_id)?;
+                let found = !positions(&workbook.bases, &workbook.sheets[s].rows, &edit.source.rows).is_empty();
+                found.then_some(edit.source.sheet_id.as_str())
+            }
+            _ => None,
+        }
+    }
+
     /// Whether the edit pastes the values cells have now (`pasteValuesOfCells`): formulas waiting for `calculate` are
     /// worked out first.
     pub fn measures_values(&self) -> bool {
@@ -304,7 +321,7 @@ pub fn make(workbook: &Workbook, edit: Edit, context: &Context) -> Result<Made, 
             paste(workbook, &selected, None, copy, What::Values, None, context)
         }
         Edit::MoveCells(edit) => move_cells(workbook, &edit, context),
-        Edit::FillCells(edit) => fill_cells(workbook, &edit),
+        Edit::FillCells(edit) => fill_cells(workbook, &edit, context),
     }?;
     super::options_kept(workbook, made)
 }
@@ -590,6 +607,18 @@ fn paste(
             }
         }
     }
+    // In the person's own order of rows, a paste landing on the rows it moves moves no formula reading another row
+    // (`seen`).
+    if let Some(seen) = context.seen.filter(|seen| seen.sheet == s) {
+        let target = &grown.sheets[s];
+        let reads = |(&(r, _), input): (&(usize, usize), &Input)| match (input, target.rows.line(r)) {
+            (Input::Formula { formula }, Some(row)) => super::seen::reads_another_row(formula, &grown.bases.text(row)),
+            _ => false,
+        };
+        if landing.area_rows().iter().any(|&r| seen.meets(r, r)) && given.iter().any(reads) {
+            return Err(Refused::Because("formulaReadsAnotherRow"));
+        }
+    }
     // A copy pasted over and over is weighed as a fill is: what it gives, and the cells it empties.
     if landing.is_repeated() {
         let (in_rows, in_columns): (HashSet<usize>, HashSet<usize>) =
@@ -648,7 +677,7 @@ fn paste(
     let mut done: HashSet<(usize, usize)> = HashSet::new();
     for (place, now) in held_cells {
         let input = given.get(&place);
-        if input.map_or(0, weight) > weight(now) {
+        if input.map_or(0, weight) > held_weight(now) {
             continue;
         }
         let (r, c) = id(place);
@@ -667,7 +696,7 @@ fn paste(
         return Ok(Made { ops: Vec::new(), place: None });
     }
     if !cells.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto });
     }
     ops.extend(formats);
     let (top, left) = (area_rows[0], area_columns[0]);
@@ -790,7 +819,7 @@ fn move_cells(workbook: &Workbook, edit: &MoveCells, context: &Context) -> Resul
         let followed = followed.into_iter().map(|(place, formula)| (id(place), Some(Input::Formula { formula })));
         let cells: Vec<CellToSet> = landed.chain(followed).map(|((r, c), input)| CellToSet { r, c, input }).collect();
         if !cells.is_empty() {
-            ops.push(Op::SetCells { sheet_id: at.id.clone(), cells, listed: true });
+            ops.push(Op::SetCells { sheet_id: at.id.clone(), cells, form: CellForm::List });
         }
     }
 
@@ -942,7 +971,7 @@ impl Moving<'_> {
 /// or along its rows over the columns to its right or left. Each line goes on as its cells do (`series`), or they
 /// are repeated (formulas moved as a paste moves them). The cells filled take what the block's cells hold and the
 /// block's formats, over and over; a cell filled with what it holds is left alone.
-fn fill_cells(workbook: &Workbook, edit: &FillCells) -> Result<Made, Refused> {
+fn fill_cells(workbook: &Workbook, edit: &FillCells, context: &Context) -> Result<Made, Refused> {
     let bases = &workbook.bases;
     let (s, left, right) = selected_columns(workbook, &edit.source)?;
     let sheet = &workbook.sheets[s];
@@ -959,6 +988,20 @@ fn fill_cells(workbook: &Workbook, edit: &FillCells) -> Result<Made, Refused> {
             let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
                 return Err(Refused::Because("unknownRow"));
             };
+            // In the person's own order of rows, a fill that meets the rows it moves moves no formula reading
+            // another row (`seen`).
+            if let Some(seen) = context.seen.filter(|seen| seen.sheet == s) {
+                let reads = |&p: &usize| {
+                    let row = sheet.rows.line(p).expect("a row of the block");
+                    let own = bases.text(row);
+                    (left..=right).filter_map(|c| sheet.cells.get(&(row, sheet.columns.line(c)?))).any(|cell| {
+                        matches!(&cell.input, Input::Formula { formula } if super::seen::reads_another_row(formula, &own))
+                    })
+                };
+                if seen.meets(first.min(top), last.max(bottom)) && source_rows.iter().any(reads) {
+                    return Err(Refused::Because("formulaReadsAnotherRow"));
+                }
+            }
             if first <= bottom && top <= last {
                 return Err(Refused::Because("fillEndsInsideSource"));
             }
@@ -1052,7 +1095,7 @@ fn fill_cells(workbook: &Workbook, edit: &FillCells) -> Result<Made, Refused> {
             done.insert(place);
             continue;
         }
-        if input.map_or(0, weight) > weight(now) {
+        if input.map_or(0, weight) > held_weight(now) {
             continue;
         }
         let (r, c) = id(place);
@@ -1075,7 +1118,7 @@ fn fill_cells(workbook: &Workbook, edit: &FillCells) -> Result<Made, Refused> {
     let column_index = |p: usize| if down { index_of(block_columns, p) } else { tile(p, left) };
     let mut ops = Vec::new();
     if !cells.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto });
     }
     let filled_from = |(r, c): (usize, usize)| {
         if down {
@@ -1613,17 +1656,19 @@ fn texts_to_show(workbook: &Workbook, s: usize, given: &HashMap<(usize, usize), 
     to_show
 }
 
-/// How much a cell's input has to keep: a text's bytes, a dropdown option's label's, a
-/// formula's text's and 256 for each reference; a number or a yes or no nothing; 128 for each person and their
-/// label's bytes; text with looks 128 for each paragraph and each run, its text's bytes (paragraphs on lines of their
-/// own) and its links'.
+/// How much a cell's input given by a paste or a fill has to keep: a text's bytes, a dropdown option's label's, a
+/// formula's text's and 164 for each reference to a cell, 256 for each to more; a number or a yes or no nothing; 128
+/// for each person and their label's bytes; text with looks 128 for each paragraph and each run, its text's bytes
+/// (paragraphs on lines of their own) and its links'.
 fn weight(input: &Input) -> usize {
     match input {
         Input::Number { .. } | Input::Boolean { .. } => 0,
         Input::Text { value } => value.len(),
         Input::DropdownOption { label, .. } => label.len(),
         Input::Formula { formula } => {
-            formula.text_between_references.iter().map(String::len).sum::<usize>() + 256 * formula.references.len()
+            let references: usize =
+                formula.references.iter().map(|r| if matches!(r, Reference::Cell { .. }) { 164 } else { 256 }).sum();
+            formula.text_between_references.iter().map(String::len).sum::<usize>() + references
         }
         Input::User { label, .. } => 128 + label.len(),
         Input::Users { users } => users.iter().map(|person| 128 + person.label.len()).sum(),
@@ -1633,6 +1678,16 @@ fn weight(input: &Input) -> usize {
             128 * (paragraphs.len() + runs().count()) + rich::plain_text(paragraphs).len() + links
         }
     }
+}
+
+/// How much a cell holds, weighed against what a paste or a fill gives it (more given waits): as `weight`, but a
+/// formula's reference weighs 52 for a cell and 144 for more, whatever sheet it is to. The order of the cells set
+/// follows it.
+fn held_weight(input: &Input) -> usize {
+    let Input::Formula { formula } = input else { return weight(input) };
+    let references: usize =
+        formula.references.iter().map(|r| if matches!(r, Reference::Cell { .. }) { 52 } else { 144 }).sum();
+    formula.text_between_references.iter().map(String::len).sum::<usize>() + references
 }
 
 /// The cells merged ranges cover (in one, not its first), by position: the ranges read back, a range hidden by one it

@@ -1,36 +1,40 @@
-import type { Dynamic } from '../dynamic.ts';
-export function indexRunsOfIds(order?: Dynamic, ids?: Dynamic, fromIndex?: Dynamic) {
-  let indices = new (Float64Array as Dynamic)(ids.size);
-  let count: Dynamic = 0;
-  for (let value of ids as Dynamic) {
-    let value2 = order.indexOf(value);
-    if (value2 === null || value2 < fromIndex) continue;
-    indices[count] = value2;
+import type { RowId, SheetId } from '@open-artifact/sheets-core';
+import type { LineIndex, LineSpan } from '../model/line-ids.ts';
+import type { GroupOnGrid } from '../model/workbook.ts';
+/** A run of lines that a group covers, and whether it is collapsed. */
+export type CollapsibleRun = LineSpan & Pick<GroupOnGrid, 'isCollapsed'>;
+export function indexRunsOfIds(order: LineIndex, ids: ReadonlySet<string>, fromIndex: number): LineSpan[] {
+  let indices = new Float64Array(ids.size);
+  let count = 0;
+  for (let lineId of ids) {
+    let index = order.indexOf(lineId);
+    if (index === null || index < fromIndex) continue;
+    indices[count] = index;
     count += 1;
   }
   let sorted = indices.subarray(0, count);
   sorted.sort();
-  let runs: Dynamic = [];
-  for (let value of sorted as Dynamic) {
-    let value2 = runs.at(-1);
-    if (value2 !== undefined && runEnd(value2) === value)
+  let runs: LineSpan[] = [];
+  for (let index of sorted) {
+    let lastRun = runs.at(-1);
+    if (lastRun !== undefined && runEnd(lastRun) === index)
       runs[runs.length - 1] = {
-        ...value2,
-        count: value2.count + 1,
+        ...lastRun,
+        count: lastRun.count + 1,
       };
     else
       runs.push({
-        firstIndex: value,
+        firstIndex: index,
         count: 1,
       });
   }
   return runs;
 }
-export function mergeIndexRuns(runs?: Dynamic, otherRuns?: Dynamic) {
+export function mergeIndexRuns(runs: LineSpan[], otherRuns: LineSpan[]): LineSpan[] {
   if (runs.length === 0) return otherRuns;
   if (otherRuns.length === 0) return runs;
-  let merged: Dynamic = [];
-  let [index, otherIndex]: Dynamic = [0, 0];
+  let merged: LineSpan[] = [];
+  let [index, otherIndex] = [0, 0];
   for (;;) {
     let [run, otherRun] = [runs[index], otherRuns[otherIndex]];
     let takesRun = run !== undefined && (otherRun === undefined || run.firstIndex <= otherRun.firstIndex);
@@ -47,37 +51,37 @@ export function mergeIndexRuns(runs?: Dynamic, otherRuns?: Dynamic) {
       };
   }
 }
-export function clipIndexRuns(runs?: Dynamic, clip?: Dynamic) {
-  let [low, high]: Dynamic = [0, runs.length];
+export function clipIndexRuns(runs: readonly LineSpan[], clip: LineSpan): LineSpan[] {
+  let [low, high] = [0, runs.length];
   while (low < high) {
-    let value = Math.floor((low + high) / 2);
-    let value2 = runs[value];
-    if (value2 !== undefined && runEnd(value2) <= clip.firstIndex) low = value + 1;
-    else high = value;
+    let middle = Math.floor((low + high) / 2);
+    let middleRun = runs[middle];
+    if (middleRun !== undefined && runEnd(middleRun) <= clip.firstIndex) low = middle + 1;
+    else high = middle;
   }
-  let clipped: Dynamic = [];
+  let clipped: LineSpan[] = [];
   for (; low < runs.length; low += 1) {
-    let value = runs[low];
-    if (value === undefined || value.firstIndex >= runEnd(clip)) break;
-    let value2 = Math.max(value.firstIndex, clip.firstIndex);
+    let run = runs[low];
+    if (run === undefined || run.firstIndex >= runEnd(clip)) break;
+    let firstIndex = Math.max(run.firstIndex, clip.firstIndex);
     clipped.push({
-      firstIndex: value2,
-      count: Math.min(runEnd(value), runEnd(clip)) - value2,
+      firstIndex,
+      count: Math.min(runEnd(run), runEnd(clip)) - firstIndex,
     });
   }
   return clipped;
 }
-export function groupsNotInsideCollapsed(groups?: Dynamic) {
-  let coveredUntil: Dynamic = 0;
-  return groups.filter(({ firstIndex: firstIndex, count: count, isCollapsed: isCollapsed }: Dynamic) => {
+export function groupsNotInsideCollapsed<G extends CollapsibleRun>(groups: readonly G[]): G[] {
+  let coveredUntil = 0;
+  return groups.filter(({ firstIndex, count, isCollapsed }: G) => {
     if (firstIndex < coveredUntil) return false;
     if (isCollapsed) coveredUntil = firstIndex + count;
     return true;
   });
 }
-export function collapsedIndexRuns(groups?: Dynamic) {
-  let runs: Dynamic = [];
-  for (let { firstIndex: firstIndex, count: count, isCollapsed: isCollapsed } of groupsNotInsideCollapsed(groups) as Dynamic) {
+export function collapsedIndexRuns(groups: readonly CollapsibleRun[]): LineSpan[] {
+  let runs: LineSpan[] = [];
+  for (let { firstIndex, count, isCollapsed } of groupsNotInsideCollapsed(groups)) {
     if (!isCollapsed) continue;
     let last = runs.at(-1);
     if (last !== undefined && last.firstIndex + last.count === firstIndex)
@@ -87,24 +91,27 @@ export function collapsedIndexRuns(groups?: Dynamic) {
       };
     else
       runs.push({
-        firstIndex: firstIndex,
-        count: count,
+        firstIndex,
+        count,
       });
   }
   return runs;
 }
-export const NO_ROWS_OUT_OF_VIEW_BY_FILTERS = new (Map as Dynamic)();
-export const runEnd = ({ firstIndex: firstIndex, count: count }: Dynamic) => firstIndex + count;
-export const NO_OWN_COLLAPSING = new (Map as Dynamic)();
-export const withOwnCollapsing = (overrides?: Dynamic, groups?: Dynamic) =>
-  overrides.size === 0
+export const NO_ROWS_OUT_OF_VIEW_BY_FILTERS = new Map<SheetId, Set<RowId>>();
+export const runEnd = ({ firstIndex, count }: LineSpan): number => firstIndex + count;
+export const NO_OWN_COLLAPSING = new Map<string, boolean>();
+export const withOwnCollapsing = <G extends Pick<GroupOnGrid, 'groupId' | 'isCollapsed'>>(
+  ownCollapsing: ReadonlyMap<string, boolean>,
+  groups: readonly G[],
+): readonly G[] =>
+  ownCollapsing.size === 0
     ? groups
     : groups.map(
-        (group?: Dynamic) => ({
+        (group: G): G => ({
           ...group,
-          isCollapsed: overrides.get(group.groupId) ?? group.isCollapsed,
+          isCollapsed: ownCollapsing.get(group.groupId) ?? group.isCollapsed,
         }),
       );
-export const leadingRunCount = ([firstRun]: Dynamic) => (firstRun?.firstIndex === 0 ? firstRun.count : 0);
-export const countInIndexRun = (runs?: Dynamic, clip?: Dynamic) =>
-  clipIndexRuns(runs, clip).reduce((total: Dynamic, { count: count }: Dynamic) => total + count, 0);
+export const leadingRunCount = ([firstRun]: readonly LineSpan[]): number => (firstRun?.firstIndex === 0 ? firstRun.count : 0);
+export const countInIndexRun = (runs: readonly LineSpan[], clip: LineSpan): number =>
+  clipIndexRuns(runs, clip).reduce((total: number, { count }: LineSpan) => total + count, 0);

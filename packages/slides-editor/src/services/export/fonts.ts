@@ -11,7 +11,7 @@
 import { blockUnicodeRange, cssUrls, fontFaceBlocks, parseUnicodeRange, rangeCovers } from '@open-artifact/export-kit';
 import { nodeText, type DeckFace, type Slide, type SlideNode } from '@open-artifact/slides-core';
 import { fontFaceRule } from '../../render/fonts.ts';
-import { dataUrlBytes, type AssetCache } from './assets.ts';
+import { dataUrlBytes, fetchRetrying, type AssetCache } from './assets.ts';
 
 /** Inlined font CSS and what could not be inlined. */
 export interface FontBundle {
@@ -52,7 +52,7 @@ export async function deckFontCss(
   const rules: string[] = [];
   for (const face of Object.values(faces)) {
     if (face.href) {
-      const css = await fetch(face.href)
+      const css = await fetchRetrying(face.href)
         .then((response) => (response.ok ? response.text() : null))
         .catch(() => null);
       if (!css) {

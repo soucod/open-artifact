@@ -1,0 +1,27 @@
+{
+  "format": "open-artifact-docs",
+  "version": 1,
+  "id": "46bfa470-ca38-499c-a0a7-190bfb524d7d",
+  "name": "Docs Browser QA",
+  "created": "2026-11-21T03:01:48.389Z",
+  "updated": "2026-11-21T03:03:31.221Z",
+  "head": 10,
+  "tabs": {
+    "db1e207b-51bd": {
+      "name": "Tab 1",
+      "order": "V",
+      "node": "9b1f162b-ee2d"
+    },
+    "1fce64a1-6d19": {
+      "name": "Review Notes",
+      "order": "k",
+      "node": "9d4448ab-9c08"
+    },
+    "c4325fa1-d6c1": {
+      "name": "Browser QA Scratch",
+      "order": "r",
+      "node": "5422cdbd-a498"
+    }
+  },
+  "enums": {}
+}

@@ -341,7 +341,8 @@ pub fn widths_needed_with_texts_held_to(workbook: &Workbook, sheet: &Sheet, colu
             _ => needed(sheet, cell, value, width_of(cell.1), has_bold_run || bold.contains(&cell.1), locale),
         };
         if let Some(width) = width {
-            note(cell.1, if matches!(value, Value::Number(_)) { width } else { width.min(widest_text) });
+            // The room around the text is kept, however narrow the text is held to.
+            note(cell.1, if matches!(value, Value::Number(_)) { width } else { width.min(widest_text.max(AROUND_THE_TEXT)) });
         }
     };
     for (&cell, contents) in &sheet.cells {
@@ -380,18 +381,13 @@ pub fn widths_needed_with_texts_held_to(workbook: &Workbook, sheet: &Sheet, colu
             continue;
         }
         let (Some(top), Some(left)) = (sheet.rows.position(*r), sheet.columns.position(*c)) else { continue };
-        for j in 0..array.columns() {
-            let Some(column) = sheet.columns.line(left + j) else { break };
+        for ((i, j), value) in array.entries().filter(|(position, _)| *position != (0, 0)) {
+            let Some(column) = sheet.columns.line(left + j) else { continue };
             if !wanted.contains(&column) {
                 continue;
             }
-            for i in 0..array.rows() {
-                if i == 0 && j == 0 {
-                    continue;
-                }
-                let Some(row) = sheet.rows.line(top + i) else { break };
-                measure((row, column), array.get(i, j), false, false, None);
-            }
+            let Some(row) = sheet.rows.line(top + i) else { continue };
+            measure((row, column), value, false, false, None);
         }
     }
     drop(measure);
@@ -401,4 +397,67 @@ pub fn widths_needed_with_texts_held_to(workbook: &Workbook, sheet: &Sheet, colu
         }
     }
     widths
+}
+
+/// How wide a column may be made to show numbers given a new pattern (`queueEdit`'s `makesRoomForNumbersIn`).
+const WIDEST_MADE_ROOM: u32 = 400;
+
+/// How many digits a General number is taken to show before its pattern changes, at most.
+const DIGITS_OF_A_GENERAL_NUMBER_BEFORE: usize = 5;
+
+/// The columns made wider to show numbers in a pattern they were given (`queueEdit` with `makesRoomForNumbersIn`
+/// naming the sheet the pattern is given in): a number of the cells given it (a formula's too)
+/// that fitted its column before (nine tenths of what it needed then no wider than the column; a General number
+/// taken to need no more than five digits) and does not now makes its column as wide as the widest such needs now, no
+/// more than 400 pixels, when that is wider than it is. In the columns' order, each with its new width.
+pub fn widths_making_room_for_numbers(before: &Workbook, after: &Workbook, sheet_id: &str,
+    is_given: impl Fn((LineId, LineId)) -> bool) -> Vec<(LineId, u32)> {
+    let (Some(was), Some(sheet)) = (before.sheet_index(sheet_id).map(|k| &before.sheets[k]), after.sheet_index(sheet_id).map(|k| &after.sheets[k])) else {
+        return Vec::new();
+    };
+    let locale = crate::locale::find(&after.locale).unwrap_or_else(crate::locale::en_us);
+    let (bold_before, bold) = (made_bold(before, was), made_bold(after, sheet));
+    let width_of = |column: LineId| sheet.column_widths.get(&column).copied().unwrap_or(DEFAULT_WIDTH);
+    let mut wanted: HashMap<LineId, u32> = HashMap::new();
+    for (&cell, contents) in &sheet.cells {
+        if !is_given(cell) || sheet.rows.position(cell.0).is_none() || sheet.columns.position(cell.1).is_none() {
+            continue;
+        }
+        let number = match &contents.input {
+            Input::Number { value } => *value,
+            Input::Formula { .. } => match before.outcome(sheet_id, cell.0, cell.1).or_else(|| after.outcome(sheet_id, cell.0, cell.1)) {
+                Some(outcome) => match outcome.value {
+                    Value::Number(n) => n,
+                    _ => continue,
+                },
+                None => continue,
+            },
+            _ => continue,
+        };
+        let value = Value::Number(number);
+        let width = width_of(cell.1);
+        let pattern = was.formats.get(Leaf::NumberFormat, cell).and_then(|f| f.get("pattern")?.as_str());
+        let needed_before = match pattern.filter(|p| *p != "General") {
+            None => {
+                let font = Font::of(was, cell, bold_before.contains(&cell.1));
+                let general = NumberFormat::parse("General").expect("General reads");
+                let room = Room::InACell { most_characters: MOST_CHARACTERS_OF_A_NUMBER };
+                let Ok(shown) = general.show_number_in(number, locale, room) else { continue };
+                let digits = shown.text.chars().count().min(DIGITS_OF_A_GENERAL_NUMBER_BEFORE);
+                font.digits(digits as f64).ceil() as u32 + AROUND_THE_TEXT
+            }
+            Some(_) => match needed(was, cell, &value, width, bold_before.contains(&cell.1), locale) {
+                Some(w) => w,
+                None => continue,
+            },
+        };
+        let Some(needed_now) = needed(sheet, cell, &value, width, bold.contains(&cell.1), locale) else { continue };
+        if 0.9 * needed_before as f64 <= width as f64 && needed_now > width {
+            let w = wanted.entry(cell.1).or_insert(0);
+            *w = (*w).max(needed_now.min(WIDEST_MADE_ROOM));
+        }
+    }
+    let mut out: Vec<(LineId, u32)> = wanted.into_iter().filter(|&(c, w)| w > width_of(c)).collect();
+    out.sort_by_key(|&(c, _)| sheet.columns.position(c));
+    out
 }

@@ -135,7 +135,7 @@ impl Cells {
         self.array.get(row, column)
     }
 
-    pub fn values(&self) -> &[Value] {
+    pub fn values(&self) -> impl ExactSizeIterator<Item = &Value> + '_ {
         self.array.values()
     }
 

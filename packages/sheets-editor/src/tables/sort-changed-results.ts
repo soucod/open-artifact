@@ -1,4 +1,15 @@
-import type { Dynamic } from '../dynamic.ts';
+import type {
+  CellContents,
+  ColumnId,
+  ColumnPoint,
+  Reference,
+  RowId,
+  RowPoint,
+  SheetId,
+  SortDirection,
+  StoredFormula,
+  ValueContents,
+} from '@open-artifact/sheets-core';
 import { formulaMatchesOutsideReferences, sheetPrefixForFormula } from '../formulas/references.ts';
 import { areaOfReference } from '../model/reference-areas.ts';
 import { areasOverlap } from '../model/workbook.ts';
@@ -11,26 +22,85 @@ import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import { sortSourceRows } from '../formulas/lost-formulas.ts';
 import { isEntryWorkPending } from '../editor/unanswered-entries.ts';
 import { isInSpan } from '../grid/geometry.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { PageState, ResultsChanged } from '../state/initial-state.ts';
+import type { CellId, CellOnShow, WorkbookReads } from '../model/workbook.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function edgesOfReference(reference?: Dynamic) {
+import type { CellArea, CellPosition } from '../selection/model.ts';
+import type { ActThatMayLoseFormulas, ColumnsOfTableMoved, PageContext, PageEvent } from '../state/event-reducer.ts';
+import type { ColumnsOfTableMoving } from '../selection/move-table-columns.ts';
+/** The four edges of a reference: the rows at its top and bottom, the columns at its left and right; `null` where it runs to the end of the sheet. */
+export interface ReferenceEdges {
+  top: RowPoint | null;
+  bottom: RowPoint | null;
+  left: ColumnPoint | null;
+  right: ColumnPoint | null;
+}
+/** What a look at the formulas of a sorted area goes by: the area, how far its sheet reaches, and the indexes of its lines by id. */
+export interface SortAreaFacts {
+  sheetId: SheetId;
+  area: CellArea;
+  isEveryColumnSorted: boolean;
+  lastRowThatShowsAnything: number;
+  lastRowIndex: number;
+  lastColumnIndex: number;
+  rowIndexOf: (rowId: RowId) => number | null;
+  columnIndexOf: (columnId: ColumnId) => number | null;
+}
+/** A formula of a cell in a sorted area, with its text, its row and whether it draws random numbers. */
+export interface FormulaInSortedArea {
+  formula: StoredFormula;
+  text: string;
+  rowIndex: number;
+  drawsRandomNumbers: boolean;
+}
+/** How many formulas a column of a sorted area holds, and one of them while they are all the same formula filled down. */
+interface FormulasOfColumn {
+  count: number;
+  oneOfThem: FormulaInSortedArea | null;
+}
+/** A cell holding a formula, and its row. */
+export interface FormulaCellOfRow {
+  rowIndex: number;
+  cell: CellContents;
+}
+/** Whether the result of a formula's cell changed, by its sheet, the cell and where it is now. */
+export type HasResultChanged = (sheetId: SheetId, cell: CellContents, position: CellPosition) => boolean;
+/** The act of sorting an area of rows, as the answer to the sort tells it. */
+export type SortedArea = Extract<ActThatMayLoseFormulas, { kind: 'sorted' }>;
+/** A sort to look back on once it is answered: the act, the workbook before it, and the column and direction it sorted by. */
+export interface SortLookedBackOn {
+  sorted: SortedArea;
+  before: WorkbookReads;
+  column: string;
+  direction: SortDirection;
+  atChangeCount: number;
+}
+/** A move of columns of a table to look back on once it is answered: the move, how many columns, and the workbook before it. */
+export interface ColumnMoveLookedBackOn {
+  moved: ColumnsOfTableMoved;
+  count: number;
+  before: WorkbookReads;
+  atChangeCount: number;
+}
+/** A sort or a move of columns whose changed results are still to be looked at. */
+export type SortOrMoveToLookBackOn = SortLookedBackOn | ColumnMoveLookedBackOn;
+export function edgesOfReference(reference: Reference): ReferenceEdges {
   switch (reference.kind) {
     case 'cell': {
-      let { cell: cellOrTopLeft } = reference;
+      let { cell } = reference;
       return {
-        top: cellOrTopLeft,
-        bottom: cellOrTopLeft,
-        left: cellOrTopLeft,
-        right: cellOrTopLeft,
+        top: cell,
+        bottom: cell,
+        left: cell,
+        right: cell,
       };
     }
     case 'range': {
-      let { topLeft: cellOrTopLeft, bottomRight: bottomRight } = reference;
+      let { topLeft, bottomRight } = reference;
       return {
-        top: cellOrTopLeft,
+        top: topLeft,
         bottom: bottomRight,
-        left: cellOrTopLeft,
+        left: topLeft,
         right: bottomRight,
       };
     }
@@ -46,13 +116,13 @@ export function edgesOfReference(reference?: Dynamic) {
       };
   }
 }
-export function isReferenceKeptBySort(reference?: Dynamic, rowId?: Dynamic, facts?: Dynamic) {
+export function isReferenceKeptBySort(reference: Reference, rowId: RowId, facts: SortAreaFacts) {
   let {
-    sheetId: sheetId,
-    area: area,
-    lastRowThatShowsAnything: lastRowThatShowsAnything,
-    rowIndexOf: rowIndexOf,
-    columnIndexOf: columnIndexOf,
+    sheetId,
+    area,
+    lastRowThatShowsAnything,
+    rowIndexOf,
+    columnIndexOf,
   } = facts;
   if (reference.sheetId !== sheetId) return true;
   let edges = edgesOfReference(reference);
@@ -76,16 +146,16 @@ export function isReferenceKeptBySort(reference?: Dynamic, rowId?: Dynamic, fact
       firstRow > lastRowThatShowsAnything ||
       (firstRow <= area.topRowIndex && lastRow >= lastRowThatShowsAnything)
     );
-  let isRowNearArea = (rowIndex?: Dynamic, isFixed?: Dynamic) =>
+  let isRowNearArea = (rowIndex: number, isFixed: boolean) =>
     isFixed || isIndexInSpan(rowIndex, area.topRowIndex - 1, area.rowCount + 2);
   return isWithinColumns && isRowNearArea(topIndex, isTopFixed) && isRowNearArea(bottomIndex, isBottomFixed);
 }
 export function isSameFilledFormula(
-  { formula: formula, rowIndex: rowIndex }: Dynamic,
-  { formula: otherFormula, rowIndex: otherRowIndex }: Dynamic,
-  { sheetId: sheetId, rowIndexOf: rowIndexOf }: Dynamic,
+  { formula, rowIndex }: FormulaInSortedArea,
+  { formula: otherFormula, rowIndex: otherRowIndex }: FormulaInSortedArea,
+  { sheetId, rowIndexOf }: SortAreaFacts,
 ) {
-  let isSameRowEdge = (edge?: Dynamic, otherEdge?: Dynamic) => {
+  let isSameRowEdge = (edge: RowPoint | null, otherEdge: RowPoint | null) => {
     if (edge === null || otherEdge === null) return edge === otherEdge;
     if (edge.isRowAbsolute !== otherEdge.isRowAbsolute) return false;
     if (edge.isRowAbsolute) return edge.r === otherEdge.r;
@@ -94,8 +164,8 @@ export function isSameFilledFormula(
   };
   return (
     formula.references.length === otherFormula.references.length &&
-    formula.textBetweenReferences.every((text?: Dynamic, nth?: Dynamic) => text === otherFormula.textBetweenReferences[nth]) &&
-    formula.references.every((reference?: Dynamic, nth?: Dynamic) => {
+    formula.textBetweenReferences.every((text, nth) => text === otherFormula.textBetweenReferences[nth]) &&
+    formula.references.every((reference, nth) => {
       let otherReference = otherFormula.references[nth];
       if (reference.kind !== otherReference?.kind || reference.sheetId !== otherReference.sheetId) return false;
       if (reference.sheetId !== sheetId) return true;
@@ -109,9 +179,9 @@ export function isSameFilledFormula(
     })
   );
 }
-export function memoizeByKey(compute?: Dynamic) {
-  let cache = new (Map as Dynamic)();
-  return (key?: Dynamic) => {
+export function memoizeByKey<Key, Value>(compute: (key: Key) => Value) {
+  let cache = new Map<Key, Value>();
+  return (key: Key) => {
     let cached = cache.get(key);
     if (cached !== undefined) return cached;
     let computed = compute(key);
@@ -119,38 +189,38 @@ export function memoizeByKey(compute?: Dynamic) {
     return computed;
   };
 }
-export function sortAreaFacts(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
+export function sortAreaFacts(reads: WorkbookReads, sheetId: SheetId, area: CellArea): SortAreaFacts | null {
   let shownArea = reads.areaOnShowIn(sheetId, area);
   let lines = reads.linesOf(sheetId);
   if (shownArea === null || lines === null) return null;
   return {
-    sheetId: sheetId,
-    area: area,
+    sheetId,
+    area,
     isEveryColumnSorted: area.columnCount === lines.columns.count,
     lastRowThatShowsAnything: shownArea.topRowIndex + shownArea.rowCount - 1,
     lastRowIndex: lines.rows.count - 1,
     lastColumnIndex: lines.columns.count - 1,
-    rowIndexOf: memoizeByKey((rowId?: Dynamic) => reads.rowIndexOf(sheetId, rowId)),
-    columnIndexOf: memoizeByKey((columnId?: Dynamic) => reads.columnIndexOf(sheetId, columnId)),
+    rowIndexOf: memoizeByKey((rowId: RowId) => reads.rowIndexOf(sheetId, rowId)),
+    columnIndexOf: memoizeByKey((columnId: ColumnId) => reads.columnIndexOf(sheetId, columnId)),
   };
 }
 export function dependsOnOtherRows(
   reads: WorkbookReads,
-  { formula: formula, text: text, rowIndex: rowIndex, drawsRandomNumbers: drawsRandomNumbers }: Dynamic,
-  changedColumns: Dynamic,
-  { sheetId: sheetId, area: area, rowIndexOf: rowIndexOf }: Dynamic,
+  { formula, text, rowIndex, drawsRandomNumbers }: FormulaInSortedArea,
+  changedColumns: ReadonlySet<number>,
+  { sheetId, area, rowIndexOf }: SortAreaFacts,
 ) {
-  let isOwnRowEdge = (edge?: Dynamic) => !isRowFixed(edge) && edge !== null && rowIndexOf(edge.r) === rowIndex;
+  let isOwnRowEdge = (edge: RowPoint | null) => !isRowFixed(edge) && edge !== null && rowIndexOf(edge.r) === rowIndex;
   return (
     drawsRandomNumbers ||
     formulaMatchesOutsideReferences(text, ROW_DEPENDENT_FUNCTION_PATTERN, reads.decimalSign) ||
-    formula.references.some((reference?: Dynamic) => {
+    formula.references.some((reference) => {
       if (reference.sheetId !== sheetId) return false;
-      let { top: top, bottom: bottom } = edgesOfReference(reference);
+      let { top, bottom } = edgesOfReference(reference);
       if (!(isRowFixed(top) && isRowFixed(bottom)) && !(isOwnRowEdge(top) && isOwnRowEdge(bottom))) return true;
       let referencedArea = areaOfReference(reads, reference);
       if (referencedArea === null) return false;
-      for (let columnIndex of changedColumns as Dynamic)
+      for (let columnIndex of changedColumns)
         if (
           areasOverlap(referencedArea, {
             ...area,
@@ -163,28 +233,28 @@ export function dependsOnOtherRows(
     })
   );
 }
-export function orderDependentColumns(reads: WorkbookReads, sheetId?: Dynamic, area?: Dynamic) {
+export function orderDependentColumns(reads: WorkbookReads, sheetId: SheetId, area: CellArea) {
   let facts = sortAreaFacts(reads, sheetId, area);
-  if (facts === null) return new (Set as Dynamic)();
-  let rowsWithCells: Dynamic = 0;
-  let formulaColumns = new (Map as Dynamic)();
-  for (let [rowIdOrIsGrowing, cellsOrColumn] of reads.cellsHeldByRow(sheetId) as Dynamic) {
-    let rowIndexOrCount = facts.rowIndexOf(rowIdOrIsGrowing);
-    if (!isIndexInSpan(rowIndexOrCount, area.topRowIndex, area.rowCount)) continue;
-    let hasCellsOrOneOfThem: Dynamic = false;
-    for (let [columnId, cellFacts] of cellsOrColumn as Dynamic) {
-      let { input: input, spill: spill, formulaText = '', drawsRandomNumbers = false } = cellFacts;
+  if (facts === null) return new Set<number>();
+  let rowsWithCells = 0;
+  let formulaColumns = new Map<number, FormulasOfColumn>();
+  for (let [rowId, cellsOfRow] of reads.cellsHeldByRow(sheetId)) {
+    let rowIndex = facts.rowIndexOf(rowId);
+    if (!isIndexInSpan(rowIndex, area.topRowIndex, area.rowCount)) continue;
+    let hasCells = false;
+    for (let [columnId, cell] of cellsOfRow) {
+      let { input, spill, formulaText = '', drawsRandomNumbers = false } = cell;
       let columnIndex = facts.columnIndexOf(columnId);
       if (!isIndexInSpan(columnIndex, area.leftColumnIndex, area.columnCount)) continue;
-      hasCellsOrOneOfThem = true;
+      hasCells = true;
       if (input.kind !== 'formula') continue;
-      let formulaCell = {
+      let formulaCell: FormulaInSortedArea = {
         formula: input.formula,
         text: formulaText,
-        rowIndex: rowIndexOrCount,
-        drawsRandomNumbers: drawsRandomNumbers,
+        rowIndex,
+        drawsRandomNumbers,
       };
-      let columnFacts = formulaColumns.get(columnIndex) ?? {
+      let columnFacts: FormulasOfColumn = formulaColumns.get(columnIndex) ?? {
         count: 0,
         oneOfThem: formulaCell,
       };
@@ -194,94 +264,99 @@ export function orderDependentColumns(reads: WorkbookReads, sheetId?: Dynamic, a
         !(
           columnFacts.oneOfThem !== null &&
           spill === undefined &&
-          formulaCell.formula.references.every((reference?: Dynamic) => isReferenceKeptBySort(reference, rowIdOrIsGrowing, facts)) &&
+          formulaCell.formula.references.every((reference) => isReferenceKeptBySort(reference, rowId, facts)) &&
           isSameFilledFormula(columnFacts.oneOfThem, formulaCell, facts)
         )
       )
         columnFacts.oneOfThem = null;
     }
-    if (hasCellsOrOneOfThem) rowsWithCells += 1;
+    if (hasCells) rowsWithCells += 1;
   }
-  if (rowsWithCells !== facts.lastRowThatShowsAnything - area.topRowIndex + 1) return new (Set as Dynamic)();
-  let changedColumns = new (Set as Dynamic)();
-  for (let rowIdOrIsGrowing: Dynamic = true; rowIdOrIsGrowing; ) {
-    rowIdOrIsGrowing = false;
-    for (let [cellsOrColumn, { count: rowIndexOrCount, oneOfThem: hasCellsOrOneOfThem }] of formulaColumns as Dynamic) {
-      if (hasCellsOrOneOfThem === null || rowIndexOrCount !== rowsWithCells || changedColumns.has(cellsOrColumn)) continue;
-      if (!dependsOnOtherRows(reads, hasCellsOrOneOfThem, changedColumns, facts)) continue;
-      changedColumns.add(cellsOrColumn);
-      rowIdOrIsGrowing = true;
+  if (rowsWithCells !== facts.lastRowThatShowsAnything - area.topRowIndex + 1) return new Set<number>();
+  let changedColumns = new Set<number>();
+  for (let isGrowing = true; isGrowing; ) {
+    isGrowing = false;
+    for (let [columnIndex, { count, oneOfThem }] of formulaColumns) {
+      if (oneOfThem === null || count !== rowsWithCells || changedColumns.has(columnIndex)) continue;
+      if (!dependsOnOtherRows(reads, oneOfThem, changedColumns, facts)) continue;
+      changedColumns.add(columnIndex);
+      isGrowing = true;
     }
   }
   return changedColumns;
 }
-export function isSameCellValue(cell?: Dynamic, otherCell?: Dynamic) {
+export function isSameCellValue(cell: CellOnShow, otherCell: CellOnShow) {
   let [value, otherValue] = [cellValueOf(cell), cellValueOf(otherCell)];
   if (cellValueKey(value) === cellValueKey(otherValue)) return true;
   if (value?.kind !== 'number' || otherValue?.kind !== 'number') return false;
   if (Number.isSafeInteger(value.value) && Number.isSafeInteger(otherValue.value)) return false;
-  let [shown, otherShown] = [cell, otherCell].map((cell2?: Dynamic) => shownCellText(cell2, 1 / 0, 'point'));
+  let [shown, otherShown] = [cell, otherCell].map((eitherCell) => shownCellText(eitherCell, 1 / 0, 'point'));
   return JSON.stringify(shown) === JSON.stringify(otherShown);
 }
-export function compareCellValues(cell?: Dynamic, otherCell?: Dynamic) {
+export function compareCellValues(cell: CellOnShow, otherCell: CellOnShow) {
   let [value, otherValue] = [cellValueOf(cell), cellValueOf(otherCell)];
   if (value?.kind === 'number' && otherValue?.kind === 'number') return value.value - otherValue.value;
-  let [key, otherKey] = [value, otherValue].map((value2?: Dynamic) => `${value2?.kind} ${value2?.value}`);
+  let [key, otherKey] = [value, otherValue].map((eitherValue) => `${eitherValue?.kind} ${eitherValue?.value}`);
   return key === otherKey ? 0 : (key ?? '') < (otherKey ?? '') ? -1 : 1;
 }
-export function resultCellsOfFormula(reads: WorkbookReads, sheetId?: Dynamic, cell?: Dynamic) {
+export function resultCellsOfFormula(reads: WorkbookReads, sheetId: SheetId, cell: CellContents | null): CellOnShow[] | null {
   if (cell?.input.kind !== 'formula' || cell.value === undefined) return null;
   let spillArea =
     cell.spill?.kind === 'fills'
       ? reads.spillOver({
-          sheetId: sheetId,
+          sheetId,
           rowId: cell.r,
           columnId: cell.c,
         })?.area
       : undefined;
   if (spillArea === undefined) return [cell];
-  let cells = reads.cellsOnShowIn(sheetId, spillArea).flatMap((cellRef?: Dynamic) => reads.cellOnShowIn(cellRef) ?? []);
+  let cells = reads.cellsOnShowIn(sheetId, spillArea).flatMap((cellId) => reads.cellOnShowIn(cellId) ?? []);
   cells.sort(compareCellValues);
   return cells;
 }
-export function rowsWhoseResultsChanged(before?: Dynamic, after?: Dynamic) {
-  for (let value of [before, after] as Dynamic)
-    value.sort((first?: Dynamic, second?: Dynamic) => compareCellValues(first.cell, second.cell));
-  let changedRows = new (Set as Dynamic)();
-  let beforeIndex: Dynamic = 0;
-  for (let { rowIndex: value, cell: afterCell } of after as Dynamic) {
-    let isFound: Dynamic = false;
-    for (let beforeEntry: Dynamic = before[beforeIndex]; beforeEntry !== undefined && !isFound; beforeEntry = before[beforeIndex]) {
+export function rowsWhoseResultsChanged(before: FormulaCellOfRow[], after: FormulaCellOfRow[]) {
+  for (let formulaCells of [before, after])
+    formulaCells.sort((first, second) => compareCellValues(first.cell, second.cell));
+  let changedRows = new Set<number>();
+  let beforeIndex = 0;
+  for (let { rowIndex, cell: afterCell } of after) {
+    let isFound = false;
+    for (let beforeEntry = before[beforeIndex]; beforeEntry !== undefined && !isFound; beforeEntry = before[beforeIndex]) {
       isFound = isSameCellValue(beforeEntry.cell, afterCell);
       if (!isFound && compareCellValues(beforeEntry.cell, afterCell) >= 0) break;
       beforeIndex += 1;
     }
-    if (!isFound) changedRows.add(value);
+    if (!isFound) changedRows.add(rowIndex);
   }
   return changedRows;
 }
-export function changedFormulaResults(readsBefore?: Dynamic, readsAfter?: Dynamic, sheetIdOfAct?: Dynamic, hasResultChanged?: Dynamic) {
-  let cellsHangingOnNowOrToday: Dynamic = null;
-  let isChangeNotFromTimeZone = (sheetId?: Dynamic, cell?: Dynamic, position?: Dynamic) => {
+export function changedFormulaResults(
+  readsBefore: WorkbookReads,
+  readsAfter: WorkbookReads,
+  sheetIdOfAct: SheetId,
+  hasResultChanged: HasResultChanged,
+): ResultsChanged | null {
+  let cellsHangingOnNowOrToday: NonNullable<ReturnType<typeof cellsHangingOnFormulasWhere>> | 'tooManyToTell' | null = null;
+  let isChangeNotFromTimeZone = (sheetId: SheetId, cell: CellContents, position: CellPosition) => {
     if (readsBefore.timeZone === readsAfter.timeZone) return true;
     if (cell.value?.kind === 'error' && cell.value.value !== '#N/A') return true;
     cellsHangingOnNowOrToday ??=
       cellsHangingOnFormulasWhere(
         readsAfter,
-        (formulaText?: Dynamic) => formulaMatchesOutsideReferences(formulaText, NOW_OR_TODAY_PATTERN, readsAfter.decimalSign),
+        (formulaText: string) => formulaMatchesOutsideReferences(formulaText, NOW_OR_TODAY_PATTERN, readsAfter.decimalSign),
       ) ?? 'tooManyToTell';
     return cellsHangingOnNowOrToday !== 'tooManyToTell' && !areaTouchesHangingCells(cellsHangingOnNowOrToday, sheetId, areaOfPosition(position));
   };
-  let [changedCount, changedErrorCount]: Dynamic = [0, 0];
-  let firstCellText: Dynamic = null;
+  let [changedCount, changedErrorCount] = [0, 0];
+  let firstCellText: string | null = null;
   let sheets = readsAfter.listSheets();
-  for (let { sheetId: sheetId, name: sheetName } of sheets as Dynamic) {
+  for (let { sheetId, name: sheetName } of sheets) {
     if (readsBefore.sheetAsItStands(sheetId) === readsAfter.sheetAsItStands(sheetId)) continue;
-    let changedPositions: Dynamic = [];
-    let visitCell = (cell?: Dynamic) => {
+    let changedPositions: CellPosition[] = [];
+    let visitCell = (cell: CellContents) => {
       if (cell.input.kind !== 'formula') return;
       let position = readsAfter.positionOfCell({
-        sheetId: sheetId,
+        sheetId,
         rowId: cell.r,
         columnId: cell.c,
       });
@@ -291,19 +366,19 @@ export function changedFormulaResults(readsBefore?: Dynamic, readsAfter?: Dynami
       if (cell.value?.kind === 'error') changedErrorCount += 1;
     };
     let cellsBeforeByRow = readsBefore.cellsHeldByRow(sheetId);
-    for (let [rowId, cellsOfRow] of readsAfter.cellsHeldByRow(sheetId) as Dynamic) {
+    for (let [rowId, cellsOfRow] of readsAfter.cellsHeldByRow(sheetId)) {
       if (cellsBeforeByRow.get(rowId) === cellsOfRow) continue;
-      for (let cellOfRow of cellsOfRow.values() as Dynamic) if (cellOfRow.spill === undefined) visitCell(cellOfRow);
+      for (let cellOfRow of cellsOfRow.values()) if (cellOfRow.spill === undefined) visitCell(cellOfRow);
     }
     readsAfter.cellsWithSpillIn(sheetId).forEach(visitCell);
     changedCount += changedPositions.length;
     let [firstChanged, ...otherChanged] = changedPositions;
     if (firstChanged === undefined || (firstCellText !== null && sheetId !== sheetIdOfAct)) continue;
     let earliestChanged = otherChanged.reduce(
-      (earliest?: Dynamic, position?: Dynamic) => (comesBeforeInReadingOrder(position, earliest) ? position : earliest),
+      (earliest, position) => (comesBeforeInReadingOrder(position, earliest) ? position : earliest),
       firstChanged,
     );
-    let cellAddress = areaToA1AsStored(areaOfPosition(earliestChanged), ownRowOrderOfSheet(readsAfter, sheetId));
+    let cellAddress: string = areaToA1AsStored(areaOfPosition(earliestChanged), ownRowOrderOfSheet(readsAfter, sheetId));
     firstCellText = sheets.length === 1 ? cellAddress : `${sheetPrefixForFormula(sheetName)}${cellAddress}`;
   }
   return firstCellText === null
@@ -314,65 +389,65 @@ export function changedFormulaResults(readsBefore?: Dynamic, readsAfter?: Dynami
         firstCell: firstCellText,
       };
 }
-export function resultsChangedBySort(readsBeforeSort?: Dynamic, readsAfterSort?: Dynamic, sorted?: Dynamic) {
+export function resultsChangedBySort(readsBeforeSort: WorkbookReads, readsAfterSort: WorkbookReads, sorted: SortedArea) {
   let readsBefore = readsBeforeSort.asStored() ?? readsBeforeSort;
   let readsAfter = readsAfterSort.asStored() ?? readsAfterSort;
-  let { area: area } = sorted;
-  let columnsExpectedToChange: Dynamic = null;
-  let sourceRows: Dynamic = null;
-  let unmatchedRowsByColumn = new (Map as Dynamic)();
-  let sourceRowOf = (rowIndex?: Dynamic) => {
+  let { area } = sorted;
+  let columnsExpectedToChange: Set<number> | null = null;
+  let sourceRows: (number | null)[] | null = null;
+  let unmatchedRowsByColumn = new Map<number, Set<number>>();
+  let sourceRowOf = (rowIndex: number) => {
     sourceRows ??= sortSourceRows(readsBefore, readsAfter, sorted);
     let rowOffset = sourceRows[rowIndex - area.topRowIndex] ?? null;
     return rowOffset === null ? null : area.topRowIndex + rowOffset;
   };
-  let cellBeforeSortAt = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) => {
+  let cellBeforeSortAt = ({ rowIndex, columnIndex }: CellPosition) => {
     let sourceRow = sourceRowOf(rowIndex);
     let cellId = sourceRow === null ? null : readsBefore.cellIdAt(sorted.sheetId, sourceRow, columnIndex);
     return cellId === null ? null : readsBefore.cellOf(cellId);
   };
-  let isResultUnmatchedInColumn = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) => {
-    let unmatchedRows: Dynamic = unmatchedRowsByColumn.get(columnIndex);
+  let isResultUnmatchedInColumn = ({ rowIndex, columnIndex }: CellPosition) => {
+    let unmatchedRows = unmatchedRowsByColumn.get(columnIndex);
     if (unmatchedRows === undefined) {
-      let rowIndexes = Array.from<Dynamic, Dynamic>(
+      let rowIndexes = Array.from(
         {
           length: area.rowCount,
         },
-        (input?: Dynamic, offset?: Dynamic) => area.topRowIndex + offset,
+        (_, offset) => area.topRowIndex + offset,
       );
-      let sourceRowsUsed = new (Set as Dynamic)(rowIndexes.map(sourceRowOf));
-      let formulaCellsOfRows = (reads: WorkbookReads, keepsRow?: Dynamic) =>
-        rowIndexes.filter(keepsRow).flatMap((rowIndex2?: Dynamic) => {
-          let cellId = reads.cellIdAt(sorted.sheetId, rowIndex2, columnIndex);
+      let sourceRowsUsed = new Set(rowIndexes.map(sourceRowOf));
+      let formulaCellsOfRows = (reads: WorkbookReads, keepsRow: (rowIndex: number) => boolean): FormulaCellOfRow[] =>
+        rowIndexes.filter(keepsRow).flatMap((keptRowIndex) => {
+          let cellId = reads.cellIdAt(sorted.sheetId, keptRowIndex, columnIndex);
           let cell = cellId === null ? null : reads.cellOf(cellId);
           return cell?.input.kind === 'formula'
             ? [
                 {
-                  rowIndex: rowIndex2,
-                  cell: cell,
+                  rowIndex: keptRowIndex,
+                  cell,
                 },
               ]
             : [];
         });
-      let formulaCellsBefore = formulaCellsOfRows(readsBefore, (rowIndex2?: Dynamic) => !sourceRowsUsed.has(rowIndex2));
-      unmatchedRows = formulaCellsBefore.some(({ cell: cell }: Dynamic) => cell.value === undefined)
-        ? new (Set as Dynamic)()
+      let formulaCellsBefore = formulaCellsOfRows(readsBefore, (rowIndexBefore) => !sourceRowsUsed.has(rowIndexBefore));
+      unmatchedRows = formulaCellsBefore.some(({ cell }) => cell.value === undefined)
+        ? new Set<number>()
         : rowsWhoseResultsChanged(
             formulaCellsBefore,
-            formulaCellsOfRows(readsAfter, (rowIndex2?: Dynamic) => sourceRowOf(rowIndex2) === null),
+            formulaCellsOfRows(readsAfter, (rowIndexAfter) => sourceRowOf(rowIndexAfter) === null),
           );
       unmatchedRowsByColumn.set(columnIndex, unmatchedRows);
     }
     return unmatchedRows.has(rowIndex);
   };
-  let hasResultChanged = (sheetId?: Dynamic, cell?: Dynamic, position?: Dynamic) => {
+  let hasResultChanged = (sheetId: SheetId, cell: CellContents, position: CellPosition) => {
     let valuesAfter = resultCellsOfFormula(readsAfter, sheetId, cell);
     if (valuesAfter === null) return false;
     let isInSortedRows =
       sheetId === sorted.sheetId && position.rowIndex >= area.topRowIndex && position.rowIndex < area.topRowIndex + area.rowCount;
     if (!(isInSortedRows && position.columnIndex >= area.leftColumnIndex && position.columnIndex < area.leftColumnIndex + area.columnCount)) {
-      let value = readsBefore.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
-      let valuesBefore = resultCellsOfFormula(readsBefore, sheetId, value === null ? null : readsBefore.cellOf(value));
+      let cellIdBefore = readsBefore.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
+      let valuesBefore = resultCellsOfFormula(readsBefore, sheetId, cellIdBefore === null ? null : readsBefore.cellOf(cellIdBefore));
       if (valuesBefore === null || areSameCellValues(valuesBefore, valuesAfter)) return false;
       if (!isInSortedRows) return true;
       let valuesAtSourceRow = resultCellsOfFormula(readsBefore, sheetId, cellBeforeSortAt(position));
@@ -381,10 +456,10 @@ export function resultsChangedBySort(readsBeforeSort?: Dynamic, readsAfterSort?:
     if (sourceRowOf(position.rowIndex) === null) {
       if (!isResultUnmatchedInColumn(position)) return false;
     } else {
-      let value = cellBeforeSortAt(position);
-      let valuesBefore = resultCellsOfFormula(readsBefore, sheetId, value);
+      let cellBefore = cellBeforeSortAt(position);
+      let valuesBefore = resultCellsOfFormula(readsBefore, sheetId, cellBefore);
       if (valuesBefore === null) return false;
-      if ((value?.spill ?? cell.spill) !== undefined)
+      if (!isSpillFromRow(cell) && (cellBefore?.spill ?? cell.spill) !== undefined)
         return !areSameCellValues(valuesBefore, valuesAfter) || sourceRowOf(position.rowIndex) !== position.rowIndex;
       if (columnsExpectedToChange?.has(position.columnIndex) === true || areSameCellValues(valuesBefore, valuesAfter)) return false;
     }
@@ -393,38 +468,38 @@ export function resultsChangedBySort(readsBeforeSort?: Dynamic, readsAfterSort?:
   };
   return changedFormulaResults(readsBefore, readsAfter, sorted.sheetId, hasResultChanged);
 }
-export function columnMoveToLookBackOn(event: Dynamic, state: PageState) {
+export function columnMoveToLookBackOn(event: PageEvent, state: PageState): ColumnMoveLookedBackOn | null {
   if (event.kind !== 'editAnswered' || event.outcome.kind !== 'editQueued') return null;
   let { movesColumnsOfTable: moved } = event.ifQueued;
   if (moved === undefined || moved.before === null) return null;
-  let { before: before, count: count } = moved;
+  let { before, count } = moved;
   return {
-    moved: moved,
-    count: count,
-    before: before,
+    moved,
+    count,
+    before,
     atChangeCount: state.workbookChangeCount,
   };
 }
-export function sortToLookBackOnFromAnswer(event: Dynamic, state: PageState) {
+export function sortToLookBackOnFromAnswer(event: PageEvent, state: PageState): SortLookedBackOn | null {
   if (event.kind !== 'editAnswered' || event.outcome.kind !== 'editQueued') return null;
-  let { before: actBefore, ifQueued: ifQueued } = event;
+  let { before: actBefore, ifQueued } = event;
   let done = typeof ifQueued.done === 'object' ? ifQueued.done : null;
   if (actBefore?.act.kind !== 'sorted') return null;
   if (done?.what !== 'rowsSorted' && done?.what !== 'cellsSorted') return null;
-  let { column: column, direction: direction } = done;
+  let { column, direction } = done;
   return {
     sorted: actBefore.act,
     before: actBefore.reads,
-    column: column,
-    direction: direction,
+    column,
+    direction,
     atChangeCount: state.workbookChangeCount,
   };
 }
-export function offerUndoIfEditChangedResults(state?: Dynamic, event?: Dynamic, context?: Dynamic) {
+export function offerUndoIfEditChangedResults(state: PageState, event: PageEvent, context: PageContext) {
   let settled = settleMoveOfColumnsAnswer(state, event, context.reads);
   return offerUndoIfSortChangedResults(settled, event, context);
 }
-export function settleMoveOfColumnsAnswer(state: Dynamic, event: Dynamic, reads: ReadsWithTextMeasurer) {
+export function settleMoveOfColumnsAnswer(state: PageState, event: PageEvent, reads: ReadsWithTextMeasurer): PageState {
   if (event.kind !== 'editAnswered' || event.ifQueued.movesColumnsOfTable === undefined) return state;
   let answered = {
     ...state,
@@ -436,12 +511,12 @@ export function settleMoveOfColumnsAnswer(state: Dynamic, event: Dynamic, reads:
       ...event.ifQueued.movesColumnsOfTable.selectedIfNotMade,
     };
   if (event.ifQueued.isViewLeftAsItIs === true) return answered;
-  let scrollToCell = (state2?: Dynamic, cellId?: Dynamic) => {
+  let scrollToCell = (scrolled: PageState, cellId: CellId) => {
     let position = reads.positionOfCell(cellId);
     return position === null
-      ? state2
+      ? scrolled
       : scrollToShowPosition(
-          state2,
+          scrolled,
           reads,
           position,
           {
@@ -453,8 +528,8 @@ export function settleMoveOfColumnsAnswer(state: Dynamic, event: Dynamic, reads:
   };
   return scrollToCell(scrollToCell(answered, answered.selectionCorner), answered.activeCell);
 }
-export function offerUndoIfSortChangedResults(state: PageState, event?: Dynamic, context?: Dynamic) {
-  let { reads: reads } = context;
+export function offerUndoIfSortChangedResults(state: PageState, event: PageEvent, context: PageContext): PageState {
+  let { reads } = context;
   let sortToLookBackOn = sortToLookBackOnFromAnswer(event, state) ?? columnMoveToLookBackOn(event, state) ?? state.sortToLookBackOn;
   if (sortToLookBackOn === null) return state;
   if (sortToLookBackOn.atChangeCount !== state.workbookChangeCount || context.refusalOfEveryEdit !== null)
@@ -467,7 +542,7 @@ export function offerUndoIfSortChangedResults(state: PageState, event?: Dynamic,
       ? state
       : {
           ...state,
-          sortToLookBackOn: sortToLookBackOn,
+          sortToLookBackOn,
         };
   let tookTooLong = sortToLookBackOn.before.calculationTookTooLong || reads.calculationTookTooLong;
   if ('moved' in sortToLookBackOn) {
@@ -485,7 +560,7 @@ export function offerUndoIfSortChangedResults(state: PageState, event?: Dynamic,
       }),
     };
   }
-  let { sorted: sorted, before: readsBefore, column: column, direction: direction } = sortToLookBackOn;
+  let { sorted, before: readsBefore, column, direction } = sortToLookBackOn;
   let changedResults = tookTooLong ? null : resultsChangedBySort(readsBefore, reads, sorted);
   return {
     ...state,
@@ -493,37 +568,40 @@ export function offerUndoIfSortChangedResults(state: PageState, event?: Dynamic,
     ...(changedResults !== null && {
       undoOffer: {
         kind: 'sortChangedResults',
-        column: column,
-        direction: direction,
+        column,
+        direction,
         results: changedResults,
         isSaved: state.saving === 'allSaved',
       },
     }),
   };
 }
-export const isIndexInSpan = (index?: Dynamic, start?: Dynamic, count?: Dynamic) =>
+/** Whether an index is found (not `null`) and lies in the span of `count` lines from `start`. */
+export const isIndexInSpan = (index: number | null, start: number, count: number): index is number =>
   index !== null && index >= start && index < start + count;
-export const isRowFixed = (edge?: Dynamic) => edge?.isRowAbsolute ?? true;
-export const isSameColumnEdge = (edge?: Dynamic, otherEdge?: Dynamic) =>
+export const isRowFixed = (edge: RowPoint | null) => edge?.isRowAbsolute ?? true;
+export const isSameColumnEdge = (edge: ColumnPoint | null, otherEdge: ColumnPoint | null) =>
   edge?.c === otherEdge?.c && edge?.isColumnAbsolute === otherEdge?.isColumnAbsolute;
 export const ROW_DEPENDENT_FUNCTION_PATTERN = /\b(?:ROW|OFFSET|INDIRECT)\s*\(/i;
-export const cellValueKey = (value?: Dynamic) =>
+export const cellValueKey = (value: ValueContents | null) =>
   `${value?.kind} ${value?.kind === 'number' ? value.value.toPrecision(15) : value?.value}`;
-export const areSameCellValues = (cells?: Dynamic, otherCells?: Dynamic) =>
+export const areSameCellValues = (cells: readonly CellOnShow[], otherCells: readonly CellOnShow[]) =>
   cells.length === otherCells.length &&
-  cells.every((cell?: Dynamic, nth?: Dynamic) => {
+  cells.every((cell, nth) => {
     let otherCell = otherCells[nth];
     return otherCell !== undefined && isSameCellValue(cell, otherCell);
   });
+export const isSpillFromRow = ({ r, spill }: Pick<CellContents, 'r' | 'spill'>): boolean =>
+  (spill?.kind === 'fills' ? spill.to : spill?.wouldFillTo)?.r === r;
 export const NOW_OR_TODAY_PATTERN = /\b(?:NOW|TODAY)\s*\(/i;
-export const comesBeforeInReadingOrder = (first?: Dynamic, second?: Dynamic) =>
+export const comesBeforeInReadingOrder = (first: CellPosition, second: CellPosition) =>
   first.rowIndex === second.rowIndex ? first.columnIndex < second.columnIndex : first.rowIndex < second.rowIndex;
 export const resultsChangedByColumnMove = (
-  readsBefore: Dynamic,
-  readsAfter: Dynamic,
-  { sheetId: sheetIdMoved, area: area, cameFrom: cameFrom }: Dynamic,
+  readsBefore: WorkbookReads,
+  readsAfter: WorkbookReads,
+  { sheetId: sheetIdMoved, area, cameFrom }: Pick<ColumnsOfTableMoving, 'sheetId' | 'area' | 'cameFrom'>,
 ) =>
-  changedFormulaResults(readsBefore, readsAfter, sheetIdMoved, (sheetId?: Dynamic, cell?: Dynamic, position?: Dynamic) => {
+  changedFormulaResults(readsBefore, readsAfter, sheetIdMoved, (sheetId, cell, position) => {
     let valuesAfter = resultCellsOfFormula(readsAfter, sheetId, cell);
     if (valuesAfter === null) return false;
     let columnBefore =

@@ -528,12 +528,8 @@ fn spilled_values<'a>(workbook: &'a Workbook, sheet: &Sheet) -> HashMap<(usize, 
         }
         let Some(SpillOutcome::Fills { array, .. }) = &outcome.spill else { continue };
         let (Some(ar), Some(ac)) = (sheet.rows.position(*r), sheet.columns.position(*c)) else { continue };
-        for i in 0..array.rows() {
-            for j in 0..array.columns() {
-                if (i, j) != (0, 0) {
-                    out.insert((ar + i, ac + j), ((ar, ac), array.get(i, j)));
-                }
-            }
+        for ((i, j), value) in array.stored_entries().filter(|(position, _)| *position != (0, 0)) {
+            out.insert((ar + i, ac + j), ((ar, ac), value));
         }
     }
     out

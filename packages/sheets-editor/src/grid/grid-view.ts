@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { columnsOfTableMoving, columnGripsOfTables } from '../selection/move-table-columns.ts';
 import { readsWithColumnsMoved, columnsRidingOf } from './moved-columns.ts';
 import { readsWithUnansweredEntries } from '../editor/unanswered-entries.ts';
@@ -100,7 +99,7 @@ import { cellValueOf, usersOfCell, listLinesOfCell, NO_LIST_LINES } from '../mod
 import { readCellLink } from '../links/cell-links.ts';
 import { resolvedHorizontalAlignment } from '../format/toolbar-choices.ts';
 import { shownCellText } from '../format/shown-text.ts';
-import { textOverflowAround, cellTextLayout, cellsJoinForOverflow, shareOverflowWidth, NO_TEXT_OVERFLOW, mayCellTextFade } from './text-overflow.ts';
+import { textOverflowAround, cellTextLayout, cellsJoinForOverflow, shareOverflowWidth, NO_TEXT_OVERFLOW, mayCellTextFade, wrappingOfWrapText } from './text-overflow.ts';
 import {
   chipPersonOf,
   doColumnSpansOverlap,
@@ -120,8 +119,7 @@ import {
   isBoxShownOrEmpty,
   COMMENT_CARD_ROOM_AT_FOOT,
 } from './cards-place.ts';
-import { isCheckboxFormat } from '../chips/checkboxes.ts';
-import { booleanOfValue } from '../chips/checkbox-presses.ts';
+import { isCheckboxFormat, booleanOfValue } from '../chips/checkboxes.ts';
 import { isFormulaCell, areasOverlap } from '../model/workbook.ts';
 import { dropdownAtCell } from '../chips/dropdown-options.ts';
 import { NO_COLOR } from '../model/colors.ts';
@@ -157,7 +155,7 @@ import { fillHandleBox, fillAreaOfDrag } from '../selection/fill-handle.ts';
 import { areaCoveringChanges, MAX_CHANGE_GROUPS_APART, changesSpanWholeLines } from '../agent/changes-by-agent.ts';
 import { cellsShownByAgent } from '../agent/shown-by-agent.ts';
 import { movingLinesDropIndex, selectedWholeLines } from '../selection/move-lines.ts';
-import { entryLooksOf, textAtStartOfEntry } from '../editor/entry-looks.ts';
+import { entryLooksOf, textAtStartOfEntry, hasEntryLists } from '../editor/entry-looks.ts';
 import {
   isEntryExpanded,
   isExpandOfferedInEntry as isExpandOfferedInEntryImported,
@@ -194,60 +192,139 @@ import { POINTER_DRAG_KINDS } from '../selection/pointer.ts';
 import { doesEntryReadSigns } from '../editor/start-entry.ts';
 import { workingCardRoom } from '../agent/turn-of-agent.ts';
 import { newMovedCellsParts, movedCellsCopy, windowOfLines } from './moved-cells-copy.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selectionSummary?: Dynamic, isReadOnly?: Dynamic, shift: Dynamic = null) {
+import type { SelectionHandle } from '../kit/selection-frame.tsx';
+import type { CellContents, ColumnId, RowId } from '@open-artifact/sheets-core';
+import type { ChangeJoinedInMark, FontMark, OwnFilter, PageState } from '../state/initial-state.ts';
+import type { ReadsWithTextMeasurer, ShiftOfView } from '../state/controller.ts';
+import type { PointerPressed } from '../state/event-reducer.ts';
+import type { SelectionOfferSide } from '../state/offers-at-selection.ts';
+import type { CellId } from '../model/workbook.ts';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { LineSpan } from '../model/line-ids.ts';
+import type { CellArea, CellPosition } from '../selection/model.ts';
+import type { FigureOfCells } from '../selection/figures.ts';
+import type { MovingCellsDrag } from '../selection/move-cells.ts';
+import type { EditorFolds } from '../editor/editor-box.ts';
+import type { FlagRoom } from '../presence/flags.ts';
+import type { SelectionCorners } from '../presence/selections.ts';
+import type { AreaSpansOnScreen, EdgesOfCells, GridPane, PaneRect } from './geometry.ts';
+import type { CellLooks } from './header-gray-fill.ts';
+import type { TextReachPastCell } from './text-overflow.ts';
+import type { ColumnSpan, PlacedTableOnSheet } from './sticky-headers.ts';
+import type { DrawnBox } from './view-boxes.ts';
+import type { FormulaShownAsText } from './formulas-shown.ts';
+import type { CopyOfHeldCells, MovedCellsParts } from './moved-cells-copy.ts';
+import type {
+  BoxLitByLink,
+  DrawnCell,
+  DrawnRow,
+  FadingBox,
+  GroundUnderButton,
+  KeptHeaderDrawn,
+  ReferenceMark,
+  TableOutlineDrawn,
+} from './grid-drawing.tsx';
+/** The grid as the page draws it: its rows, cells, boxes, marks and controls. */
+export type GridView = ReturnType<typeof gridViewOf>;
+/** A fix on a cell: the formula offered, or what is shown while the agent works on it. */
+export interface FixOnCell {
+  cellId: CellId;
+  askId: number;
+  formula: string | null;
+  shownWhileItWaits: string | null;
+}
+/** Where the text of the cell with the fix pill starts, how wide it is, and the room it has. */
+export interface FixPillText {
+  left: number;
+  width: number;
+  room: number;
+}
+/** A filter button as the grid places it, with the box it is held in while its column scrolls on and the grounds under it. */
+export interface FilterButtonHeldInView {
+  tableKey: string;
+  headerKept: string | null;
+  heldInView: FadingBox | null;
+  groundsWhereHeld: readonly GroundUnderButton[];
+}
+/** The rows of a header kept in sight over the cells being moved. */
+export interface HeaderKeptOverMovedCells extends LineSpan {
+  isOfFoundTable: boolean;
+}
+/** What is worked out once, at the press, for cells being moved: the parts of their copies, and the header kept over them. */
+export interface StartOfMovedCells {
+  parts: MovedCellsParts;
+  isFoundTable: boolean;
+  headerKept: HeaderKeptOverMovedCells | null;
+  inHeaderKept: WeakMap<CopyOfHeldCells, CopyOfHeldCells>;
+}
+/** The row and column in sight where a merged area is drawn. */
+export interface MergeAnchor {
+  rowIndex: number | undefined;
+  columnIndex: number | undefined;
+}
+/** The fields of the grid's view whose words are kept to the ones they can be, beside the rest of it. */
+type LiteralsOfGridView = Record<string, unknown> & {
+  placedViewHeldBy: SelectionHandle | 'all' | null;
+  pillOfFix: (Record<string, unknown> & { side: 'left' | 'right' }) | null;
+};
+export function gridViewOf(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  selectionSummary: FigureOfCells | null,
+  isReadOnly: boolean,
+  shift: ShiftOfView | null = null,
+) {
   let columnsMoving = columnsOfTableMoving(state, reads);
   let moveUnanswered = state.moveOfColumnsUnanswered?.before === reads ? state.moveOfColumnsUnanswered.moved : null;
   let columnsMove = columnsMoving ?? moveUnanswered;
   let movedColumns = columnsMove === null ? null : readsWithColumnsMoved(reads, columnsMove);
   let readsMoved = movedColumns?.reads ?? reads;
-  let readsNow = readsWithUnansweredEntries(readsMoved, state);
+  let readsNow: ReadsWithTextMeasurer = readsWithUnansweredEntries(readsMoved, state);
   let body = {
     left: ROW_HEADER_WIDTH,
     top: COLUMN_HEADER_HEIGHT,
     width: cellsAreaWidth(state),
     height: cellsAreaHeight(state),
   };
-  let { sheetId: sheetId } = state;
+  let { sheetId } = state;
   let ownRowOrder = ownRowOrderOfSheet(readsNow, sheetId);
   let layout = layoutOfView(state, readsMoved);
   let [rowReach, columnReach] = [extraReachOfShift(shift?.y ?? 0), extraReachOfShift(shift?.x ?? 0)];
   let [rowPaneSpans, columnPaneSpans] = [rowPanes(state, layout, state, rowReach), columnPanes(state, layout, state, columnReach)];
-  let spansOfArea = (area?: Dynamic) => rangeSpansOnScreen(area, state, layout, state);
+  let spansOfArea = (area: CellArea) => rangeSpansOnScreen(area, state, layout, state);
   let isActiveCellInSheet = state.activeCell.sheetId === sheetId;
   let activeArea = isActiveCellInSheet ? mergedAreaOrCellOf(readsNow, state.activeCell) : null;
-  let areaOfSelection = isActiveCellInSheet ? selectedArea(state, readsNow) : null;
+  const areaOfSelection = isActiveCellInSheet ? selectedArea(state, readsNow) : null;
   let selectedAreas = isActiveCellInSheet ? areasOfAllRanges(state, readsNow) : [];
   let shownUnderPattern = shownUnderPatternOf(state);
-  let isRowSelected = (rowIndex?: Dynamic) =>
-    selectedAreas.some(({ topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic) => isInSpan(rowIndex, topRowIndex, rowCount));
-  let isColumnSelected = (columnIndex?: Dynamic) =>
+  let isRowSelected = (rowIndex: number) =>
+    selectedAreas.some(({ topRowIndex, rowCount }: CellArea) => isInSpan(rowIndex, topRowIndex, rowCount));
+  let isColumnSelected = (columnIndex: number) =>
     selectedAreas.some(
-      ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) => isInSpan(columnIndex, leftColumnIndex, columnCount),
+      ({ leftColumnIndex, columnCount }: CellArea) => isInSpan(columnIndex, leftColumnIndex, columnCount),
     );
   let commentAreas = (state.comments ?? []).flatMap(
-    ({ cells: cells, isResolved: isResolved }: Dynamic) =>
+    ({ cells, isResolved }) =>
       isResolved || cells.activeCell.sheetId !== sheetId ? [] : (selectedAreaAsSeen(cells, readsNow) ?? []),
   );
   let areasWrittenByAgent = state.writtenInTurnOfAgent.flatMap(
-    (cells?: Dynamic) => (cells.activeCell.sheetId !== sheetId ? [] : (cachedSelectedArea(cells, readsNow) ?? [])),
+    (cells) => (cells.activeCell.sheetId !== sheetId ? [] : (cachedSelectedArea(cells, readsNow) ?? [])),
   );
-  let cellIdAt = (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+  let cellIdAt = (rowIndex: number, columnIndex: number): CellId => {
     let cellId = readsNow.cellIdAt(sheetId, rowIndex, columnIndex);
     if (cellId === null) throw Error('a cell to draw is not in the sheet');
     return cellId;
   };
-  let formatsByIndex = new (Map as Dynamic)();
+  let formatsByIndex = new Map<number, WholeCellFormat>();
   let drawnFormats = drawnFormatsOf(readsNow, sheetId, conditionalFormatsGivenNow(state, readsNow));
   let drawnFormatsBefore = movedColumns === null ? drawnFormats : drawnFormatsOf(reads, sheetId, conditionalFormatsGivenNow(state, reads));
-  let drawnFormatsMoved =
+  let drawnFormatsMoved: CellLooks =
     movedColumns === null
       ? drawnFormats
       : {
-          formatOf: (cell?: Dynamic) => drawnFormats.formatOver(readsNow.formatOf(cell), movedColumns.layBefore(cell)),
-          formatOver: (format?: Dynamic, cell?: Dynamic) => drawnFormats.formatOver(format, movedColumns.layBefore(cell)),
-          lookOf(cell?: Dynamic, position?: Dynamic) {
+          formatOf: (cell: CellId) => drawnFormats.formatOver(readsNow.formatOf(cell), movedColumns.layBefore(cell)),
+          formatOver: (format: WholeCellFormat, cell: CellId) => drawnFormats.formatOver(format, movedColumns.layBefore(cell)),
+          lookOf(cell: CellId, position: CellPosition) {
             let cellBefore = movedColumns.layBefore(cell);
             if (cellBefore === cell) return drawnFormats.lookOf(cell, position);
             return drawnFormatsBefore.lookOf(cellBefore, reads.positionOfCell(cellBefore) ?? position);
@@ -257,21 +334,21 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   let isFilterHeaderArea = makeIsFilterHeaderArea(state, readsNow, layout);
   let outlinedTables = tablesToOutline(state, readsNow);
   let isInTableHeader = makeIsInTableHeader(outlinedTables);
-  let headerGroundOf = (area?: Dynamic) => (isFilterHeaderArea(area) ? 'header' : isInTableHeader(area) ? 'foundHeader' : 'sheet');
-  let looks = looksWithoutHeaderGray(drawnFormatsMoved, readsNow, (area?: Dynamic) => headerGroundOf(area) !== 'sheet');
+  let headerGroundOf = (area: CellArea) => (isFilterHeaderArea(area) ? 'header' : isInTableHeader(area) ? 'foundHeader' : 'sheet');
+  let looks = looksWithoutHeaderGray(drawnFormatsMoved, readsNow, (area: CellArea) => headerGroundOf(area) !== 'sheet');
   let isInTable = makeIsInTable(state, readsNow, outlinedTables);
   let tableEdgeColumnsOfRow = makeTableEdgeColumnsOfRow(state, readsNow, layout, outlinedTables);
   let cornersOfTable = makeCornersOfTable(state, readsNow, layout, outlinedTables);
   let isCellMarkedForAttention = makeIsCellMarkedForAttention(state, readsNow);
   let isColumnLineInTable = makeIsColumnLineInTable(state, readsNow, layout, outlinedTables);
-  let isBorderedPastArea = ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount, ...restOfArea }: Dynamic) =>
+  let isBorderedPastArea = ({ leftColumnIndex, columnCount, ...restOfArea }: CellArea) =>
     leftColumnIndex + columnCount !== layout.frozenColumnCount &&
     cornersOfTable({
       ...restOfArea,
       leftColumnIndex: shownLineAtOrAfter(layout.columnEdges, leftColumnIndex + columnCount),
       columnCount: 1,
     })?.includes('left') === true;
-  let formatAt = (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+  let formatAt = (rowIndex: number, columnIndex: number): WholeCellFormat => {
     let key = rowIndex * layout.columnCount + columnIndex;
     let format = formatsByIndex.get(key) ?? looks.formatOf(cellIdAt(rowIndex, columnIndex));
     formatsByIndex.set(key, format);
@@ -279,16 +356,16 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   };
   let editedCellPosition =
     state.mode.kind === 'editing' && isActiveCellInSheet ? readsNow.positionOfCell(activeAnchorCell(state, readsNow)) : null;
-  let cellAsShown = (cell?: Dynamic, format?: Dynamic) => (state.areFormulasShown ? cellWithFormulaShown(cell, format) : cell);
-  let fixCells = state.fixesOnCells.stage?.sheetId === sheetId ? cellsOfFixes(state) : [];
-  let fixByCellKey = new (Map as Dynamic)(fixCells.map((fix?: Dynamic) => [cellKeyText(fix.cellId), fix]));
+  let cellAsShown = (cell: CellContents | null, format: Pick<WholeCellFormat, 'cellControl'>) => (state.areFormulasShown ? cellWithFormulaShown(cell, format) : cell);
+  let fixCells: FixOnCell[] = state.fixesOnCells.stage?.sheetId === sheetId ? cellsOfFixes(state) : [];
+  let fixByCellKey = new Map<string, FixOnCell>(fixCells.map((fix: FixOnCell): [string, FixOnCell] => [cellKeyText(fix.cellId), fix]));
   let activeCellFixPill = fixPillOfActiveCell(state, readsNow);
   let keyOfFixWithKeys = activeCellFixPill === null ? null : cellKeyText(activeCellFixPill.cellId);
   let fixPill = fixPillShown(state, readsNow);
   let keyOfFixPill = fixPill === null ? null : cellKeyText(fixPill.cellId);
-  let fixPillTexts: Dynamic = [];
-  let fixTextEnds = new (Map as Dynamic)();
-  let doesTextOverflowCell = (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+  let fixPillTexts: FixPillText[] = [];
+  let fixTextEnds = new Map<string, number>();
+  let doesTextOverflowCell = (rowIndex: number, columnIndex: number) => {
     if (
       isInTableHeader({
         topRowIndex: rowIndex,
@@ -313,10 +390,10 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     let rowHeight = layout.rowEdges.sizeOf(rowIndex);
     return (
       isTextLike &&
-      !format.alignment.wrap &&
+      format.alignment.wrap !== true &&
       readsNow.mergedAreaAt(sheetId, {
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
+        rowIndex,
+        columnIndex,
       }) === null &&
       doesHeaderTextWrapBesideButton(readsNow, fixFormula ?? shownCellText(cellOrSpill, 0, readsNow.decimalSign).text, format.font, {
         cellWidth: layout.columnEdges.sizeOf(columnIndex),
@@ -324,29 +401,29 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       })
     );
   };
-  let columnIndexes = columnPaneSpans.flatMap((columnPane?: Dynamic) => shownColumnIndicesInPane(columnPane, layout));
+  let columnIndexes = columnPaneSpans.flatMap((columnPane: GridPane) => shownColumnIndicesInPane(columnPane, layout));
   let rowsToDraw =
     layout.columnCount === 0
       ? []
       : rowPaneSpans.flatMap(
-          (rowPane?: Dynamic) =>
+          (rowPane: GridPane) =>
             shownRowIndicesInPane(rowPane, layout).map(
-              (rowIndex?: Dynamic) => ({
-                rowIndex: rowIndex,
+              (rowIndex: number) => ({
+                rowIndex,
                 span: rowPane,
               }),
             ),
         );
-  let rowIndexes = rowsToDraw.map(({ rowIndex: rowIndex }: Dynamic) => rowIndex);
-  let columnIdByIndex = new (Map as Dynamic)(
-    layout.rowCount === 0 ? [] : columnIndexes.map((columnIndex?: Dynamic) => [columnIndex, cellIdAt(0, columnIndex).columnId]),
+  let rowIndexes = rowsToDraw.map(({ rowIndex }) => rowIndex);
+  let columnIdByIndex = new Map<number, ColumnId>(
+    layout.rowCount === 0 ? [] : columnIndexes.map((columnIndex: number): [number, ColumnId] => [columnIndex, cellIdAt(0, columnIndex).columnId]),
   );
   let mergedAreas = [
-    ...new (Set as Dynamic)(
+    ...new Set<CellArea>(
       rowPaneSpans.flatMap(
-        (rowPane?: Dynamic) =>
+        (rowPane: GridPane) =>
           columnPaneSpans.flatMap(
-            (columnPane?: Dynamic) =>
+            (columnPane: GridPane) =>
               readsNow.mergedAreasIn(sheetId, {
                 topRowIndex: rowPane.first,
                 rowCount: rowPane.count,
@@ -357,20 +434,20 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       ),
     ),
   ];
-  let mergedAreaAnchors = new (Map as Dynamic)(
+  let mergedAreaAnchors = new Map<CellArea, MergeAnchor>(
     mergedAreas.map(
-      (mergedArea?: Dynamic) => [
+      (mergedArea: CellArea): [CellArea, MergeAnchor] => [
         mergedArea,
         {
-          rowIndex: rowIndexes.find((rowIndex?: Dynamic) => isInSpan(rowIndex, mergedArea.topRowIndex, mergedArea.rowCount)),
+          rowIndex: rowIndexes.find((rowIndex: number) => isInSpan(rowIndex, mergedArea.topRowIndex, mergedArea.rowCount)),
           columnIndex: columnIndexes.find(
-            (columnIndex?: Dynamic) => isInSpan(columnIndex, mergedArea.leftColumnIndex, mergedArea.columnCount),
+            (columnIndex: number) => isInSpan(columnIndex, mergedArea.leftColumnIndex, mergedArea.columnCount),
           ),
         },
       ],
     ),
   );
-  function cellsOfRow(rowIndex?: Dynamic, rowId?: Dynamic, rowPane?: Dynamic, columnPane?: Dynamic) {
+  function cellsOfRow(rowIndex: number, rowId: RowId, rowPane: GridPane, columnPane: GridPane): DrawnCell[] {
     let scroll = {
       scrollLeft: columnPane.scroll,
       scrollTop: rowPane.scroll,
@@ -382,12 +459,12 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     let paneEnd = columnsOfPane.leftColumnIndex + columnsOfPane.columnCount;
     let columnIndexesOfPane = shownColumnIndicesInPane(columnPane, layout);
     let mergedAreasInRow = mergedAreas.filter(
-      (mergedArea?: Dynamic) => isInSpan(rowIndex, mergedArea.topRowIndex, mergedArea.rowCount),
+      (mergedArea: CellArea) => isInSpan(rowIndex, mergedArea.topRowIndex, mergedArea.rowCount),
     );
     let commentAreasInRow = commentAreas.filter(
-      (commentArea?: Dynamic) => isInSpan(rowIndex, commentArea.topRowIndex, commentArea.rowCount),
+      (commentArea: CellArea) => isInSpan(rowIndex, commentArea.topRowIndex, commentArea.rowCount),
     );
-    let blocksInRow =
+    let blocksInRow: ColumnSpan[] =
       editedCellPosition?.rowIndex === rowIndex
         ? [
             ...mergedAreasInRow,
@@ -398,8 +475,8 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           ]
         : mergedAreasInRow;
     let tableEdgeColumns = tableEdgeColumnsOfRow(rowIndex);
-    let cells: Dynamic = [];
-    let nextFreeColumn: Dynamic = 0;
+    let cells: DrawnCell[] = [];
+    let nextFreeColumn = 0;
     let columnsWithContent = readsNow.columnIndexesOnShowIn(sheetId, rowIndex);
     let lastColumnBefore = columnsWithContent[lowerBoundIndex(columnsWithContent, columnsOfPane.leftColumnIndex) - 1];
     let columnsToDraw = columnPane.areFrozen
@@ -410,45 +487,45 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           columnsWithContent[lowerBoundIndex(columnsWithContent, paneEnd)] ?? [],
         ]
           .flat()
-          .filter((columnIndex?: Dynamic) => isLineShown(layout.columnEdges, columnIndex));
-    let isMergedBefore = (columnIndex?: Dynamic) => {
+          .filter((columnIndex: number) => isLineShown(layout.columnEdges, columnIndex));
+    let isMergedBefore = (columnIndex: number) => {
       let firstColumn = Math.min(columnIndex, paneEnd);
       let columnCount = Math.max(columnIndex + 1, columnsOfPane.leftColumnIndex) - firstColumn;
       let betweenArea = {
         topRowIndex: rowIndex,
         rowCount: 1,
         leftColumnIndex: firstColumn,
-        columnCount: columnCount,
+        columnCount,
       };
       return readsNow.mergedAreasIn(sheetId, betweenArea).length > 0;
     };
-    let overflowRoomLeftOf = (columnIndex?: Dynamic) => {
+    let overflowRoomLeftOf = (columnIndex: number) => {
       let cellId = cellIdAt(rowIndex, columnIndex);
       let cell = readsNow.cellOf(cellId);
       let cellOrSpill = cell ?? readsNow.spilledCellOf(cellId);
       let value = cellValueOf(cellOrSpill);
       let columnWidth = layout.columnEdges.sizeOf(columnIndex);
-      let { cellControl: cellControl, alignment: alignment, font: font } = formatAt(rowIndex, columnIndex);
+      let { cellControl, alignment, font } = formatAt(rowIndex, columnIndex);
       if (
         cellAsShown(cell, {
-          cellControl: cellControl,
+          cellControl,
         }) !== cell
       )
         return 0;
       if ((fixByCellKey.get(cellKeyText(cellId))?.formula ?? null) !== null) return 0;
       return textOverflowAround(
         cellTextLayout(value, {
-          isMerged: mergedAreasInRow.some((mergedArea?: Dynamic) => mergedArea.leftColumnIndex === columnIndex),
+          isMerged: mergedAreasInRow.some((mergedArea: CellArea) => mergedArea.leftColumnIndex === columnIndex),
           isTypedIn: editedCellPosition?.rowIndex === rowIndex && editedCellPosition.columnIndex === columnIndex,
           isOfDropdown: cellControl.kind === 'dropdown',
           hasFilterButton: hasFilterButton(rowIndex, cellId.columnId),
           isPerson: usersOfCell(cell).length > 0,
           linkDrawnAs:
             readCellLink(cell, {
-              cellControl: cellControl,
+              cellControl,
             })?.drawnAs ?? null,
           isFormulaShown: false,
-          isWrappedByFormat: alignment.wrap,
+          wrappingByFormat: wrappingOfWrapText(alignment.wrap),
           holdsList: listLinesOfCell(cell).length > 0,
           hasRoomToWrap: hasRoomForText(columnWidth, font.size),
         }),
@@ -459,26 +536,26 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       ).toLeft;
     };
     let overflowSpanOf = (
-      columnIndex?: Dynamic,
-      cellRect?: Dynamic,
-      textReach?: Dynamic,
-      blockingColumns?: Dynamic,
-      leftmostColumn: Dynamic = columnsOfPane.leftColumnIndex,
-    ) => {
+      columnIndex: number,
+      cellRect: EdgesOfCells,
+      textReach: TextReachPastCell,
+      blockingColumns: readonly number[],
+      leftmostColumn: number = columnsOfPane.leftColumnIndex,
+    ): ColumnSpan => {
       let contentIndex = lowerBoundIndex(columnsWithContent, columnIndex);
-      let leftColumn = (Math.max as Dynamic)(
+      let leftColumn = Math.max(
         layout.columnEdges.indexAt(cellRect.left - textReach.toLeft),
         (columnsWithContent[contentIndex - 1] ?? -1) + 1,
-        ...blocksInRow.map((block?: Dynamic) => (block.leftColumnIndex < columnIndex ? block.leftColumnIndex + block.columnCount : 0)),
-        ...blockingColumns.map((column?: Dynamic) => (column < columnIndex ? column + 1 : 0)),
+        ...blocksInRow.map((block: ColumnSpan) => (block.leftColumnIndex < columnIndex ? block.leftColumnIndex + block.columnCount : 0)),
+        ...blockingColumns.map((column: number) => (column < columnIndex ? column + 1 : 0)),
         nextFreeColumn,
         Math.min(columnIndex, leftmostColumn),
       );
       let nextContentColumn = columnsWithContent[contentIndex + 1] ?? layout.columnCount;
-      let rightLimit = (Math.min as Dynamic)(
+      let rightLimit = Math.min(
         nextContentColumn,
-        ...blocksInRow.map((block?: Dynamic) => (block.leftColumnIndex > columnIndex ? block.leftColumnIndex : layout.columnCount)),
-        ...blockingColumns.map((column?: Dynamic) => (column >= columnIndex ? column + 1 : layout.columnCount)),
+        ...blocksInRow.map((block: ColumnSpan) => (block.leftColumnIndex > columnIndex ? block.leftColumnIndex : layout.columnCount)),
+        ...blockingColumns.map((column: number) => (column >= columnIndex ? column + 1 : layout.columnCount)),
       );
       let canBorrowRight =
         textReach.toRight > 0 &&
@@ -504,16 +581,16 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         columnCount: endColumn - leftColumn,
       };
     };
-    let sameLookSpanOf = (columnIndex?: Dynamic, format?: Dynamic, span?: Dynamic) => {
-      let leftColumn: Dynamic = columnIndex;
-      for (let lookSoFar: Dynamic = format; leftColumn > span.leftColumnIndex; leftColumn -= 1) {
+    let sameLookSpanOf = (columnIndex: number, format: WholeCellFormat, span: ColumnSpan): ColumnSpan => {
+      let leftColumn = columnIndex;
+      for (let lookSoFar = format; leftColumn > span.leftColumnIndex; leftColumn -= 1) {
         let look = formatAt(rowIndex, leftColumn - 1);
         if (!cellsJoinForOverflow(look, lookSoFar, !isReadOnly)) break;
         lookSoFar = look;
       }
       let endOfSpan = span.leftColumnIndex + span.columnCount;
-      let endColumn: Dynamic = columnIndex + 1;
-      for (let lookSoFar: Dynamic = format; endColumn < endOfSpan; endColumn += 1) {
+      let endColumn = columnIndex + 1;
+      for (let lookSoFar = format; endColumn < endOfSpan; endColumn += 1) {
         let look = formatAt(rowIndex, endColumn);
         if (!cellsJoinForOverflow(lookSoFar, look, !isReadOnly)) break;
         lookSoFar = look;
@@ -524,12 +601,12 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       };
     };
     let overflowStartOf = (
-      columnIndex?: Dynamic,
-      format?: Dynamic,
-      cellRect?: Dynamic,
-      textReach?: Dynamic,
-      blockingColumns?: Dynamic,
-    ) => {
+      columnIndex: number,
+      format: WholeCellFormat,
+      cellRect: EdgesOfCells,
+      textReach: TextReachPastCell,
+      blockingColumns: readonly number[],
+    ): number => {
       let { leftColumnIndex: leftColumn } = sameLookSpanOf(
         columnIndex,
         format,
@@ -540,23 +617,23 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         topRowIndex: rowIndex,
         rowCount: 1,
         leftColumnIndex: leftColumn,
-        columnCount: columnCount,
+        columnCount,
       };
-      return (Math.max as Dynamic)(
+      return Math.max(
         leftColumn,
         ...(columnCount === 0 ? [] : readsNow.mergedAreasIn(sheetId, betweenArea)).map(
-          (mergedArea?: Dynamic) => mergedArea.leftColumnIndex + mergedArea.columnCount,
+          (mergedArea: CellArea) => mergedArea.leftColumnIndex + mergedArea.columnCount,
         ),
       );
     };
-    for (let columnIndex of columnsToDraw as Dynamic) {
+    for (let columnIndex of columnsToDraw) {
       let isInPane = isInSpan(columnIndex, columnsOfPane.leftColumnIndex, columnsOfPane.columnCount);
       let mergedArea = mergedAreasInRow.find(
-        ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) => isInSpan(columnIndex, leftColumnIndex, columnCount),
+        ({ leftColumnIndex, columnCount }: CellArea) => isInSpan(columnIndex, leftColumnIndex, columnCount),
       );
       let mergeAnchor = mergedArea === undefined ? undefined : mergedAreaAnchors.get(mergedArea);
       if (mergedArea !== undefined && !(mergeAnchor?.rowIndex === rowIndex && mergeAnchor.columnIndex === columnIndex)) continue;
-      let area = mergedArea ?? {
+      let area: CellArea = mergedArea ?? {
         topRowIndex: rowIndex,
         leftColumnIndex: columnIndex,
         rowCount: 1,
@@ -573,18 +650,18 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         columnIndex: mergedArea?.leftColumnIndex ?? columnIndex,
       };
       let columnId = columnIdByIndex.get(columnIndex);
-      let cellId =
+      let cellId: CellId =
         mergedArea === undefined && columnId !== undefined
           ? {
-              sheetId: sheetId,
-              rowId: rowId,
-              columnId: columnId,
+              sheetId,
+              rowId,
+              columnId,
             }
           : cellIdAt(position.rowIndex, position.columnIndex);
       let cell = readsNow.cellOf(cellId);
-      let { format: format, paints: paints, isTextColorFromRule: isTextColorFromRule } = looks.lookOf(cellId, position);
-      let { formula: fixFormula = null, shownWhileItWaits = null } = fixByCellKey.get(cellKeyText(cellId)) ?? {};
-      let cellShown =
+      let { format, paints, isTextColorFromRule } = looks.lookOf(cellId, position);
+      let { formula: fixFormula = null, shownWhileItWaits = null }: Partial<FixOnCell> = fixByCellKey.get(cellKeyText(cellId)) ?? {};
+      let cellShown: CellContents | FormulaShownAsText | null =
         fixFormula === null
           ? cellAsShown(cell, format)
           : {
@@ -599,31 +676,31 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         shownUnderPattern !== null &&
         !isFormulaShown &&
         selectedAreas.some(
-          (area2?: Dynamic) =>
-            isInSpan(position.rowIndex, area2.topRowIndex, area2.rowCount) &&
-            isInSpan(position.columnIndex, area2.leftColumnIndex, area2.columnCount),
+          (selected: CellArea) =>
+            isInSpan(position.rowIndex, selected.topRowIndex, selected.rowCount) &&
+            isInSpan(position.columnIndex, selected.leftColumnIndex, selected.columnCount),
         )
           ? withShownUnderPattern(cellOrSpill, shownUnderPattern)
           : cellOrSpill;
       let value = cellValueOf(valueSource);
       let isOfDropdown = format.cellControl.kind === 'dropdown';
-      let people = usersOfCell(cell).map((userId?: Dynamic) => chipPersonOf(state.profilesById, userId));
+      let people = usersOfCell(cell).map((userId) => chipPersonOf(state.profilesById, userId));
       let [firstPerson = null] = people;
       let { url: linkUrl = null, drawnAs: linkDrawnAs = null } = readCellLink(cellShown, format) ?? {};
       let checkboxState = isCheckboxFormat(format) ? booleanOfValue(value) : null;
       let cellWidth = cellRect.right - cellRect.left;
       let isCheckboxReadOnly = checkboxState !== null && isFormulaCell(readsNow, cellId);
-      let hasFilterButton2 = mergedArea === undefined && hasFilterButton(rowIndex, cellId.columnId);
-      let filterButtonRoom = hasFilterButton2 && !doesTextOverflowCell(rowIndex, columnIndex) ? filterButtonRoomInCell(cellWidth) : 0;
+      let hasOwnFilterButton = mergedArea === undefined && hasFilterButton(rowIndex, cellId.columnId);
+      let filterButtonRoom = hasOwnFilterButton && !doesTextOverflowCell(rowIndex, columnIndex) ? filterButtonRoomInCell(cellWidth) : 0;
       let textFlowAsks = {
         isMerged: mergedArea !== undefined,
         isTypedIn: editedCellPosition?.rowIndex === position.rowIndex && editedCellPosition.columnIndex === position.columnIndex,
-        isOfDropdown: isOfDropdown,
-        hasFilterButton: hasFilterButton2 && filterButtonRoomInCell(cellWidth) > 0,
+        isOfDropdown,
+        hasFilterButton: hasOwnFilterButton && filterButtonRoomInCell(cellWidth) > 0,
         isPerson: firstPerson !== null,
-        linkDrawnAs: linkDrawnAs,
-        isFormulaShown: isFormulaShown,
-        isWrappedByFormat: format.alignment.wrap,
+        linkDrawnAs,
+        isFormulaShown,
+        wrappingByFormat: wrappingOfWrapText(format.alignment.wrap),
         holdsList: listLinesOfCell(cell).length > 0,
         hasRoomToWrap: hasRoomForText(cellWidth, format.font.size),
       };
@@ -639,15 +716,15 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         valueSource,
         charsThatFitWidth(cellWidth - pillRoom - filterButtonRoom, format.font),
         readsNow.decimalSign,
-        (text2?: Dynamic) =>
-          pillRoom === 0 && readsNow.widthOfCharacters(text2, format.font) > textRoomPastPadding(cellWidth - filterButtonRoom),
+        (textShown: string) =>
+          pillRoom === 0 && readsNow.widthOfCharacters(textShown, format.font) > textRoomPastPadding(cellWidth - filterButtonRoom),
       );
       let textColor = isTextColorFromRule ? null : shownText.textColor;
       let text = checkboxState === null ? (firstPerson?.name ?? shownText.text) : '';
       let spokenValue =
         firstPerson === null
           ? cellShownText(valueSource, readsNow.decimalSign)
-          : joinPeopleNames(people.map(({ name: name }: Dynamic) => name));
+          : joinPeopleNames(people.map(({ name }) => name));
       let spokenText = checkboxState === null ? spokenValue : text;
       let alignment = isFormulaShown ? 'left' : resolvedHorizontalAlignment(format.alignment.horizontal, value);
       let parts = cellTextLinks(cell, format, text, linkUrl).parts;
@@ -677,7 +754,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
               {
                 topRowIndex: rowIndex,
                 rowCount: 1,
-                ...overflowSpan,
+                ...overflowSpan!,
               },
               layout,
             ),
@@ -695,10 +772,10 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           Math.min(textBox.left + textBox.width, cellBox.left + Math.ceil(readsNow.widthOfCharacters(text, format.font)) + CELL_TEXT_PADDING_X),
         );
       if (isOverflowing) {
-        nextFreeColumn = overflowSpan.leftColumnIndex + overflowSpan.columnCount;
-        for (let index: Dynamic = cells.length - 1; index >= 0; index -= 1) {
+        nextFreeColumn = overflowSpan!.leftColumnIndex + overflowSpan!.columnCount;
+        for (let index = cells.length - 1; index >= 0; index -= 1) {
           let drawnCell = cells[index];
-          if (drawnCell === undefined || drawnCell.columnNumber - 1 < overflowSpan.leftColumnIndex) break;
+          if (drawnCell === undefined || drawnCell.columnNumber - 1 < overflowSpan!.leftColumnIndex) break;
           cells[index] = {
             ...drawnCell,
             hasLineAtRight: false,
@@ -739,13 +816,13 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         mergedColumnCount: mergedArea?.columnCount ?? null,
         hiddenAtLeft: mergedBox === null ? 0 : Math.max(0, mergedBox.showsIn.left - cellBox.left),
         hiddenAtTop: mergedBox === null ? 0 : Math.max(0, mergedBox.showsIn.top - cellBox.top),
-        text: text,
+        text,
         spokenText: spokenText === text ? null : spokenText,
         textColor: textColor === null ? null : textColorNameOf(textColor),
         opensCalendar: !isReadOnly && isCalendarFormat(format, readsNow, cellId),
         isCalendarOpen: isActive && state.calendar !== null,
-        pill: pill,
-        opensDropdownList: opensDropdownList,
+        pill,
+        opensDropdownList,
         isDropdownListOpen: isActive && state.dropdown !== null,
         ...(isFormatComingToCell(state, cellId) && {
           comesAtKey: true,
@@ -756,38 +833,38 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         textLeft: textBox.left,
         textWidth: textBox.width,
         isTextWrapped: textFlow === 'wrap',
-        areLinesCut: textFlow === 'wrap' && !format.alignment.wrap,
+        areLinesCut: textFlow === 'wrap' && format.alignment.wrap !== true,
         textLeftInWholeRow: overflowStart === null ? textBox.left : layout.columnEdges.startOf(overflowStart) - scroll.scrollLeft,
         wouldTextWrapIfToldTo:
           textFlow !== 'wrap' &&
           cellTextLayout(value, {
             ...textFlowAsks,
-            isWrappedByFormat: true,
+            wrappingByFormat: 'wrap',
           }) === 'wrap',
-        alignment: alignment,
+        alignment,
         isCutAtEndOnly: value?.kind === 'number' && pillRoom === 0,
         mayTextFade:
           (isCellInTable || textCutByViewAt !== null) &&
           mayCellTextFade(
             {
-              text: text,
-              format: format,
+              text,
+              format,
               textWidth: textBox.width,
-              textCutByViewAt: textCutByViewAt,
-              indentToCenter: indentToCenter,
+              textCutByViewAt,
+              indentToCenter,
               mergedColumnCount: mergedArea?.columnCount ?? null,
               takenAtRight: filterButtonRoom,
               isTextWrapped: textFlow === 'wrap',
               isPerson: firstPerson !== null,
-              pill: pill,
-              opensDropdownList: opensDropdownList,
-              linkDrawnAs: linkDrawnAs,
+              pill,
+              opensDropdownList,
+              linkDrawnAs,
             },
             readsNow,
           ),
-        textCutByViewAt: textCutByViewAt,
-        cutByViewAt: cutByViewAt,
-        takenAtRight: textFlow === 'wrap' && format.alignment.wrap ? 0 : filterButtonRoom,
+        textCutByViewAt,
+        cutByViewAt,
+        takenAtRight: textFlow === 'wrap' && format.alignment.wrap === true ? 0 : filterButtonRoom,
         hasTintOfFilterHeader: isFilterHeaderArea(area),
         hasGroundOfFoundHeader: isInTableHeader(area),
         isInTable: isCellInTable,
@@ -798,25 +875,25 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         cornersOfTable: cornersOfTable(area),
         isHeadingOfTable: isHeading,
         hasColorOfHeading: isHeading && !hasFontFormatting(format) && !isCellMarkedForAttention(cellId, area),
-        indentToCenter: indentToCenter,
+        indentToCenter,
         linesInTextBox: isOverflowing
           ? columnIndexesOfPane
               .filter(
-                (columnIndex2?: Dynamic) =>
-                  isInSpan(columnIndex2, overflowSpan.leftColumnIndex, overflowSpan.columnCount - 1) && !isColumnLineInTable(rowIndex, columnIndex2),
+                (columnInBox: number) =>
+                  isInSpan(columnInBox, overflowSpan!.leftColumnIndex, overflowSpan!.columnCount - 1) && !isColumnLineInTable(rowIndex, columnInBox),
               )
               .map(
-                (columnIndex2?: Dynamic) =>
-                  layout.columnEdges.startOf(columnIndex2 + 1) - 1 - layout.columnEdges.startOf(overflowSpan.leftColumnIndex),
+                (columnInBox: number) =>
+                  layout.columnEdges.startOf(columnInBox + 1) - 1 - layout.columnEdges.startOf(overflowSpan!.leftColumnIndex),
               )
           : NO_LINES_IN_TEXT_BOX,
         hasLineAtRight:
           columnIndex >= nextFreeColumn - 1 &&
           (![area.topRowIndex, area.topRowIndex + area.rowCount - 1].every(
-            (rowIndex2?: Dynamic) => isColumnLineInTable(rowIndex2, area.leftColumnIndex + area.columnCount - 1),
+            (rowAtEdge: number) => isColumnLineInTable(rowAtEdge, area.leftColumnIndex + area.columnCount - 1),
           ) ||
             isBorderedPastArea(area)),
-        format: format,
+        format,
         isPerson: firstPerson !== null,
         checkbox:
           checkboxState === null
@@ -839,21 +916,21 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
               },
         avatarUrl: firstPerson?.avatarUrl ?? null,
         otherPeople: people.length < 2 ? NO_OTHER_PEOPLE : people.slice(1),
-        linkUrl: linkUrl,
-        linkDrawnAs: linkDrawnAs,
+        linkUrl,
+        linkDrawnAs,
         linkCellKey: linkDrawnAs === 'words' || parts.length > 0 ? cellKeyText(cellId) : null,
         partsWithLinks: parts,
-        listLines: listLines,
-        paints: paints,
+        listLines,
+        paints,
         frozenBy: rowPane.areFrozen && columnPane.areFrozen ? 'both' : rowPane.areFrozen ? 'row' : columnPane.areFrozen ? 'column' : null,
-        isActive: isActive,
+        isActive,
         elementId: isActive ? `cell-${cellId.rowId}-${cellId.columnId}` : null,
         isSaidToHaveComment: isActive
           ? commentAtActiveCell(state, readsNow) !== null
           : someAreaHasCell(mergedArea === undefined ? commentAreasInRow : commentAreas, position.rowIndex, position.columnIndex),
         isSelected: someAreaHasCell(selectedAreas, rowIndex, columnIndex),
         isError: fixFormula === null && errorCodeOfCell(cell ?? valueSource) !== null,
-        looksLikeError: looksLikeError,
+        looksLikeError,
         isErrorMuted: looksLikeError && someAreaHasCell(areasWrittenByAgent, rowIndex, columnIndex),
         isFormulaOfFix: fixFormula !== null,
         shownForFixThatWaits: shownWhileItWaits,
@@ -864,8 +941,8 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     }
     return cells;
   }
-  let rows = rowsToDraw.map(({ rowIndex: rowIndex, span: pane }: Dynamic) => {
-    let { rowId: rowId } = cellIdAt(rowIndex, 0);
+  let rows = rowsToDraw.map(({ rowIndex, span: pane }) => {
+    let { rowId } = cellIdAt(rowIndex, 0);
     let top = layout.rowEdges.startOf(rowIndex) - pane.scroll;
     let height = layout.rowEdges.sizeOf(rowIndex);
     let [shownTop, shownHeight] = clipSpanToShown(top, height, pane.showFrom, pane.showTo);
@@ -873,22 +950,22 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       key: rowId,
       headerText: String(rowNumberAsStored(rowIndex, ownRowOrder)),
       rowNumber: rowIndex + 1,
-      top: top,
-      height: height,
+      top,
+      height,
       outOfViewAbove: shownTop - top,
       outOfViewBelow: top + height - (shownTop + shownHeight),
       isActive: isRowSelected(rowIndex),
       isFrozen: pane.areFrozen,
       isNumberBehindBars: false,
       isBehindBars: false,
-      cells: columnPaneSpans.flatMap((columnPane?: Dynamic) => cellsOfRow(rowIndex, rowId, pane, columnPane)),
+      cells: columnPaneSpans.flatMap((columnPane) => cellsOfRow(rowIndex, rowId, pane, columnPane)),
     };
   });
   let borderLines = !readsNow.hasBorderLine(sheetId)
     ? NO_BORDER_LINES
     : rowPaneSpans.flatMap(
-        (rowPane?: Dynamic) =>
-          columnPaneSpans.flatMap((columnPane?: Dynamic) => {
+        (rowPane) =>
+          columnPaneSpans.flatMap((columnPane) => {
             let paneLeft = -columnPane.scroll - columnPane.showFrom;
             let paneTop = -rowPane.scroll - rowPane.showFrom;
             let rowLimit = rowPane.areFrozen ? rowPane.count : layout.rowCount;
@@ -896,11 +973,11 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
             let lines = buildBorderPaths({
               rows: linesAroundIndexes(shownRowIndicesInPane(rowPane, layout), layout.rowEdges),
               columns: linesAroundIndexes(shownColumnIndicesInPane(columnPane, layout), layout.columnEdges),
-              formatAt: ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+              formatAt: ({ rowIndex, columnIndex }) =>
                 isInSpan(rowIndex, 0, rowLimit) && isInSpan(columnIndex, 0, columnLimit) ? formatAt(rowIndex, columnIndex) : null,
-              mergedAreas: mergedAreas,
-              leftOfColumn: (columnIndex?: Dynamic) => paneLeft + layout.columnEdges.startOf(columnIndex),
-              topOfRow: (rowIndex?: Dynamic) => paneTop + layout.rowEdges.startOf(rowIndex),
+              mergedAreas,
+              leftOfColumn: (columnIndex) => paneLeft + layout.columnEdges.startOf(columnIndex),
+              topOfRow: (rowIndex) => paneTop + layout.rowEdges.startOf(rowIndex),
             });
             return lines.length === 0
               ? []
@@ -908,7 +985,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
                   {
                     key: `${rowPane.areFrozen} ${columnPane.areFrozen}`,
                     box: paneRect(columnPane, rowPane),
-                    lines: lines,
+                    lines,
                   },
                 ];
           }),
@@ -922,8 +999,8 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       : drawnBoxOfSpans(spansOfArea(areaOfSelection));
   let lastColumnsWithText = [
     ...rowIndexes.map(
-      (rowIndex?: Dynamic) =>
-        lastShownLineWhere(readsNow.columnIndexesOnShowIn(sheetId, rowIndex), layout.columnEdges, (columnIndex?: Dynamic) => {
+      (rowIndex) =>
+        lastShownLineWhere(readsNow.columnIndexesOnShowIn(sheetId, rowIndex), layout.columnEdges, (columnIndex) => {
           let cellId = cellIdAt(rowIndex, columnIndex);
           let value = cellValueOf(readsNow.cellOf(cellId) ?? readsNow.spilledCellOf(cellId));
           return value?.kind !== 'text' || value.value !== '';
@@ -931,38 +1008,38 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     ),
     ...mergedAreas
       .filter(
-        (mergedArea?: Dynamic) =>
+        (mergedArea) =>
           mergedAreaAnchors.get(mergedArea)?.rowIndex !== undefined &&
           readsNow.columnIndexesOnShowIn(sheetId, mergedArea.topRowIndex).includes(mergedArea.leftColumnIndex),
       )
-      .map(({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) => leftColumnIndex + columnCount - 1),
+      .map(({ leftColumnIndex, columnCount }) => leftColumnIndex + columnCount - 1),
     ...[
-      ...ownFiltersOfSheet(state, sheetId).flatMap((filter?: Dynamic) => areaOfFilteredTable(readsNow, filter) ?? []),
-      ...outlinedTables.map(({ area: area }: Dynamic) => area),
+      ...ownFiltersOfSheet(state, sheetId).flatMap((filter: OwnFilter): CellArea | [] => areaOfFilteredTable(readsNow, filter) ?? []),
+      ...outlinedTables.map(({ area }: Pick<PlacedTableOnSheet, 'area'>) => area),
     ]
       .filter(
-        ({ topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic) =>
-          rowIndexes.some((rowIndex?: Dynamic) => isInSpan(rowIndex, topRowIndex, rowCount)),
+        ({ topRowIndex, rowCount }) =>
+          rowIndexes.some((rowIndex) => isInSpan(rowIndex, topRowIndex, rowCount)),
       )
-      .map(({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) => leftColumnIndex + columnCount - 1),
-  ].filter((columnIndex?: Dynamic) => columnIndex !== null);
-  let otherRangeBoxes = (isActiveCellInSheet ? state.otherRanges : []).flatMap((range?: Dynamic) => {
+      .map(({ leftColumnIndex, columnCount }) => leftColumnIndex + columnCount - 1),
+  ].filter((columnIndex) => columnIndex !== null);
+  let otherRangeBoxes = (isActiveCellInSheet ? state.otherRanges : []).flatMap((range) => {
     let area = selectedArea(range, readsNow);
     let box = area === null ? null : drawnBoxOfSpans(spansOfArea(area));
-    let { activeCell: activeCell, selectionCorner: selectionCorner } = range;
+    let { activeCell, selectionCorner } = range;
     let key = `${activeCell.rowId} ${activeCell.columnId} ${selectionCorner.rowId} ${selectionCorner.columnId}`;
     return box === null
       ? []
       : [
           {
-            key: key,
-            box: box,
+            key,
+            box,
           },
         ];
   });
   let columnHeaders = columnPaneSpans.flatMap(
-    (columnPane?: Dynamic) =>
-      shownColumnIndicesInPane(columnPane, layout).flatMap((columnIndex?: Dynamic) => {
+    (columnPane) =>
+      shownColumnIndicesInPane(columnPane, layout).flatMap((columnIndex) => {
         let columnId = columnIdByIndex.get(columnIndex);
         if (columnId === undefined) return [];
         return [
@@ -984,16 +1061,16 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     ...(dropdownStretches.length < 2
       ? []
       : dropdownStretches.filter(
-          (stretch?: Dynamic, index?: Dynamic) => dropdownEditor?.reach !== 'ownStretch' || index === dropdownEditor.indexOfOwnStretch,
+          (stretch, index) => dropdownEditor?.reach !== 'ownStretch' || index === dropdownEditor.indexOfOwnStretch,
         )
-    ).flatMap(({ top: top, bottom: bottom }: Dynamic) => {
+    ).flatMap(({ top, bottom }) => {
       let topPosition = readsNow.positionOfCell({
-        sheetId: sheetId,
+        sheetId,
         rowId: top.r,
         columnId: top.c,
       });
       let bottomPosition = readsNow.positionOfCell({
-        sheetId: sheetId,
+        sheetId,
         rowId: bottom.r,
         columnId: bottom.c,
       });
@@ -1004,22 +1081,22 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         rowCount: bottomPosition.rowIndex - topPosition.rowIndex + 1,
         columnCount: 1,
       };
-      return [drawnBoxOfSpans(spansOfArea(area))].filter((box?: Dynamic) => box !== null);
+      return [drawnBoxOfSpans(spansOfArea(area))].filter((box) => box !== null);
     }),
     ...areasOfRuleBeingEdited(state, readsNow)
-      .map((area?: Dynamic) => drawnBoxOfSpans(spansOfArea(area)))
-      .filter((box?: Dynamic) => box !== null),
+      .map((area) => drawnBoxOfSpans(spansOfArea(area)))
+      .filter((box) => box !== null),
   ];
-  let isFixAwaited = fixCells.some(({ formula: formula }: Dynamic) => formula === null);
-  let fixAreas = (fixCells.length === 0 ? [] : fixAreasToDraw(state, readsNow)).flatMap((area?: Dynamic) => {
+  let isFixAwaited = fixCells.some(({ formula }) => formula === null);
+  let fixAreas = (fixCells.length === 0 ? [] : fixAreasToDraw(state, readsNow)).flatMap((area) => {
     let box = drawnBoxOfSpans(spansOfArea(area));
     if (box === null) return [];
-    let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount } = area;
-    let textEnds = Array.from<Dynamic, Dynamic>(
+    let { topRowIndex, leftColumnIndex, rowCount } = area;
+    let textEnds = Array.from(
       {
         length: rowCount,
       },
-      (input?: Dynamic, rowOffset?: Dynamic) => {
+      (_, rowOffset) => {
         let textEnd = fixTextEnds.get(`${topRowIndex + rowOffset} ${leftColumnIndex}`);
         return textEnd === undefined ? 0 : textEnd - box.left;
       },
@@ -1027,24 +1104,24 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     let roomToRight = box.showsIn.left + box.showsIn.width + BOX_MARGIN_PAST_SIGHT - box.left;
     return [
       {
-        area: area,
+        area,
         box: {
           ...box,
-          width: Math.min(roomToRight, (Math.max as Dynamic)(box.width, ...textEnds)),
+          width: Math.min(roomToRight, Math.max(box.width, ...textEnds)),
         },
       },
     ];
   });
   let marksOfFixes = fixAreas.map(
-    ({ area: { key: key }, box: box }: Dynamic) => ({
-      key: key,
-      box: box,
+    ({ area: { key }, box }) => ({
+      key,
+      box,
       isAwaited: isFixAwaited,
     }),
   );
   let fixPillArea = fixPill === null ? null : mergedAreaOrCellOf(readsNow, fixPill.cellId);
   let fixPillCellBox = fixPillArea === null ? null : drawnBoxOfSpans(spansOfArea(fixPillArea));
-  let fixAreaOfPill = fixAreas.find(({ area: area }: Dynamic) => fixPillArea !== null && areasOverlap(area, fixPillArea));
+  let fixAreaOfPill = fixAreas.find(({ area }) => fixPillArea !== null && areasOverlap(area, fixPillArea));
   let fixPillBox =
     fixPillCellBox === null
       ? null
@@ -1065,13 +1142,13 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   let spill = isActiveCellInSheet ? spillOutlineOfEntry(state, readsNow, entryCellId) : null;
   let tableOfSpill = spill?.kind === 'fills' ? tableAreaOfFilledBody(spill.area, outlinedTables, state, readsNow) : null;
   let spillBox = spill === null || tableOfSpill !== null ? null : drawnBoxOfSpans(spansOfArea(spill.area));
-  let referenceMarks = new (Map as Dynamic)();
+  let referenceMarks = new Map<string, ReferenceMark>();
   let { stage: formulaFromWords } = state.formulaFromWords;
   let arrivingFormula = formulaFromWords?.kind === 'proposed' && formulaFromWords.isArriving ? formulaFromWords : null;
-  for (let reference of state.referencesInEntry as Dynamic) {
-    let { sheetId: refSheetIdOrHue, area: refAreaOrKey, hue: refHueOrBox } = reference;
+  for (let reference of state.referencesInEntry) {
+    let { sheetId: referenceSheetId, area: referenceArea, hue: referenceHue } = reference;
     if (reference.pieces !== undefined) {
-      for (let piece of (refSheetIdOrHue === sheetId ? reference.pieces : []) as Dynamic) {
+      for (let piece of referenceSheetId === sheetId ? reference.pieces : []) {
         let pieceBox = drawnBoxOfSpans(spansOfArea(piece));
         if (pieceBox === null) continue;
         let pieceKey = areaToA1AsStored(piece, null);
@@ -1079,21 +1156,21 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           referenceMarks.set(pieceKey, {
             cells: pieceKey,
             box: pieceBox,
-            hue: refHueOrBox,
+            hue: referenceHue,
             leavesTextAsItIs: false,
             arrivesAtPart: null,
           });
       }
       continue;
     }
-    let refKey = areaToA1AsStored(refAreaOrKey, null);
-    if (refSheetIdOrHue !== sheetId || referenceMarks.has(refKey)) continue;
-    let isOneCell = refAreaOrKey.rowCount === 1 && refAreaOrKey.columnCount === 1;
+    let refKey = areaToA1AsStored(referenceArea, null);
+    if (referenceSheetId !== sheetId || referenceMarks.has(refKey)) continue;
+    let isOneCell = referenceArea.rowCount === 1 && referenceArea.columnCount === 1;
     let position = {
-      rowIndex: refAreaOrKey.topRowIndex,
-      columnIndex: refAreaOrKey.leftColumnIndex,
+      rowIndex: referenceArea.topRowIndex,
+      columnIndex: referenceArea.leftColumnIndex,
     };
-    let areaShown = (isOneCell ? readsNow.mergedAreaAt(sheetId, position) : null) ?? refAreaOrKey;
+    let areaShown = (isOneCell ? readsNow.mergedAreaAt(sheetId, position) : null) ?? referenceArea;
     let refBox = drawnBoxOfSpans(spansOfArea(areaShown));
     let leavesTextAsItIs = reference.isNamedInWords === true;
     let arrivesAtPart = arrivingFormula?.lightsAtPart[refKey] ?? null;
@@ -1101,30 +1178,30 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       referenceMarks.set(refKey, {
         cells: refKey,
         box: refBox,
-        hue: refHueOrBox,
-        leavesTextAsItIs: leavesTextAsItIs,
-        arrivesAtPart: arrivesAtPart,
+        hue: referenceHue,
+        leavesTextAsItIs,
+        arrivesAtPart,
       });
   }
-  for (let { area: reference, hue: refSheetIdOrHue } of (state.referencesInEntry.length > 0
+  for (let { area: inputArea, hue: inputHue } of state.referencesInEntry.length > 0
     ? []
-    : selectedChartInputAreas(state, readsNow)) as Dynamic) {
-    let [refAreaOrKey, refHueOrBox] = [areaToA1AsStored(reference, null), drawnBoxOfSpans(spansOfArea(reference))];
-    if (refHueOrBox !== null && !referenceMarks.has(refAreaOrKey))
-      referenceMarks.set(refAreaOrKey, {
-        cells: refAreaOrKey,
-        box: refHueOrBox,
-        hue: refSheetIdOrHue,
+    : selectedChartInputAreas(state, readsNow)) {
+    let [inputKey, inputBox] = [areaToA1AsStored(inputArea, null), drawnBoxOfSpans(spansOfArea(inputArea))];
+    if (inputBox !== null && !referenceMarks.has(inputKey))
+      referenceMarks.set(inputKey, {
+        cells: inputKey,
+        box: inputBox,
+        hue: inputHue,
         leavesTextAsItIs: true,
         arrivesAtPart: null,
       });
   }
   let stuckHeaders = stuckHeadersOfView(state, readsNow, layout, shift?.y);
-  let tableOutlineOf = (area?: Dynamic) => {
+  let tableOutlineOf = (area: CellArea): TableOutlineDrawn | null => {
     let box = drawnBoxOfSpans(spansOfArea(area));
     if (box === null) return null;
     let stuckHeader = stuckHeaders.find(
-      (stuckHeader2?: Dynamic) => stuckHeader2.firstRowIndex === area.topRowIndex && stuckHeader2.firstColumnIndex === area.leftColumnIndex,
+      (header) => header.firstRowIndex === area.topRowIndex && header.firstColumnIndex === area.leftColumnIndex,
     );
     if (stuckHeader === undefined)
       return {
@@ -1141,8 +1218,8 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   };
   let chartAreaStart = startOfAreaToChart(state, readsNow);
   let tableOutlineOfSpill = tableOfSpill === null ? null : tableOutlineOf(tableOfSpill);
-  let flagRoomOf = (area?: Dynamic) => {
-    let { left: left, top: top, right: right, bottom: bottom } = boxOfCellRange(area, layout);
+  let flagRoomOf = (area: CellArea): FlagRoom => {
+    let { left, top, right, bottom } = boxOfCellRange(area, layout);
     let position = {
       rowIndex: area.topRowIndex,
       columnIndex: area.leftColumnIndex,
@@ -1155,14 +1232,14 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       heightCovered: stuckHeadersBottom(area, stuckHeaders),
     };
   };
-  let boxWithFlagRoom = ({ across: across, down: down }: Dynamic) => {
+  let boxWithFlagRoom = ({ across, down }: AreaSpansOnScreen): DrawnBox | null => {
     let [showFrom, showTo] = [down.showFrom - FLAG_HEIGHT, down.showTo + FLAG_HEIGHT];
     let box = drawnBoxOfSpans({
-      across: across,
+      across,
       down: {
         ...down,
-        showFrom: showFrom,
-        showTo: showTo,
+        showFrom,
+        showTo,
       },
     });
     return box === null
@@ -1173,9 +1250,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         };
   };
   let reachingBoxOf =
-    (boxOfSpans?: Dynamic) =>
-    (area?: Dynamic) => {
-      let { across: across, down: down } = spansOfArea(area);
+    (boxOfSpans: (spans: AreaSpansOnScreen) => DrawnBox | null) =>
+    (area: CellArea): DrawnBox | null => {
+      let { across, down } = spansOfArea(area);
       let box = boxOfSpans({
         across: paneWithExtraReach(across, columnReach),
         down: paneWithExtraReach(down, rowReach),
@@ -1188,17 +1265,17 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           };
     };
   let [flagBoxReaching, drawnBoxReaching] = [reachingBoxOf(boxWithFlagRoom), reachingBoxOf(drawnBoxOfSpans)];
-  let selectedAreaOf = (cells?: Dynamic) => (cells.activeCell.sheetId === sheetId ? selectedAreaAsSeen(cells, readsNow) : null);
-  let commentBoxOf = (cells?: Dynamic) => {
+  let selectedAreaOf = (cells: SelectionCorners) => (cells.activeCell.sheetId === sheetId ? selectedAreaAsSeen(cells, readsNow) : null);
+  let commentBoxOf = (cells: SelectionCorners) => {
     let area = selectedAreaOf(cells);
     let box = area === null ? null : drawnBoxOfSpans(spansOfArea(area));
     return box === null || box.height === 0 ? null : box;
   };
   let marksOfComments = (state.comments ?? []).flatMap(
-    ({ handle: handle, cells: cells, isResolved: isResolved, isOpen: isOpen }: Dynamic) => {
+    ({ handle, cells, isResolved, isOpen }) => {
       let box = isResolved && !isOpen ? null : commentBoxOf(cells);
       if (box === null) return [];
-      let endsAt = (area?: Dynamic) => doesCommentEndAtSelectionCorner(cells, area, state, readsNow, layout);
+      let endsAt = (area: CellArea | null) => doesCommentEndAtSelectionCorner(cells, area, state, readsNow, layout);
       let endsAtActiveCell = endsAt(activeArea) ? 'activeCell' : null;
       let endsWith = endsAt(areaOfSelection) ? 'selection' : endsAtActiveCell;
       let isPointedAt = state.commentsPointedAt.includes(handle);
@@ -1207,10 +1284,10 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         {
           ...box,
           key: handle,
-          isOpen: isOpen,
-          isPointedAt: isPointedAt,
-          isWithAgent: isWithAgent,
-          endsWith: endsWith,
+          isOpen,
+          isPointedAt,
+          isWithAgent,
+          endsWith,
         },
       ];
     },
@@ -1223,13 +1300,13 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   let fillHandle = fillHandleBox(state, readsNow, isReadOnly);
   let isSelectionInOpenComment = [
     ...(state.newCommentOn === null ? [] : [state.newCommentOn]),
-    ...(state.comments ?? []).flatMap((comment?: Dynamic) => (isCommentMarkedOnGrid(state, comment) ? [comment.cells] : [])),
-  ].some((cells?: Dynamic) => {
+    ...(state.comments ?? []).flatMap((comment) => (isCommentMarkedOnGrid(state, comment) ? [comment.cells] : [])),
+  ].some((cells) => {
     let area = selectedAreaOf(cells);
     return areaOfSelection !== null && area !== null && isSameArea(unionOfAreas(areaOfSelection, area), area);
   });
-  let selectionsOfOthers = state.selectionsOfOthers.flatMap((selectionOfOther?: Dynamic) => {
-    let { tabKey: tabKey, userId: userId, selection: selection, movedAtMs: movedAtMs } = selectionOfOther;
+  let selectionsOfOthers = state.selectionsOfOthers.flatMap((selectionOfOther) => {
+    let { tabKey, userId, selection, movedAtMs } = selectionOfOther;
     if (selection.activeCell.sheetId !== sheetId) return [];
     let area = selectedAreaAsSeen(selection, readsNow);
     let box = area === null ? null : boxWithFlagRoom(spansOfArea(area));
@@ -1239,27 +1316,27 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     return [
       {
         key: tabKey,
-        userId: userId,
-        box: box,
+        userId,
+        box,
         ...flagRoomOf(area),
-        movedAtMs: movedAtMs,
-        isUnderOwnOutline: isUnderOwnOutline,
+        movedAtMs,
+        isUnderOwnOutline,
         ...flagLook,
       },
     ];
   });
   let marksOfChangesByAgent = state.changesByAgent
-    .filter(({ isOfLayoutAlone: isOfLayoutAlone }: Dynamic) => isOfLayoutAlone !== true)
+    .filter(({ isOfLayoutAlone }) => isOfLayoutAlone !== true)
     .flatMap(
       ({
-        revision: revision,
-        group: group,
-        cells: cells,
-        fadeBeginsAtMs: fadeBeginsAtMs,
-        joinedWith: joinedWith,
-        stoodAsOneMark: stoodAsOneMark,
-        isOfWholeLines: isOfWholeLines,
-      }: Dynamic) => {
+        revision,
+        group,
+        cells,
+        fadeBeginsAtMs,
+        joinedWith,
+        stoodAsOneMark,
+        isOfWholeLines,
+      }) => {
         if (cells.activeCell.sheetId !== sheetId) return [];
         let ownArea = cachedSelectedArea(cells, readsNow);
         let joinedArea = areaCoveringChanges(joinedWith, readsNow);
@@ -1268,23 +1345,23 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         if (area === null || box === null) return [];
         let ownBox = ownArea === null ? null : drawnBoxReaching(ownArea);
         let grewFrom = joinedArea === null ? null : stoodAsOneMark ? flagBoxReaching(joinedArea) : box;
-        let joinedRevisions = joinedWith.map((joined?: Dynamic) => joined.revision);
+        let joinedRevisions = joinedWith.map((joined: ChangeJoinedInMark) => joined.revision);
         let key = `${revision} ${group}`;
         let withFlags = flagRoomOf(area);
         return [
           {
-            key: key,
-            revision: revision,
-            fadeBeginsAtMs: fadeBeginsAtMs,
-            box: box,
+            key,
+            revision,
+            fadeBeginsAtMs,
+            box,
             all: area,
-            withFlags: withFlags,
+            withFlags,
             area: ownArea ?? area,
-            isOfWholeLines: isOfWholeLines,
+            isOfWholeLines,
             isOfPlaceShown: false,
-            ownBox: ownBox,
-            grewFrom: grewFrom,
-            joinedRevisions: joinedRevisions,
+            ownBox,
+            grewFrom,
+            joinedRevisions,
           },
         ];
       },
@@ -1292,7 +1369,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   let revisionDropped = marksOfChangesByAgent.at(-MAX_CHANGE_GROUPS_APART - 1)?.revision;
   let recentMarks = marksOfChangesByAgent
     .slice(-MAX_CHANGE_GROUPS_APART)
-    .filter(({ revision: revision }: Dynamic) => revision !== revisionDropped);
+    .filter(({ revision }) => revision !== revisionDropped);
   let agentShownCells = cellsShownByAgent(state);
   let shownArea = agentShownCells?.activeCell.sheetId === sheetId ? cachedSelectedArea(agentShownCells, readsNow) : null;
   let shownBox = shownArea === null ? null : flagBoxReaching(shownArea);
@@ -1358,11 +1435,11 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         }
       : entryLooks.lookOf(entryCellId, entryPosition);
   let entryLooksOfMode = entryLooksOf(state.mode);
-  let entryFormatWith = (marks?: Dynamic) =>
+  let entryFormatWith = (marks: readonly FontMark[]) =>
     entryLooks.formatOver(withFontMarks(readsNow.formatOf(entryCellId), marks), entryCellId);
   let entryCellFormat = entryLooksOfMode === undefined ? entryFormat : entryFormatWith([]);
   let isExpanded = isEntryExpanded(state.mode);
-  let editorFormat = isExpanded
+  let editorFormat: WholeCellFormat = isExpanded
     ? {
         ...entryCellFormat,
         alignment: {
@@ -1376,14 +1453,14 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     entryLooksOfMode === undefined
       ? entryFormat
       : entryFormatWith(
-          fontMarksWhere((mark?: Dynamic) => entryLooksOfMode.stretches.some(({ marks: marks }: Dynamic) => marks.includes(mark))),
+          fontMarksWhere((mark) => entryLooksOfMode.stretches.some(({ marks }) => marks.includes(mark))),
         );
   let pageSize = {
     width: body.width,
     height: cellsHeightAboveFloats(state),
   };
-  let placeFlag = (box?: Dynamic, area?: Dynamic, withFlags?: Dynamic) => {
-    let placeAt = (flagBox?: Dynamic) =>
+  let placeFlag = (box: DrawnBox, area: CellArea, withFlags: FlagRoom) => {
+    let placeAt = (flagBox: DrawnBox) =>
       placeSelectionFlag(
         flagBox,
         {
@@ -1408,8 +1485,8 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       ...placed,
       box: {
         ...placed.box,
-        left: left,
-        top: top,
+        left,
+        top,
       },
     };
   };
@@ -1444,9 +1521,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         )
       : null;
   let {
-    editorBox: editorBox,
-    editorLineCount: editorLineCount,
-    editorFoldsAt: editorFoldsAt,
+    editorBox,
+    editorLineCount,
+    editorFoldsAt,
   } = expandedLayout !== null
     ? {
         editorBox: {
@@ -1475,7 +1552,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           editorScale,
           state.isOnPhone && state.isNarrowByTouch,
           expandButtonRoom,
-          proposedFixesOf(state.formulaFromWords).map(({ formula: formula }: Dynamic) => formula),
+          proposedFixesOf(state.formulaFromWords).map(({ formula }: { formula: string }) => formula),
         )
       : NO_EDITOR_LAYOUT;
   let isEditorAComboBox =
@@ -1500,31 +1577,31 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     left: state.scrollLeft === 0 ? 0 : frozenColumnsWidth(layout),
     top:
       (state.scrollTop === 0 ? 0 : frozenRowsHeight(layout)) +
-      (Math.max as Dynamic)(0, ...stuckHeaders.map((stuckHeader?: Dynamic) => stuckHeader.top + stuckHeader.height - stuckHeader.showFrom)),
+      Math.max(0, ...stuckHeaders.map((stuckHeader) => stuckHeader.top + stuckHeader.height - stuckHeader.showFrom)),
     right: roomForSummary.width,
     bottom: roomForSummary.height,
   };
   let { stage: fixesStage } = state.fixesOnCells;
   let fixCellsAsked = fixesStage?.isOfSelection === true ? fixesStage.asked : null;
-  let isFixBoxAt = (left?: Dynamic, top?: Dynamic) =>
-    fixAreas.some(({ box: box }: Dynamic) => left === box.left && top >= box.top && top < box.top + box.height);
+  let isFixBoxAt = (left: number, top: number) =>
+    fixAreas.some(({ box }) => left === box.left && top >= box.top && top < box.top + box.height);
   let cellBoxesForOffer =
     lastErrorArea === null && explainedArea === null
       ? []
       : rows.flatMap(
-          (row?: Dynamic) =>
+          (row) =>
             row.cells
-              .filter(({ text: text, pill: pill, checkbox: checkbox }: Dynamic) => text !== '' || pill !== null || checkbox !== null)
-              .flatMap((cell?: Dynamic) => {
-                let { left: left, width: width, height: height, frozenBy: frozenBy } = cell;
+              .filter(({ text, pill, checkbox }) => text !== '' || pill !== null || checkbox !== null)
+              .flatMap((cell) => {
+                let { left, width, height, frozenBy } = cell;
                 let isInError = cell.looksLikeError || cell.isFormulaOfFix;
                 let top = row.top + cell.top;
                 let cellBox = {
-                  left: left,
-                  top: top,
-                  width: width,
-                  height: height,
-                  isInError: isInError,
+                  left,
+                  top,
+                  width,
+                  height,
+                  isInError,
                   isOfOffer: isInError && cell.text !== '#N/A' && (fixCellsAsked === null || isFixBoxAt(left, top)),
                   isWholeInView:
                     (frozenBy === 'column' || frozenBy === 'both' || wholeInViewRect.left <= left) &&
@@ -1546,10 +1623,10 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
               }),
         );
   let placedViews = placedViewsToDraw(state, readsNow, isReadOnly);
-  let placedViewBoxes = placedViews.flatMap(({ box: box, isInView: isInView }: Dynamic) => (isInView ? [clipBoxToShown(box)] : []));
-  let errorsOfferCornerOf = (explainedCard?: Dynamic) => {
+  let placedViewBoxes = placedViews.flatMap(({ box, isInView }) => (isInView ? [clipBoxToShown(box)] : []));
+  let errorsOfferCornerOf = (explainedCard: PaneRect | null) => {
     let lastArea = offeredErrors === null ? null : mergedAreaOrCellOf(readsNow, offeredErrors.last);
-    let askedAreas = (fixCellsAsked ?? []).flatMap((cellId?: Dynamic) => mergedAreaOrCellOf(readsNow, cellId) ?? []);
+    let askedAreas = (fixCellsAsked ?? []).flatMap((cellId: CellId) => mergedAreaOrCellOf(readsNow, cellId) ?? []);
     let firstArea = askedAreas[0] ?? firstErrorArea;
     if (firstArea === null || lastArea === null) return null;
     return errorsOfferCornerPlace(
@@ -1558,9 +1635,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         areMoreBelow:
           (fixCellsAsked === null
             ? Math.min(spansOfArea(lastArea).down.end, lastErrorArea === null ? 1 / 0 : spansOfArea(lastErrorArea).down.end)
-            : (Math.max as Dynamic)(...askedAreas.map((area?: Dynamic) => spansOfArea(area).down.end))) > wholeInViewRect.bottom,
+            : Math.max(...askedAreas.map((area: CellArea) => spansOfArea(area).down.end))) > wholeInViewRect.bottom,
         leftOfFirst: spansOfArea(firstArea).across.start,
-        rightOfFixes: (Math.max as Dynamic)(0, ...fixAreas.map(({ box: box }: Dynamic) => box.left + box.width)),
+        rightOfFixes: Math.max(0, ...fixAreas.map(({ box }) => box.left + box.width)),
       },
       state.zoom,
       explainedCard,
@@ -1590,14 +1667,14 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
   let explainedRect = explainedArea === null ? null : rectOfSpans(spansOfArea(explainedArea));
   let sideOfExplainedCell =
     explainedRect === null ? 'right' : (sideForExplainedCard(explainedRect, roomForSummary, state.zoom, cellBoxesForOffer) ?? 'under');
-  let offersAtSelection =
+  const offersAtSelection =
     areaOfSelection !== null && (selectionBox ?? activeCellBox) !== null && mayOfferAtSelection(state, readsNow, explainedCell);
   let isSingleCellSelected = offersAtSelection && isAreaJustActiveCell(state, readsNow, areaOfSelection);
   let activeDrawnCell =
     !isReadOnly && areaOfSelection !== null && isChosenCellAlone(state, readsNow, areaOfSelection)
       ? rows
-          .find(({ cells: cells }: Dynamic) => cells.some(({ isActive: isActive }: Dynamic) => isActive))
-          ?.cells.find(({ isActive: isActive }: Dynamic) => isActive)
+          .find(({ cells }) => cells.some(({ isActive }) => isActive))
+          ?.cells.find(({ isActive }) => isActive)
       : undefined;
   let endOfTextCut =
     activeDrawnCell?.wouldTextWrapIfToldTo === true
@@ -1605,17 +1682,17 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       : activeDrawnCell?.areLinesCut === true && areCellLinesCut(state.activeCell, layout, readsNow)
         ? activeDrawnCell.textLeft + activeDrawnCell.textWidth
         : null;
-  let endOfCutText = isSingleCellSelected ? endOfTextCut : null;
+  let endOfCutText = isSingleCellSelected && activeDrawnCell?.format.alignment.wrap !== 'clip' ? endOfTextCut : null;
   let isExpandOfferedAtCell =
     activeDrawnCell !== undefined &&
     isExpandOfferedAtActiveCell(state, readsNow) &&
     (endOfTextCut !== null || hasCellSeveralLines(state.activeCell, layout, readsNow));
-  let offerPlaceBeside = (side?: Dynamic) => {
+  let offerPlaceBeside = (side: SelectionOfferSide) => {
     let place = !offersAtSelection
       ? null
       : placeOfSelectionOffer(spansOfArea(areaOfSelection), roomForSummary, state.zoom, {
-          side: side,
-          endOfCutText: endOfCutText,
+          side,
+          endOfCutText,
         });
     return place !== null && isSelectionOfferCovered(place, placedViewBoxes, state.zoom, side) ? null : place;
   };
@@ -1631,22 +1708,22 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           ...summaryPlace,
         };
   return {
-    body: body,
+    body,
     yetToGlide: shift,
     density: state.density,
     rowCount: layout.rowCount,
     columnCount: layout.columnCount,
-    ownRowOrder: ownRowOrder,
-    columnHeaders: columnHeaders,
-    columnEdgeGrips: (areGripsShown ? columnHeaders : []).flatMap(({ key: key, columnNumber: columnNumber }: Dynamic) => {
+    ownRowOrder,
+    columnHeaders,
+    columnEdgeGrips: (areGripsShown ? columnHeaders : []).flatMap(({ key, columnNumber }) => {
       let grip = columnResizeGrip(columnNumber - 1, state, layout);
       if (grip === null) return [];
-      let { start: start, end: end, edge: edge } = grip;
+      let { start, end, edge } = grip;
       let isOfFrozen = columnNumber <= layout.frozenColumnCount;
       return [
         {
-          key: key,
-          isOfFrozen: isOfFrozen,
+          key,
+          isOfFrozen,
           left: start,
           width: end - start,
           edgeFromLeft: edge - start,
@@ -1654,13 +1731,13 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       ];
     }),
     gripOfColumnsForFingerAt: lineResize?.isByFinger === true ? heldEdgeAt : (lastShownColumnEdge(state, readsNow, isReadOnly)?.edge ?? null),
-    rowEdgeGrips: (areGripsShown ? rows : []).flatMap(({ key: key, rowNumber: rowNumber }: Dynamic) => {
+    rowEdgeGrips: (areGripsShown ? rows : []).flatMap(({ key, rowNumber }) => {
       let grip = rowResizeGrip(rowNumber - 1, state, layout);
       return grip === null || isRowUnderStuckHeader(rowNumber - 1, state, readsNow, layout)
         ? []
         : [
             {
-              key: key,
+              key,
               isOfFrozen: rowNumber <= layout.frozenRowCount,
               top: grip.start,
               height: grip.end - grip.start,
@@ -1670,7 +1747,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     }),
     edgeHeldOf: state.dragging?.kind === 'resizing' ? state.dragging.line.isA : null,
     heldEdgeIsOf: lineResize?.isA ?? null,
-    heldEdgeAt: heldEdgeAt,
+    heldEdgeAt,
     linesToTakeHoldOf:
       areGripsShown && (isIdleOrTapping(state) || state.dragging?.kind === 'movingLines')
         ? (selectedWholeLines(state, readsNow)?.what ?? null)
@@ -1701,25 +1778,25 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
             isOverCells: state.scrollLeft > 0,
           },
     areGridlinesHidden: sheetOfView(state, readsNow)?.areGridlinesHidden === true,
-    filterButtons: filterButtonsInView(state, readsNow, stuckHeaders, (rowIndex?: Dynamic, columnIndex?: Dynamic) => {
+    filterButtons: filterButtonsInView(state, readsNow, stuckHeaders, (rowIndex: number, columnIndex: number) => {
       let format = formatAt(rowIndex, columnIndex);
       let mergedArea = readsNow.mergedAreaAt(sheetId, {
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
+        rowIndex,
+        columnIndex,
       });
       let position =
         mergedArea === null
           ? {
-              rowIndex: rowIndex,
-              columnIndex: columnIndex,
+              rowIndex,
+              columnIndex,
             }
           : {
               rowIndex: mergedArea.topRowIndex,
               columnIndex: mergedArea.leftColumnIndex,
             };
-      let { fill: fill } = looks.lookOf(cellIdAt(position.rowIndex, position.columnIndex), position).paints;
+      let { fill } = looks.lookOf(cellIdAt(position.rowIndex, position.columnIndex), position).paints;
       let doesTextOverflow = doesTextOverflowCell(rowIndex, columnIndex);
-      let hasGround = format.alignment.wrap || mergedArea !== null || doesTextOverflow;
+      let hasGround = format.alignment.wrap === true || mergedArea !== null || doesTextOverflow;
       let area = mergedArea ?? {
         topRowIndex: rowIndex,
         rowCount: 1,
@@ -1767,7 +1844,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       },
     },
     isMoreToTheRight: lastColumnsWithText.some(
-      (columnIndex?: Dynamic) => columnEndOnScreen(columnIndex, state, layout) > cellsAreaWidth(state),
+      (columnIndex) => columnEndOnScreen(columnIndex, state, layout) > cellsAreaWidth(state),
     ),
     freezeBars: areGripsShown
       ? {
@@ -1776,18 +1853,30 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         }
       : null,
     freezeBarHeld: state.dragging?.kind === 'freezing' ? state.dragging.what : null,
-    placedViews: placedViews,
+    placedViews,
     chartBeingMade: shownChartBeingMade(state, readsNow, placedViews),
     placedViewHeldBy: state.dragging?.kind === 'movingPlacedView' ? 'all' : state.dragging?.kind === 'sizingPlacedView' ? state.dragging.sides : null,
-    borderLines: borderLines,
-    activeCellBox: activeCellBox,
-    selectionBox: selectionBox,
+    borderLines,
+    activeCellBox,
+    selectionBox,
     isSelectionJustImported: state.isSelectionJustImported,
-    isSelectionInOpenComment: isSelectionInOpenComment,
-    otherRangeBoxes: otherRangeBoxes,
+    isSelectionInOpenComment,
+    otherRangeBoxes,
+    boxesLitByLink: (state.cellsLinkedTo?.kind === 'lit' ? state.cellsLinkedTo.cells : []).flatMap((cells, index): BoxLitByLink[] => {
+      let area = cachedSelectedArea(cells, readsNow);
+      let box = area === null ? null : drawnBoxOfSpans(spansOfArea(area));
+      return box === null
+        ? []
+        : [
+            {
+              key: `${index}`,
+              box,
+            },
+          ];
+    }),
     copiedCellsBox: copiedArea === null ? null : drawnBoxOfSpans(spansOfArea(copiedArea)),
     fillHandleBox: fillHandle,
-    isFlagInSquareOfFillHandle: fillHandle !== null && marksOfComments.some(({ endsWith: endsWith }: Dynamic) => endsWith === 'selection'),
+    isFlagInSquareOfFillHandle: fillHandle !== null && marksOfComments.some(({ endsWith }) => endsWith === 'selection'),
     offersAtSelection: !offersAtSelection
       ? null
       : {
@@ -1809,7 +1898,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       columnsMoving === null
         ? null
         : columnsRidingOf(state, reads, columnsMoving, {
-            rows: rows,
+            rows,
             sheet: layout,
             reads: readsNow,
           }),
@@ -1821,16 +1910,16 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     isFingerSelecting:
       (state.dragging?.kind === 'selecting' && state.dragging.isByFinger === true) ||
       (state.dragging?.kind === 'tapping' && state.dragging.isOnActiveCell),
-    editorBox: editorBox,
-    editorLineCount: editorLineCount,
-    editorFoldsAt: editorFoldsAt,
-    editorScale: editorScale,
+    editorBox,
+    editorLineCount,
+    editorFoldsAt,
+    editorScale,
     expandedEntryCard: expandedLayout?.card ?? null,
     expandButtonStandsIn: isExpandOfferedInEntry && editorBox !== null ? 'entry' : isExpandOfferedAtCell ? 'cell' : null,
     isExpandButtonAfterPress: isExpandOfferedAtCell && state.offersAtSelection.areCellsSelectedByPointer,
     editorFlagStands: null,
     clearBodyHeight: clearPageSize.height,
-    editorFormat: editorFormat,
+    editorFormat,
     editorLooks: state.mode.kind === 'editing' ? state.mode.looks : undefined,
     doesEntryReadSigns: doesEntryReadSigns(state, readsNow),
     textHeldAsEntryOpened: textAtStartOfEntry(state.mode),
@@ -1839,9 +1928,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     editorNumbersOfLines: (state.mode.kind === 'editing' ? state.mode.numbersOfLines : undefined) ?? NO_NUMBERS_OF_LINES,
     areEditorLooksSeen: entryLooksOfMode !== undefined,
     marksOfEntryCell: fontMarksOfStyle(readsNow.formatOf(entryCellId)),
-    editorKeepsClear: editorKeepsClear,
-    editorPaints: editorPaints,
-    isEditorAComboBox: isEditorAComboBox,
+    editorKeepsClear,
+    editorPaints,
+    isEditorAComboBox,
     isEntryAmongPeople: isEntryAmongPeople(state, readsNow),
     isEditorOverCalendar: doesCellTakeCalendar(readsNow, activeAnchorCell(state, readsNow)),
     entryHintRoom:
@@ -1853,6 +1942,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
       editorPaints.fill !== null ||
       state.calendar !== null ||
       isExpanded ||
+      hasEntryLists(state.mode) ||
       !isCellEntryBlank(state.mode)
         ? null
         : entryHintRoomOf(
@@ -1866,7 +1956,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
             {
               format: editorFormat,
               frozenBy:
-                rows.flatMap(({ cells: cells }: Dynamic) => cells).find(({ isActive: isActive }: Dynamic) => isActive)?.frozenBy ??
+                rows.flatMap(({ cells }) => cells).find(({ isActive }) => isActive)?.frozenBy ??
                 null,
               canHintReachOn: activeArea.rowCount * activeArea.columnCount === 1 && editorBox.height <= activeCellBox.height + GRID_PIXEL_SLACK,
             },
@@ -1881,16 +1971,16 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
                 },
           ),
     dropdownAnchorBox: state.dropdown === null ? null : (editorBox ?? activeCellBox),
-    explainedCellBox: explainedCellBox,
-    sideOfExplainedCell: sideOfExplainedCell,
-    cornerOfErrorsOffered: cornerOfErrorsOffered,
+    explainedCellBox,
+    sideOfExplainedCell,
+    cornerOfErrorsOffered,
     areCellsOfErrorsOfferInView:
       errorsOfferArea !== null &&
       (isBoxShownOrEmpty(spansOfArea(errorsOfferArea)) ||
-        rows.some(({ cells: cells }: Dynamic) => cells.some((cell?: Dynamic) => cell.looksLikeError && cell.text !== '#N/A'))),
+        rows.some(({ cells }) => cells.some((cell) => cell.looksLikeError && cell.text !== '#N/A'))),
     roomAboveExplainedCell: roomAboveExplainedCell * state.zoom,
-    boxesReachedByEditor: boxesReachedByEditor,
-    marksOfFixes: marksOfFixes,
+    boxesReachedByEditor,
+    marksOfFixes,
     pillOfFix:
       fixPill === null || fixPillBox === null
         ? null
@@ -1920,9 +2010,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           ? null
           : tableOutlineOf(chartAreaStart),
     marksOfReferences: [...referenceMarks.values()],
-    outlinesOfOthers: outlinesOfOthers,
+    outlinesOfOthers,
     nameFlagsOfOthers: layOutSelectionFlags(selectionsOfOthers, pageSize.height, frozenRowsHeight(layout), rows),
-    marksOfComments: marksOfComments,
+    marksOfComments,
     markOfNewComment: state.newCommentOn === null ? null : commentBoxOf(state.newCommentOn),
     lowestFootWithRoomForCommentCard:
       cellsHeightAboveFloats({
@@ -1930,9 +2020,9 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         heightUnderWhatFloats: state.heightUnderCardAtFoot,
       }) -
       COMMENT_CARD_ROOM_AT_FOOT / state.zoom,
-    wouldCommentBeInTheWay: wouldCommentBeInTheWay,
-    mayCommentBePreviewed: !wouldCommentBeInTheWay && !(state.comments ?? []).some(({ isOpen: isOpen }: Dynamic) => isOpen),
-    tintsOfFind: (state.find?.hits ?? []).flatMap(({ cellId: cellId }: Dynamic) => {
+    wouldCommentBeInTheWay,
+    mayCommentBePreviewed: !wouldCommentBeInTheWay && !(state.comments ?? []).some(({ isOpen }) => isOpen),
+    tintsOfFind: (state.find?.hits ?? []).flatMap(({ cellId }) => {
       let area = cellId.sheetId === state.sheetId ? mergedAreaOrCellOf(readsNow, cellId) : null;
       let box = area === null ? null : drawnBoxOfSpans(spansOfArea(area));
       return box === null || box.height === 0
@@ -1946,7 +2036,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
           ];
     }),
     marksOnChangesByAgent: marksOnChangesByAgent.map(
-      (mark?: Dynamic, index?: Dynamic) => ({
+      (mark, index) => ({
         key: mark.key,
         revision: mark.revision,
         fadeBeginsAtMs: mark.fadeBeginsAtMs,
@@ -1960,7 +2050,7 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
         name: index === recentMarks.length - 1 || mark.isOfPlaceShown ? placeFlag(mark.box, mark.all, mark.withFlags) : null,
       }),
     ),
-    changedInTurnOffered: (state.undoOfTurnOffered?.blocks ?? []).flatMap((cells?: Dynamic) => {
+    changedInTurnOffered: (state.undoOfTurnOffered?.blocks ?? []).flatMap((cells) => {
       let area = cells.activeCell.sheetId === sheetId ? cachedSelectedArea(cells, readsNow) : null;
       return area === null ? [] : (drawnBoxOfSpans(spansOfArea(area)) ?? []);
     }),
@@ -1971,22 +2061,28 @@ export function gridViewOf(state: PageState, reads: ReadsWithTextMeasurer, selec
     roomOfWhatAddsRows: addRowsControl,
     mostRowsToAdd: addRowsControl === null ? 0 : rowsAddableAtEnd(state, readsNow, layout),
     headerThatAddsColumns: addColumnsControlBox(state, layout, isReadOnly),
-  };
+  } satisfies LiteralsOfGridView;
 }
-export function keptHeaderViewsOf(state: PageState, reads: ReadsWithTextMeasurer, isReadOnly?: Dynamic, filterButtonsOfView?: Dynamic, shift?: Dynamic) {
+export function keptHeaderViewsOf(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  isReadOnly: boolean,
+  filterButtonsOfView: readonly Pick<FilterButtonHeldInView, 'headerKept'>[],
+  shift: ShiftOfView | null,
+): KeptHeaderDrawn[] {
   let outlinedTables = tablesToOutline(state, reads);
   let isAreaMarkedByEntry = makeIsAreaMarkedByEntry(state, reads);
   let layout = layoutOfView(state, reads);
-  return stuckHeadersOfView(state, reads, layout, shift?.y).map((stuckHeader?: Dynamic) => {
-    let { firstRowIndex: firstRowIndex, rowCount: rowCount, firstColumnIndex: firstColumnIndex, columnCount: columnCount } = stuckHeader;
-    let isOfFoundTable = outlinedTables.some(({ key: key }: Dynamic) => key === stuckHeader.key);
+  return stuckHeadersOfView(state, reads, layout, shift?.y).map((stuckHeader) => {
+    let { firstRowIndex, rowCount, firstColumnIndex, columnCount } = stuckHeader;
+    let isOfFoundTable = outlinedTables.some(({ key }: Pick<PlacedTableOnSheet, 'key'>) => key === stuckHeader.key);
     let {
-      rows: rows,
-      borderLines: borderLines,
-      selectionBox: selectionBox,
-      otherRangeBoxes: otherRangeBoxes,
-      marksOfReferences: marksOfReferences,
-      filterButtons: filterButtons,
+      rows,
+      borderLines,
+      selectionBox,
+      otherRangeBoxes,
+      marksOfReferences,
+      filterButtons,
     } = gridViewOf(
       {
         ...state,
@@ -2007,11 +2103,11 @@ export function keptHeaderViewsOf(state: PageState, reads: ReadsWithTextMeasurer
       leavesBy: stuckHeader.showFrom - stuckHeader.top,
       parts: stuckHeader.parts,
       areRowNumbersItsOwn: stuckHeader.areRowNumbersItsOwn,
-      isOfFoundTable: isOfFoundTable,
-      rows: rows.flatMap((row?: Dynamic) => {
+      isOfFoundTable,
+      rows: rows.flatMap((row: DrawnRow): DrawnRow[] => {
         if (!isInSpan(row.rowNumber - 1, firstRowIndex, rowCount)) return [];
         let cells = row.cells.flatMap(
-          (cell?: Dynamic) =>
+          (cell: DrawnCell) =>
             isInSpan(cell.columnNumber - 1, firstColumnIndex, columnCount)
               ? [keptHeaderCellOf(cell, isOfFoundTable, isAreaMarkedByEntry, reads)]
               : [],
@@ -2019,11 +2115,11 @@ export function keptHeaderViewsOf(state: PageState, reads: ReadsWithTextMeasurer
         return [
           {
             ...row,
-            cells: cells,
+            cells,
           },
         ];
       }),
-      borderLines: borderLines,
+      borderLines,
       selectionBoxes: [
         ...(selectionBox === null
           ? []
@@ -2034,13 +2130,13 @@ export function keptHeaderViewsOf(state: PageState, reads: ReadsWithTextMeasurer
               },
             ]),
         ...otherRangeBoxes,
-      ].filter(({ box: box }: Dynamic) => box.top < stuckHeader.showFrom + stuckHeader.height),
-      marksOfReferences: marksOfReferences.filter(({ box: box }: Dynamic) => box.top < stuckHeader.showFrom + stuckHeader.height),
+      ].filter(({ box }) => box.top < stuckHeader.showFrom + stuckHeader.height),
+      marksOfReferences: marksOfReferences.filter(({ box }) => box.top < stuckHeader.showFrom + stuckHeader.height),
       groundsOfButtonsHeld: filterButtons.flatMap(
-        ({ tableKey: tableKey, heldInView: heldInView, groundsWhereHeld: groundsWhereHeld }: Dynamic) =>
+        ({ tableKey, heldInView, groundsWhereHeld }: FilterButtonHeldInView) =>
           tableKey === stuckHeader.key &&
           heldInView !== null &&
-          filterButtonsOfView.some(({ headerKept: headerKept }: Dynamic) => headerKept === stuckHeader.key)
+          filterButtonsOfView.some(({ headerKept }) => headerKept === stuckHeader.key)
             ? [
                 {
                   box: heldInView,
@@ -2052,7 +2148,12 @@ export function keptHeaderViewsOf(state: PageState, reads: ReadsWithTextMeasurer
     };
   });
 }
-export function startOfMovedCells(state: Dynamic, { scrollAtPress: scrollAtPress }: Dynamic = {}, heldArea: Dynamic, reads: ReadsWithTextMeasurer) {
+export function startOfMovedCells(
+  state: PageState,
+  { scrollAtPress }: Pick<MovingCellsDrag, 'scrollAtPress'> = {} as Pick<MovingCellsDrag, 'scrollAtPress'>,
+  heldArea: CellArea,
+  reads: ReadsWithTextMeasurer,
+): StartOfMovedCells {
   let stateAtPress = {
     ...state,
     ...scrollAtPress,
@@ -2060,24 +2161,24 @@ export function startOfMovedCells(state: Dynamic, { scrollAtPress: scrollAtPress
   };
   let outlinedTables = tablesToOutline(stateAtPress, reads);
   let headerKept = stuckHeadersOfView(stateAtPress, reads).find(
-    ({ firstRowIndex: firstRowIndex, firstColumnIndex: firstColumnIndex }: Dynamic) =>
+    ({ firstRowIndex, firstColumnIndex }) =>
       isInSpan(firstRowIndex, heldArea.topRowIndex, heldArea.rowCount) && isInSpan(firstColumnIndex, heldArea.leftColumnIndex, heldArea.columnCount),
   );
   return {
     parts: newMovedCellsParts(),
-    isFoundTable: outlinedTables.some(({ area: area }: Dynamic) => isSameArea(area, heldArea)),
+    isFoundTable: outlinedTables.some(({ area }: Pick<PlacedTableOnSheet, 'area'>) => isSameArea(area, heldArea)),
     headerKept:
       headerKept === undefined
         ? null
         : {
             firstIndex: headerKept.firstRowIndex,
             count: headerKept.rowCount,
-            isOfFoundTable: outlinedTables.some(({ key: key }: Dynamic) => key === headerKept.key),
+            isOfFoundTable: outlinedTables.some(({ key }: Pick<PlacedTableOnSheet, 'key'>) => key === headerKept.key),
           },
-    inHeaderKept: new WeakMap(),
+    inHeaderKept: new WeakMap<CopyOfHeldCells, CopyOfHeldCells>(),
   };
 }
-export function linesOfPaneWithin(pane?: Dynamic, firstIndex?: Dynamic, count?: Dynamic) {
+export function linesOfPaneWithin(pane: GridPane, firstIndex: number, count: number): LineSpan | null {
   let from = Math.max(firstIndex, pane.first);
   let to = Math.min(firstIndex + count, pane.first + pane.count);
   return to > from
@@ -2087,15 +2188,15 @@ export function linesOfPaneWithin(pane?: Dynamic, firstIndex?: Dynamic, count?: 
       }
     : null;
 }
-export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, isReadOnly?: Dynamic) {
-  let { dragging: dragging } = state;
+export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, isReadOnly: boolean) {
+  let { dragging } = state;
   if (dragging?.kind !== 'movingCells' || dragging.landing === null) return null;
   let heldArea = selectedArea(state, reads);
   if (heldArea === null) return null;
   let start = movedCellsStartByPress.get(dragging.press) ?? startOfMovedCells(state, dragging, heldArea, reads);
   movedCellsStartByPress.set(dragging.press, start);
   let layout = layoutOfView(state, reads);
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layout;
+  let { rowEdges, columnEdges } = layout;
   let landingArea = landingAreaOfMovingCells(state, reads) ?? heldArea;
   let [rowsMovedBy, columnsMovedBy] = [
     landingArea.topRowIndex - heldArea.topRowIndex,
@@ -2111,33 +2212,33 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
           topRowIndex: restedAt.rowIndex,
           leftColumnIndex: restedAt.columnIndex,
         };
-  let copyOf = (rows?: Dynamic, columns?: Dynamic) =>
+  let copyOf = (rows: LineSpan, columns: LineSpan) =>
     movedCellsCopy(
       start.parts,
       {
-        rows: rows,
-        columns: columns,
+        rows,
+        columns,
       },
       {
         held: heldArea,
-        landing: landing,
+        landing,
       },
       {
         sheetId: state.sheetId,
-        layout: layout,
+        layout,
       },
       state,
       reads,
-      (stateOfCopy?: Dynamic, readsOfCopy?: Dynamic) => gridViewOf(stateOfCopy, readsOfCopy, null, isReadOnly),
+      (stateOfCopy, readsOfCopy) => gridViewOf(stateOfCopy, readsOfCopy, null, isReadOnly),
     );
-  let inHeaderKept = (part?: Dynamic, isOfFoundTable?: Dynamic) => {
+  let inHeaderKept = (part: CopyOfHeldCells, isOfFoundTable: boolean) => {
     let kept = start.inHeaderKept.get(part);
     if (kept !== undefined) return kept;
-    let cellOf = (cell?: Dynamic) => keptHeaderCellOf(cell, isOfFoundTable, () => false, reads);
-    let made = {
+    let cellOf = (cell: DrawnCell) => keptHeaderCellOf(cell, isOfFoundTable, () => false, reads);
+    let made: CopyOfHeldCells = {
       ...part,
       rows: part.rows.map(
-        (row?: Dynamic) => ({
+        (row: DrawnRow) => ({
           ...row,
           cells: row.cells.map(cellOf),
         }),
@@ -2146,8 +2247,8 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
     return (start.inHeaderKept.set(part, made), made);
   };
   let panes = rowPanes(state, layout, state).flatMap(
-    (rowPane?: Dynamic) =>
-      columnPanes(state, layout, state).flatMap((columnPane?: Dynamic) => {
+    (rowPane) =>
+      columnPanes(state, layout, state).flatMap((columnPane) => {
         let rowsInPane = linesOfPaneWithin(rowPane, landingArea.topRowIndex, landingArea.rowCount);
         let columnsInPane = linesOfPaneWithin(columnPane, landingArea.leftColumnIndex, landingArea.columnCount);
         if (rowsInPane === null || columnsInPane === null) return [];
@@ -2174,7 +2275,7 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
         let part = copyOf(rowsOfCopy, columnsOfCopy);
         if (part === null) return [];
         let firstRowShown = part.rows.find(
-          ({ rowNumber: rowNumber }: Dynamic) => rowNumber - 1 + rowsMovedBy >= rowsInPane.firstIndex,
+          ({ rowNumber }) => rowNumber - 1 + rowsMovedBy >= rowsInPane.firstIndex,
         );
         let at = {
           left: columnEdges.startOf(columnsOfCopy.firstIndex + columnsMovedBy) - columnPane.scroll,
@@ -2196,13 +2297,13 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
           {
             key: `${rowPane.areFrozen} ${columnPane.areFrozen}`,
             showsIn: paneRect(columnPane, rowPane),
-            landingAt: landingAt,
-            at: at,
-            part: part,
+            landingAt,
+            at,
+            part,
             headerKept: isHeaderKept
               ? {
                   top: rowPane.showFrom,
-                  part: inHeaderKept(headerPart, start.headerKept.isOfFoundTable),
+                  part: inHeaderKept(headerPart!, start.headerKept!.isOfFoundTable),
                 }
               : null,
           },
@@ -2214,9 +2315,9 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
     rangeSpansOnScreen(landingArea, state, layout, state),
     rangeSpansOnScreen(heldArea, state, layout, state),
   ];
-  let headerShown = panes.find((pane?: Dynamic) => pane.headerKept !== null)?.headerKept ?? null;
+  let headerShown = panes.find((pane) => pane.headerKept !== null)?.headerKept ?? null;
   let firstRow =
-    headerShown?.part.rows[0] ?? panes[0]?.part.rows.find(({ rowNumber: rowNumber }: Dynamic) => rowNumber - 1 === heldArea.topRowIndex);
+    headerShown?.part.rows[0] ?? panes[0]?.part.rows.find(({ rowNumber }) => rowNumber - 1 === heldArea.topRowIndex);
   let handleBox = tableHandleBox(landingSpans, firstRow?.height ?? 0, landingArea);
   let isHandleShown =
     firstRow !== undefined &&
@@ -2224,7 +2325,7 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
     handleBox.top + handleBox.height <= landingSpans.down.showTo &&
     (headerShown !== null || landingSpans.down.start + firstRow.height > landingSpans.down.showFrom);
   return {
-    panes: panes,
+    panes,
     home: drawnBoxOfSpans(homeSpans),
     homeAt: {
       left: homeSpans.across.start,
@@ -2236,18 +2337,23 @@ export function movedCellsView(state: PageState, reads: ReadsWithTextMeasurer, i
   };
 }
 export const isKeptHeaderUnderEditor = (
-  { top: top, height: height, parts: parts }: Dynamic,
-  editorBox?: Dynamic,
-  editorFoldsAt?: Dynamic,
-) =>
+  { top, height, parts }: Pick<KeptHeaderDrawn, 'top' | 'height' | 'parts'>,
+  editorBox: Pick<PaneRect, 'left' | 'top' | 'width' | 'height'> | null,
+  editorFoldsAt: Pick<EditorFolds, 'width'> | null,
+): boolean =>
   editorBox !== null &&
   editorBox.top < top + height &&
   editorBox.top + editorBox.height > top &&
   parts.some(
-    ({ left: left, width: width }: Dynamic) =>
+    ({ left, width }) =>
       editorBox.left < left + width && editorBox.left + Math.max(editorBox.width, editorFoldsAt?.width ?? 0) > left,
   );
-export const keptHeaderCellOf = (cell?: Dynamic, isOfFoundTable?: Dynamic, isAreaMarkedByEntry?: Dynamic, reads?: Dynamic) => ({
+export const keptHeaderCellOf = (
+  cell: DrawnCell,
+  isOfFoundTable: boolean,
+  isAreaMarkedByEntry: (area: CellArea) => boolean,
+  reads: ReadsWithTextMeasurer,
+): DrawnCell => ({
   ...cell,
   elementId: null,
   isActive: false,
@@ -2269,4 +2375,4 @@ export const keptHeaderCellOf = (cell?: Dynamic, isOfFoundTable?: Dynamic, isAre
   linesInTextBox: NO_LINES_IN_TEXT_BOX,
   mayTextFade: mayCellTextFade(cell, reads),
 });
-export const movedCellsStartByPress = new WeakMap();
+export const movedCellsStartByPress = new WeakMap<PointerPressed, StartOfMovedCells>();

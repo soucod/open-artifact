@@ -1,0 +1,12 @@
+{
+  "name": "open-artifact-harness-electron-example",
+  "private": true,
+  "type": "module",
+  "description": "An Electron agent app on @open-artifact/harness-kit: a chat column and the artifact's page in a top-level view.",
+  "main": "out/main.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node build.mjs && electron ."
+  },
+  "license": "Apache-2.0"
+}

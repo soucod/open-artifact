@@ -54,6 +54,8 @@ export type FitMode = (typeof FIT_MODES)[number];
 export interface Marks {
   /** `<b>` */
   b?: true;
+  /** `<span style="font-weight:400">`: regular weight inside bold text. Never with `b`. */
+  regular?: true;
   /** `<i>` */
   i?: true;
   /** `<u>` */
@@ -109,11 +111,17 @@ export interface TextNode extends NodeBase {
   runs: Run[];
 }
 
-/** One `<li>`. Items are plain: no style of their own. */
+/** One `<li>`. Items are plain: no style of their own beyond the list's {@link ItemMargin}. */
 export interface ListItem {
   runs: Run[];
   /** How far in a nested item sits: 1–8 (absent: the list's own level). */
   level?: number;
+}
+
+/** The `margin` every `<li>` of a list gives itself alike, in px (0 or more, not both 0). */
+export interface ItemMargin {
+  top: number;
+  bottom: number;
 }
 
 /** `<ul>` / `<ol>` of plain items; an item may sit nested up to eight levels in. */
@@ -121,6 +129,14 @@ export interface ListNode extends NodeBase {
   kind: 'list';
   tag: 'ul' | 'ol';
   items: ListItem[];
+  /** `<ol start>`: the number of the first item. */
+  start?: number;
+  /** `<ol reversed>`: the items count down. */
+  reversed?: true;
+  /** The markers of the lists nested at a level (1–8): `list-style-type` and `list-style-position` only. */
+  levels?: Record<number, StyleMap>;
+  /** The space above and below each item, nested ones too (`<li style="margin:…">` on every item). */
+  itemMargin?: ItemMargin;
 }
 
 /** A block inside a text box: an unstyled paragraph, heading or list. */

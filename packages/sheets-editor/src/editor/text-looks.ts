@@ -1,5 +1,53 @@
-import type { Dynamic } from '../dynamic.ts';
-export function isFontMarkOn(mark: Dynamic, { font: font }: Dynamic) {
+import type { Entry, ListLine, Paragraph, SharedCellFormat } from '@open-artifact/sheets-core';
+import type { EntryLooks, EntryLooksInHistory, EntryLooksKept, FontMark, StretchOfLooks } from '../state/initial-state.ts';
+import type { EditingMode, UndoOrRedoEffect } from '../state/transitions.ts';
+import type { KeyPress } from '../state/event-reducer.ts';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { CellFormatChoice } from '../i18n/change-labels.ts';
+/** The font marks of a format: as a cell has them, or as the selected cells share them (`null` where they differ). */
+export interface FormatWithFontMarks {
+  font: Pick<SharedCellFormat['font'], FontMark>;
+}
+/** The look of a stretch of text, without its length. */
+export type Look = Pick<StretchOfLooks, 'marks' | 'link'>;
+/** What changed between two texts: `written` took the place of `from` to `to` of the text before. */
+export interface TextDiff {
+  from: number;
+  to: number;
+  written: string;
+}
+/** A line of an entry: the list it is a line of, and the looks of its text. */
+export interface LineOfLooks {
+  list: ListLine;
+  stretches: StretchOfLooks[];
+}
+/** Where a link runs in the text of an entry. */
+export interface LinkSpan {
+  start: number;
+  end: number;
+  link: string;
+}
+/** A line of a list, at a level. */
+export type LineInList = Exclude<ListLine, { kind: 'none' }>;
+/** A kind of list a line can be in. */
+export type ListKind = LineInList['kind'];
+/** An entry of text with looks, as an edit enters it. */
+export type EntryWithLooks = Extract<Entry, { kind: 'textWithLooks' }>;
+/** Which way a step through the history of looks goes. */
+export type StepInLooksHistory = UndoOrRedoEffect['direction'];
+/** Where the caret stands among the lists of an entry. */
+export interface ListAtCaret {
+  line: number;
+  list: ListLine;
+  isAtStart: boolean;
+  isEmpty: boolean;
+}
+/** The key that turns a font mark on or off, with the modifier key. */
+export interface FontMarkShortcut {
+  letter: string;
+  isWithShift: boolean;
+}
+export function isFontMarkOn(mark: FontMark, { font }: FormatWithFontMarks): boolean {
   switch (mark) {
     case 'bold':
     case 'italic':
@@ -9,7 +57,7 @@ export function isFontMarkOn(mark: Dynamic, { font: font }: Dynamic) {
       return font.underline === 'single' || font.underline === 'double';
   }
 }
-export function fontMarkFormat(mark?: Dynamic, isOn?: Dynamic) {
+export function fontMarkFormat(mark: FontMark, isOn: boolean): Pick<CellFormatChoice, FontMark> {
   switch (mark) {
     case 'bold':
       return {
@@ -29,12 +77,12 @@ export function fontMarkFormat(mark?: Dynamic, isOn?: Dynamic) {
       };
   }
 }
-export function toggledFontMark(mark?: Dynamic, font?: Dynamic) {
-  return fontMarkFormat(mark, !isFontMarkOn(mark, font));
+export function toggledFontMark(mark: FontMark, format: FormatWithFontMarks) {
+  return fontMarkFormat(mark, !isFontMarkOn(mark, format));
 }
-export function diffShiftedToCaret(shift: Dynamic, { from: from, to: to, written: written }: Dynamic, before: Dynamic, after: Dynamic) {
+export function diffShiftedToCaret(shift: number, { from, to, written }: TextDiff, before: string, after: string): TextDiff | null {
   if (shift <= 0 || shift > from || (from !== to && written !== '')) return null;
-  let [text, distance] = from === to ? [after, written.length] : [before, to - from];
+  let [text, distance]: [string, number] = from === to ? [after, written.length] : [before, to - from];
   for (let index = from - shift; index < from; index += 1) if (text[index] !== text[index + distance]) return null;
   let shiftedFrom = from - shift;
   return {
@@ -43,25 +91,25 @@ export function diffShiftedToCaret(shift: Dynamic, { from: from, to: to, written
     written: after.slice(shiftedFrom, shiftedFrom + written.length),
   };
 }
-export function diffTexts(before?: Dynamic, after?: Dynamic, caret?: Dynamic) {
+export function diffTexts(before: string, after: string, caret?: number): TextDiff {
   let shorterLength = Math.min(before.length, after.length);
-  let from: Dynamic = 0;
+  let from = 0;
   while (from < shorterLength && before[from] === after[from]) from += 1;
   if (isHighSurrogate(before[from - 1])) from -= 1;
-  let sameAtEnd: Dynamic = 0;
+  let sameAtEnd = 0;
   while (sameAtEnd < shorterLength - from && before.at(-1 - sameAtEnd) === after.at(-1 - sameAtEnd)) sameAtEnd += 1;
   if (sameAtEnd > 0 && isLowSurrogate(before.at(-sameAtEnd))) sameAtEnd -= 1;
   let diff = {
-    from: from,
+    from,
     to: before.length - sameAtEnd,
     written: after.slice(from, after.length - sameAtEnd),
   };
   if (caret === undefined) return diff;
   return diffShiftedToCaret(diff.from + diff.written.length - caret, diff, before, after) ?? diff;
 }
-export function mergeLookRuns(runs?: Dynamic) {
-  let merged: Dynamic = [];
-  for (let run of runs as Dynamic) {
+export function mergeLookRuns(runs: readonly StretchOfLooks[]): StretchOfLooks[] {
+  let merged: StretchOfLooks[] = [];
+  for (let run of runs) {
     let last = merged.at(-1);
     if (run.length === 0) continue;
     if (last !== undefined && isSameLook(last, run))
@@ -73,9 +121,9 @@ export function mergeLookRuns(runs?: Dynamic) {
   }
   return merged;
 }
-export function sliceLookRuns(runs?: Dynamic, from?: Dynamic, to?: Dynamic) {
-  let position: Dynamic = 0;
-  return runs.flatMap((run?: Dynamic) => {
+export function sliceLookRuns(runs: readonly StretchOfLooks[], from: number, to: number): StretchOfLooks[] {
+  let position = 0;
+  return runs.flatMap((run) => {
     let [start, end] = [Math.max(from, position), Math.min(to, position + run.length)];
     position += run.length;
     return end > start
@@ -88,38 +136,38 @@ export function sliceLookRuns(runs?: Dynamic, from?: Dynamic, to?: Dynamic) {
       : [];
   });
 }
-export function joinLookLines(lines?: Dynamic, marksIfEmpty?: Dynamic) {
+export function joinLookLines(lines: readonly (readonly StretchOfLooks[])[], marksIfEmpty: FontMark[]): StretchOfLooks[] {
   let { marks: firstMarks } = lines.flat()[0] ?? {
     marks: marksIfEmpty,
   };
-  let runs: Dynamic = [];
-  for (let [lineIndex, lineRuns] of lines.entries() as Dynamic) {
+  let runs: StretchOfLooks[] = [];
+  for (let [lineIndex, lineRuns] of lines.entries()) {
     if (lineIndex > 0)
       runs.push({
         length: 1,
         marks: runs.at(-1)?.marks ?? firstMarks,
         link: null,
       });
-    (runs.push as Dynamic)(...lineRuns);
+    runs.push(...lineRuns);
   }
   return mergeLookRuns(runs);
 }
-export function lookRunsByLine(runs?: Dynamic, text?: Dynamic) {
-  let position: Dynamic = 0;
+export function lookRunsByLine(runs: readonly StretchOfLooks[], text: string): StretchOfLooks[][] {
+  let position = 0;
   return textLines(text).map(
-    (line?: Dynamic) => ((position += line.length + 1), sliceLookRuns(runs, position - line.length - 1, position - 1)),
+    (line) => ((position += line.length + 1), sliceLookRuns(runs, position - line.length - 1, position - 1)),
   );
 }
-export function looksFromRichText({ paragraphs: paragraphs }: Dynamic, marksOn?: Dynamic, leadLength?: Dynamic) {
-  let { stretches: stretches, lists: lists } = looksFromLines(
+export function looksFromRichText({ paragraphs }: { paragraphs: readonly Paragraph[] }, marksOn: FontMark[], leadLength: number): EntryLooks {
+  let { stretches, lists } = looksFromLines(
     paragraphs.map(
-      ({ list: list, runs: runs }: Dynamic) => ({
-        list: list,
+      ({ list, runs }) => ({
+        list,
         stretches: runs.map(
-          ({ text: text, marks: marks, link: link }: Dynamic) => ({
+          ({ text, marks, link }) => ({
             length: text.length,
-            marks: fontMarksWhere((input?: Dynamic) => marks.includes(input) || marksOn.includes(input)),
-            link: link,
+            marks: fontMarksWhere((mark) => marks.includes(mark) || marksOn.includes(mark)),
+            link,
           }),
         ),
       }),
@@ -135,10 +183,10 @@ export function looksFromRichText({ paragraphs: paragraphs }: Dynamic, marksOn?:
       },
       ...stretches,
     ]),
-    lists: lists,
+    lists,
   };
 }
-export function listsAfterTyping(lists: Dynamic, textBefore: Dynamic, { from: from, to: to, written: written }: Dynamic) {
+export function listsAfterTyping(lists: ListLine[], textBefore: string, { from, to, written }: TextDiff): ListLine[] {
   let [firstLine, lastLine] = [lineIndexAt(textBefore, from), lineIndexAt(textBefore, to)];
   if (
     firstLine === lastLine &&
@@ -168,25 +216,25 @@ export function listsAfterTyping(lists: Dynamic, textBefore: Dynamic, { from: fr
     : [...lists.slice(0, firstLine + 1), ...addedLists, ...lists.slice(lastLine + 1)];
 }
 export function looksAfterTyping(
-  { stretches: stretches, lists: lists }: Dynamic,
-  textBefore?: Dynamic,
-  textAfter?: Dynamic,
-  caret?: Dynamic,
-  marksIfNone: Dynamic = PLAIN_LOOK.marks,
-) {
+  { stretches, lists }: EntryLooks,
+  textBefore: string,
+  textAfter: string,
+  caret?: number,
+  marksIfNone: FontMark[] = PLAIN_LOOK.marks,
+): EntryLooks {
   let diff = diffTexts(textBefore, textAfter, caret);
-  let { from: from, to: to, written: written } = diff;
+  let { from, to, written } = diff;
   let [looksBefore, looksAfter] = [sliceLookRuns(stretches, 0, from), sliceLookRuns(stretches, to, textBefore.length)];
   let marks = (looksBefore.at(-1) ?? sliceLookRuns(stretches, from, to)[0] ?? looksAfter[0])?.marks ?? marksIfNone;
   let link = looksBefore.at(-1)?.link === looksAfter[0]?.link ? (looksAfter[0]?.link ?? null) : null;
-  let writtenRuns =
+  let writtenRuns: StretchOfLooks[] =
     written === ''
       ? []
       : [
           {
             length: written.length,
-            marks: marks,
-            link: link,
+            marks,
+            link,
           },
         ];
   return {
@@ -194,22 +242,22 @@ export function looksAfterTyping(
     lists: listsAfterTyping(lists, textBefore, diff),
   };
 }
-export function marksAcross({ stretches: stretches }: Dynamic, text?: Dynamic, from?: Dynamic, to?: Dynamic) {
-  let position: Dynamic = 0;
+export function marksAcross({ stretches }: EntryLooks, text: string, from: number, to: number): FontMark[] {
+  let position = 0;
   let runsAcross = textLines(text).flatMap(
-    (line?: Dynamic) => (
+    (line) => (
       (position += line.length + 1),
       sliceLookRuns(stretches, Math.max(from, position - line.length - 1), Math.min(to, position - 1))
     ),
   );
   return fontMarksWhere(
-    (input?: Dynamic) => runsAcross.length > 0 && runsAcross.every(({ marks: marks }: Dynamic) => marks.includes(input)),
+    (mark) => runsAcross.length > 0 && runsAcross.every(({ marks }) => marks.includes(mark)),
   );
 }
-export function linkSpansOfLooks({ stretches: stretches }: Dynamic) {
-  let spans: Dynamic = [];
-  let position: Dynamic = 0;
-  for (let { length: length, link: link } of stretches as Dynamic) {
+export function linkSpansOfLooks({ stretches }: EntryLooks): LinkSpan[] {
+  let spans: LinkSpan[] = [];
+  let position = 0;
+  for (let { length, link } of stretches) {
     let last = spans.at(-1);
     if (link !== null && last?.end === position && last.link === link)
       spans[spans.length - 1] = {
@@ -220,39 +268,39 @@ export function linkSpansOfLooks({ stretches: stretches }: Dynamic) {
       spans.push({
         start: position,
         end: position + length,
-        link: link,
+        link,
       });
     position += length;
   }
   return spans;
 }
-export function listKindAcross({ lists: lists }: Dynamic, text?: Dynamic, from?: Dynamic, to?: Dynamic) {
+export function listKindAcross({ lists }: EntryLooks, text: string, from: number, to: number): ListKind | null {
   let [firstLine, lastLine] = lineRangeOf(text, from, to);
   let [first, ...rest] = lists.slice(firstLine, lastLine + 1);
   if (first === undefined || first.kind === 'none') return null;
-  return rest.every(({ kind: kind }: Dynamic) => kind === first.kind) ? first.kind : null;
+  return rest.every(({ kind }) => kind === first.kind) ? first.kind : null;
 }
-export function toggleListKind(looks?: Dynamic, text?: Dynamic, from?: Dynamic, to?: Dynamic, kind?: Dynamic) {
+export function toggleListKind(looks: EntryLooks, text: string, from: number, to: number, kind: ListKind): EntryLooks {
   let isAllOfKind = listKindAcross(looks, text, from, to) === kind;
-  return mapListsInRange(looks, text, from, to, (list?: Dynamic) => {
+  return mapListsInRange(looks, text, from, to, (list) => {
     if (isAllOfKind) return NO_LIST;
     if (list.kind === kind) return list;
     let level = list.kind === 'none' ? 0 : list.level;
     return kind === 'checkbox'
       ? {
-          kind: kind,
-          level: level,
+          kind,
+          level,
           isChecked: false,
         }
       : {
-          kind: kind,
-          level: level,
+          kind,
+          level,
         };
   });
 }
-export function indentLists(looks?: Dynamic, text?: Dynamic, from?: Dynamic, to?: Dynamic, levelChange?: Dynamic) {
+export function indentLists(looks: EntryLooks, text: string, from: number, to: number, levelChange: 1 | -1): EntryLooks {
   let [firstLine, lastLine] = lineRangeOf(text, from, to);
-  let cannotGoIn = (list?: Dynamic, line?: Dynamic) => {
+  let cannotGoIn = (list: ListLine, line: number) => {
     if (list.kind === 'none' || line < firstLine || line > lastLine) return false;
     let listAbove = looks.lists[line - 1] ?? NO_LIST;
     let hasParent = listAbove.kind !== 'none' && (line > firstLine || listAbove.level >= list.level);
@@ -264,7 +312,7 @@ export function indentLists(looks?: Dynamic, text?: Dynamic, from?: Dynamic, to?
     text,
     from,
     to,
-    (list?: Dynamic) =>
+    (list) =>
       list.kind === 'none'
         ? list
         : {
@@ -273,10 +321,10 @@ export function indentLists(looks?: Dynamic, text?: Dynamic, from?: Dynamic, to?
           },
   );
 }
-export function listAtCaret({ lists: lists }: Dynamic, text?: Dynamic, caret?: Dynamic) {
+export function listAtCaret({ lists }: EntryLooks, text: string, caret: number): ListAtCaret {
   let line = lineIndexAt(text, caret);
   return {
-    line: line,
+    line,
     list: lists[line] ?? NO_LIST,
     isAtStart:
       caret === 0 ||
@@ -286,12 +334,15 @@ export function listAtCaret({ lists: lists }: Dynamic, text?: Dynamic, caret?: D
     isEmpty: textLines(text)[line] === '',
   };
 }
-export function trimLooksHistory(looksHistory?: Dynamic) {
-  let roomLeft: Dynamic = LOOKS_HISTORY_LIMIT;
-  let firstKeptAfter = looksHistory.findLastIndex(({ text: text }: Dynamic) => ((roomLeft -= text.length), roomLeft < 0));
+export function trimLooksHistory(looksHistory: EntryLooksKept[]): EntryLooksKept[] {
+  let roomLeft = LOOKS_HISTORY_LIMIT;
+  let firstKeptAfter = looksHistory.findLastIndex(({ text }) => ((roomLeft -= text.length), roomLeft < 0));
   return looksHistory.slice(firstKeptAfter + 1);
 }
-export function pushLooksHistory(looksHistory?: Dynamic, entry?: Dynamic) {
+export function pushLooksHistory(
+  looksHistory: EntryLooksInHistory | undefined,
+  entry: EntryLooksKept | undefined,
+): EntryLooksInHistory | undefined {
   if (entry === undefined)
     return looksHistory === undefined
       ? undefined
@@ -304,13 +355,18 @@ export function pushLooksHistory(looksHistory?: Dynamic, entry?: Dynamic) {
     toRedo: [],
   };
 }
-export function stepLooksHistory(looksHistory?: Dynamic, direction?: Dynamic, current?: Dynamic, text?: Dynamic) {
-  let { toUndo: toUndo, toRedo: toRedo } = looksHistory ?? {
+export function stepLooksHistory(
+  looksHistory: EntryLooksInHistory | undefined,
+  direction: StepInLooksHistory,
+  current: EntryLooksKept | undefined,
+  text: string,
+): { looks: EntryLooks | undefined; history: EntryLooksInHistory } {
+  let { toUndo, toRedo }: EntryLooksInHistory = looksHistory ?? {
     toUndo: [],
     toRedo: [],
   };
   let [from, to] = direction === 'undo' ? [toUndo, toRedo] : [toRedo, toUndo];
-  let index = from.findLastIndex((input?: Dynamic) => input.text === text);
+  let index = from.findLastIndex((kept) => kept.text === text);
   let skipped = index < 0 ? [] : from.slice(index + 1);
   skipped.reverse();
   let remaining = index < 0 ? from : from.slice(0, index);
@@ -329,8 +385,8 @@ export function stepLooksHistory(looksHistory?: Dynamic, direction?: Dynamic, cu
           },
   };
 }
-export function withEntryText(entry?: Dynamic, text?: Dynamic, caret?: Dynamic) {
-  let { text: previousText, looks: looks } = entry;
+export function withEntryText(entry: EditingMode, text: string, caret?: number): EditingMode {
+  let { text: previousText, looks } = entry;
   if (text === previousText) return entry;
   let looksHistory = pushLooksHistory(
     entry.looksInHistory,
@@ -338,12 +394,12 @@ export function withEntryText(entry?: Dynamic, text?: Dynamic, caret?: Dynamic) 
       ? undefined
       : {
           text: previousText,
-          looks: looks,
+          looks,
         },
   );
   return {
     ...entry,
-    text: text,
+    text,
     ...(looks !== undefined && {
       looks: looksAfterTyping(looks, previousText, text, caret),
     }),
@@ -352,18 +408,18 @@ export function withEntryText(entry?: Dynamic, text?: Dynamic, caret?: Dynamic) 
     }),
   };
 }
-export function richTextFromLooks(text: Dynamic, { stretches: stretches, lists: lists }: Dynamic) {
-  let position: Dynamic = 0;
+export function richTextFromLooks(text: string, { stretches, lists }: EntryLooks): EntryWithLooks {
+  let position = 0;
   return {
     kind: 'textWithLooks',
-    paragraphs: lookRunsByLine(stretches, text).map((lineRuns?: Dynamic, line?: Dynamic) => {
+    paragraphs: lookRunsByLine(stretches, text).map((lineRuns, line) => {
       let runs = lineRuns.map(
-        ({ length: length, marks: marks, link: link }: Dynamic) => (
+        ({ length, marks, link }) => (
           (position += length),
           {
             text: text.slice(position - length, position),
             marks: [...marks],
-            link: link,
+            link,
           }
         ),
       );
@@ -371,14 +427,14 @@ export function richTextFromLooks(text: Dynamic, { stretches: stretches, lists: 
         (position += 1),
         {
           list: lists[line] ?? NO_LIST,
-          runs: runs,
+          runs,
         }
       );
     }),
   };
 }
-export const FONT_MARKS = ['bold', 'italic', 'underline', 'strikethrough'];
-export const FONT_MARK_SHORTCUTS = {
+export const FONT_MARKS: readonly FontMark[] = ['bold', 'italic', 'underline', 'strikethrough'];
+export const FONT_MARK_SHORTCUTS: Record<FontMark, FontMarkShortcut> = {
   bold: {
     letter: 'b',
     isWithShift: false,
@@ -396,71 +452,71 @@ export const FONT_MARK_SHORTCUTS = {
     isWithShift: true,
   },
 };
-export const fontMarkOfShortcut = (keyPress?: Dynamic) =>
-  FONT_MARKS.find((mark?: Dynamic) => {
-    let { letter: letter, isWithShift: isWithShift } = FONT_MARK_SHORTCUTS[mark];
+export const fontMarkOfShortcut = (keyPress: KeyPress): FontMark | undefined =>
+  FONT_MARKS.find((mark) => {
+    let { letter, isWithShift } = FONT_MARK_SHORTCUTS[mark];
     return keyPress.isModifierHeld && !keyPress.isAltHeld && letter === keyPress.key.toLowerCase() && isWithShift === keyPress.isShiftHeld;
   });
-export const fontMarksOfFormat = (format?: Dynamic) => ({
+export const fontMarksOfFormat = (format: FormatWithFontMarks): Record<FontMark, boolean> => ({
   bold: isFontMarkOn('bold', format),
   italic: isFontMarkOn('italic', format),
   underline: isFontMarkOn('underline', format),
   strikethrough: isFontMarkOn('strikethrough', format),
 });
-export const isHighSurrogate = (input?: Dynamic) => input !== undefined && input >= '\uD800' && input <= '\uDBFF';
-export const isLowSurrogate = (input?: Dynamic) => input !== undefined && input >= '\uDC00' && input <= '\uDFFF';
-export const PLAIN_LOOK = {
+export const isHighSurrogate = (char: string | undefined): boolean => char !== undefined && char >= '\uD800' && char <= '\uDBFF';
+export const isLowSurrogate = (char: string | undefined): boolean => char !== undefined && char >= '\uDC00' && char <= '\uDFFF';
+export const PLAIN_LOOK: Look = {
   marks: [],
   link: null,
 };
-export const NO_LIST = {
+export const NO_LIST: ListLine = {
   kind: 'none',
 };
-export const isSameLook = (look?: Dynamic, otherLook?: Dynamic) =>
+export const isSameLook = (look: Look, otherLook: Look): boolean =>
   look.link === otherLook.link &&
   look.marks.length === otherLook.marks.length &&
-  look.marks.every((input?: Dynamic, options?: Dynamic) => input === otherLook.marks[options]);
-export const isSameList = (list?: Dynamic, otherList?: Dynamic) =>
+  look.marks.every((mark, index) => mark === otherLook.marks[index]);
+export const isSameList = (list: ListLine, otherList: ListLine | undefined): boolean =>
   list.kind === otherList?.kind &&
   (list.kind === 'none' || otherList.kind === 'none' || list.level === otherList.level) &&
   (list.kind !== 'checkbox' || otherList.kind !== 'checkbox' || list.isChecked === otherList.isChecked);
-export const areSameLookLines = (looks?: Dynamic, otherLooks?: Dynamic) =>
+export const areSameLookLines = (looks: EntryLooks, otherLooks: EntryLooks): boolean =>
   looks.stretches.length === otherLooks.stretches.length &&
   looks.stretches.every(
-    (stretch?: Dynamic, index?: Dynamic) =>
+    (stretch, index) =>
       stretch.length === otherLooks.stretches[index]?.length && isSameLook(stretch, otherLooks.stretches[index]),
   ) &&
   looks.lists.length === otherLooks.lists.length &&
-  looks.lists.every((list?: Dynamic, index?: Dynamic) => isSameList(list, otherLooks.lists[index]));
-export const looksLength = (runs?: Dynamic) => runs.reduce((total?: Dynamic, run?: Dynamic) => total + run.length, 0);
-export const textLines = (text?: Dynamic) =>
+  looks.lists.every((list, index) => isSameList(list, otherLooks.lists[index]));
+export const looksLength = (runs: readonly StretchOfLooks[]): number => runs.reduce((total, run) => total + run.length, 0);
+export const textLines = (text: string): string[] =>
   text.split(`
 `);
-export const doLooksFitText = ({ stretches: stretches, lists: lists }: Dynamic, text?: Dynamic) =>
+export const doLooksFitText = ({ stretches, lists }: EntryLooks, text: string): boolean =>
   looksLength(stretches) === text.length && lists.length === textLines(text).length;
-export const fontMarksWhere = (isOn?: Dynamic) => FONT_MARKS.filter(isOn);
-export const fontMarksOfStyle = ({ font: font }: Dynamic) =>
-  fontMarksWhere((input?: Dynamic) => (input === 'underline' ? font.underline !== 'none' : font[input]));
-export const plainLooks = (text?: Dynamic, marks?: Dynamic) => ({
+export const fontMarksWhere = (isOn: (mark: FontMark) => boolean): FontMark[] => FONT_MARKS.filter(isOn);
+export const fontMarksOfStyle = ({ font }: Pick<WholeCellFormat, 'font'>): FontMark[] =>
+  fontMarksWhere((mark) => (mark === 'underline' ? font.underline !== 'none' : font[mark]));
+export const plainLooks = (text: string, marks: FontMark[]): EntryLooks => ({
   stretches: mergeLookRuns([
     {
       length: text.length,
-      marks: marks,
+      marks,
       link: null,
     },
   ]),
   lists: textLines(text).map(() => NO_LIST),
 });
-export const looksFromLines = (lines?: Dynamic, marksIfEmpty?: Dynamic) => ({
+export const looksFromLines = (lines: readonly LineOfLooks[], marksIfEmpty: FontMark[]): EntryLooks => ({
   stretches: joinLookLines(
-    lines.map(({ stretches: stretches }: Dynamic) => stretches),
+    lines.map(({ stretches }) => stretches),
     marksIfEmpty,
   ),
-  lists: lines.map(({ list: list }: Dynamic) => list),
+  lists: lines.map(({ list }) => list),
 });
-export const looksForText = (runs?: Dynamic, text?: Dynamic) => joinLookLines(lookRunsByLine(runs, text), runs[0]?.marks ?? []);
-export const lineIndexAt = (text?: Dynamic, position?: Dynamic) => textLines(text.slice(0, position)).length - 1;
-export const lineRangeOf = (text?: Dynamic, from?: Dynamic, to?: Dynamic) => [
+export const looksForText = (runs: readonly StretchOfLooks[], text: string): StretchOfLooks[] => joinLookLines(lookRunsByLine(runs, text), runs[0]?.marks ?? []);
+export const lineIndexAt = (text: string, position: number): number => textLines(text.slice(0, position)).length - 1;
+export const lineRangeOf = (text: string, from: number, to: number): [first: number, last: number] => [
   lineIndexAt(text, from),
   lineIndexAt(
     text,
@@ -472,58 +528,58 @@ export const lineRangeOf = (text?: Dynamic, from?: Dynamic, to?: Dynamic) => [
       : to,
   ),
 ];
-export const uncheckedList = (list?: Dynamic) =>
+export const uncheckedList = (list: ListLine): ListLine =>
   list.kind === 'checkbox'
     ? {
         ...list,
         isChecked: false,
       }
     : list;
-export const marksAtCaret = ({ stretches: stretches }: Dynamic, caret?: Dynamic) =>
+export const marksAtCaret = ({ stretches }: EntryLooks, caret: number): FontMark[] =>
   (sliceLookRuns(stretches, caret - 1, caret)[0] ?? sliceLookRuns(stretches, caret, caret + 1)[0] ?? PLAIN_LOOK).marks;
-export const setMarkInLooks = (looks?: Dynamic, from?: Dynamic, to?: Dynamic, mark?: Dynamic, isOn?: Dynamic) =>
+export const setMarkInLooks = (stretches: readonly StretchOfLooks[], from: number, to: number, mark: FontMark, isOn: boolean): StretchOfLooks[] =>
   mergeLookRuns([
-    ...sliceLookRuns(looks, 0, from),
-    ...sliceLookRuns(looks, from, to).map(
-      ({ length: length, marks: marks, link: link }: Dynamic) => ({
-        length: length,
-        marks: fontMarksWhere((input?: Dynamic) => (input === mark ? isOn : marks.includes(input))),
-        link: link,
+    ...sliceLookRuns(stretches, 0, from),
+    ...sliceLookRuns(stretches, from, to).map(
+      ({ length, marks, link }) => ({
+        length,
+        marks: fontMarksWhere((markOfRun) => (markOfRun === mark ? isOn : marks.includes(markOfRun))),
+        link,
       }),
     ),
-    ...sliceLookRuns(looks, to, looksLength(looks)),
+    ...sliceLookRuns(stretches, to, looksLength(stretches)),
   ]);
 export const withMarkSet = (
-  { stretches: stretches, lists: lists }: Dynamic,
-  from?: Dynamic,
-  to?: Dynamic,
-  mark?: Dynamic,
-  isOn?: Dynamic,
-) => ({
+  { stretches, lists }: EntryLooks,
+  from: number,
+  to: number,
+  mark: FontMark,
+  isOn: boolean,
+): EntryLooks => ({
   stretches: setMarkInLooks(stretches, from, to, mark, isOn),
-  lists: lists,
+  lists,
 });
-export const withLinkSet = ({ stretches: stretches, lists: lists }: Dynamic, from?: Dynamic, to?: Dynamic, link?: Dynamic) => ({
+export const withLinkSet = ({ stretches, lists }: EntryLooks, from: number, to: number, link: string | null): EntryLooks => ({
   stretches: mergeLookRuns([
     ...sliceLookRuns(stretches, 0, from),
     ...sliceLookRuns(stretches, from, to).map(
-      ({ length: length, marks: marks }: Dynamic) => ({
-        length: length,
-        marks: marks,
-        link: link,
+      ({ length, marks }) => ({
+        length,
+        marks,
+        link,
       }),
     ),
     ...sliceLookRuns(stretches, to, looksLength(stretches)),
   ]),
-  lists: lists,
+  lists,
 });
 export const looksWithRangeReplaced = (
-  { stretches: stretches, lists: lists }: Dynamic,
-  text?: Dynamic,
-  from?: Dynamic,
-  to?: Dynamic,
-  written?: Dynamic,
-) => ({
+  { stretches, lists }: EntryLooks,
+  text: string,
+  from: number,
+  to: number,
+  written: string,
+): EntryLooks => ({
   stretches: mergeLookRuns([
     ...sliceLookRuns(stretches, 0, from),
     {
@@ -533,40 +589,40 @@ export const looksWithRangeReplaced = (
     ...sliceLookRuns(stretches, to, looksLength(stretches)),
   ]),
   lists: listsAfterTyping(lists, text, {
-    from: from,
-    to: to,
-    written: written,
+    from,
+    to,
+    written,
   }),
 });
-export const withMarkSetEverywhere = ({ stretches: stretches, lists: lists }: Dynamic, mark?: Dynamic, isOn?: Dynamic) => ({
+export const withMarkSetEverywhere = ({ stretches, lists }: EntryLooks, mark: FontMark, isOn: boolean): EntryLooks => ({
   stretches: setMarkInLooks(stretches, 0, looksLength(stretches), mark, isOn),
-  lists: lists,
+  lists,
 });
-export const toggleMarkInLooks = (looks?: Dynamic, text?: Dynamic, from?: Dynamic, to?: Dynamic, mark?: Dynamic) => ({
+export const toggleMarkInLooks = (looks: EntryLooks, text: string, from: number, to: number, mark: FontMark): EntryLooks => ({
   stretches: looksForText(setMarkInLooks(looks.stretches, from, to, mark, !marksAcross(looks, text, from, to).includes(mark)), text),
   lists: looks.lists,
 });
 export const mapListsInRange = (
-  { stretches: stretches, lists: lists }: Dynamic,
-  text?: Dynamic,
-  from?: Dynamic,
-  to?: Dynamic,
-  change?: Dynamic,
-) => {
+  { stretches, lists }: EntryLooks,
+  text: string,
+  from: number,
+  to: number,
+  change: (list: ListLine) => ListLine,
+): EntryLooks => {
   let [firstLine, lastLine] = lineRangeOf(text, from, to);
   return {
-    stretches: stretches,
-    lists: lists.map((list?: Dynamic, line?: Dynamic) => (line < firstLine || line > lastLine ? list : change(list))),
+    stretches,
+    lists: lists.map((list, line) => (line < firstLine || line > lastLine ? list : change(list))),
   };
 };
 export const MAX_LIST_LEVEL = 7;
-export const isListLevel = (level?: Dynamic) => Number.isInteger(level) && level >= 0 && level <= MAX_LIST_LEVEL;
+export const isListLevel = (level: number): boolean => Number.isInteger(level) && level >= 0 && level <= MAX_LIST_LEVEL;
 export const LIST_INDENT_LIMIT = 2;
-export const clearListAt = (looks?: Dynamic, text?: Dynamic, at?: Dynamic) =>
+export const clearListAt = (looks: EntryLooks, text: string, at: number): EntryLooks =>
   mapListsInRange(looks, text, at, at, () => NO_LIST);
-export const setListAt = (looks?: Dynamic, text?: Dynamic, at?: Dynamic, list?: Dynamic) =>
+export const setListAt = (looks: EntryLooks, text: string, at: number, list: ListLine): EntryLooks =>
   mapListsInRange(looks, text, at, at, () => list);
-export const LIST_STARTERS = [
+export const LIST_STARTERS: readonly (readonly [RegExp, LineInList])[] = [
   [
     /^[-*] $/,
     {
@@ -598,14 +654,14 @@ export const LIST_STARTERS = [
     },
   ],
 ];
-export const listOfStarter = (word?: Dynamic) =>
-  LIST_STARTERS.find(([pattern]: Dynamic) => pattern.test(word))?.[1] ?? null;
-export const leadingWord = (text?: Dynamic) => /^\S+ /.exec(text)?.[0] ?? '';
-export const startsWithListStarter = (text?: Dynamic) => listOfStarter(leadingWord(text)) !== null;
-export const toggleCheckboxAt = ({ stretches: stretches, lists: lists }: Dynamic, line?: Dynamic) => ({
-  stretches: stretches,
+export const listOfStarter = (word: string): LineInList | null =>
+  LIST_STARTERS.find(([pattern]) => pattern.test(word))?.[1] ?? null;
+export const leadingWord = (text: string): string => /^\S+ /.exec(text)?.[0] ?? '';
+export const startsWithListStarter = (text: string): boolean => listOfStarter(leadingWord(text)) !== null;
+export const toggleCheckboxAt = ({ stretches, lists }: EntryLooks, line: number): EntryLooks => ({
+  stretches,
   lists: lists.map(
-    (list?: Dynamic, index?: Dynamic) =>
+    (list, index) =>
       index === line && list.kind === 'checkbox'
         ? {
             ...list,
@@ -615,13 +671,13 @@ export const toggleCheckboxAt = ({ stretches: stretches, lists: lists }: Dynamic
   ),
 });
 export const LOOKS_HISTORY_LIMIT = 1e6;
-export const hasLists = ({ lists: lists }: Dynamic) => lists.some(({ kind: kind }: Dynamic) => kind !== 'none');
-export const isWholeLookMarked = (looks?: Dynamic, marks?: Dynamic) =>
+export const hasLists = ({ lists }: EntryLooks): boolean => lists.some(({ kind }) => kind !== 'none');
+export const isWholeLookMarked = (looks: EntryLooks, marks: FontMark[]): boolean =>
   !hasLists(looks) &&
   looks.stretches.every(
-    (input?: Dynamic) =>
-      isSameLook(input, {
-        marks: marks,
+    (stretch) =>
+      isSameLook(stretch, {
+        marks,
         link: null,
       }),
   );

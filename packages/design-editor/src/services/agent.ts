@@ -7,7 +7,7 @@
  * Only what the viewer typed goes in as their own words.
  */
 
-import { buildFixRequest, buildViewContext, type DesignViewContext, type SelectedElement } from '@open-artifact/design-core';
+import { buildViewContext, type DesignViewContext, type SelectedElement } from '@open-artifact/design-core';
 import { elementKind, elementLabel, parseDcDocument, parseTemplate, resolveElement, type TemplateModel } from '@open-artifact/dc';
 import { fenceUntrusted, type AgentSendResult, type AgentStatus } from '@open-artifact/runtime';
 import { agentResultMessage, sendFailure, watchAgentStatus } from '@open-artifact/editor-kit';
@@ -17,6 +17,7 @@ import { isDirty, useDocument } from '../state/document.ts';
 import { useView } from '../state/view.ts';
 import { session } from './session.ts';
 import { visibleBoards } from './viewport.ts';
+import { errorsKey, fixRequest, type BoardProblem } from '../lib/board-errors.ts';
 
 /** Live agent status. */
 export const useAgent = create<{ status: AgentStatus }>()(() => ({
@@ -140,21 +141,40 @@ export async function sendToAgent(message: string): Promise<AgentSendResult | nu
   }
 }
 
-/** Hands the errors of the given artboards to the agent. */
-export async function askAgentToFix(boards: readonly string[]): Promise<void> {
+/**
+ * Hands the errors of the given artboards to the agent. When it cannot be
+ * reached, the request waits in the list of artboards with errors for the
+ * viewer to copy, and the list opens on the canvas.
+ */
+export async function askAgentToFix(problems: readonly BoardProblem[]): Promise<AgentSendResult | null> {
   const { agent } = session();
-  if (!agent) return;
-  const frames = useView.getState().frames;
-  const errors = boards
-    .map((board) => ({ board, messages: (frames[board]?.errors ?? []).map((e) => `[${e.source}] ${e.message}`) }))
-    .filter((entry) => entry.messages.length);
-  if (errors.length === 0) return;
-  const text = [`Fix the errors in ${errors.map((e) => e.board).join(', ')}.`, fenceUntrusted(buildFixRequest(errors), { label: 'artboard errors' })].join('\n\n');
+  if (!agent || problems.length === 0) return null;
+  const text = fixRequest(problems);
+  let result: AgentSendResult;
   try {
-    reportResult(await agent.send({ title: 'Ask agent to fix', text, context: { boards: errors.map((e) => e.board) } }));
+    result = await agent.send({ title: 'Ask agent to fix', text, context: { boards: problems.map((problem) => problem.path) } });
   } catch (error) {
-    reportResult(sendFailure(error));
+    result = sendFailure(error);
   }
+  const view = useView.getState();
+  if (result.status === 'failed') {
+    view.setUnsentFix({ key: problemsKey(problems), text });
+    if (view.mode === 'canvas') {
+      view.setErrorsOpen(true);
+      const message = agentResultMessage(result, 'this design', useAgent.getState().status);
+      toast.add({ ...message, description: `${message.description ?? ''} The request is in the list of artboards with errors, to copy.`.trim() });
+      return result;
+    }
+  } else if (view.unsentFix) {
+    view.setUnsentFix(null);
+  }
+  reportResult(result);
+  return result;
+}
+
+/** Changes whenever the artboards or their errors change. */
+export function problemsKey(problems: readonly BoardProblem[]): string {
+  return JSON.stringify(problems.map((problem) => [problem.path, errorsKey(problem.errors)]));
 }
 
 /** A broken index has no board selection to attach to a repair request. */

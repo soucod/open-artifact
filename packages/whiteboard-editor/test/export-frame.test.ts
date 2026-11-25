@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { ArrowGeometry, NoteElement, StickerElement } from '@open-artifact/whiteboard-core';
-import { boardPngFilename, EXPORT_MAX_SCALE, EXPORT_PADDING, EXPORT_TITLE_BAR_PX, exportFrameFor } from '../src/export/frame.ts';
+import type { ArrowElement, ArrowGeometry, NoteElement, StickerElement, TextElement } from '@open-artifact/whiteboard-core';
+import { boardPngFilename, EXPORT_MAX_SCALE, PNG_FILENAME_MAX_CHARS, EXPORT_PADDING, EXPORT_TITLE_BAR_PX, exportFrameFor, framedElements } from '../src/export/frame.ts';
 import { arrowEndNeighbor, arrowPathData, rectPathData, stickerOutlinePadding, stickerOutlineShadows, tableHeadColors, TABLE_HEAD_FILLS } from '../src/export/look.ts';
 
 const note = (id: string, x = 0, y = 0): NoteElement => ({ type: 'note', id, x, y, w: 180, h: 180, color: 'yellow', text: 'Hi', tilt: 0 });
@@ -15,6 +15,19 @@ const sticker = (id: string, size: number): StickerElement => ({ type: 'sticker'
 describe('exportFrameFor', () => {
   it('has no frame for an empty board', () => {
     assert.equal(exportFrameFor([]), undefined);
+  });
+
+  it('leaves out texts that show only their placeholder, unless an arrow joins one', () => {
+    const hint = (id: string, x: number): TextElement => ({ type: 'text', id, x, y: 0, text: ' ', size: 'body', color: 'ink', placeholder: 'Type here' });
+    const arrow: ArrowElement = { type: 'arrow', id: 'a', from: 'n1', to: 'joined', head: 'end', dash: false, color: 'ink' };
+    const elements = [note('n1'), hint('alone', 2000), hint('joined', 600), arrow];
+    assert.deepEqual(
+      framedElements(elements).map((element) => element.id),
+      ['n1', 'joined', 'a'],
+    );
+    assert.equal(exportFrameFor([hint('alone', 2000)]), undefined);
+    const frame = exportFrameFor([note('n1'), hint('alone', 2000)]);
+    assert.equal(frame?.board.w, 180 + EXPORT_PADDING * 2);
   });
 
   it('pads the content and caps the scale at 2', () => {
@@ -50,13 +63,26 @@ describe('exportFrameFor', () => {
 });
 
 describe('boardPngFilename', () => {
-  it('keeps word characters and dashes the spaces', () => {
-    assert.equal(boardPngFilename('Q3 Retro: wins & misses!'), 'Q3-Retro-wins-misses.png');
+  it('keeps the title, turning characters file systems refuse into spaces', () => {
+    assert.equal(boardPngFilename('Q3 Retro: wins & misses!'), 'Q3 Retro wins & misses!.png');
+    assert.equal(boardPngFilename('a/b\\c*d?e"f<g>h|i%j'), 'a b c d e f g h i j.png');
+    assert.equal(boardPngFilename('Café 計画'), 'Café 計画.png');
+  });
+
+  it('drops control characters', () => {
+    assert.equal(boardPngFilename('Plan\u0000\u0007 A\u007f'), 'Plan A.png');
+    assert.equal(boardPngFilename('Line one\nLine two'), 'Line oneLine two.png');
+  });
+
+  it('keeps at most 120 characters', () => {
+    assert.equal(boardPngFilename('x'.repeat(300)), 'x'.repeat(PNG_FILENAME_MAX_CHARS) + '.png');
+    assert.equal(PNG_FILENAME_MAX_CHARS, 120);
   });
 
   it('falls back to "whiteboard"', () => {
     assert.equal(boardPngFilename(''), 'whiteboard.png');
-    assert.equal(boardPngFilename('!!!'), 'whiteboard.png');
+    assert.equal(boardPngFilename(' :/?* '), 'whiteboard.png');
+    assert.equal(boardPngFilename('\u0001\u0002'), 'whiteboard.png');
   });
 });
 

@@ -1,127 +1,109 @@
-/** Opening the ask card on the caret's line, sending what is asked to the agent, and following it while it writes. */
-import { agentResultMessage, sendFailure, watchAgentStatus } from '@open-artifact/editor-kit';
+/** Opening and closing the ask prompts, and sending an ask: the agent chip in the text, the `@agent` comment on it. */
 import { toast } from '@open-artifact/ui';
+import { TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 import { docClient } from '../app/doc-client.ts';
-import { maybeSession } from '../app/session.ts';
-import { getDocs } from '../app/store.ts';
+import { getDocs, setDocs } from '../app/store.ts';
+import { blockIdAt, idsOfRange } from '../comments/anchor-map.ts';
+import { createThread } from '../comments/actions.ts';
+import { type Composer, agentName, canAskAgent, canComment } from '../comments/store.ts';
 import { currentView, useEditor } from '../editor/format.ts';
-import { ASK_TITLE, cleanAsk, lineAskContext, lineAskText } from './request.ts';
-import { getAsk, setAsk } from './store.ts';
+import { suggestingNow } from '../suggest/mode.ts';
+import { type AskEntry, agentChip, askOnChip, chipInsertion, chipThread, emptyDocSpot, lineWords, offersAsk } from './ask.ts';
+import { askSpotOf, setAskSpot } from './spot.ts';
+import { getAsk, setAsk, setDraft } from './store.ts';
 
-/** How long the card waits for the agent before it lets go. */
-const WORKING_MS = 120_000;
+/** How long a send waits for the chip to reach the server before posting the comment anyway. */
+const SETTLE_MS = 3_000;
 
-/** Whether the person can ask the agent from the text: an agent that takes requests, and a doc they can write. */
-export function canAskFromText(): boolean {
-  const current = maybeSession();
-  return !!current?.canAsk && !!current.agent && getDocs().writable;
-}
+export const canAskInText = (): boolean =>
+  offersAsk({ agentListening: canAskAgent(), mayComment: canComment(), writable: getDocs().writable, suggesting: suggestingNow() });
 
-/** The id of the top-level block holding a position. */
-function blockAt(view: EditorView, pos: number): { id: string; empty: boolean } | null {
-  const $pos = view.state.doc.resolve(pos);
-  const node = $pos.depth ? $pos.node(1) : null;
-  const id = node?.attrs.bid;
-  return typeof id === 'string' && node ? { id, empty: node.textContent.trim() === '' } : null;
-}
-
-/** Opens the card on the caret's line, once what was typed is in the model (a new line has no id before). */
-export async function openAsk(view: EditorView): Promise<boolean> {
+/** Opens the prompt at `pos`, where the @ was typed. */
+export function openAsk(view: EditorView, pos: number): void {
   const tab = useEditor.getState().tab;
-  if (!tab || !canAskFromText()) return false;
-  if (getAsk().open && getAsk().open!.phase !== 'prompt') {
-    toast.add({ title: 'Agent is busy with an earlier request.' });
-    return false;
-  }
-  await docClient().settled();
-  const now = currentView();
-  if (!now || useEditor.getState().tab !== tab) return false;
-  const block = blockAt(now, now.state.selection.from);
-  if (!block) return false;
-  setAsk({ open: { tab, block: block.id, phase: 'prompt' } });
-  return true;
+  if (!tab || !canAskInText() || getAsk().sending) return;
+  setAskSpot(view, pos);
+  setDraft('caret', '');
+  setAsk({ prompt: { tab } });
 }
 
+/** Closes the @ menu's prompt; no chip has gone in yet, so nothing is left in the text. */
 export function closeAsk(refocus = true): void {
-  setAsk({ open: null });
-  if (refocus) currentView()?.focus();
+  if (!getAsk().prompt) return;
+  const view = currentView();
+  const spot = view ? askSpotOf(view.state) : null;
+  setAsk({ prompt: null });
+  setDraft('caret', '');
+  if (!view) return;
+  setAskSpot(view, null);
+  if (!refocus) return;
+  if (spot !== null) view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(spot))));
+  view.focus();
 }
 
-let stopWatching: (() => void) | null = null;
+interface Placed {
+  tab: string;
+  chip: string;
+  composer: Composer;
+}
 
-export async function sendAsk(ask: string): Promise<void> {
-  const open = getAsk().open;
-  const agent = maybeSession()?.agent;
+/** Puts the agent chip in for `entry` and names the comment's anchor; null where it can't go. */
+function putChip(view: EditorView, tab: string, entry: AskEntry): Placed | null {
+  const open = docClient().openTabOf(tab);
+  if (!open) return null;
+  const name = agentName();
+  const spot = entry === 'caret' ? askSpotOf(view.state) : emptyDocSpot(view.state.doc);
+  if (spot === null) return null;
+  const { pos, newLine } = typeof spot === 'number' ? { pos: spot, newLine: false } : spot;
+  const inserted = chipInsertion(view.state, agentChip(name), pos, newLine);
+  if (!inserted) return null;
+  view.dispatch(inserted.tr.scrollIntoView());
+  const ids = idsOfRange(view.state.doc, open.binding.shadow, inserted.at, inserted.at + 1);
+  if (!ids) {
+    view.dispatch(view.state.tr.delete(inserted.at, inserted.at + 1).setMeta('addToHistory', false));
+    return null;
+  }
+  const block = view.state.doc.resolve(inserted.at).parent;
+  const thread = chipThread({ tab, chip: ids[0], block: blockIdAt(view.state.doc, inserted.at), name, line: lineWords(block) });
+  return { tab, chip: ids[0], composer: { ...thread, text: '' } };
+}
+
+/** Takes the chip out again, wherever it is now. */
+function takeChip({ tab, chip }: Placed): void {
+  try {
+    docClient()
+      .openTabOf(tab)
+      ?.sync.write([{ op: 'delete', target: { kind: 'chars', range: [chip, chip] } }]);
+  } catch {
+    // Already gone.
+  }
+}
+
+async function postOn(placed: Placed, text: string): Promise<boolean> {
+  await Promise.race([docClient().settled(), new Promise(done => setTimeout(done, SETTLE_MS))]);
+  return createThread(text, placed.composer, true);
+}
+
+export async function sendAsk(entry: AskEntry): Promise<void> {
+  const text = getAsk().drafts[entry].trim();
   const view = currentView();
-  if (!open || open.phase !== 'prompt' || !agent || !view) return;
-  if (!cleanAsk(ask)) {
-    toast.add({ title: 'Type what you want written, then press Enter.' });
+  const tab = useEditor.getState().tab;
+  if (!text || !view || !tab || getAsk().sending || !canAskInText()) return;
+  setAsk({ sending: entry });
+  const outcome = await askOnChip<Placed>({ put: () => putChip(view, tab, entry), post: placed => postOn(placed, text), take: takeChip }).finally(() =>
+    setAsk({ sending: null }),
+  );
+  if (outcome === 'no_place') {
+    toast.add({ title: 'The agent can’t be asked from here', description: 'Put the caret in a paragraph, heading or list item.' });
     return;
   }
-  let empty = false;
-  view.state.doc.forEach(node => {
-    if (node.attrs.bid === open.block) empty = node.textContent.trim() === '';
-  });
-  setAsk({ open: { ...open, phase: 'sending' } });
-  const request = { tab: open.tab, block: open.block, empty, ask };
-  try {
-    const result = await agent.send({ title: ASK_TITLE, text: lineAskText(request), context: lineAskContext(request) }).catch(sendFailure);
-    if (getAsk().open?.phase !== 'sending') return;
-    if (result.status !== 'delivered') {
-      closeAsk();
-      toast.add(agentResultMessage(result, 'this doc'));
-      return;
-    }
-    setAsk({ open: { ...open, phase: 'working' } });
-    watchWork(open.block);
-  } catch (error) {
-    closeAsk();
-    toast.add(agentResultMessage(sendFailure(error), 'this doc'));
+  if (outcome === 'refused') return;
+  if (getDocs().comments === 'hidden') setDocs({ comments: 'margin' });
+  setDraft(entry, '');
+  if (entry === 'caret') {
+    setAsk({ prompt: null });
+    setAskSpot(view, null);
   }
-}
-
-/** The card stays while the agent works, and goes when the line changes, the agent is done, or time is up. */
-function watchWork(block: string): void {
-  stopWatching?.();
-  const agent = maybeSession()?.agent;
-  let wasBusy = false;
-  const startText = lineText(block);
-  const finish = () => {
-    stopWatching?.();
-    stopWatching = null;
-    if (getAsk().open?.phase === 'working') setAsk({ open: null });
-  };
-  const offStatus = watchAgentStatus(agent, status => {
-    if (status.busy) wasBusy = true;
-    else if (wasBusy) finish();
-  });
-  const offText = useEditor.subscribe(() => {
-    if (lineText(block) !== startText) finish();
-  });
-  const timer = setTimeout(finish, WORKING_MS);
-  stopWatching = () => {
-    offStatus();
-    offText();
-    clearTimeout(timer);
-  };
-}
-
-/** The text of a top-level block, or null once it is gone. */
-function lineText(block: string): string | null {
-  const doc = useEditor.getState().state?.doc;
-  let text: string | null = null;
-  doc?.forEach(node => {
-    if (node.attrs.bid === block) text = node.textContent;
-  });
-  return text;
-}
-
-/** Escape while the agent writes: the card goes; what the agent still writes arrives as usual. */
-export function stopAsk(): void {
-  const working = getAsk().open?.phase === 'working';
-  stopWatching?.();
-  stopWatching = null;
-  closeAsk();
-  if (working) toast.add({ title: 'Stopped waiting', description: 'If Agent still writes here, its text arrives as usual.' });
+  view.focus();
 }

@@ -7,8 +7,10 @@
 
 import { create } from 'zustand';
 
-/** Longest message read out (longer ones are cut). */
+/** Longest message read out (longer ones are cut, at a word where they can be). */
 export const ANNOUNCE_LIMIT = 200;
+/** A cut at a word keeps at least this many characters; one that would keep fewer cuts at the limit instead. */
+const SHORTEST_WORD_CUT = 119;
 
 export interface AnnouncerState {
   message: string;
@@ -18,10 +20,17 @@ export interface AnnouncerState {
 
 export const useAnnouncer = create<AnnouncerState>()(() => ({ message: '', serial: 0 }));
 
-/** The text read out for a message (whitespace collapsed, cut to {@link ANNOUNCE_LIMIT}); empty: nothing. */
+/**
+ * The text read out for a message, whitespace collapsed; empty: nothing. Past {@link ANNOUNCE_LIMIT} it is cut at the
+ * last word break within that many characters, or mid-word when that break comes early, and ends with an ellipsis.
+ */
 export function announcementText(message: string): string {
   const text = message.replace(/\s+/g, ' ').trim();
-  return text.length > ANNOUNCE_LIMIT ? `${text.slice(0, ANNOUNCE_LIMIT - 1)}…` : text;
+  if (text.length <= ANNOUNCE_LIMIT) return text;
+  const wordBreak = text.slice(0, ANNOUNCE_LIMIT).search(/\s+\S*$/);
+  // A cut mid-word leaves room for the ellipsis and no half of a surrogate pair.
+  const kept = wordBreak >= SHORTEST_WORD_CUT ? text.slice(0, wordBreak) : text.slice(0, ANNOUNCE_LIMIT - 1).replace(/[\uD800-\uDBFF]$/, '');
+  return `${kept}…`;
 }
 
 /** Reads a message out to screen readers. */

@@ -316,6 +316,12 @@ describe('mentions', () => {
     assert.deepEqual([...new Set(all.map(entry => entry.section))], ['People', 'Agent', 'Dates', 'Tabs']);
   });
 
+  it('puts Ask Agent first, in place of the plain Agent mention, when the agent can be asked', () => {
+    const all = mentionOptions('', { ...world, askAgent: () => {} });
+    assert.deepEqual(labels(all).slice(0, 3), ['Ask Agent', 'Mara Quinn', 'Dev Patel']);
+    assert.equal(labels(all).filter(label => label === 'Agent').length, 0);
+  });
+
   it('matches any word of a name', () => {
     assert.deepEqual(labels(mentionOptions('qu', world)), ['Mara Quinn']);
     assert.deepEqual(labels(mentionOptions('ag', world)), ['Agent']);

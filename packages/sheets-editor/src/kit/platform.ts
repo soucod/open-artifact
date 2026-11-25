@@ -14,7 +14,7 @@ export function windowMatchesMedia(query: string, win?: Window | null): boolean 
   return typeof target?.matchMedia === 'function' && target.matchMedia(query).matches;
 }
 
-export function ownerWindowOf(element: Element | null | undefined): Window {
+export function ownerWindowOf(element: Element | null | undefined): Window & typeof globalThis {
   return element?.ownerDocument.defaultView ?? window;
 }
 

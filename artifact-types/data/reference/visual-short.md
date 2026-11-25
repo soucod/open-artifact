@@ -12,7 +12,7 @@ The first chapter is the title, which says what the piece is, the period it cove
 
 A waiting chapter is faded with `opacity`, since under `display: none` its drawings measure 0 wide and its marks go unchecked. It is also `aria-hidden` and takes no pointer. None of that stops the keyboard, so nothing in a chapter takes focus: no link, control or `tabindex`.
 
-The dashboard pauses the piece when someone opens Sources, picks a figure there or comments, and has each chapter stand whole while they edit by hand, so the script has no pause of its own for these.
+The dashboard pauses the piece when someone opens Sources, picks a figure there or comments, and has each chapter stand whole while they edit by hand, so the script has no pause of its own for these. Preserve the skeleton's print stylesheet so PDF exports place one static frame of each chapter per page.
 
 ## Drawings and motion
 

@@ -1,6 +1,6 @@
 import type { Edit } from '@open-artifact/sheets-core';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { LastDone, PageState } from '../state/initial-state.ts';
+import type { LastDone, OneRangeAct, PageState } from '../state/initial-state.ts';
 import type { PageEvent } from '../state/event-reducer.ts';
 import type { PageTransition, QueueEditEffect } from '../state/transitions.ts';
 import type { GridHit } from '../grid/geometry.ts';
@@ -55,7 +55,7 @@ export function coveredLineCount(areas: readonly CellArea[], axis: Exclude<Selec
 export function coveredCellCount(areas: readonly CellArea[]): number {
   let rowEdges = [
     ...new Set(
-      areas.flatMap(({ topRowIndex: topRowIndex, rowCount: rowCount }) => [topRowIndex, topRowIndex + rowCount]),
+      areas.flatMap(({ topRowIndex, rowCount }) => [topRowIndex, topRowIndex + rowCount]),
     ),
   ];
   rowEdges.sort((edge, otherEdge) => edge - otherEdge);
@@ -118,10 +118,10 @@ export function splitAreaAround(area: CellArea, cut: CellArea, axis: Exclude<Sel
       topRowIndex: cutBottom,
       rowCount: bottomEnd - cutBottom,
     },
-  ].filter(({ rowCount: rowCount, columnCount: columnCount }) => rowCount > 0 && columnCount > 0);
+  ].filter(({ rowCount, columnCount }) => rowCount > 0 && columnCount > 0);
 }
 export function piecesAfterTakingOut(
-  { state: state, reads: reads, range: range, alsoOut: alsoOut }: TakingOutOfRange,
+  { state, reads, range, alsoOut }: TakingOutOfRange,
   area: CellArea,
   cut: CellArea,
 ): CellArea[] {
@@ -138,10 +138,10 @@ export function piecesAfterTakingOut(
     if (merged === undefined) return [piece];
     let innerPieces = piecesAfterTakingOut(
       {
-        state: state,
-        reads: reads,
-        range: range,
-        alsoOut: alsoOut,
+        state,
+        reads,
+        range,
+        alsoOut,
       },
       piece,
       merged,
@@ -156,7 +156,7 @@ export function takeAreaOutOfSelection(
   reads: ReadsWithTextMeasurer,
   cut: CellArea,
   canCut: (area: CellArea) => boolean = () => true,
-) {
+): PageState | null {
   let areas = areasOfAllRanges(selection, reads);
   let takenOutNames = new Set<string>([areaToA1AsStored(cut, null)]);
   let noteTakenOut = (area: CellArea): void => void takenOutNames.add(areaToA1AsStored(area, null));
@@ -166,7 +166,7 @@ export function takeAreaOutOfSelection(
         ? piecesAfterTakingOut(
             {
               state: selection,
-              reads: reads,
+              reads,
               range: area,
               alsoOut: noteTakenOut,
             },
@@ -259,10 +259,10 @@ export function withEditsOfOtherRanges(otherEffects: readonly QueueEditEffect[],
     ...effect,
     editsBefore: [
       ...otherEffects.flatMap(
-        ({ editsBefore: editsBefore = [], edit: edit }) => [
+        ({ editsBefore = [], edit }) => [
           ...editsBefore,
           {
-            edit: edit,
+            edit,
             isPointedAt: true,
           },
         ],
@@ -270,7 +270,7 @@ export function withEditsOfOtherRanges(otherEffects: readonly QueueEditEffect[],
       ...(effect.editsBefore ?? []),
     ],
     ...(editsThatGoAlong.length > 0 && {
-      editsThatGoAlong: editsThatGoAlong,
+      editsThatGoAlong,
     }),
   };
 }
@@ -299,7 +299,7 @@ export function actOnEveryRange(
     let effects = current.effects.map((effect) => (effect === ownEffect ? joinedEffect : effect));
     return {
       ...current,
-      effects: effects,
+      effects,
     };
   }
   let ifQueued = {
@@ -309,7 +309,7 @@ export function actOnEveryRange(
   };
   let joinedEffect = withEditsOfOtherRanges(otherEffects.slice(0, -1), {
     ...lastOtherEffect,
-    ifQueued: ifQueued,
+    ifQueued,
   });
   return {
     ...current,
@@ -321,7 +321,7 @@ export function keepLastDoneAfterEdit(
   selection: PageState,
   reads: WorkbookReads,
   change: Edit,
-  { isOfSeveralRanges: isOfSeveralRanges }: ActOfSeveralRanges,
+  { isOfSeveralRanges }: ActOfSeveralRanges,
 ): PageState {
   if (isOfSeveralRanges === true && selection.lastDone === null)
     return {
@@ -340,7 +340,7 @@ export function keepLastDoneAfterEdit(
     : refreshed;
 }
 export function refreshLastDoneCounts(selection: PageState, reads: WorkbookReads, change: Edit): PageState {
-  let { lastDone: lastDone } = selection;
+  let { lastDone } = selection;
   if (hasOtherRanges(selection) && (lastDone?.what === 'rowsSized' || lastDone?.what === 'columnsSized')) {
     let axis: Exclude<SelectionKind, 'cells'> = lastDone.what === 'rowsSized' ? 'rows' : 'columns';
     let lineCount = selectedLineCountOnAxis(selection, reads, axis);
@@ -351,7 +351,7 @@ export function refreshLastDoneCounts(selection: PageState, reads: WorkbookReads
           ...selection,
           lastDone: {
             ...lastDone,
-            lineCount: lineCount,
+            lineCount,
           },
         };
   }
@@ -380,18 +380,18 @@ export function refreshLastDoneCounts(selection: PageState, reads: WorkbookReads
   };
 }
 export const NO_OTHER_RANGES: CellSelection[] = [];
-export const hasOtherRanges = ({ otherRanges: otherRanges }: Pick<SeveralRanges, 'otherRanges'>): boolean => otherRanges.length > 0;
+export const hasOtherRanges = ({ otherRanges }: Pick<SeveralRanges, 'otherRanges'>): boolean => otherRanges.length > 0;
 export const allRangesOf = ({
-  otherRanges: otherRanges,
-  activeCell: activeCell,
-  selectionCorner: selectionCorner,
+  otherRanges,
+  activeCell,
+  selectionCorner,
   rangeWalked = null,
 }: SeveralRanges): CellSelection[] => [
   ...otherRanges,
   {
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
-    rangeWalked: rangeWalked,
+    activeCell,
+    selectionCorner,
+    rangeWalked,
   },
 ];
 export const areasOfAllRanges = (selection: SeveralRanges, reads: WorkbookReads): CellArea[] =>
@@ -426,7 +426,7 @@ export const withoutOtherRanges = <S extends Pick<SeveralRanges, 'otherRanges'>>
       }
     : selection;
 export const isAreaWithin = (area: CellArea, outer: CellArea): boolean => isSameArea(unionOfAreas(area, outer), outer);
-export const isEditRefusedForSeveralRanges = ({ notice: notice }: Pick<PageState, 'notice'>, { isOfSeveralRanges: isOfSeveralRanges }: ActOfSeveralRanges): boolean =>
+export const isEditRefusedForSeveralRanges = ({ notice }: Pick<PageState, 'notice'>, { isOfSeveralRanges }: ActOfSeveralRanges): boolean =>
   isOfSeveralRanges === true && notice?.kind === 'editRefused';
 export const ONE_RANGE_ACT_BY_COMMAND = {
   insertRowAbove: 'insertRows',
@@ -457,11 +457,11 @@ export const ONE_RANGE_ACT_BY_COMMAND = {
   collapseColumns: null,
   expandRows: null,
   expandColumns: null,
-};
+} satisfies Record<string, OneRangeAct | null>;
 /** A command that some act of it can take only one range. */
 export type CommandOfOneRange = keyof typeof ONE_RANGE_ACT_BY_COMMAND;
 export const oneRangeActOfCommand = (command: CommandOfOneRange) => ONE_RANGE_ACT_BY_COMMAND[command];
-export const refuseWhenSeveralRanges = (selection: PageState, act: string) =>
+export const refuseWhenSeveralRanges = (selection: PageState, act: OneRangeAct): PageTransition | null =>
   hasOtherRanges(selection)
     ? {
         state: {
@@ -469,7 +469,7 @@ export const refuseWhenSeveralRanges = (selection: PageState, act: string) =>
           lastDone: null,
           notice: {
             kind: 'oneRangeNeeded',
-            act: act,
+            act,
           },
         },
         effects: [],

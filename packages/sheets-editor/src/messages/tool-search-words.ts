@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
 import { AGENT_NAME } from '../agent/agent-name.ts';
 export const toolSearchMessages = {
@@ -18,22 +17,22 @@ export const toolSearchMessages = {
     translateMessage({
       defaultMessage: 'Couldn’t suggest tools',
     }),
-  namesOfAgent: () =>
-    new (Set as Dynamic)(
+  namesOfAgent: (): Set<string> =>
+    new Set<string>(
       `${translateMessage({
         defaultMessage: 'ai agent assistant chatbot',
       })} ${AGENT_NAME.toLowerCase()}`
         .split(/[^\p{L}\p{M}\p{N}]+/u)
         .filter((word: string) => word !== ''),
     ),
-  wordsOfAQuestion: () =>
-    new (Set as Dynamic)(
+  wordsOfAQuestion: (): Set<string> =>
+    new Set<string>(
       translateMessage({
         defaultMessage: 'ask why how what explain if',
       }).split(/[^\p{L}\p{M}\p{N}]+/u),
     ),
-  littleWords: () =>
-    new (Set as Dynamic)(
+  littleWords: (): Set<string> =>
+    new Set<string>(
       translateMessage({
         defaultMessage:
           'a an the this that these those here there it its for and or to of in on as at by if is are be with all my me i you we please make add put show set get turn give want need can based from into than when then them some more less very like cell cells',

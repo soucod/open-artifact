@@ -58,7 +58,7 @@ pub fn aggregate(args: &[Arg], cx: &mut CallContext) -> Answer {
 fn cells_of(arg: &Arg, skip_errors: bool) -> Result<Cells, CellError> {
     match arg {
         Arg::Cells(cells) if cells.is_range() => {
-            if !skip_errors || !cells.values().iter().any(Value::is_error) {
+            if !skip_errors || !cells.values().any(Value::is_error) {
                 return Ok(cells.clone());
             }
             let array = cells.array.map(|v| if v.is_error() { Value::Blank } else { v.clone() });

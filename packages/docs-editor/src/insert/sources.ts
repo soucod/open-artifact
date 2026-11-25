@@ -1,6 +1,6 @@
 /** What each typeahead menu lists for its query. */
 import { getDocs } from '../app/store.ts';
-import { canAskFromText, openAsk } from '../ask/actions.ts';
+import { canAskInText, openAsk } from '../ask/actions.ts';
 import { searchEmoji } from './emoji.ts';
 import { mentionOptions } from './mentions.ts';
 import { knownPeople } from './people.ts';
@@ -13,7 +13,7 @@ export const mentionSource: OptionSource = query => {
     people: knownPeople(),
     files: project?.files ?? [],
     enums: project?.enums ?? [],
-    ...(canAskFromText() ? { askAgent: (view: Parameters<typeof openAsk>[0]) => void openAsk(view) } : {}),
+    ...(canAskInText() ? { askAgent: openAsk } : {}),
   });
 };
 

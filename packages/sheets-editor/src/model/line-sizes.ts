@@ -35,7 +35,7 @@ export function createLineSizes(count: number, sizedRuns: readonly SizedRun[], d
     stretches.push({
       firstIndex: nextIndex,
       count: lineCount,
-      sizeInPixels: sizeInPixels,
+      sizeInPixels,
       start: nextStart,
     });
     nextIndex += lineCount;
@@ -49,7 +49,7 @@ export function createLineSizes(count: number, sizedRuns: readonly SizedRun[], d
   if (nextIndex > count) throw Error('a row or column past the last was given a size');
   addStretch(count - nextIndex, defaultSize);
   let stretchAt = (index: number) =>
-    lastAtOrBefore(stretches, ({ firstIndex: firstIndex }: SizedStretch) => firstIndex, index);
+    lastAtOrBefore(stretches, ({ firstIndex }: SizedStretch) => firstIndex, index);
   return {
     totalSize: nextStart,
     startOf(index: number) {
@@ -60,7 +60,7 @@ export function createLineSizes(count: number, sizedRuns: readonly SizedRun[], d
     sizeOf: (index: number) => stretchAt(index)?.sizeInPixels ?? defaultSize,
     indexAt(pixel: number) {
       if (pixel < 0) return -1;
-      let stretch = lastAtOrBefore(stretches, ({ start: start }: SizedStretch) => start, pixel);
+      let stretch = lastAtOrBefore(stretches, ({ start }: SizedStretch) => start, pixel);
       if (stretch === undefined || pixel >= nextStart) return count;
       return stretch.firstIndex + Math.floor((pixel - stretch.start) / stretch.sizeInPixels);
     },
@@ -70,22 +70,22 @@ export function collapseLineSizes(sizes: LineSizes, hiddenRuns: readonly LineSpa
   if (hiddenRuns.length === 0) return sizes;
   let hiddenStretches: HiddenStretch[] = [];
   let sizeGone = 0;
-  for (let { firstIndex: firstIndex, count: lineCount } of hiddenRuns) {
+  for (let { firstIndex, count: lineCount } of hiddenRuns) {
     let start = sizes.startOf(firstIndex);
     let seam = start - sizeGone;
     sizeGone += sizes.startOf(firstIndex + lineCount) - start;
     hiddenStretches.push({
-      firstIndex: firstIndex,
+      firstIndex,
       count: lineCount,
-      seam: seam,
+      seam,
       sizeGoneBy: sizeGone,
     });
   }
   let hiddenStretchAt = (index: number) => {
-    let stretch = lastAtOrBefore(hiddenStretches, ({ firstIndex: firstIndex }: HiddenStretch) => firstIndex, index);
+    let stretch = lastAtOrBefore(hiddenStretches, ({ firstIndex }: HiddenStretch) => firstIndex, index);
     return stretch === undefined || index < stretch.firstIndex ? null : stretch;
   };
-  let isInside = (index: number, { firstIndex: firstIndex, count: count }: HiddenStretch) => index < firstIndex + count;
+  let isInside = (index: number, { firstIndex, count }: HiddenStretch) => index < firstIndex + count;
   return {
     totalSize: sizes.totalSize - sizeGone,
     startOf(index: number) {
@@ -98,7 +98,7 @@ export function collapseLineSizes(sizes: LineSizes, hiddenRuns: readonly LineSpa
       return stretch !== null && isInside(index, stretch) ? 0 : sizes.sizeOf(index);
     },
     indexAt(pixel: number) {
-      let stretch = lastAtOrBefore(hiddenStretches, ({ seam: seam }: HiddenStretch) => seam, pixel);
+      let stretch = lastAtOrBefore(hiddenStretches, ({ seam }: HiddenStretch) => seam, pixel);
       return sizes.indexAt(stretch === undefined || pixel < stretch.seam ? pixel : pixel + stretch.sizeGoneBy);
     },
   };
@@ -116,7 +116,7 @@ export function scrollPositionAtPixel(sizes: LineSizes, pixel: number): ScrollPo
   let clampedPixel = Math.max(0, Math.min(Math.round(pixel), sizes.totalSize - 1));
   let index = sizes.indexAt(clampedPixel);
   return {
-    index: index,
+    index,
     pixelsPast: clampedPixel - sizes.startOf(index),
   };
 }
@@ -135,7 +135,7 @@ export const MIN_ROW_HEIGHT = 8;
 export const MAX_ROW_HEIGHT = 2000;
 export const isLineShown = (sizes: LineSizes, index: number): boolean => sizes.sizeOf(index) > 0;
 export const shownLineAtOrAfter = (sizes: LineSizes, index: number): number => sizes.indexAt(sizes.startOf(index));
-export const pixelOfScrollPosition = (sizes: LineSizes, { index: index, pixelsPast: pixelsPast }: ScrollPosition): number =>
+export const pixelOfScrollPosition = (sizes: LineSizes, { index, pixelsPast }: ScrollPosition): number =>
   sizes.startOf(index) + pixelsPast;
-export const clampPixelsPast = (sizes: LineSizes, { index: index, pixelsPast: pixelsPast }: ScrollPosition): number =>
+export const clampPixelsPast = (sizes: LineSizes, { index, pixelsPast }: ScrollPosition): number =>
   Math.max(0, Math.min(pixelsPast, sizes.totalSize - 1 - sizes.startOf(index)));

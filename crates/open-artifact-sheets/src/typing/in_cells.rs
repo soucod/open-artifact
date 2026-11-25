@@ -36,6 +36,7 @@ use super::{workbook_locale, CellAt, Change, How, Pasted, PastedTextIs};
 use super::TextThatNoCellShows;
 use super::TypedCell;
 use crate::ids::{IdRun, LineId};
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{blocks, Leaf};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op, Refusal};
 use crate::workbook::{layout, Sheet, Workbook};
@@ -225,7 +226,7 @@ pub fn clear_cells(workbook: &Workbook, edit: &Value) -> Result<Vec<Op>, Refusal
     }
     let mut ops = Vec::new();
     if !emptied.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: emptied, listed: true });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: emptied, form: CellForm::List });
     }
     if !checkboxes.is_empty() {
         let none = json!({"kind": "none"});

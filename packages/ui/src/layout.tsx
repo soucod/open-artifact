@@ -17,6 +17,8 @@ export interface TabItem<T extends string> {
   value: T;
   label: ReactNode;
   content: ReactNode;
+  /** Kept rendered, hidden, while another tab is on show (its content is unmounted otherwise). */
+  keepMounted?: boolean;
 }
 
 /** Props of {@link Tabs}. */
@@ -27,14 +29,16 @@ export interface TabsProps<T extends string> {
   className?: string;
   /** Extra controls shown at the end of the tab bar. */
   trailing?: ReactNode;
+  /** The tab list's accessible name. */
+  label?: string;
 }
 
 /** A tab strip with panels. */
-export function Tabs<T extends string>({ value, onChange, items, className, trailing }: TabsProps<T>) {
+export function Tabs<T extends string>({ value, onChange, items, className, trailing, label }: TabsProps<T>) {
   return (
     <BaseTabs.Root value={value} onValueChange={(next) => onChange(next as T)} className={cn('flex min-h-0 flex-col', className)}>
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
-        <BaseTabs.List className="relative flex items-center gap-1">
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2" data-ui-tabs-bar="">
+        <BaseTabs.List aria-label={label} className="relative flex items-center gap-1">
           {items.map((item) => (
             <BaseTabs.Tab
               key={item.value}
@@ -48,7 +52,7 @@ export function Tabs<T extends string>({ value, onChange, items, className, trai
         <div className="ml-auto flex items-center gap-1">{trailing}</div>
       </div>
       {items.map((item) => (
-        <BaseTabs.Panel key={item.value} value={item.value} className="min-h-0 flex-1 overflow-auto outline-none">
+        <BaseTabs.Panel key={item.value} value={item.value} keepMounted={item.keepMounted} className="min-h-0 flex-1 overflow-auto outline-none">
           {item.content}
         </BaseTabs.Panel>
       ))}
@@ -68,11 +72,11 @@ export interface SectionProps {
   defaultOpen?: boolean;
 }
 
-/** A collapsible group of inspector rows. */
+/** A collapsible group of inspector rows. Carries `data-ui-section` (its heading `data-ui-section-head`) for page styles. */
 export function Section({ title, children, actions, defaultOpen = true }: SectionProps) {
   return (
-    <Collapsible.Root defaultOpen={defaultOpen} className="border-b border-line px-3 py-2">
-      <div className="flex h-7 items-center gap-1">
+    <Collapsible.Root defaultOpen={defaultOpen} className="border-b border-line px-3 py-2" data-ui-section="">
+      <div className="flex h-7 items-center gap-1" data-ui-section-head="">
         <Collapsible.Trigger className="group flex flex-1 items-center gap-1 text-left text-xs font-semibold text-fg outline-none">
           <ChevronDown className="size-3 text-fg-subtle transition-transform group-data-[panel-open]:rotate-0 -rotate-90" />
           {title}
@@ -84,11 +88,15 @@ export function Section({ title, children, actions, defaultOpen = true }: Sectio
   );
 }
 
-/** A label + control row inside a {@link Section}. */
+/** A label + control row inside a {@link Section}. Carries `data-ui-row` (its label `data-ui-row-label`) for page styles. */
 export function Row({ label, children, className }: { label?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <div className={cn('flex min-w-0 items-center gap-2', className)}>
-      {label !== undefined ? <div className="w-16 shrink-0 truncate text-xs text-fg-muted">{label}</div> : null}
+    <div className={cn('flex min-w-0 items-center gap-2', className)} data-ui-row="">
+      {label !== undefined ? (
+        <div className="w-16 shrink-0 truncate text-xs text-fg-muted" data-ui-row-label="">
+          {label}
+        </div>
+      ) : null}
       <div className="flex min-w-0 flex-1 items-center gap-1.5">{children}</div>
     </div>
   );
@@ -155,6 +163,9 @@ function ToastList() {
       <Toast.Content className="flex min-w-0 flex-1 flex-col gap-0.5">
         <Toast.Title className="text-[13px] font-semibold" />
         <Toast.Description className="text-xs text-fg-muted" />
+        {item.actionProps ? (
+          <Toast.Action className="mt-1 self-start rounded px-2 py-0.5 text-xs font-medium text-accent hover:bg-hover" />
+        ) : null}
       </Toast.Content>
       <Toast.Close aria-label="Dismiss" onKeyDown={guardToastClose} className="rounded p-0.5 text-fg-muted hover:bg-hover">
         <X className="size-3.5" />

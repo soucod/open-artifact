@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, Edit, EditOf, SheetId, TextPasted, TextThatNoCellShows } from '@open-artifact/sheets-core';
 import {
   textMatchesFind,
   MAX_FIND_SHOWN_CHARACTERS,
@@ -21,9 +21,34 @@ import { withoutOtherRanges } from '../selection/several-ranges.ts';
 import { selectionAtCell } from '../selection/model.ts';
 import { shownCellOf } from '../grid/formulas-shown.ts';
 import { makeIsCellFilteredOut } from '../tables/filtered-rows.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function replaceInFormulaText(formulaText?: Dynamic, pattern?: Dynamic, replacement?: Dynamic) {
+import type { CellsCountedOffer, Find, FindOptions, PageState, UndoOffer } from '../state/initial-state.ts';
+import type { CellId, CellOnShow, WorkbookReads } from '../model/workbook.ts';
+import type { IfQueued, PageContext, ReplaceChosen } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { FindQuery } from './find.ts';
+/** What a cell's text becomes under a replace: unchanged, left out, or the text to write. */
+export type ReplacementOfCell = 'same' | 'skipped' | { write: string };
+/** A replace in every cell as it was asked, kept to count the matches left once its edit is answered. */
+export interface ReplaceAllAsked {
+  sheetId: SheetId;
+  areFormulasShown: boolean;
+  asked: { text: string; options: FindOptions };
+  /** The replacement text. */
+  text: string;
+  /** The text each skipped formula cell showed, by `findCellKeyOf`. */
+  shownByFormulas: Map<string, string>;
+}
+/** How a replace edit is queued: with the replace in every cell it came from, when there was one. */
+export interface IfQueuedOfReplace extends IfQueued {
+  ofReplaceAll?: ReplaceAllAsked;
+}
+/** The texts a replace in every cell writes, the matches it leaves, and the text shown by the formula cells it skipped. */
+export interface ReplaceAllFound {
+  cells: TextPasted[];
+  leftCount: number;
+  shownByFormulas: Map<string, string>;
+}
+export function replaceInFormulaText(formulaText: string, pattern: RegExp, replacement: string): ReplacementOfCell {
   let replaced = formulaText.replaceAll(pattern, () => replacement);
   if (replaced === formulaText) return 'same';
   return /^=\s*\S/u.test(replaced)
@@ -32,26 +57,31 @@ export function replaceInFormulaText(formulaText?: Dynamic, pattern?: Dynamic, r
       }
     : 'skipped';
 }
-export function isMatchInHiddenFormula({ areFormulasShown: areFormulasShown }: Dynamic, reads: WorkbookReads, cellRef?: Dynamic, find?: Dynamic) {
+export function isMatchInHiddenFormula(
+  { areFormulasShown }: Pick<PageState, 'areFormulasShown'>,
+  reads: WorkbookReads,
+  cellId: CellId,
+  find: FindQuery,
+): boolean {
   if (!find.isInFormulas || areFormulasShown) return false;
-  let cell = reads.cellOf(cellRef);
+  let cell = reads.cellOf(cellId);
   return cell?.input.kind === 'formula' && textMatchesFind(formulaTextOf(cell), find);
 }
 export function replacementOfCell(
   state: PageState,
   reads: WorkbookReads,
-  cellRef?: Dynamic,
-  find?: Dynamic,
-  pattern?: Dynamic,
-  replacement?: Dynamic,
-) {
-  let cell = reads.cellOf(cellRef);
-  if (cell === null || reads.formatOf(cellRef).cellControl.kind !== 'none') return 'skipped';
+  cellId: CellId,
+  find: FindQuery,
+  pattern: RegExp,
+  replacement: string,
+): ReplacementOfCell {
+  let cell = reads.cellOf(cellId);
+  if (cell === null || reads.formatOf(cellId).cellControl.kind !== 'none') return 'skipped';
   let { kind: inputKind } = cell.input;
   if (inputKind === 'formula' && state.areFormulasShown) return replaceInFormulaText(formulaTextOf(cell), pattern, replacement);
-  if (isMatchInHiddenFormula(state, reads, cellRef, find)) return replaceInFormulaText(formulaTextOf(cell), pattern, replacement);
+  if (isMatchInHiddenFormula(state, reads, cellId, find)) return replaceInFormulaText(formulaTextOf(cell), pattern, replacement);
   if (inputKind !== 'text' && inputKind !== 'number' && inputKind !== 'boolean') return 'skipped';
-  let { decimalSign: decimalSign } = reads;
+  let { decimalSign } = reads;
   let inputText = cellInputText(cell, decimalSign);
   let isTextShownOtherwise = cell.input.kind === 'text' && inputText !== cell.input.value;
   let textToSearch = isTextShownOtherwise ? stripTextPrefixQuote(inputText) : inputText;
@@ -60,7 +90,7 @@ export function replacementOfCell(
   let replaced = textToSearch.replaceAll(pattern, () => replacement);
   if (replaced === textToSearch) return textToSearch.search(pattern) === -1 ? 'skipped' : 'same';
   let typedBack = textAsTypedInput(replaced, decimalSign);
-  let isTextFormat = reads.formatOf(cellRef).numberFormat.kind === 'text';
+  let isTextFormat = reads.formatOf(cellId).numberFormat.kind === 'text';
   if (isTextShownOtherwise)
     return typedBack === replaced && /\d/u.test(replaced) && !isTextFormat
       ? 'skipped'
@@ -75,11 +105,11 @@ export function replacementOfCell(
         write: written,
       };
 }
-export function* cellsToSearch(state: PageState, reads: WorkbookReads, find?: Dynamic): Generator<Dynamic, Dynamic, Dynamic> {
-  let { sheetId: sheetId } = state;
-  let rowCount = reads.listSheets().find((sheet?: Dynamic) => sheet.sheetId === sheetId)?.rowCount ?? 0;
-  for (let rowIndex: Dynamic = 0; rowIndex < rowCount; rowIndex += 1)
-    for (let columnIndex of reads.columnIndexesOnShowIn(sheetId, rowIndex) as Dynamic) {
+export function* cellsToSearch(state: PageState, reads: WorkbookReads, find: FindQuery): Generator<CellId, void, undefined> {
+  let { sheetId } = state;
+  let rowCount = reads.listSheets().find((sheet) => sheet.sheetId === sheetId)?.rowCount ?? 0;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1)
+    for (let columnIndex of reads.columnIndexesOnShowIn(sheetId, rowIndex)) {
       let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
       if (
         cellId === null ||
@@ -87,52 +117,52 @@ export function* cellsToSearch(state: PageState, reads: WorkbookReads, find?: Dy
           state,
           reads,
           {
-            cellId: cellId,
-            rowIndex: rowIndex,
-            columnIndex: columnIndex,
+            cellId,
+            rowIndex,
+            columnIndex,
           },
           find,
         )
       )
         continue;
       let mergedArea = reads.mergedAreaAt(sheetId, {
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
+        rowIndex,
+        columnIndex,
       });
       if (mergedArea === null || (mergedArea.topRowIndex === rowIndex && mergedArea.leftColumnIndex === columnIndex)) yield cellId;
     }
 }
-export function replaceAllEdits(state: PageState, reads: WorkbookReads, find?: Dynamic, replacement?: Dynamic) {
+export function replaceAllEdits(state: PageState, reads: WorkbookReads, find: FindQuery, replacement: string): ReplaceAllFound | null {
   let pattern = findPatternOf(find.text, find);
-  let cells: Dynamic = [];
-  let shownByFormulas = new (Map as Dynamic)();
-  let leftCount: Dynamic = 0;
+  let cells: TextPasted[] = [];
+  let shownByFormulas = new Map<string, string>();
+  let leftCount = 0;
   let isOutOfScope = outOfFindScope(state, reads, find);
-  for (let cellRef of cellsToSearch(state, reads, find) as Dynamic) {
-    if (isOutOfScope(cellRef)) {
+  for (let cellId of cellsToSearch(state, reads, find)) {
+    if (isOutOfScope(cellId)) {
       leftCount += 1;
       continue;
     }
-    let outcome = replacementOfCell(state, reads, cellRef, find, pattern, replacement);
+    let outcome = replacementOfCell(state, reads, cellId, find, pattern, replacement);
     if (outcome === 'skipped') leftCount += 1;
-    if (outcome === 'skipped' && isMatchInShownCell(state, reads, cellRef, find))
-      shownByFormulas.set(findCellKeyOf(cellRef), shownTextOf(reads, cellRef));
+    if (outcome === 'skipped' && isMatchInShownCell(state, reads, cellId, find))
+      shownByFormulas.set(findCellKeyOf(cellId), shownTextOf(reads, cellId));
     if (typeof outcome === 'string') continue;
     if (
       cells.push({
-        ...cellRefOf(cellRef),
+        ...cellRefOf(cellId),
         text: outcome.write,
       }) > MAX_CELLS_REPLACED
     )
       return null;
   }
   return {
-    cells: cells,
-    leftCount: leftCount,
-    shownByFormulas: shownByFormulas,
+    cells,
+    leftCount,
+    shownByFormulas,
   };
 }
-export function isStillMatching(cell?: Dynamic, find?: Dynamic, pattern?: Dynamic, decimalSign?: Dynamic) {
+export function isStillMatching(cell: CellOnShow | null, find: FindQuery, pattern: RegExp, decimalSign: DecimalSignName): boolean {
   let shownText = shownCellText(cell, MAX_FIND_SHOWN_CHARACTERS, decimalSign).text.replaceAll(
     pattern,
     `
@@ -142,41 +172,41 @@ export function isStillMatching(cell?: Dynamic, find?: Dynamic, pattern?: Dynami
   return cellValueOf(cell)?.kind === 'number' && numberTextMatchesFind(shownText, find, decimalSign);
 }
 export function countLeftAfterReplaceAll(
-  { undoOffer: undoOffer, ofReplaceAll: ofReplaceAll }: Dynamic,
-  state: Dynamic,
-  { reads: reads, areFormulasLeft: areFormulasLeft }: Dynamic,
-) {
+  { undoOffer, ofReplaceAll }: IfQueuedOfReplace,
+  state: PageState,
+  { reads, areFormulasLeft }: PageContext,
+): UndoOffer | null | undefined {
   if (undoOffer?.kind !== 'replacedInCells' || ofReplaceAll === undefined || areFormulasLeft) return undoOffer;
-  let { sheetId: sheetId, areFormulasShown: areFormulasShown, asked: asked, text: text, shownByFormulas: shownByFormulas } = ofReplaceAll;
+  let { sheetId, areFormulasShown, asked, text, shownByFormulas } = ofReplaceAll;
   let find = findQueryOf(asked, reads, sheetId);
-  let stateAsAsked = {
+  let stateAsAsked: PageState = {
     ...state,
-    sheetId: sheetId,
-    areFormulasShown: areFormulasShown,
+    sheetId,
+    areFormulasShown,
   };
   let pattern = text === '' ? null : findPatternOf(text, find);
-  let { leftCount: leftCount }: Dynamic = undoOffer;
+  let { leftCount } = undoOffer;
   let isOutOfScope = outOfFindScope(stateAsAsked, reads, find);
-  for (let cellRef of cellsToSearch(stateAsAsked, reads, find) as Dynamic) {
-    if (isOutOfScope(cellRef) || !isMatchInShownCell(stateAsAsked, reads, cellRef, find)) continue;
+  for (let cellId of cellsToSearch(stateAsAsked, reads, find)) {
+    if (isOutOfScope(cellId) || !isMatchInShownCell(stateAsAsked, reads, cellId, find)) continue;
     if (
       pattern === null ||
-      shownByFormulas.get(findCellKeyOf(cellRef)) === shownTextOf(reads, cellRef) ||
-      isStillMatching(reads.cellOnShowIn(cellRef), find, pattern, reads.decimalSign)
+      shownByFormulas.get(findCellKeyOf(cellId)) === shownTextOf(reads, cellId) ||
+      isStillMatching(reads.cellOnShowIn(cellId), find, pattern, reads.decimalSign)
     )
       leftCount += 1;
   }
   return {
     ...undoOffer,
-    leftCount: leftCount,
+    leftCount,
   };
 }
 export function replaceInEveryCell(
   state: PageState,
-  { reads: reads, areFormulasLeft: areFormulasLeft }: Dynamic,
-  find?: Dynamic,
-  replacement?: Dynamic,
-) {
+  { reads, areFormulasLeft }: PageContext,
+  find: Find,
+  replacement: string,
+): PageTransition {
   let findInSheet = findQueryOf(find, reads, state.sheetId);
   let found = replaceAllEdits(state, reads, findInSheet, replacement);
   if (found === null)
@@ -188,7 +218,7 @@ export function replaceInEveryCell(
         asked: 'otherEdit',
       },
     });
-  let { cells: cells, leftCount: leftCount, shownByFormulas: shownByFormulas } = found;
+  let { cells, leftCount, shownByFormulas } = found;
   let leftNotShown = leftCount - shownByFormulas.size;
   if (cells.length === 0) {
     let countLeft = areFormulasLeft ? leftNotShown : leftCount;
@@ -231,24 +261,29 @@ export function replaceInEveryCell(
             options: find.options,
           },
           text: replacement,
-          shownByFormulas: shownByFormulas,
+          shownByFormulas,
         },
       }),
       thenEvent: {
         kind: 'findLookedAgain',
       },
-    },
+    } satisfies IfQueuedOfReplace,
   );
 }
-export function dropReplacementsNotShown(state: PageState, edit?: Dynamic, textThatNoCellShows?: Dynamic, ifQueued?: Dynamic) {
-  let { done: done, undoOffer: undoOffer, ofReplaceAll: ofReplaceAll } = ifQueued;
+export function dropReplacementsNotShown(
+  state: PageState,
+  edit: Edit,
+  textThatNoCellShows: TextThatNoCellShows[] | 'tooMany',
+  ifQueued: IfQueuedOfReplace,
+): PageTransition | null {
+  let { done, undoOffer, ofReplaceAll } = ifQueued;
   if (edit.kind !== 'pasteTexts') return null;
-  let unshownKeys = new (Set as Dynamic)(textThatNoCellShows === 'tooMany' ? [] : textThatNoCellShows.map(findCellKeyOfRc));
-  let unshownTexts = new (Set as Dynamic)(
-    edit.cells.filter((cell?: Dynamic) => unshownKeys.has(findCellKeyOfRc(cell))).map(({ text: text }: Dynamic) => text),
+  let unshownKeys = new Set<string>(textThatNoCellShows === 'tooMany' ? [] : textThatNoCellShows.map(findCellKeyOfRc));
+  let unshownTexts = new Set<string>(
+    edit.cells.filter((cell) => unshownKeys.has(findCellKeyOfRc(cell))).map(({ text }) => text),
   );
   let keptCells = edit.cells.filter(
-    ({ text: text }: Dynamic) => (textThatNoCellShows === 'tooMany' ? !text.startsWith('=') : !unshownTexts.has(text)),
+    ({ text }) => (textThatNoCellShows === 'tooMany' ? !text.startsWith('=') : !unshownTexts.has(text)),
   );
   let droppedCount = edit.cells.length - keptCells.length;
   if (droppedCount === 0) return null;
@@ -283,14 +318,14 @@ export function dropReplacementsNotShown(state: PageState, edit?: Dynamic, textT
       undoOffer: {
         ...undoOffer,
         count: keptCells.length,
-        leftCount: leftCount,
+        leftCount,
       },
     },
   );
 }
-export function replaceFound(state: PageState, context: Dynamic, { text: text, where: where }: Dynamic) {
-  let { reads: reads, areFormulasLeft: areFormulasLeft } = context;
-  let { mode: mode, dragging: dragging, find: find } = state;
+export function replaceFound(state: PageState, context: PageContext, { text, where }: Pick<ReplaceChosen, 'text' | 'where'>): PageTransition {
+  let { reads, areFormulasLeft } = context;
+  let { mode, dragging, find } = state;
   if (mode.kind !== 'navigating' || isModalOpen(state) || dragging !== null || find === null || find.text === '') return withNoEffects(state);
   let [findInSheet, replacement] = [findQueryOf(find, reads, state.sheetId), sanitizeCellText(text)];
   if (where === 'everyCell') return replaceInEveryCell(state, context, find, replacement);
@@ -301,7 +336,7 @@ export function replaceFound(state: PageState, context: Dynamic, { text: text, w
       : replacementOfCell(stateLooked, reads, stateLooked.activeCell, findInSheet, findPatternOf(findInSheet.text, findInSheet), replacement);
   if (typeof outcome === 'string') {
     let stateStepped = stepFindHit(stateLooked, 1, reads);
-    let notice = {
+    let notice: PageState['notice'] = {
       kind: 'matchesNotReplaced',
       count: 1,
     };
@@ -311,12 +346,12 @@ export function replaceFound(state: PageState, context: Dynamic, { text: text, w
       isNoticeShown
         ? {
             ...stateStepped,
-            notice: notice,
+            notice,
           }
         : stateStepped,
     );
   }
-  let stateAtCell = {
+  let stateAtCell: PageState = {
     ...withoutOtherRanges(stateLooked),
     ...selectionAtCell(stateLooked.activeCell),
   };
@@ -340,24 +375,24 @@ export function replaceFound(state: PageState, context: Dynamic, { text: text, w
   );
 }
 export const REGEX_SPECIAL_PATTERN = /[.*+?^${}()|[\]\\]/g;
-export const findPatternOf = (text: Dynamic, { matchesCase: matchesCase }: Dynamic) =>
-  new (RegExp as Dynamic)(text.replaceAll(REGEX_SPECIAL_PATTERN, String.raw`\$&`), matchesCase ? 'gu' : 'giu');
+export const findPatternOf = (text: string, { matchesCase }: Pick<FindQuery, 'matchesCase'>): RegExp =>
+  new RegExp(text.replaceAll(REGEX_SPECIAL_PATTERN, String.raw`\$&`), matchesCase ? 'gu' : 'giu');
 export const MAX_CELLS_REPLACED = 3000;
-export const findCellKeyOf = ({ rowId: rowId, columnId: columnId }: Dynamic) => `${rowId} ${columnId}`;
-export const shownTextOf = (reads: WorkbookReads, cellRef?: Dynamic) =>
-  shownCellText(reads.cellOnShowIn(cellRef), MAX_FIND_SHOWN_CHARACTERS, reads.decimalSign).text;
-export const isMatchInShownCell = (state: Dynamic, reads: WorkbookReads, cellRef?: Dynamic, find?: Dynamic) =>
-  isFormulaCell(reads, cellRef) &&
-  shownCellOf(state, reads, cellRef) === reads.cellOnShowIn(cellRef) &&
-  !isMatchInHiddenFormula(state, reads, cellRef, find);
-export const isFindOverWholeSheet = ({ within: within }: Dynamic) => within === null;
-export const outOfFindScope = (state: PageState, reads: WorkbookReads, find?: Dynamic) =>
+export const findCellKeyOf = ({ rowId, columnId }: Pick<CellId, 'rowId' | 'columnId'>): string => `${rowId} ${columnId}`;
+export const shownTextOf = (reads: WorkbookReads, cellId: CellId): string =>
+  shownCellText(reads.cellOnShowIn(cellId), MAX_FIND_SHOWN_CHARACTERS, reads.decimalSign).text;
+export const isMatchInShownCell = (state: Pick<PageState, 'areFormulasShown'>, reads: WorkbookReads, cellId: CellId, find: FindQuery): boolean =>
+  isFormulaCell(reads, cellId) &&
+  shownCellOf(state, reads, cellId) === reads.cellOnShowIn(cellId) &&
+  !isMatchInHiddenFormula(state, reads, cellId, find);
+export const isFindOverWholeSheet = ({ within }: Pick<FindQuery, 'within'>): boolean => within === null;
+export const outOfFindScope = (state: PageState, reads: WorkbookReads, find: FindQuery): ((cellId: CellId) => boolean) =>
   isFindOverWholeSheet(find) ? () => false : makeIsCellFilteredOut(state, reads);
-export const pasteTextsEdit = (state: PageState, reads: WorkbookReads, cells?: Dynamic) => ({
+export const pasteTextsEdit = (state: PageState, reads: WorkbookReads, cells: readonly TextPasted[]): EditOf<'pasteTexts'> => ({
   kind: 'pasteTexts',
   sheetId: state.sheetId,
   cells: [...cells],
   pastedTextIs: 'asTyped',
   localeOfTexts: reads.locale,
 });
-export const findCellKeyOfRc = ({ r: rowId, c: columnId }: Dynamic) => `${rowId} ${columnId}`;
+export const findCellKeyOfRc = ({ r: rowId, c: columnId }: Pick<TextPasted, 'r' | 'c'>): string => `${rowId} ${columnId}`;

@@ -1,4 +1,13 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type {
+  ColumnId,
+  ConditionalFormatSuggestion,
+  ConditionalFormatSuggestionsAnswer,
+  DropdownOption,
+  Matches,
+  RangeCorners,
+  RuleInIds,
+  SheetId,
+} from '@open-artifact/sheets-core';
 import { areasOfRuleRanges } from './descriptions.ts';
 import { defaultRuleForRanges, suggestedRulesFor } from './rule-edits.ts';
 import { isInSpan } from '../../grid/geometry.ts';
@@ -15,23 +24,50 @@ import {
 import { lightenedFillColor } from '../cell-colors.ts';
 import { matchesOfRules, canRulesRunToSheetEnd, withRuleRangesMapped, originalOfStretchedRules } from './selection-target.ts';
 import { mergedAreaOrCellOf } from '../../selection/model.ts';
+import { tableAtCellIfAny } from '../../model/workbook.ts';
 import { rangesOfAreas } from './editor-edits.ts';
 import { conditionalRulesOfPane } from '../../state/queries.ts';
 import { tableColumnSummary } from './editor-view.ts';
 import type { PageState } from '../../state/initial-state.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
-export function columnIdsWithCells(reads: WorkbookReads, sheetId?: Dynamic) {
-  let columnIds = new (Set as Dynamic)();
-  let cellsSeen: Dynamic = 0;
-  for (let cellsOfRow of reads.cellsHeldByRow(sheetId).values() as Dynamic) {
+import type { CellId, SheetRead, WorkbookReads } from '../../model/workbook.ts';
+import type { CellArea } from '../../selection/model.ts';
+import type { IfQueued } from '../../state/event-reducer.ts';
+import type { CellsPickedByPage, RulesForSelection } from './pane-state.ts';
+
+/** What dropdown color suggestions of a sheet worked out: the matches of each rule list, and the lists stretched to the sheet's end. */
+export interface DropdownSuggestionsCache {
+  matches: Map<string, (Matches | null)[] | null>;
+  runOn: Map<string, RuleInIds[]>;
+}
+
+/** The body of a table, as a range and as an area. */
+export interface TableBody {
+  range: RangeCorners;
+  area: CellArea;
+}
+
+/** A rule that colors the cells holding a dropdown option. */
+interface RuleOfOption {
+  optionId: DropdownOption['optionId'];
+  rule: RuleInIds;
+}
+export function columnIdsWithCells(reads: WorkbookReads, sheetId: SheetId): Set<ColumnId> | null {
+  let columnIds = new Set<ColumnId>();
+  let cellsSeen = 0;
+  for (let cellsOfRow of reads.cellsHeldByRow(sheetId).values()) {
     cellsSeen += cellsOfRow.size;
     if (cellsSeen > MOST_HELD_CELLS_FOR_COLUMNS) return null;
-    for (let columnId of cellsOfRow.keys() as Dynamic) columnIds.add(columnId);
+    for (let columnId of cellsOfRow.keys()) columnIds.add(columnId);
   }
   return columnIds;
 }
-export function suggestionsForSelectedBlock(reads: WorkbookReads, anchorCell?: Dynamic, focusCell?: Dynamic, suggestions?: Dynamic) {
-  let { sheetId: sheetId } = anchorCell;
+export function suggestionsForSelectedBlock(
+  reads: WorkbookReads,
+  anchorCell: CellId,
+  focusCell: CellId,
+  suggestions: ConditionalFormatSuggestionsAnswer,
+): ConditionalFormatSuggestionsAnswer | null {
+  let { sheetId } = anchorCell;
   if ((anchorCell.rowId === focusCell.rowId && anchorCell.columnId === focusCell.columnId) || !suggestions.isWidenedToColumn) return null;
   let [anchorAt, focusAt] = [reads.positionOfCell(anchorCell), reads.positionOfCell(focusCell)];
   if (anchorAt === null || focusAt === null) return null;
@@ -39,7 +75,7 @@ export function suggestionsForSelectedBlock(reads: WorkbookReads, anchorCell?: D
   let [leftCell, rightCell] = anchorAt.columnIndex > focusAt.columnIndex ? [focusCell, anchorCell] : [anchorCell, focusCell];
   let [recordsArea] = areasOfRuleRanges(reads, sheetId, [suggestions.table.records]);
   if (recordsArea === undefined || Math.min(anchorAt.rowIndex, focusAt.rowIndex) < recordsArea.topRowIndex) return null;
-  let about = {
+  let about: RangeCorners = {
     topLeft: {
       r: topCell.rowId,
       c: leftCell.columnId,
@@ -51,29 +87,33 @@ export function suggestionsForSelectedBlock(reads: WorkbookReads, anchorCell?: D
   };
   return {
     ...suggestions,
-    about: about,
+    about,
     isWidenedToColumn: false,
     suggestions: numberRuleSuggestions(reads, sheetId, {
-      about: about,
+      about,
       table: suggestions.table,
     }),
     ruleToStartFrom: defaultRuleForRanges([about]),
   };
 }
-export function sameKindNumberColumnsIn(reads: WorkbookReads, sheetId: Dynamic, { about: about, table: table }: Dynamic) {
+export function sameKindNumberColumnsIn(
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  { about, table }: Pick<ConditionalFormatSuggestionsAnswer, 'about' | 'table'>,
+): RangeCorners | null {
   let [aboutArea] = areasOfRuleRanges(reads, sheetId, [about]);
   let isWholeTableWide = table.columns[0].c === table.records.topLeft.c && table.columns.at(-1)?.c === table.records.bottomRight.c;
   if (aboutArea === undefined || !isWholeTableWide) return null;
-  let numberColumns = table.columns.flatMap(({ c: c, kind: kind }: Dynamic) => {
+  let numberColumns = table.columns.flatMap(({ c, kind }) => {
     let columnIndex = reads.columnIndexOf(sheetId, c) ?? -1;
     return isInSpan(columnIndex, aboutArea.leftColumnIndex, aboutArea.columnCount) &&
       measureOfColumn({
-        kind: kind,
+        kind,
       }) === 'numbers'
       ? [
           {
-            c: c,
-            kind: kind,
+            c,
+            kind,
             at: columnIndex,
           },
         ]
@@ -82,7 +122,7 @@ export function sameKindNumberColumnsIn(reads: WorkbookReads, sheetId: Dynamic, 
   let [firstColumn, lastColumn] = [numberColumns[0], numberColumns.at(-1)];
   if (firstColumn === undefined || lastColumn === undefined) return null;
   return lastColumn.at - firstColumn.at === numberColumns.length - 1 &&
-    numberColumns.every(({ kind: kind }: Dynamic) => kind === firstColumn.kind)
+    numberColumns.every(({ kind }) => kind === firstColumn.kind)
     ? {
         topLeft: {
           r: about.topLeft.r,
@@ -95,11 +135,15 @@ export function sameKindNumberColumnsIn(reads: WorkbookReads, sheetId: Dynamic, 
       }
     : null;
 }
-export function numberRuleSuggestions(reads: WorkbookReads, sheetId?: Dynamic, suggestionsFor?: Dynamic) {
+export function numberRuleSuggestions(
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  suggestionsFor: Pick<ConditionalFormatSuggestionsAnswer, 'about' | 'table'>,
+): ConditionalFormatSuggestion[] {
   let columnsRange = sameKindNumberColumnsIn(reads, sheetId, suggestionsFor);
   if (columnsRange === null) return [];
-  let { scale: scale, ofNegatives: ofNegatives, ofTheLargest: ofTheLargest, ofAnyNumber: ofAnyNumber } = suggestedRulesFor([columnsRange]);
-  let withMatches = (rule?: Dynamic) => ({
+  let { scale, ofNegatives, ofTheLargest, ofAnyNumber } = suggestedRulesFor([columnsRange]);
+  let withMatches = (rule: RuleInIds): ConditionalFormatSuggestion => ({
     rules: [rule],
     matches: matchTotalOfRules(reads, sheetId, [rule]),
   });
@@ -118,29 +162,29 @@ export function numberRuleSuggestions(reads: WorkbookReads, sheetId?: Dynamic, s
     ...(hasLargestApart && matchedCellsOf(largest) === 1 ? [largest] : []),
   ];
 }
-export function firstDropdownCellIn(reads: WorkbookReads, sheetId?: Dynamic, range?: Dynamic) {
+export function firstDropdownCellIn(reads: WorkbookReads, sheetId: SheetId, range: RangeCorners): CellId | null {
   let [area] = areasOfRuleRanges(reads, sheetId, [range]);
   if (area === undefined) return null;
-  for (let rowOffset: Dynamic = 0; rowOffset < Math.min(area.rowCount, MOST_ROWS_LOOKED_AT_FOR_DROPDOWN); rowOffset += 1) {
+  for (let rowOffset = 0; rowOffset < Math.min(area.rowCount, MOST_ROWS_LOOKED_AT_FOR_DROPDOWN); rowOffset += 1) {
     let cellId = reads.cellIdAt(sheetId, area.topRowIndex + rowOffset, area.leftColumnIndex);
     if (cellId !== null && reads.dropdownOf(cellId) !== null) return cellId;
   }
   return null;
 }
-export function dropdownSuggestionsCacheOf(reads: WorkbookReads, sheetId?: Dynamic) {
+export function dropdownSuggestionsCacheOf(reads: WorkbookReads, sheetId: SheetId): DropdownSuggestionsCache | null {
   let sheetNow = reads.sheetAsItStands(sheetId);
   if (sheetNow === null) return null;
   let cache = dropdownSuggestionsCache.get(sheetNow) ?? {
-    matches: new (Map as Dynamic)(),
-    runOn: new (Map as Dynamic)(),
+    matches: new Map(),
+    runOn: new Map(),
   };
   dropdownSuggestionsCache.set(sheetNow, cache);
   return cache;
 }
-export function tableBodyOfCell(reads: WorkbookReads, cell?: Dynamic) {
-  let table = reads.tableAtCell(cell)?.table;
+export function tableBodyOfCell(reads: WorkbookReads, cell: CellId): TableBody | null {
+  let table = tableAtCellIfAny(reads, cell)?.table;
   if (table === undefined) return null;
-  let bodyRange = {
+  let bodyRange: RangeCorners = {
     topLeft: {
       r: table.firstRowOfBody,
       c: table.firstColumn,
@@ -158,7 +202,7 @@ export function tableBodyOfCell(reads: WorkbookReads, cell?: Dynamic) {
         area: bodyArea,
       };
 }
-export function tableBodyRowsWithin(reads: WorkbookReads, sheetId: Dynamic, { range: range, area: area }: Dynamic, within?: Dynamic) {
+export function tableBodyRowsWithin(reads: WorkbookReads, sheetId: SheetId, { range, area }: TableBody, within: RangeCorners): RangeCorners | null {
   let [withinArea] = areasOfRuleRanges(reads, sheetId, [within]);
   let rows = reads.linesOf(sheetId)?.rows;
   if (withinArea === undefined || rows === undefined) return null;
@@ -178,7 +222,12 @@ export function tableBodyRowsWithin(reads: WorkbookReads, sheetId: Dynamic, { ra
         },
       };
 }
-export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic, about?: Dynamic, dropdownCell?: Dynamic) {
+export function dropdownColorSuggestions(
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  about: RangeCorners,
+  dropdownCell: CellId | null,
+): ConditionalFormatSuggestion[] {
   let c = about.topLeft.c;
   if (c !== about.bottomRight.c) return [];
   let cellWithDropdown = dropdownCell ?? firstDropdownCellIn(reads, sheetId, about);
@@ -191,13 +240,13 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
   let lastRowId = rows?.idAt(rows.count - 1) ?? null;
   let cache = dropdownSuggestionsCacheOf(reads, sheetId);
   if (ruleRange === null || ruleArea === undefined || lastRowId === null || cache === null) return [];
-  let existingRules = reads.conditionalFormatsOf(sheetId).flatMap((format?: Dynamic) => ruleOfConditionalFormat(format) ?? []);
-  let optionRules = dropdown.options.flatMap(({ optionId: optionId, label: label, color: color }: Dynamic) => {
+  let existingRules = reads.conditionalFormatsOf(sheetId).flatMap((format) => ruleOfConditionalFormat(format) ?? []);
+  let optionRules = dropdown.options.flatMap(({ optionId, label, color }): RuleOfOption[] => {
     let fillColor = lightenedFillColor(color);
     if (fillColor === null) return [];
     return [
       {
-        optionId: optionId,
+        optionId,
         rule: {
           ranges: [ruleRange],
           effect: {
@@ -206,7 +255,7 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
               {
                 tested: {
                   kind: 'sameRowInColumn',
-                  c: c,
+                  c,
                 },
                 condition: {
                   kind: 'textIs',
@@ -215,7 +264,7 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
               },
             ],
             format: {
-              fillColor: fillColor,
+              fillColor,
             },
           },
         },
@@ -223,14 +272,14 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
     ];
   });
   let newOptionRules = optionRules.filter(
-    ({ rule: rule }: Dynamic) =>
+    ({ rule }) =>
       !existingRules.some(
-        (existing?: Dynamic) =>
+        (existing) =>
           isSameRulesJson(whatRuleLooksFor(existing), whatRuleLooksFor(rule)) &&
-          areasOfRuleRanges(reads, sheetId, existing.ranges).some((area?: Dynamic) => areaContainsArea(area, ruleArea)),
+          areasOfRuleRanges(reads, sheetId, existing.ranges).some((area) => areaContainsArea(area, ruleArea)),
       ),
   );
-  let asSuggestion = (rules?: Dynamic) => {
+  let asSuggestion = (rules: RuleInIds[]): ConditionalFormatSuggestion[] => {
     let cacheKey = JSON.stringify(rules);
     let matches = cache.matches.get(cacheKey) ?? matchesOfRules(reads, sheetId, rules);
     if (matches !== null) cache.matches.set(cacheKey, matches);
@@ -244,7 +293,7 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
       : (cache.runOn.get(cacheKey) ??
         withRuleRangesMapped(
           rules,
-          (range?: Dynamic) => ({
+          (range) => ({
             ...range,
             bottomRight: {
               ...range.bottomRight,
@@ -263,8 +312,8 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
     ];
   };
   let cellOption = dropdownCell === null ? undefined : reads.cellOf(dropdownCell)?.dropdownOption;
-  let ruleOfCellOption = newOptionRules.find(({ optionId: optionId }: Dynamic) => optionId === cellOption?.optionId);
-  let [firstRule, ...otherRules] = newOptionRules.map(({ rule: rule }: Dynamic) => rule);
+  let ruleOfCellOption = newOptionRules.find(({ optionId }) => optionId === cellOption?.optionId);
+  let [firstRule, ...otherRules] = newOptionRules.map(({ rule }) => rule);
   return [
     ...(ruleOfCellOption === undefined ? [] : asSuggestion([ruleOfCellOption.rule])),
     ...(firstRule === undefined || otherRules.length === 0 || optionRules.length > MOST_DROPDOWN_OPTIONS_FOR_COLORS
@@ -272,8 +321,12 @@ export function dropdownColorSuggestions(reads: WorkbookReads, sheetId?: Dynamic
       : asSuggestion([firstRule, ...otherRules])),
   ];
 }
-export function withCellsToAskAgentAbout(reads: WorkbookReads, sheetId?: Dynamic, suggestions?: Dynamic) {
-  let { about: about, table: table } = suggestions;
+export function withCellsToAskAgentAbout(
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  suggestions: ConditionalFormatSuggestionsAnswer,
+): RulesForSelection {
+  let { about, table } = suggestions;
   let [aboutArea] = areasOfRuleRanges(reads, sheetId, [about]);
   let [recordsArea] = areasOfRuleRanges(reads, sheetId, [table.records]);
   let columns = reads.linesOf(sheetId)?.columns;
@@ -297,8 +350,13 @@ export function withCellsToAskAgentAbout(reads: WorkbookReads, sheetId?: Dynamic
         },
       };
 }
-export function suggestionsForCells(reads: WorkbookReads, anchorCell?: Dynamic, focusCell?: Dynamic, mergedArea: Dynamic = null) {
-  let { sheetId: sheetId } = anchorCell;
+export function suggestionsForCells(
+  reads: WorkbookReads,
+  anchorCell: CellId,
+  focusCell: CellId,
+  mergedArea: CellArea | null = null,
+): RulesForSelection | null {
+  let { sheetId } = anchorCell;
   let suggestions = reads.conditionalFormatSuggestions(anchorCell, focusCell);
   let blockSuggestions = suggestions === null ? null : suggestionsForSelectedBlock(reads, anchorCell, focusCell, suggestions);
   if (blockSuggestions !== null) return withCellsToAskAgentAbout(reads, sheetId, blockSuggestions);
@@ -307,7 +365,7 @@ export function suggestionsForCells(reads: WorkbookReads, anchorCell?: Dynamic, 
   let columnsWithCells =
     anchorColumnIndex === null || focusColumnIndex === null || anchorColumnIndex === focusColumnIndex ? null : columnIdsWithCells(reads, sheetId);
   if (anchorColumnIndex === null || focusColumnIndex === null || columnsWithCells === null) {
-    let isMergedColumn =
+    const isMergedColumn =
       isSameRulesJson(anchorCell, focusCell) &&
       mergedArea !== null &&
       mergedArea.rowCount > 1 &&
@@ -333,37 +391,37 @@ export function suggestionsForCells(reads: WorkbookReads, anchorCell?: Dynamic, 
         };
   }
   let columns = reads.linesOf(sheetId)?.columns;
-  let columnSuggestions = Array.from<Dynamic, Dynamic>(
+  let columnSuggestions = Array.from(
     {
       length: Math.abs(anchorColumnIndex - focusColumnIndex) + 1,
     },
-    (input?: Dynamic, offset?: Dynamic) => columns?.idAt(Math.min(anchorColumnIndex, focusColumnIndex) + offset) ?? null,
+    (unfilledSpot, offset) => columns?.idAt(Math.min(anchorColumnIndex, focusColumnIndex) + offset) ?? null,
   )
-    .flatMap((columnId?: Dynamic) => (columnId !== null && columnsWithCells.has(columnId) ? [columnId] : []))
+    .flatMap((columnId) => (columnId !== null && columnsWithCells.has(columnId) ? [columnId] : []))
     .slice(0, MOST_COLUMNS_FOR_SUGGESTIONS)
     .flatMap(
-      (columnId?: Dynamic) =>
+      (columnId) =>
         reads.conditionalFormatSuggestions(
           {
             ...anchorCell,
-            columnId: columnId,
+            columnId,
           },
           {
             ...focusCell,
-            columnId: columnId,
+            columnId,
           },
         ) ?? [],
     );
-  let suggestionLists = columnSuggestions.map(({ suggestions: suggestions2 }: Dynamic) => suggestions2);
-  let longestList = (Math.max as Dynamic)(0, ...suggestionLists.map((list?: Dynamic) => list.length));
-  let interleaved = Array.from<Dynamic, Dynamic>(
+  let suggestionLists = columnSuggestions.map(({ suggestions: ofColumn }) => ofColumn);
+  let longestList = Math.max(0, ...suggestionLists.map((list) => list.length));
+  let interleaved = Array.from(
     {
       length: longestList,
     },
-    (input?: Dynamic, rank?: Dynamic) => suggestionLists.flatMap((list?: Dynamic) => list[rank] ?? []),
+    (unfilledSpot, rank) => suggestionLists.flatMap((list) => list[rank] ?? []),
   ).flat();
   let dropdownSuggestions = columnSuggestions.flatMap(
-    ({ about: about }: Dynamic) => dropdownColorSuggestions(reads, sheetId, about, null),
+    ({ about }) => dropdownColorSuggestions(reads, sheetId, about, null),
   );
   return suggestions === null
     ? null
@@ -372,7 +430,12 @@ export function suggestionsForCells(reads: WorkbookReads, anchorCell?: Dynamic, 
         suggestions: [...dropdownSuggestions, ...interleaved],
       };
 }
-export function openRuleEditor(state: PageState, reads: WorkbookReads, conditionalFormatId?: Dynamic, cellsPickedByPage?: Dynamic) {
+export function openRuleEditor(
+  state: PageState,
+  reads: WorkbookReads,
+  conditionalFormatId: string,
+  cellsPickedByPage: CellsPickedByPage,
+): PageState {
   let pane = conditionalRulesOfPane(state);
   let rule = pane === null ? null : conditionalFormatRuleById(reads, pane.sheetId, conditionalFormatId);
   if (pane === null || rule === null) return state;
@@ -382,9 +445,9 @@ export function openRuleEditor(state: PageState, reads: WorkbookReads, condition
     drawnAs: 'pane',
     editor: {
       ...{
-        conditionalFormatId: conditionalFormatId,
-        table: table,
-        cellsPickedByPage: cellsPickedByPage,
+        conditionalFormatId,
+        table,
+        cellsPickedByPage,
         typed: null,
       },
       testBeingAdded: null,
@@ -394,7 +457,11 @@ export function openRuleEditor(state: PageState, reads: WorkbookReads, condition
     inWords: null,
   });
 }
-export function openEditorOfTopRule(state: PageState, reads: WorkbookReads, { cellsPickedByPage: cellsPickedByPage }: Dynamic) {
+export function openEditorOfTopRule(
+  state: PageState,
+  reads: WorkbookReads,
+  { cellsPickedByPage }: NonNullable<IfQueued['thenEditorOfTopRule']>,
+): PageState {
   let [topFormat] = reads.conditionalFormatsOf(conditionalRulesOfPane(state)?.sheetId ?? state.sheetId);
   return topFormat === undefined ? state : openRuleEditor(state, reads, topFormat.conditionalFormatId, cellsPickedByPage);
 }
@@ -403,17 +470,17 @@ export const MOST_HELD_CELLS_FOR_COLUMNS = 20000;
 export const PAGE_SUGGESTIONS_FOR_BLOCK = 4;
 export const PAGE_SUGGESTIONS_BESIDE_AGENT = 2;
 export const LEAST_CELLS_FOR_COLOR_SCALE = 3;
-export const matchedCellsOf = ({ matches: matches }: Dynamic) => matches?.cells ?? 0;
+export const matchedCellsOf = ({ matches }: Pick<ConditionalFormatSuggestion, 'matches'>): number => matches?.cells ?? 0;
 export const MOST_ROWS_LOOKED_AT_FOR_DROPDOWN = 10;
-export const dropdownSuggestionsCache = new (WeakMap as Dynamic)();
-export const areaContainsArea = (area?: Dynamic, inner?: Dynamic) =>
+export const dropdownSuggestionsCache = new WeakMap<SheetRead, DropdownSuggestionsCache>();
+export const areaContainsArea = (area: CellArea, inner: CellArea): boolean =>
   area.topRowIndex <= inner.topRowIndex &&
   area.topRowIndex + area.rowCount >= inner.topRowIndex + inner.rowCount &&
   area.leftColumnIndex <= inner.leftColumnIndex &&
   area.leftColumnIndex + area.columnCount >= inner.leftColumnIndex + inner.columnCount;
 export const MOST_DROPDOWN_OPTIONS_FOR_COLORS = 8;
-export const dropdownColorRuleLists = new (WeakSet as Dynamic)();
-export const columnNameOfAbout = ({ about: about, table: table }: Dynamic) =>
+export const dropdownColorRuleLists = new WeakSet<RuleInIds[]>();
+export const columnNameOfAbout = ({ about, table }: Pick<ConditionalFormatSuggestionsAnswer, 'about' | 'table'>): string | null =>
   about.topLeft.c === about.bottomRight.c && about.topLeft.r === table.records.topLeft.r && about.bottomRight.r === table.records.bottomRight.r
     ? tableColumnSummary(table, about.topLeft.c).name
     : null;

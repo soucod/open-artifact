@@ -13,7 +13,7 @@
  */
 
 import type { TypeApiWakeResult, TypeServerEnv, WakeRequestItem } from '@open-artifact/protocol';
-import { TypeApi, typeServerEnv } from '@open-artifact/server-sdk';
+import { TypeApi, typeServerEnv, type TypeApiLike } from '@open-artifact/server-sdk';
 
 export { typeServerEnv };
 
@@ -33,7 +33,7 @@ export function envPort(env: Partial<TypeServerEnv> = typeServerEnv()): number |
 export type WakeOutcome = TypeApiWakeResult | { status: 'failed'; via: 'failed'; reason: string };
 
 /** Hands page requests to the agent that owns the artifact. Never throws. */
-export async function wakeRequests(daemon: TypeApi, id: string, requests: WakeRequestItem[]): Promise<WakeOutcome> {
+export async function wakeRequests(daemon: TypeApiLike, id: string, requests: WakeRequestItem[]): Promise<WakeOutcome> {
   try {
     return await daemon.wake(id, { requests });
   } catch (error) {
@@ -42,7 +42,7 @@ export async function wakeRequests(daemon: TypeApi, id: string, requests: WakeRe
 }
 
 /** Reports a write made through the page. Failures are ignored. */
-export async function reportTouch(daemon: TypeApi | null, id: string, author: string, paths: string[], title?: string): Promise<void> {
+export async function reportTouch(daemon: TypeApiLike | null, id: string, author: string, paths: string[], title?: string): Promise<void> {
   if (!daemon) return;
   try {
     await daemon.touch(id, { author, paths, ...(title ? { title } : {}) });

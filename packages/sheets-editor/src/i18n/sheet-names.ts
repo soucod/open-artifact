@@ -1,18 +1,22 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from './messages.ts';
-export function copiedSheetNameAffixes() {
+/** The text a copied sheet's name puts before and after the name of the sheet it copies. */
+export interface CopiedSheetNameAffixes {
+  beforeName: string;
+  afterName: string;
+}
+export function copiedSheetNameAffixes(): CopiedSheetNameAffixes {
   let [beforeName = '', afterName = ''] = copiedSheetName(SHEET_NAME_PLACEHOLDER).split(SHEET_NAME_PLACEHOLDER);
   return {
-    beforeName: beforeName,
-    afterName: afterName,
+    beforeName,
+    afterName,
   };
 }
-export const defaultSheetName = () =>
+export const defaultSheetName = (): string =>
   translateMessage({
     defaultMessage: 'Sheet',
     id: '5oHo/izHhB',
   });
-export const copiedSheetName = (sheetName?: Dynamic) =>
+export const copiedSheetName = (sheetName: string): string =>
   translateMessage(
     {
       defaultMessage: '{name} (copy)',

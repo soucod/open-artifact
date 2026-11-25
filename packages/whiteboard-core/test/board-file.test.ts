@@ -154,7 +154,7 @@ describe('board check', () => {
     assert.ok(has('board/meta', 'warning', /not an element id/));
     assert.ok(has('board/meta', 'warning', /lists gone, but db\/elements\/gone\.json does not exist/));
     assert.ok(has('board/inks', 'warning', /"FF8800"/));
-    assert.ok(has('board/claim-c1234567', 'info', /no area/));
+    assert.ok(!findings.some((finding) => finding.path === 'board/claim-c1234567'), 'a claim set to {} is over and says nothing');
     assert.ok(has('elements/n3', 'warning', /Not listed in db\/board\/meta\.json/));
     assert.ok(has('elements/x1', 'error', /Not a valid "mystery" element/));
     assert.ok(has('elements/a1', 'error', /points to missing/));

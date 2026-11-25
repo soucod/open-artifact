@@ -19,5 +19,32 @@
   "wake": [
     "inbox"
   ],
-  "open": "browser"
+  "open": "browser",
+  "markers": [
+    "CODEX_THREAD_ID"
+  ],
+  "hookDialect": "claude-code",
+  "sessionWorkspace": "codex-rollout",
+  "nudge": {
+    "command": [
+      "${env:OPEN_ARTIFACT_CODEX_BIN}",
+      "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "codex"
+    ],
+    "args": [
+      "queue",
+      "--thread",
+      "${session}",
+      "--message",
+      "${text}"
+    ]
+  },
+  "caps": {
+    "tools": "mcp",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    }
+  }
 }

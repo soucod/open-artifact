@@ -42,10 +42,10 @@ export function walkToDataEdge(filledIndexes: Set<number>, start: number, from: 
   return current;
 }
 export function edgeOfDataFrom(state: PageState, reads: ReadsWithTextMeasurer, cell: CellPosition, direction: KeyMove): CellPosition {
-  let { sheetId: sheetId } = state;
-  let { rowCount: rowCount, columnCount: columnCount, rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(state, reads);
+  let { sheetId } = state;
+  let { rowCount, columnCount, rowEdges, columnEdges } = layoutOfView(state, reads);
   let isAcross = direction.rowDelta === 0;
-  let indexAlong = ({ rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition) => (isAcross ? columnIndex : rowIndex);
+  let indexAlong = ({ rowIndex, columnIndex }: CellPosition) => (isAcross ? columnIndex : rowIndex);
   let spanAlong = (area: CellArea): [number, number] =>
     isAcross ? [area.leftColumnIndex, area.columnCount] : [area.topRowIndex, area.rowCount];
   let cellAt = (index: number): CellPosition =>
@@ -73,12 +73,12 @@ export function edgeOfDataFrom(state: PageState, reads: ReadsWithTextMeasurer, c
         topRowIndex: entryPosition.rowIndex,
         leftColumnIndex: 0,
         rowCount: 1,
-        columnCount: columnCount,
+        columnCount,
       }
     : {
         topRowIndex: 0,
         leftColumnIndex: entryPosition.columnIndex,
-        rowCount: rowCount,
+        rowCount,
         columnCount: 1,
       };
   let filledIndexes = new Set<number>();
@@ -104,13 +104,13 @@ export function edgeOfDataFrom(state: PageState, reads: ReadsWithTextMeasurer, c
   return cellAt(walkToDataEdge(filledIndexes, startIndex, firstStep, stepVisible));
 }
 export function filledCellTester(state: PageState, reads: ReadsWithTextMeasurer): FilledCellTest {
-  let { sheetId: sheetId } = state;
-  let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(state, reads);
+  let { sheetId } = state;
+  let { rowCount, columnCount } = layoutOfView(state, reads);
   let wholeSheet = {
     topRowIndex: 0,
     leftColumnIndex: 0,
-    rowCount: rowCount,
-    columnCount: columnCount,
+    rowCount,
+    columnCount,
   };
   let filledKeys = new Set<number>();
   let keyOf = (rowIndex: number, columnIndex: number) => rowIndex * columnCount + columnIndex;
@@ -165,9 +165,9 @@ export function lastRowOfDataBelow(state: PageState, reads: ReadsWithTextMeasure
     if (isFilledIn([rowIndex, rowIndex], columnSpan)) return rowIndex - 1;
   return regionBottom;
 }
-export function pageRowIndex(state: PageState, reads: ReadsWithTextMeasurer, { rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition, by: PageStep): number {
+export function pageRowIndex(state: PageState, reads: ReadsWithTextMeasurer, { rowIndex, columnIndex }: CellPosition, by: PageStep): number {
   let layout = layoutOfView(state, reads);
-  let { rowEdges: rowEdges, rowCount: rowCount } = layout;
+  let { rowEdges, rowCount } = layout;
   let pageHeight =
     cellsHeightAboveFloats(state) - frozenRowsHeight(layout) - tallestStickyHeaderOverColumn(state, reads, columnIndex, layout);
   if (by === 1) {
@@ -234,7 +234,7 @@ export function jumpCell(state: PageState, reads: ReadsWithTextMeasurer, jump: J
         columnIndex: 0,
       };
     case 'endOfSheet': {
-      let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(state, reads);
+      let { rowCount, columnCount } = layoutOfView(state, reads);
       return {
         rowIndex: rowCount - 1,
         columnIndex: columnCount - 1,
@@ -250,8 +250,8 @@ export function jumpCell(state: PageState, reads: ReadsWithTextMeasurer, jump: J
   }
 }
 export function pageStartRow(state: PageState, reads: ReadsWithTextMeasurer, position: CellPosition, by: PageStep): CellPosition {
-  let { topRowIndex: topRowIndex, rowCount: rowCount } = reads.mergedAreaAt(state.sheetId, position) ?? areaOfPosition(position);
-  let { rowEdges: rowEdges } = layoutOfView(state, reads);
+  let { topRowIndex, rowCount } = reads.mergedAreaAt(state.sheetId, position) ?? areaOfPosition(position);
+  let { rowEdges } = layoutOfView(state, reads);
   let pageStart = stepOriginInMerge(by, topRowIndex, rowCount, position.rowIndex);
   let rowIndex =
     by === 1
@@ -259,12 +259,12 @@ export function pageStartRow(state: PageState, reads: ReadsWithTextMeasurer, pos
       : Math.min(position.rowIndex, shownLineAtOrAfter(rowEdges, pageStart));
   return {
     ...position,
-    rowIndex: rowIndex,
+    rowIndex,
   };
 }
 export function scrollForPage(state: PageState, reads: ReadsWithTextMeasurer, from: CellPosition, to: CellPosition): PageState {
   let layout = layoutOfView(state, reads);
-  let { rowEdges: rowEdges } = layout;
+  let { rowEdges } = layout;
   let scrollTop = state.scrollTop + rowEdges.startOf(to.rowIndex) - rowEdges.startOf(from.rowIndex);
   return {
     ...state,
@@ -272,7 +272,7 @@ export function scrollForPage(state: PageState, reads: ReadsWithTextMeasurer, fr
       state,
       {
         ...state,
-        scrollTop: scrollTop,
+        scrollTop,
       },
       layout,
       state,

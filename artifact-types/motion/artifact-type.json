@@ -1,0 +1,23 @@
+{
+  "slug": "motion",
+  "name": "Motion",
+  "title": "Motion (animated films)",
+  "description": "Short animated films kept as small JSON documents: a list of scenes, and each scene's HTML, CSS and JavaScript drawn as a pure function of time, with a generated score of music and sound effects and, where the agent can record one, a captioned voiceover, or a video clip's own sound under captions. The page plays the film in place, lets people retype its words, change its colors, fonts, scene lengths and the look of single things by hand, comment on a moment or a spot in the frame and send requests to the agent, and exports it as MP4, GIF, a standalone HTML player or a source ZIP.",
+  "summary": "A short animated film that plays in place and exports as MP4 or GIF.",
+  "artifactTitle": "Untitled motion",
+  "category": "Media",
+  "version": "0.1.0",
+  "skill": "SKILL.md",
+  "intents": ["motion", "animation", "motion graphics", "video", "animated video", "explainer video", "promo video", "product video", "title sequence", "gif"],
+  "when": "The person wants a short animated film: an explainer, a product promo or walkthrough, a launch or recruiting clip, a toast, a title or end card, an animated story or scene, or motion graphics they can play, change and export as a video file or GIF.",
+  "detect": ["db/film/meta.json"],
+  "titleFrom": "db/film/meta.json#/title",
+  "entry": {
+    "start": { "command": "node", "args": ["scripts/cli.mjs", "serve", "--type", "motion"] },
+    "open": true,
+    "share": true,
+    "actions": true
+  },
+  "engines": { "openArtifact": ">=1" },
+  "openArtifact": { "style": "db", "store": "db", "comments": true, "openEarly": true, "exports": ["mp4", "gif", "html", "zip"], "uses": ["design-system"] }
+}

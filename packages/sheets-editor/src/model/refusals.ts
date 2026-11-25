@@ -28,7 +28,7 @@ export function editRefusalReason(refusal: string): EditRefusalReason | 'fault' 
 }
 export function readErrorKind(error: unknown): ErrorKind {
   if (!(error instanceof Error)) return 'notAnError';
-  let { name: name, message: message } = error;
+  let { name, message } = error;
   switch (name) {
     case 'RuntimeError':
       return WASM_UNREACHABLE_MESSAGE.test(message) ? 'wasmUnreachable' : 'wasmOtherTrap';
@@ -122,6 +122,16 @@ export const REFUSAL_MESSAGE_KEYS = {
   tooManyPlacements: 'tooManyCharts',
   tooManyGroups: 'tooManyGroups',
   tooManyConditionalFormats: 'tooManyConditionalFormats',
+  nameOfNamedViewTaken: 'namedViewNameTaken',
+  namedViewTooLarge: 'namedViewTooLarge',
+  tooManyTestsInNamedView: 'namedViewTooLarge',
+  tooManyKeysInNamedView: 'namedViewTooLarge',
+  unknownNamedView: 'namedViewIsGone',
+  unknownInteractive: 'interactiveCantWrite',
+  cellIsNotTheInteractives: 'interactiveCantWrite',
+  cellHoldsMoreThanAValue: 'interactiveCantWrite',
+  valueDoesNotFitCell: 'interactiveCantWrite',
+  interactiveSavesTooMuch: 'interactiveSavesTooMuch',
   tooManySheets: 'tooManySheets',
   tableTooLarge: 'tableTooLarge',
   stepTooLarge: 'tableTooLarge',
@@ -132,11 +142,30 @@ export const REFUSAL_MESSAGE_KEYS = {
   cellOfDropdownHoldsNoOption: 'isNoOptionOfDropdown',
   tooManyFormulasReadMovedCells: 'tooManyFormulasReadMovedCells',
   formulasNotCalculated: 'formulasNotCalculated',
+  pivotTableSourceHasNoHeader: 'pivotTableSourceHasNoHeader',
+  pivotTableSourceHasNoRecords: 'pivotTableSourceHasNoRecords',
+  pivotTableSourceRecordsNotClear: 'pivotTableSourceRecordsNotClear',
+  pivotTableSourceHasSectionsOrSubtotals: 'pivotTableSourceHasSectionsOrSubtotals',
+  pivotTableColumnNotOfSource: 'pivotTableColumnNotOfSource',
+  pivotTableTotalNeedsNumbers: 'pivotTableTotalNeedsNumbers',
+  pivotTablePeriodNeedsDates: 'pivotTablePeriodNeedsDates',
+  pivotTableFilterValueCannotBeWritten: 'pivotTableFilterValueCannotBeWritten',
+  pivotTableWouldReadItself: 'pivotTableWouldReadItself',
+  pivotTableWouldTouchATable: 'pivotTableWouldTouchATable',
+  pivotTableWouldBeReadByAnother: 'pivotTableWouldBeReadByAnother',
+  pivotTableCellsInTheWay: 'pivotTableCellsInTheWay',
+  pivotTableFormulaInTheWay: 'pivotTableFormulaInTheWay',
+  pivotTableTooLarge: 'pivotTableTooLarge',
   mergedRangesOverlap: 'mergedCellsOverlap',
   patternEndsBeforeTheFill: 'patternEndsTooSoon',
   moveSplitsMergedRange: 'moveSplitsMergedCells',
   mergedRangeAmongSortedCells: 'moveSplitsMergedCells',
+  mergedRangeAmongMovedColumnsOfCells: 'moveSplitsMergedCells',
+  spilledValuesAmongMovedColumnsOfCells: 'moveCrossesSpilledCells',
+  columnOutOfSightAmongMovedColumnsOfCells: 'moveCrossesHiddenColumn',
   sortKeysNotCalculated: 'sortKeysNotCalculated',
+  sortColumnFilledDownByOneFormula: 'sortColumnFilledDownByOneFormula',
+  sortColumnFilledFromOutsideTheCells: 'sortColumnFilledFromOutsideTheCells',
   groupsPartlyOverlap: 'groupsPartlyOverlap',
   nothingLeftInSight: 'nothingLeftInSight',
   widgetNodeNotCopied: 'chartsNotCopied',
@@ -220,6 +249,7 @@ export const PAGE_FAILURE_WORDS = Object.freeze([
   ),
   ...FAULT_WORDS.map((fault) => `fault_${fault}`),
   'fault_other',
+  'module_noWebAssembly',
   'noCauseSeen',
 ]);
 export const ERROR_PLACES = [
@@ -231,7 +261,6 @@ export const ERROR_PLACES = [
   'ownColor',
   'versionHistory',
   'changesByAgent',
-  'sortsByOthers',
   'charts',
   'exports',
   'actsCounted',

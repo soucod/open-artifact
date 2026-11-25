@@ -1,7 +1,11 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { SortDirection } from '@open-artifact/sheets-core';
+import type { LinesAxisName } from '../grid/geometry.ts';
+import type { WordSetApart } from './messages.ts';
 import { translateMessage, joinMessageParts } from './messages.ts';
 import { columnLetters } from '../model/a1-references.ts';
-export function sortOrderLabel(valuesKind?: Dynamic, direction?: Dynamic) {
+/** What every cell of a sort column holds, when they all hold the same kind of value. */
+export type SortedValuesKind = 'numbers' | 'dates' | 'times' | 'text' | 'options';
+export function sortOrderLabel(valuesKind: SortedValuesKind, direction: SortDirection): string {
   switch (valuesKind) {
     case 'numbers':
       return direction === 'ascending'
@@ -55,295 +59,286 @@ export function sortOrderLabel(valuesKind?: Dynamic, direction?: Dynamic) {
           });
   }
 }
-export function truncateGraphemes(text?: Dynamic, maxCharacters?: Dynamic) {
-  let graphemes = Array.from<Dynamic, Dynamic>(
-    new (Intl.Segmenter as Dynamic)().segment(text),
-    ({ segment: segment }: Dynamic) => segment,
+export function truncateGraphemes(text: string, maxCharacters: number): string {
+  let graphemes = Array.from(
+    new Intl.Segmenter().segment(text),
+    ({ segment }) => segment,
   );
   return graphemes.length <= maxCharacters ? text : `${graphemes.slice(0, maxCharacters).join('').trimEnd()}…`;
 }
-export function rowsFieldTextParts(count?: Dynamic) {
+/** The words before and after the row count field, split where the field goes. */
+export function rowsFieldTextParts(count: number): [string, string] {
   let parts = translateMessage(
     {
       defaultMessage: '{count, plural, one {{field} row} other {{field} rows}}',
       id: 'p6tL7SIpHA',
     },
     {
-      count: count,
+      count,
       field: ROWS_FIELD_PLACEHOLDER,
     },
   );
   let fieldIndex = Math.max(
     0,
-    parts.findIndex((part?: Dynamic) => typeof part !== 'string'),
+    parts.findIndex((part) => typeof part !== 'string'),
   );
   return [joinMessageParts(parts.slice(0, fieldIndex)), joinMessageParts(parts.slice(fieldIndex))];
 }
-export const editingCellOnSheetLabel = (cell?: Dynamic, sheet?: Dynamic) =>
+export const editingCellOnSheetLabel = (cell: string, sheet: string): string =>
   translateMessage(
     {
       defaultMessage: 'Editing {cell} on {sheet}',
       id: 'KdQvTZ1aJx',
     },
     {
-      cell: cell,
-      sheet: sheet,
+      cell,
+      sheet,
     },
   );
-export const editingCellLabel = (cell?: Dynamic) =>
+export const editingCellLabel = (cell: string): string =>
   translateMessage(
     {
       defaultMessage: 'Editing {cell}',
       id: 'j2ODfneE/9',
     },
     {
-      cell: cell,
+      cell,
     },
   );
-export const cellEditorShortHint = () =>
+export const cellEditorShortHint = (): string =>
   translateMessage({
     defaultMessage: '@ to insert, = for a formula',
     id: '7Z1ogKFTrY',
   });
-export const cellEditorHint = () =>
+export const cellEditorHint = (): string =>
   translateMessage({
     defaultMessage: 'Type a value, = for a formula, or @ to insert a person, date, or dropdown',
     id: 'QZbreTiH/4',
   });
-export const insertChipLabel = (what?: Dynamic) =>
-  translateMessage(
-    {
-      defaultMessage: '{what, select, dropdown {Insert dropdown} person {Insert person} date {Insert date} other {Insert checkbox}}',
-      id: '/i4/uUaF8f',
-    },
-    {
-      what: what,
-    },
-  );
-export const insertLinesLabel = (lines?: Dynamic, count?: Dynamic) =>
+export const insertLinesLabel = (lines: LinesAxisName, count: number): string =>
   lines === 'rows'
     ? translateMessage(
         {
           defaultMessage: '{count, plural, one {Insert row} other {Insert rows}}',
-          id: 'Q3VbcqYIqZ',
+          id: 'tix62H2JJV',
         },
         {
-          count: count,
+          count,
         },
       )
     : translateMessage(
         {
           defaultMessage: '{count, plural, one {Insert column} other {Insert columns}}',
-          id: 'MzJcardNCt',
+          id: 'RHyXpUfqsO',
         },
         {
-          count: count,
+          count,
         },
       );
-export const rowsAboveLabel = (count?: Dynamic) =>
+export const rowsAboveLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Row above} other {# rows above}}',
-      id: 'HK+wML55am',
+      id: 'KXgppCNbGN',
     },
     {
-      count: count,
+      count,
     },
   );
-export const rowsBelowLabel = (count?: Dynamic) =>
+export const rowsBelowLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Row below} other {# rows below}}',
-      id: 'pl2WRHN6wS',
+      id: 'yo+3SPw8zC',
     },
     {
-      count: count,
+      count,
     },
   );
-export const columnsLeftLabel = (count?: Dynamic) =>
+export const columnsLeftLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Column to the left} other {# columns to the left}}',
-      id: 'U2UeVGJDIo',
+      id: 'bHpZaDcq0B',
     },
     {
-      count: count,
+      count,
     },
   );
-export const columnsRightLabel = (count?: Dynamic) =>
+export const columnsRightLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Column to the right} other {# columns to the right}}',
-      id: 'pUQuQXuso3',
+      id: 'U9hzRROf01',
     },
     {
-      count: count,
+      count,
     },
   );
-export const rowCountLabel = (count?: Dynamic) =>
+export const rowCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Row} other {# rows}}',
       id: '5d4jfHzofP',
     },
     {
-      count: count,
+      count,
     },
   );
-export const columnCountLabel = (count?: Dynamic) =>
+export const columnCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Column} other {# columns}}',
       id: '85/7jzCQg0',
     },
     {
-      count: count,
+      count,
     },
   );
-export const insertRowsAboveLabel = (count?: Dynamic) =>
+export const insertRowsAboveLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Insert row above} other {Insert # rows above}}',
       id: 't+8FgWIKbE',
     },
     {
-      count: count,
+      count,
     },
   );
-export const insertRowsBelowLabel = (count?: Dynamic) =>
+export const insertRowsBelowLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Insert row below} other {Insert # rows below}}',
       id: 'T6lJpY+VG0',
     },
     {
-      count: count,
+      count,
     },
   );
-export const insertColumnsLeftLabel = (count?: Dynamic) =>
+export const insertColumnsLeftLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Insert column left} other {Insert # columns left}}',
       id: '8n3iyc4p5Q',
     },
     {
-      count: count,
+      count,
     },
   );
-export const insertColumnsRightLabel = (count?: Dynamic) =>
+export const insertColumnsRightLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Insert column right} other {Insert # columns right}}',
       id: 'hs1s70jfcr',
     },
     {
-      count: count,
+      count,
     },
   );
-export const moveRowsUpLabel = (count?: Dynamic) =>
+export const moveRowsUpLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Move row up} other {Move # rows up}}',
       id: 'IbnRqui2Nr',
     },
     {
-      count: count,
+      count,
     },
   );
-export const moveRowsDownLabel = (count?: Dynamic) =>
+export const moveRowsDownLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Move row down} other {Move # rows down}}',
       id: 'rO+L5Cj9l0',
     },
     {
-      count: count,
+      count,
     },
   );
-export const moveColumnsLeftLabel = (count?: Dynamic) =>
+export const moveColumnsLeftLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Move column left} other {Move # columns left}}',
       id: '7hdWcV7tXS',
     },
     {
-      count: count,
+      count,
     },
   );
-export const moveColumnsRightLabel = (count?: Dynamic) =>
+export const moveColumnsRightLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Move column right} other {Move # columns right}}',
       id: '9kHSuGumH4',
     },
     {
-      count: count,
+      count,
     },
   );
-export const deleteRowsLabel = (count?: Dynamic) =>
+export const deleteRowsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Delete row} other {Delete # rows}}',
       id: 'opogheqCkG',
     },
     {
-      count: count,
+      count,
     },
   );
-export const deleteColumnsLabel = (count?: Dynamic) =>
+export const deleteColumnsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Delete column} other {Delete # columns}}',
       id: 'kyBgJLr3/O',
     },
     {
-      count: count,
+      count,
     },
   );
-export const resizeColumnsLabel = (count?: Dynamic) =>
+export const resizeColumnsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Resize column} other {Resize # columns}}',
       id: 'lae8GCUBBJ',
     },
     {
-      count: count,
+      count,
     },
   );
-export const rowsFromFirstLabel = (count?: Dynamic) =>
+export const rowsFromFirstLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, =0 {No rows} =1 {1 row} =2 {2 rows} one {Rows 1 to {last}} other {Rows 1 to {last}}}',
       id: 'H+TSuNytIa',
     },
     {
-      count: count,
+      count,
       last: String(count),
     },
   );
-export const columnsFromFirstLabel = (count?: Dynamic) =>
+export const columnsFromFirstLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, =0 {No columns} =1 {1 column} =2 {2 columns} one {Columns A to {last}} other {Columns A to {last}}}',
       id: 'kpbrVkwPET',
     },
     {
-      count: count,
+      count,
       last: columnLetters(Math.max(0, count - 1)),
     },
   );
-export const freezeRowsLabel = (count?: Dynamic) =>
+export const freezeRowsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, =0 {Unfreeze rows} =1 {Freeze row 1} one {Freeze rows 1 to {last}} other {Freeze rows 1 to {last}}}',
       id: 'CjXNX8GOTo',
     },
     {
-      count: count,
+      count,
       last: String(count),
     },
   );
-export const freezeColumnsLabel = (count?: Dynamic) =>
+export const freezeColumnsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage:
@@ -351,185 +346,190 @@ export const freezeColumnsLabel = (count?: Dynamic) =>
       id: 'dirtHX//XU',
     },
     {
-      count: count,
+      count,
       last: columnLetters(Math.max(0, count - 1)),
     },
   );
-export const timeValueLabel = (time?: Dynamic) =>
+export const timeValueLabel = (time: string): string =>
   translateMessage(
     {
       defaultMessage: 'Time, {time}',
       id: 'j464aluuLS',
     },
     {
-      time: time,
+      time,
     },
   );
-export const decimalPlacesLimitText = (count?: Dynamic) =>
+export const decimalPlacesLimitText = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {The limit is # decimal place.} other {The limit is # decimal places.}}',
       id: 'Th/e4hWhfR',
     },
     {
-      count: count,
+      count,
     },
   );
-export const toolUnavailableLabel = (tool?: Dynamic) =>
+export const toolUnavailableLabel = (tool: string): string =>
   translateMessage(
     {
       defaultMessage: '{tool}, unavailable.',
       id: 'psVfNzWiwz',
     },
     {
-      tool: tool,
+      tool,
     },
   );
-export const enterTimeHint = (example?: Dynamic) =>
+export const enterTimeHint = (example: string): string =>
   translateMessage(
     {
       defaultMessage: 'Enter a time, such as {example}.',
       id: 'j3Pq7nfqyh',
     },
     {
-      example: example,
+      example,
     },
   );
-export const resizeRowsLabel = (count?: Dynamic) =>
+export const resizeRowsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Resize row} other {Resize # rows}}',
       id: 'mdCNqlRGF+',
     },
     {
-      count: count,
+      count,
     },
   );
-export const sortMenuLabel = () =>
+export const sortMenuLabel = (): string =>
   translateMessage({
     defaultMessage: 'Sort',
     id: 'xn8Q2qgLFE',
   });
-export const sortTableUnclearHint = () =>
-  translateMessage({
-    defaultMessage: 'The table for this cell isn’t clear. Select all the cells to sort, then use Custom sort.',
-    id: 'F1NZETubq4',
-  });
-export const sortRangeLabel = () =>
+export const sortTableUnclearHint = (isPivotTable?: boolean): string =>
+  isPivotTable
+    ? translateMessage({
+        defaultMessage: 'To sort a pivot table, use Edit pivot table.',
+        id: 'l1Doh/z3aK',
+      })
+    : translateMessage({
+        defaultMessage: 'The table for this cell isn’t clear. Select all the cells to sort, then use Custom sort.',
+        id: 'F1NZETubq4',
+      });
+export const sortRangeLabel = (): string =>
   translateMessage({
     defaultMessage: 'Sort range',
     id: 'btjrqFR8AZ',
   });
-export const sortSheetLabel = () =>
+export const sortSheetLabel = (): string =>
   translateMessage({
     defaultMessage: 'Sort sheet',
     id: 'Tmgcec9uzN',
   });
-export const byColumnLabel = (column?: Dynamic) =>
+export const byColumnLabel = (column: string): string =>
   translateMessage(
     {
       defaultMessage: 'By column {column}',
       id: 'EInADw5Q0O',
     },
     {
-      column: column,
+      column,
     },
   );
-export const byHeadingLabel = (heading?: Dynamic) =>
+export const byHeadingLabel = (heading: string): string =>
   translateMessage(
     {
       defaultMessage: 'By “{heading}”',
       id: 'xTNJFt/EuR',
     },
     {
-      heading: heading,
+      heading,
     },
   );
-export const ascendingLabel = () =>
+export const ascendingLabel = (): string =>
   translateMessage({
     defaultMessage: 'Ascending',
     id: 'I9vb5JJE/U',
   });
-export const descendingLabel = () =>
+export const descendingLabel = (): string =>
   translateMessage({
     defaultMessage: 'Descending',
     id: 'Kv55Kps4Ah',
   });
-export const sortByText = () =>
+export const sortByText = (): string =>
   translateMessage({
     defaultMessage: 'Sort by',
     id: 'a9fGMOM8q8',
   });
-export const columnLetterLabel = (column?: Dynamic) =>
+export const columnLetterLabel = (column: string): string =>
   translateMessage(
     {
       defaultMessage: 'Column {column}',
       id: 'Z+DwYSfjt8',
     },
     {
-      column: column,
+      column,
     },
   );
-export const sortCellsInsteadQuestion = (cells?: Dynamic) =>
+export const sortCellsInsteadQuestion = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Sort {cells} instead?',
       id: 'VwuU2X9CVu',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const dataNextToCellsWarning = (cells?: Dynamic) =>
+export const dataNextToCellsWarning = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'There’s data next to {cells}. Sorting only these cells would separate them from the rest of their rows.',
       id: 'TCypuuEHx9',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const sortCellsLabel = (cells?: Dynamic) =>
+export const sortCellsLabel = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Sort {cells}',
       id: 'KWMVKbOBfw',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const sortCellsOnlyLabel = (cells?: Dynamic) =>
+export const sortCellsOnlyLabel = (cells: string): string =>
   translateMessage(
     {
       defaultMessage: 'Sort {cells} only',
       id: 'HwOXC9bT1e',
     },
     {
-      cells: cells,
+      cells,
     },
   );
-export const wholeNumberBetweenHint = (smallest?: Dynamic, largest?: Dynamic) =>
+export const wholeNumberBetweenHint = (smallest: number, largest: number): string =>
   translateMessage(
     {
       defaultMessage: 'Enter a whole number from {smallest} to {largest}.',
       id: 'BXrulCaiQs',
     },
     {
-      smallest: smallest,
-      largest: largest,
+      smallest,
+      largest,
     },
   );
-export const digitsBetweenHint = (smallest?: Dynamic, largest?: Dynamic) =>
+export const digitsBetweenHint = (smallest: number, largest: number): string =>
   translateMessage(
     {
       defaultMessage: 'Enter digits only, from {smallest} to {largest}, such as 120.',
       id: 'QJItV7rV7f',
     },
     {
-      smallest: smallest,
-      largest: largest,
+      smallest,
+      largest,
     },
   );
 export const HEADING_LABEL_MAX_CHARACTERS = 24;
@@ -537,17 +537,17 @@ export const SHEET_NAME_IN_NOTICE_MAX_CHARACTERS = 32;
 export const DROPDOWN_OPTION_IN_NOTICE_MAX_CHARACTERS = 32;
 export const PLACED_VIEW_NAME_IN_NOTICE_MAX_CHARACTERS = 32;
 export const PERSON_NAME_IN_NOTICE_MAX_CHARACTERS = 32;
-export const figureNameLabel = (figure?: Dynamic) =>
+export const figureNameLabel = (figure: string): string =>
   translateMessage(
     {
       defaultMessage: '{figure, select, sum {Sum} average {Average} min {Min} max {Max} other {Count}}',
       id: 'SJ8F3Yr1VZ',
     },
     {
-      figure: figure,
+      figure,
     },
   );
-export const figureWithValueLabel = (figure?: Dynamic, written?: Dynamic) =>
+export const figureWithValueLabel = (figure: string, written: string): string =>
   translateMessage(
     {
       defaultMessage:
@@ -555,26 +555,26 @@ export const figureWithValueLabel = (figure?: Dynamic, written?: Dynamic) =>
       id: '3VSiQ3ZdeR',
     },
     {
-      figure: figure,
-      written: written,
+      figure,
+      written,
     },
   );
-export const figureForSelectionLabel = (figure?: Dynamic) =>
+export const figureForSelectionLabel = (figure: string): string =>
   translateMessage(
     {
       defaultMessage: '{figure} for the selected cells',
       id: 'V4PmjXrr/k',
     },
     {
-      figure: figure,
+      figure,
     },
   );
-export const selectionSummaryLabel = () =>
+export const selectionSummaryLabel = (): string =>
   translateMessage({
     defaultMessage: 'Summary of the selected cells',
     id: 'fX2hBE5ED9',
   });
-export const addFormulaUnderNumbersLabel = (heading?: Dynamic) =>
+export const addFormulaUnderNumbersLabel = (heading: string | null): string =>
   heading === null
     ? translateMessage({
         defaultMessage: 'Add a formula under the numbers',
@@ -589,69 +589,69 @@ export const addFormulaUnderNumbersLabel = (heading?: Dynamic) =>
           heading: truncateGraphemes(heading, HEADING_LABEL_MAX_CHARACTERS),
         },
       );
-export const shortHeadingLabel = (heading?: Dynamic) => truncateGraphemes(heading, HEADING_LABEL_MAX_CHARACTERS);
-export const ROWS_FIELD_PLACEHOLDER = [
+export const shortHeadingLabel = (heading: string): string => truncateGraphemes(heading, HEADING_LABEL_MAX_CHARACTERS);
+export const ROWS_FIELD_PLACEHOLDER: WordSetApart[] = [
   {
     setApart: '',
   },
 ];
-export const addColumnsLabel = (count?: Dynamic) =>
+export const addColumnsLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Add # column} other {Add # columns}}',
       id: 'iyP9oa5IB5',
     },
     {
-      count: count,
+      count,
     },
   );
-export const upToAtATimeHint = (most?: Dynamic) =>
+export const upToAtATimeHint = (most: number): string =>
   translateMessage(
     {
       defaultMessage: 'Up to {most, number} at a time',
       id: 'YHxAbKkvU/',
     },
     {
-      most: most,
+      most,
     },
   );
-export const enterNumberUpToHint = (most?: Dynamic) =>
+export const enterNumberUpToHint = (most: number): string =>
   translateMessage(
     {
       defaultMessage: 'Enter a number from 1 to {most, number}',
       id: 'G12J9/sb70',
     },
     {
-      most: most,
+      most,
     },
   );
-export const errorCountLabel = (count?: Dynamic) =>
+export const errorCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {# error} other {# errors}}',
       id: 'NGpjD2CoP3',
     },
     {
-      count: count,
+      count,
     },
   );
-export const writingFormulasLabel = (count?: Dynamic) =>
+export const writingFormulasLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Writing # formula…} other {Writing # formulas…}}',
       id: 'EY+f+rW9dH',
     },
     {
-      count: count,
+      count,
     },
   );
-export const keepFixesLabel = (count?: Dynamic) =>
+export const keepFixesLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, =1 {Keep} one {Keep all # fix} other {Keep all # fixes}}',
       id: 'Lj0j+SWLX4',
     },
     {
-      count: count,
+      count,
     },
   );

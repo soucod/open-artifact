@@ -34,14 +34,15 @@ import {
   type HtmlElement,
   type HtmlNode,
 } from '@open-artifact/dc/html';
-import { compileSlide, type CompileResult, type Diagnostic } from './compile.ts';
+import { compileSlide, misreadComments, type CompileResult, type Diagnostic } from './compile.ts';
 import { formatNumber } from './css/color.ts';
 import { compareSpecificity, matchesSelector, type MatchElement } from './css/selectors.ts';
+import { formatItemMargin, isMarginProperty, readItemMargin } from './css/properties.ts';
 import { parseDeclarationBlock, parseStylesheet, type SheetDeclaration, type Stylesheet } from './css/sheet.ts';
-import { splitTopLevel } from './css/values.ts';
+import { parseBackground, splitTopLevel } from './css/values.ts';
 import type { DeckFormat, DeckIndex } from './deck.ts';
 import { DECK_SIZE_WIDTHS, SLIDE_HEIGHT, SOURCE_MARK, type DeckSize } from './limits.ts';
-import type { Slide, SlideMotion, SlideNode } from './model.ts';
+import type { ItemMargin, Slide, SlideMotion, SlideNode } from './model.ts';
 import { serializeNode, serializeSlide } from './serialize.ts';
 
 /* -------------------------------------------------------------------------- */
@@ -364,7 +365,10 @@ const INHERITED = new Set([
 ]);
 
 /** Declarations that draw nothing on a still slide, or are worked out here: dropped without a word. */
-const QUIET_DROP = /^(?:animation(?:-.*)?|transition(?:-.*)?|offset(?:-.*)?|will-change|box-sizing|content|counter-(?:increment|reset|set)|cursor|pointer-events|user-select|-webkit-user-select|-webkit-font-smoothing|-moz-osx-font-smoothing|text-rendering|font-kerning|font-optical-sizing|backface-visibility|transform-style|perspective|contain|isolation|scroll-.*|overscroll-.*|touch-action|caret-color|accent-color|appearance|-webkit-appearance|list-style-position|font-synthesis|text-size-adjust|-webkit-text-size-adjust|speak|visibility)$/;
+const LIST_MARKER = /^list-style(?:-type|-position)?$/;
+/** What a list's items may give themselves, alike, for the list to carry. */
+const ITEM_TEXT = ['color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing'] as const;
+const QUIET_DROP = /^(?:animation(?:-.*)?|transition(?:-.*)?|offset(?:-.*)?|will-change|box-sizing|content|counter-(?:increment|reset|set)|cursor|pointer-events|user-select|-webkit-user-select|-webkit-font-smoothing|-moz-osx-font-smoothing|text-rendering|font-kerning|font-optical-sizing|backface-visibility|transform-style|perspective|contain|isolation|scroll-.*|overscroll-.*|touch-action|caret-color|accent-color|appearance|-webkit-appearance|font-synthesis|text-size-adjust|-webkit-text-size-adjust|speak|visibility)$/;
 
 /** One element of the virtual document the sheet is matched against. */
 class SourceElement implements MatchElement {
@@ -558,6 +562,7 @@ class SourceReader {
     const section = findSection(nodes);
     if (!section) return this.html;
     for (const [i, el] of numberSourceElements(section).entries()) this.marks.set(el, i);
+    for (const { node, message } of misreadComments([section])) this.report('warning', message, node.start);
     for (const el of numberSourceElements(section)) {
       if (el.tag === 'style') this.report('error', '<style> in a slide is not read: put the rules in project/deck.css', el.start);
       else if (el.tag === 'link') this.report('error', '<link> in a slide is not read: put the rules in project/deck.css, fonts in deck.json "faces"', el.start);
@@ -654,7 +659,7 @@ class SourceReader {
       if (name.startsWith('--')) continue;
       const resolved = this.resolve(name, value, element);
       if (resolved === undefined) continue;
-      if (name === 'list-style' || name === 'list-style-type') continue;
+      if (LIST_MARKER.test(name) && element.tag !== 'ul' && element.tag !== 'ol') continue;
       out.push([name, resolved]);
     }
     if (!borderBox) this.addBoxEdges(out, element.tag);
@@ -891,7 +896,7 @@ class SourceReader {
       const listStyle = (element.own.get('list-style') ?? element.own.get('list-style-type') ?? '').trim();
       if (/^none\b/.test(listStyle) || listStyle === 'none') {
         // A list without markers: plain boxes and lines.
-        this.write(this.startTag('div', el, style, extra));
+        this.write(this.startTag('div', el, style.filter(([name]) => !LIST_MARKER.test(name)), extra));
         for (const [li, item] of this.elementsOf(el, element)) {
           this.computeElement(item, attributeValue(li, 'style'));
           this.pad(li.start);
@@ -948,9 +953,81 @@ class SourceReader {
     return text;
   }
 
+  /** Every item of a list, nested ones too, with its cascade worked out. */
+  private itemsOf(el: HtmlElement, element: SourceElement): SourceElement[] {
+    const items: SourceElement[] = [];
+    const walk = (list: HtmlElement, parent: SourceElement): void => {
+      for (const child of list.children) {
+        if (child.type !== 'element' || child.tag !== 'li') continue;
+        const item = new SourceElement(child, 'li', parent);
+        item.siblings = [item];
+        this.computeElement(item, attributeValue(child, 'style'));
+        items.push(item);
+        for (const node of child.children) {
+          if (node.type !== 'element' || (node.tag !== 'ul' && node.tag !== 'ol')) continue;
+          const nested = new SourceElement(node, node.tag, item);
+          nested.siblings = [nested];
+          this.computeElement(nested, attributeValue(node, 'style'));
+          walk(node, nested);
+        }
+      }
+    };
+    walk(el, element);
+    return items;
+  }
+
+  /** The font and colour declarations every item of a list (nested ones too) gives itself alike. */
+  private sharedItemStyle(items: readonly SourceElement[]): Array<[string, string]> {
+    const shared: Array<[string, string]> = [];
+    for (const name of ITEM_TEXT) {
+      const values = new Set(items.map((item) => (item.own.has(name) ? this.resolve(name, item.own.get(name)!, item) : undefined)));
+      const value = values.size === 1 ? [...values][0] : undefined;
+      if (value !== undefined) shared.push([name, value]);
+    }
+    return shared;
+  }
+
+  /** The flat colour a row group paints under its rows, if it has one. */
+  private groupFill(el: HtmlElement, element: SourceElement): string | undefined {
+    const name = element.own.has('background-color') && !element.own.has('background') ? 'background-color' : 'background';
+    const raw = element.own.get(name);
+    if (raw === undefined) return undefined;
+    const value = this.resolve(name, raw, element);
+    if (value === undefined) return undefined;
+    const parsed = parseBackground(value);
+    if (parsed.ok && !parsed.value.gradient && !parsed.value.image) return value;
+    this.report('unsupported', `<${el.tag}> background: a row group gives its rows a flat colour only`, el.start);
+    return undefined;
+  }
+
+  /** One item's margin declarations, resolved, in the order they apply. */
+  private itemMarginOf(item: SourceElement): ReturnType<typeof readItemMargin> {
+    const declarations: Array<[string, string]> = [];
+    for (const [name, value] of item.own) {
+      if (!isMarginProperty(name)) continue;
+      declarations.push([name, this.resolve(name, value, item) ?? '0']);
+    }
+    return readItemMargin(declarations);
+  }
+
+  /** The positive px top and bottom margin every item of a list (nested ones too) gives itself alike. */
+  private sharedItemMargin(items: readonly SourceElement[]): ItemMargin | undefined {
+    const reads = items.map((item) => this.itemMarginOf(item));
+    const first = reads[0]?.margin;
+    if (!first || (first.top === 0 && first.bottom === 0)) return undefined;
+    return reads.every((read) => read.margin?.top === first.top && read.margin.bottom === first.bottom) ? first : undefined;
+  }
+
   /** A list, its items and the lists nested in them. */
-  private list(el: HtmlElement, element: SourceElement, style: Array<[string, string]>, extra: Array<[string, string | null]>, top: boolean): void {
-    this.write(this.startTag(el.tag, el, top ? style : [], extra, top));
+  private list(el: HtmlElement, element: SourceElement, style: Array<[string, string]>, extra: Array<[string, string | null]>, top: boolean, lifted: ReadonlySet<string> = new Set(), spacing?: ItemMargin): void {
+    if (top) {
+      const items = this.itemsOf(el, element);
+      const shared = this.sharedItemStyle(items);
+      lifted = new Set(shared.map(([name]) => name));
+      style = [...style.filter(([name]) => !lifted.has(name)), ...shared];
+      spacing = this.sharedItemMargin(items);
+    }
+    this.write(this.startTag(el.tag, el, style, extra, top));
     for (const child of el.children) {
       if (child.type === 'comment') continue;
       if (child.type === 'text') {
@@ -964,17 +1041,20 @@ class SourceReader {
       const item = new SourceElement(child, 'li', element);
       item.siblings = [item];
       this.computeElement(item, attributeValue(child, 'style'));
-      const dropped = [...item.own.keys()].filter((n) => !QUIET_DROP.test(n) && n !== 'list-style' && n !== 'list-style-type');
-      if (dropped.length) this.report('unsupported', `<li> ${dropped.join(', ')}: a list line takes no style of its own; style the <${el.tag}>`, child.start);
+      const margin = this.itemMarginOf(item);
+      const quietMargin = spacing !== undefined || (margin.margin?.top === 0 && margin.margin.bottom === 0 && !margin.sideways);
+      const dropped = [...item.own.keys()].filter((n) => !QUIET_DROP.test(n) && !LIST_MARKER.test(n) && !lifted.has(n) && !(isMarginProperty(n) && quietMargin));
+      if (dropped.length) this.report('unsupported', `<li> ${dropped.join(', ')}: a list line takes no style of its own, only a top and bottom margin in px that every item shares; style the <${el.tag}>`, child.start);
+      if (spacing && margin.sideways) this.report('unsupported', '<li> margin-left / margin-right: an item keeps only its top and bottom margin', child.start);
       this.pad(child.start);
       const indent = attributeValue(child, 'data-indent');
-      this.write(`<li${indent !== undefined ? ` data-indent="${escapeAttribute(indent)}"` : ''}>`);
+      this.write(`<li${indent !== undefined ? ` data-indent="${escapeAttribute(indent)}"` : ''}${spacing ? ` style="margin:${formatItemMargin(spacing)}"` : ''}>`);
       for (const node of child.children) {
         if (node.type === 'element' && (node.tag === 'ul' || node.tag === 'ol')) {
           const nested = new SourceElement(node, node.tag, item);
           nested.siblings = [nested];
           this.computeElement(nested, attributeValue(node, 'style'));
-          this.list(node, nested, [], [], false);
+          this.list(node, nested, this.flatStyle(nested).filter(([name]) => LIST_MARKER.test(name)), [], false, lifted, spacing);
         } else this.inlineNode(node, item);
       }
       this.write('</li>');
@@ -982,22 +1062,37 @@ class SourceReader {
     this.write(`</${el.tag}>`);
   }
 
-  /** A table: rows (row groups unwrapped by the compiler) and cells. */
-  private table(el: HtmlElement, element: SourceElement): void {
+  /** A table: rows (row groups unwrapped by the compiler) and cells; a group's flat fill goes to its rows. */
+  private table(el: HtmlElement, element: SourceElement, groupFill?: string): void {
     for (const [child, sub] of this.elementsOf(el, element)) {
       this.pad(child.start);
       if (child.tag === 'thead' || child.tag === 'tbody' || child.tag === 'tfoot') {
         this.computeElement(sub, attributeValue(child, 'style'));
-        if (sub.own.size) this.report('unsupported', `<${child.tag}> style is not read; put a row's background on its <tr>`, child.start);
+        const fill = this.groupFill(child, sub);
+        const others = [...sub.own.keys()].filter((n) => n !== 'background' && n !== 'background-color' && !QUIET_DROP.test(n) && !n.startsWith('--'));
+        if (others.length) this.report('unsupported', `<${child.tag}> ${others.join(', ')} is not read; style its rows or cells`, child.start);
         this.write(`<${child.tag}>`);
-        this.table(child, sub);
+        this.table(child, sub, fill);
         this.write(`</${child.tag}>`);
       } else if (child.tag === 'tr') {
         this.computeElement(sub, attributeValue(child, 'style'));
-        this.write(this.startTag('tr', child, this.flatStyle(sub), [], false));
-        for (const [cell, cellEl] of this.elementsOf(child, sub)) {
+        const rowStyle = this.flatStyle(sub);
+        const cells = this.elementsOf(child, sub).map(([cell, cellEl]) => {
           this.computeElement(cellEl, attributeValue(cell, 'style'));
-          this.write(this.startTag(cell.tag === 'th' ? 'th' : 'td', cell, this.flatStyle(cellEl), [], false));
+          return { cell, cellEl, style: this.flatStyle(cellEl) };
+        });
+        const rowFill = fillOf(rowStyle) ?? groupFill;
+        const fills = new Set(cells.map((c) => fillOf(c.style) ?? rowFill));
+        const style = withoutFill(rowStyle);
+        if (fills.size === 1) {
+          const fill = [...fills][0];
+          if (fill !== undefined) style.push(['background', fill]);
+        } else if (fills.size > 1) {
+          this.report('warning', '<tr> cells are filled differently — a row takes one fill; it was left unfilled', child.start);
+        }
+        this.write(this.startTag('tr', child, style, [], false));
+        for (const { cell, cellEl, style: cellStyle } of cells) {
+          this.write(this.startTag(cell.tag === 'th' ? 'th' : 'td', cell, withoutFill(cellStyle), [], false));
           this.inlineChildren(cell, cellEl);
           this.write(`</${cell.tag === 'th' ? 'th' : 'td'}>`);
         }
@@ -1035,7 +1130,7 @@ class SourceReader {
     } else this.write(this.html.slice(node.start, node.end));
   }
 
-  /** A phrase: colour, bold, italic, underline and links survive. */
+  /** A phrase: colour, bold or regular weight, italic, underline and links survive. */
   private inline(el: HtmlElement, element: SourceElement): void {
     const tag = el.tag;
     if (tag === 'br') {
@@ -1048,6 +1143,7 @@ class SourceReader {
     let href: string | undefined;
     if (mark === 'a') href = attributeValue(el, 'href');
     let color: string | undefined;
+    let regular = false;
     const dropped: string[] = [];
     for (const [name, value] of element.own) {
       if (QUIET_DROP.test(name) || name.startsWith('--')) continue;
@@ -1055,8 +1151,13 @@ class SourceReader {
       if (resolved === undefined) continue;
       if (name === 'color') color = resolved;
       else if (name === 'font-weight') {
-        const n = Number(resolved);
-        if (n >= 600 && !wrap.includes('b')) wrap.push('b');
+        const n = Math.round(Number(resolved) / 100) * 100;
+        if (n >= 600) {
+          if (!wrap.includes('b')) wrap.push('b');
+        } else if (n === 400) {
+          if (wrap.includes('b')) wrap.splice(wrap.indexOf('b'), 1);
+          regular = element.parent?.inherited.get('font-weight') !== '400';
+        } else this.report('unsupported', `<${tag}> font-weight:${resolved}: a phrase is bold (600 or more) or regular (400)`, el.start);
       } else if (name === 'font-style') {
         if (/italic|oblique/.test(resolved) && !wrap.includes('i')) wrap.push('i');
       } else if (name === 'text-decoration' || name === 'text-decoration-line') {
@@ -1076,14 +1177,26 @@ class SourceReader {
       open += `<${w}>`;
       close = `</${w}>` + close;
     }
-    if (color !== undefined) {
-      open += `<span style="color:${escapeAttribute(color)}">`;
+    const span = [color !== undefined ? `color:${escapeAttribute(color)}` : '', regular ? 'font-weight:400' : ''].filter(Boolean);
+    if (span.length) {
+      open += `<span style="${span.join(';')}">`;
       close = '</span>' + close;
     }
     this.write(open);
     this.inlineChildren(el, element);
     this.write(close);
   }
+}
+
+/** The fill a flat style paints, as written. */
+function fillOf(style: ReadonlyArray<[string, string]>): string | undefined {
+  let fill: string | undefined;
+  for (const [name, value] of style) if (name === 'background' || name === 'background-color') fill = value;
+  return fill;
+}
+
+function withoutFill(style: ReadonlyArray<[string, string]>): Array<[string, string]> {
+  return style.filter(([name]) => name !== 'background' && name !== 'background-color');
 }
 
 /**
@@ -1132,7 +1245,7 @@ export function flattenSlide(slide: Slide): string {
 
 /** What a removed property is reset to inline, so the sheet's value stops applying. */
 function resetValue(property: string): string {
-  if (/^(?:background|border(?:-(?:top|right|bottom|left))?|box-shadow|text-shadow|filter|backdrop-filter|transform|max-width|max-height|text-transform|text-decoration|-webkit-text-stroke)$/.test(property)) return 'none';
+  if (/^(?:background|border(?:-(?:top|right|bottom|left))?|clip-path|box-shadow|text-shadow|filter|backdrop-filter|transform|max-width|max-height|text-transform|text-decoration|-webkit-text-stroke)$/.test(property)) return 'none';
   if (/^(?:padding|margin|gap|border-width|border-radius|letter-spacing)$/.test(property)) return '0';
   if (/^(?:width|height|min-width|min-height|left|top|right|bottom|flex-basis|aspect-ratio|grid-column|grid-row)$/.test(property)) return 'auto';
   if (property === 'opacity' || property === 'flex-grow') return '1';
@@ -1200,6 +1313,16 @@ function flatInner(node: SlideNode): HtmlNode[] {
   return el?.children ?? [];
 }
 
+/** List items written plain, for the sheet to give their margin back. */
+function withoutItemStyles(nodes: HtmlNode[]): HtmlNode[] {
+  for (const node of nodes) {
+    if (node.type !== 'element') continue;
+    if (node.tag === 'li') node.attrs = node.attrs.filter((a) => a.name.toLowerCase() !== 'style');
+    withoutItemStyles(node.children);
+  }
+  return nodes;
+}
+
 /** A node's flat element, with the classes of the element it replaces. */
 function flatElement(node: SlideNode, classOf?: HtmlElement): HtmlElement | undefined {
   const el = createdNodes(serializeNode({ ...node, origin: undefined } as SlideNode)).find((n): n is HtmlElement => n.type === 'element');
@@ -1216,9 +1339,30 @@ function flatElement(node: SlideNode, classOf?: HtmlElement): HtmlElement | unde
 
 class Patcher {
   private readonly elements: HtmlElement[];
+  /** Changed declarations the tag writes itself are taken off it, for the sheet to give back. */
+  private readonly unwrite: boolean;
+  /** A list's new type or colour is written on its items too, over the rules that style them. */
+  private readonly items: boolean;
 
-  constructor(section: HtmlElement) {
+  constructor(section: HtmlElement, mode: PatchMode) {
     this.elements = numberSourceElements(section);
+    this.unwrite = mode === 'unwrite';
+    this.items = mode === 'items';
+  }
+
+  /** Writes the list's changed type and colour declarations on every item, nested ones too. */
+  private itemStyle(el: HtmlElement, saved: Record<string, string | undefined>, edited: Record<string, string | undefined>): void {
+    const changes = new Map<string, string>();
+    for (const name of ITEM_TEXT) if (saved[name] !== edited[name] && edited[name] !== undefined) changes.set(name, edited[name]!);
+    if (changes.size === 0) return;
+    const walk = (list: HtmlElement): void => {
+      for (const li of list.children) {
+        if (li.type !== 'element' || li.tag !== 'li') continue;
+        setAttribute(li, 'style', upsertStyle(attributeValue(li, 'style') ?? '', changes));
+        for (const nested of li.children) if (nested.type === 'element' && (nested.tag === 'ul' || nested.tag === 'ol')) walk(nested);
+      }
+    };
+    walk(el);
   }
 
   private at(src: number | undefined): HtmlElement | undefined {
@@ -1228,13 +1372,14 @@ class Patcher {
   /** Writes the style difference of a node into its element's inline style. */
   private style(el: HtmlElement, saved: Record<string, string | undefined>, edited: Record<string, string | undefined>): void {
     const changes = new Map<string, string | undefined>();
+    const own = this.unwrite ? new Set(parseDeclarationBlock(attributeValue(el, 'style') ?? '').map((d) => d.name)) : new Set<string>();
     for (const name of new Set([...Object.keys(saved), ...Object.keys(edited)])) {
       if (saved[name] === edited[name]) continue;
-      changes.set(name, edited[name] ?? resetValue(name));
+      changes.set(name, own.has(name) ? undefined : (edited[name] ?? resetValue(name)));
     }
     if (changes.size === 0) return;
     if ([...changes.keys()].some((n) => /^(?:min-|max-)?(?:width|height)$/.test(n))) changes.set('box-sizing', 'border-box');
-    setAttribute(el, 'style', upsertStyle(attributeValue(el, 'style') ?? '', changes));
+    setAttribute(el, 'style', upsertStyle(attributeValue(el, 'style') ?? '', changes) || undefined);
   }
 
   private replaceChildren(el: HtmlElement, children: HtmlNode[]): void {
@@ -1281,7 +1426,8 @@ class Patcher {
       case 'embed': {
         const a = JSON.stringify(contentOf(saved));
         const b = JSON.stringify(contentOf(edited));
-        if (a !== b) this.replaceChildren(el, edited.kind === 'embed' ? createdNodes(edited.html) : flatInner(edited));
+        if (a !== b) this.replaceChildren(el, edited.kind === 'embed' ? createdNodes(edited.html) : edited.kind === 'list' && !this.items ? withoutItemStyles(flatInner(edited)) : flatInner(edited));
+        if (this.items && edited.kind === 'list') this.itemStyle(el, saved.style, edited.style);
         return true;
       }
       default:
@@ -1370,7 +1516,7 @@ function contentOf(node: SlideNode): unknown {
     case 'text':
       return node.runs;
     case 'list':
-      return node.items;
+      return { items: node.items, levels: node.levels, itemMargin: node.itemMargin };
     case 'textbox':
       return node.blocks.map(stripNode);
     case 'table':
@@ -1393,10 +1539,24 @@ export interface PatchOptions extends SourceReadOptions {}
  * ({@link flattenSlide}).
  */
 export function patchSourceSlide(source: string, saved: Slide, edited: Slide, deck: SourceDeck, options: PatchOptions = {}): string | undefined {
+  for (const mode of PATCH_MODES) {
+    const out = patchOnce(source, saved, edited, deck, options, mode);
+    if (out !== undefined) return out;
+  }
+  return undefined;
+}
+
+type PatchMode = 'unwrite' | 'plain' | 'items';
+
+/** `unwrite` first lets the sheet give back what an edit had written on a tag; `items` last reaches past rules on list items. */
+const PATCH_MODES: readonly PatchMode[] = ['unwrite', 'plain', 'items'];
+
+/** One try at a patch. */
+function patchOnce(source: string, saved: Slide, edited: Slide, deck: SourceDeck, options: PatchOptions, mode: PatchMode): string | undefined {
   const nodes = parseHtml(source);
   const section = findSection(nodes);
   if (!section || saved.id !== edited.id || edited.flat) return undefined;
-  const patcher = new Patcher(section);
+  const patcher = new Patcher(section, mode);
   if (saved.hidden !== edited.hidden) {
     setAttribute(section, 'hidden', edited.hidden ? null : undefined);
     if (!edited.hidden) setAttribute(section, 'data-deck-skip', undefined);

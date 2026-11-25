@@ -1,7 +1,8 @@
 /**
  * Collaboration drawings in screen units, above the board: the labels of
  * the agent's claims, other people's cursors (and edge marks), comment
- * pins and cards, the idea mark and this viewer's cursor chat line.
+ * pins and cards, the corner grip of an area being asked or commented
+ * about, the idea mark and this viewer's cursor chat line.
  *
  * The root never takes pointer events itself; only the controls in it do
  * (each carries `data-wb-chrome`, so the board starts no gesture on them).
@@ -10,6 +11,7 @@
 import { CLAIM_FADE_MS } from '@open-artifact/whiteboard-core';
 import { boardToScreen } from '../lib/camera.ts';
 import { useCamera } from '../state/camera.ts';
+import { AreaGrips } from './AreaGrip.tsx';
 import { CommentPins } from './CommentPins.tsx';
 import { CursorChatBox } from './CursorChatBox.tsx';
 import { useClaimViews, useFading } from './hooks.ts';
@@ -47,6 +49,7 @@ export function CollabOverlay() {
     <div className="wb-collab-overlay">
       <ClaimLabels />
       <PeerCursors />
+      <AreaGrips />
       <CommentPins />
       <IdeaMark />
       <CursorChatBox />

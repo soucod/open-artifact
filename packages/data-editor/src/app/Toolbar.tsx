@@ -11,6 +11,7 @@ import { DEFAULT_DASHBOARD_TITLE } from '@open-artifact/data-core';
 import { CommentsButton, MOD, ToolButton } from '@open-artifact/editor-kit/react';
 import { cn } from '@open-artifact/ui';
 import { maybeDataEngine } from '../data/engine.ts';
+import { askSnapshotRefresh, snapshotFailure, snapshotLine, snapshotWords, useLiveSnapshot } from '../data/live-snapshot.ts';
 import { joinSentences } from '../data/util.ts';
 import { AgentWorking, DraftBar, EditBar, EditStatus, PageEditBar } from '../drafts/EditBar.tsx';
 import { STYLE_BAR_WORDS } from '../drafts/words.ts';
@@ -19,6 +20,7 @@ import { useDraftFlow } from '../drafts/flow.ts';
 import { isDraftBarShown } from '../drafts/draft-state.ts';
 import { useEditFlow } from '../drafts/edit-flow.ts';
 import { useVersionHistory } from '../history/store.ts';
+import { useAgentActivity } from '../platform/agent-activity.ts';
 import { maybeSession } from '../services/session.ts';
 import { useShellDraws } from '../services/shell.ts';
 import { useDocument } from '../state/document.ts';
@@ -53,9 +55,9 @@ import {
 
 export const SOURCES_SHORTCUT = `${MOD}\\`;
 
-function StatusText({ text }: { text: string }): ReactElement {
+function StatusText({ text, snapshot = false }: { text: string; snapshot?: boolean }): ReactElement {
   return (
-    <span role="status" className="dash-toolbar-text min-w-0 truncate text-[13px] text-chrome-muted">
+    <span role="status" title={snapshot ? text : undefined} data-dash-snapshot={snapshot ? '' : undefined} className="dash-toolbar-text min-w-0 truncate text-[13px] text-chrome-muted">
       {text}
     </span>
   );
@@ -99,6 +101,60 @@ function RefreshButton({ data }: { data: DashboardData }): ReactElement {
         if (!busy) maybeDataEngine()?.refresh();
       }}
     />
+  );
+}
+
+/**
+ * A hosted page (no connectors) showing the answers the owner's computer took: "Data as of <time>, from <owner>'s
+ * computer", and for the owner why the last refresh failed. `null` while the page has connectors or no snapshot.
+ */
+function useSnapshotText(): string | null {
+  const status = useLiveSnapshot((state) => state.status);
+  const ask = useLiveSnapshot((state) => state.ask);
+  const current = maybeSession();
+  if (status === null || current === null || current.mcp !== null) return null;
+  const line = snapshotLine(status);
+  if (line === null) return null;
+  const words = snapshotWords(status.owner);
+  const failure = current.viewer.role === 'owner' ? snapshotFailure(status) : null;
+  const asked =
+    ask.kind === 'sending' ? words.sending : ask.kind === 'waiting' ? (ask.online ? words.waiting : words.offline) : ask.kind === 'failed' ? ask.message : null;
+  return [line, failure, asked].filter((part): part is string => part !== null).join(' · ');
+}
+
+/**
+ * Whether this viewer may ask the owner's computer for a refresh: the owner, or an editor the owner lets ask the agent.
+ * An editor's page has the agent capability either way; the type server reports the agent available to an editor only
+ * while the owner lets editors ask (`editorsCanAskAgent`), so that is what tells them apart.
+ */
+function useMayAskSnapshot(): boolean {
+  const status = useLiveSnapshot((state) => state.status);
+  const agentHeard = useAgentActivity((state) => state.available);
+  const current = maybeSession();
+  if (status === null || current === null || current.mcp !== null) return false;
+  return current.viewer.role === 'owner' || (current.viewer.role === 'editor' && current.agent !== null && agentHeard);
+}
+
+/** Refresh on a hosted page: asks the owner's computer to run the queries again (it never calls a connector here). */
+function SnapshotRefreshButton(): ReactElement {
+  const ask = useLiveSnapshot((state) => state.ask);
+  const owner = useLiveSnapshot((state) => state.status?.owner ?? '');
+  const words = snapshotWords(owner);
+  const busy = ask.kind === 'sending' || (ask.kind === 'waiting' && ask.online);
+  return (
+    <span data-dash-snapshot-refresh="" className="inline-flex">
+      <ToolButton
+        size="lg"
+        tipSide="bottom"
+        label={words.label}
+        tip={ask.kind === 'waiting' && !ask.online ? words.offline : words.tip}
+        aria-busy={busy || undefined}
+        icon={busy ? <LoaderCircle className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
+        onClick={() => {
+          if (ask.kind !== 'sending') void askSnapshotRefresh();
+        }}
+      />
+    </span>
   );
 }
 
@@ -148,7 +204,9 @@ export function Toolbar({ data, text, empty, checkWorking }: ToolbarProps): Reac
   const commenting = useShown((state) => state.commenting);
   const editing = useShown((state) => state.editing);
   const historyAvailable = useVersionHistory((state) => state.available);
-  const leading = useLeadingText(text);
+  const snapshotText = useSnapshotText();
+  const mayAskSnapshot = useMayAskSnapshot();
+  const leading = useLeadingText(snapshotText ?? text);
   const designAvailable = maybeSession()?.canEdit ?? false;
   const attention = data.attention.length > 0 ? formatAttentionCount(data.attention.length) : null;
   const sourcesOpen = panel === 'sources';
@@ -168,8 +226,8 @@ export function Toolbar({ data, text, empty, checkWorking }: ToolbarProps): Reac
         {drawsSaved ? null : <SaveStatus />}
         {empty ? null : (
           <>
-            {data.hasLiveQueries ? <RefreshButton data={data} /> : null}
-            {leading === null ? null : <StatusText text={leading} />}
+            {snapshotText !== null ? mayAskSnapshot ? <SnapshotRefreshButton /> : null : data.hasLiveQueries ? <RefreshButton data={data} /> : null}
+            {leading === null ? null : <StatusText text={leading} snapshot={snapshotText !== null && leading === snapshotText} />}
           </>
         )}
       </div>

@@ -17,11 +17,12 @@ use super::Answer;
 use crate::calculate::SpillOutcome;
 use crate::dates::date_from_serial;
 use crate::number_format::{Kind, NumberFormat, Room};
+use crate::session::interactive::{reset_changes, with_current_defaults};
 use crate::shown::{shown, ShownValue};
 use crate::value::Value;
 use crate::workbook::formats::Leaf;
 use crate::workbook::layout::RangeIds;
-use crate::workbook::objects::{RangeOnASheet, ViewElement};
+use crate::workbook::objects::RangeOnASheet;
 use crate::workbook::{Input, Sheet, Workbook};
 
 /// The most rows an input reads.
@@ -44,7 +45,7 @@ pub fn views(workbook: &Workbook) -> Json {
 /// Whether a view is there to read: not placed only on deleted sheets.
 fn is_there(workbook: &Workbook) -> impl Fn(&str) -> bool {
     let placed = |sheets: &[Sheet]| -> HashSet<String> {
-        sheets.iter().flat_map(|s| s.placements.values()).map(|(_, p)| p.shows.view_id().to_owned()).collect()
+        sheets.iter().flat_map(Sheet::shown_views).map(str::to_owned).collect()
     };
     let (live, deleted) = (placed(&workbook.sheets), placed(&workbook.deleted_sheets));
     move |id| live.contains(id) || !deleted.contains(id)
@@ -54,7 +55,8 @@ fn is_there(workbook: &Workbook) -> impl Fn(&str) -> bool {
 pub fn inputs_of_view(workbook: &Workbook, view_id: &str) -> Answer {
     let (_, view) = workbook.views.get(view_id).filter(|(id, _)| is_there(workbook)(id)).ok_or("unknownView")?;
     let mut elements: Vec<Json> = Vec::new();
-    for ViewElement::Widget { element_id, inputs, .. } in &view.elements {
+    for element in &view.elements {
+        let (element_id, _, inputs) = element.parts();
         let mut read = Vec::new();
         for input in inputs {
             let (_, rows) = read_input(workbook, &input.range).map_err(TooMuch::refusal)?;
@@ -62,7 +64,16 @@ pub fn inputs_of_view(workbook: &Workbook, view_id: &str) -> Answer {
         }
         elements.push(json!({"elementId": element_id, "inputs": read}));
     }
-    Ok(json!({"kind": "inputsOfView", "viewId": view_id, "elements": elements}))
+    let mut answer = json!({"kind": "inputsOfView", "viewId": view_id, "elements": elements});
+    if view.is_interactive() {
+        if !reset_changes(workbook, view).is_empty() {
+            answer["canBeReset"] = json!(true);
+        }
+        if !with_current_defaults(workbook, view).is_ok_and(|current| current == *view) {
+            answer["hasDefaultsToSave"] = json!(true);
+        }
+    }
+    Ok(answer)
 }
 
 /// Why an input is not read: it reads too many rows, or too much.
@@ -209,12 +220,10 @@ fn spilled_values(
             continue;
         }
         let Some((top, left)) = sheet.rows.position(*r).zip(sheet.columns.position(*c)) else { continue };
-        for i in 0..array.rows() {
-            for j in 0..array.columns() {
-                if (i, j) != (0, 0) && inside((top + i, left + j)) {
-                    let brought = formats.as_ref().and_then(|f| f.get(i * array.columns() + j)?.as_ref());
-                    out.push(((top + i, left + j), array.get(i, j).clone(), brought.map(|b| b.pattern.to_string())));
-                }
+        for ((i, j), value) in array.stored_entries() {
+            if (i, j) != (0, 0) && inside((top + i, left + j)) {
+                let brought = formats.as_ref().and_then(|f| f.get(array.columns(), (i, j)));
+                out.push(((top + i, left + j), value.clone(), brought.map(|b| b.pattern.to_string())));
             }
         }
     }

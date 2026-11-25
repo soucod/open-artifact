@@ -16,65 +16,85 @@
 //! - Each part is taken back by what reverses it, applied after the parts before it (so a part's formats taken back
 //!   are blocks of their own).
 
-use serde::Serialize;
-
 use crate::ids::split_id;
-use crate::workbook::grid::{is_grid, Slot};
+use crate::workbook::grid::{listed_cell_bytes, written, CellForm, GridPlan, Slot};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
 
 /// The most cells set in a part.
 const MOST_CELLS: usize = 10234;
 /// What a grid piece counts besides its grid, rows and columns.
 const GRID_EXTRA: usize = 59;
+/// An edit fitting this budget is sent whole.
+const WHOLE: usize = 240 * 1024;
 /// A part is smaller than this.
 const PART: usize = 120 * 1024;
 /// A block of formats cut into parts is smaller than this.
 const BLOCK: usize = 30 * 1024;
 
-/// The length of a thing as written, counted as it is written rather than kept.
-fn written<T: Serialize>(x: &T) -> usize {
-    struct Count(usize);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    serde_json::to_writer(&mut count, x).map_or(0, |()| count.0)
-}
-
 /// An operation as an edit sent in parts takes it: whole, or the pieces it is cut into, each with its size.
 enum Cut {
-    Whole(Op),
-    Cells(String, Vec<(CellToSet, usize)>),
-    Formats(String, Vec<(CellsToFormat, usize)>),
+    Whole { op: Op, bytes: usize },
+    Cells { sheet_id: String, grid: Vec<(CellToSet, usize)>, outside: Vec<(CellToSet, usize)>, bytes: usize },
 }
 
 impl Cut {
-    fn of(op: &Op, back: &Op) -> Cut {
+    fn of(op: &Op, back: &Op, compact_lists: bool) -> Cut {
         match (op, back) {
-            (Op::SetCells { sheet_id, cells, listed: false }, Op::SetCells { cells: old, .. })
-                if is_grid(cells) && cells.len() == old.len() =>
+            (Op::SetCells { cells, form: CellForm::ListUnlessLarge, .. }, Op::SetCells { cells: old, .. })
+                if !compact_lists && cells.len() == old.len() =>
             {
+                let bytes = cells.iter().zip(old).fold(written(op), |bytes, (cell, was)| {
+                    bytes.saturating_add(written(&was.input).saturating_sub(written(&cell.input)))
+                });
+                Cut::Whole { op: op.clone(), bytes }
+            }
+            (Op::SetCells { sheet_id, cells, form: CellForm::Auto | CellForm::ListUnlessLarge }, Op::SetCells { cells: old, .. })
+                if !cells.is_empty() && cells.len() == old.len() =>
+            {
+                let plan = GridPlan::of(sheet_id, cells, Some(old));
                 fn key(c: &CellToSet) -> (Option<(&str, u32)>, Option<(&str, u32)>) {
                     (split_id(&c.r), split_id(&c.c))
                 }
-                let mut sized: Vec<(CellToSet, usize)> = cells
-                    .iter()
-                    .zip(old)
-                    .map(|(cell, was)| (cell.clone(), written(&Slot::Cell(&cell.input)).max(written(&Slot::Cell(&was.input)))))
-                    .collect();
+                let mut sized = Vec::new();
+                let mut outside = Vec::new();
+                for ((cell, was), accepted) in cells.iter().zip(old).zip(plan.accepted) {
+                    if plan.use_grid && accepted {
+                        let new_size = written(&Slot::Cell(cell.input.as_ref()));
+                        let old_size = written(&Slot::Cell(was.input.as_ref()));
+                        sized.push((cell.clone(), new_size.max(old_size)));
+                    } else {
+                        outside.push((cell.clone(), listed_cell_bytes(cell, was.input.as_ref())));
+                    }
+                }
                 sized.sort_by(|a, b| key(&a.0).cmp(&key(&b.0)));
-                Cut::Cells(sheet_id.clone(), sized)
+                Cut::Cells { sheet_id: sheet_id.clone(), grid: sized, outside, bytes: plan.bytes }
             }
-            (Op::SetCellFormats { sheet_id, formats }, _) if !formats.is_empty() => {
-                Cut::Formats(sheet_id.clone(), formats.iter().flat_map(blocks).collect())
+            _ => Cut::Whole { op: op.clone(), bytes: written(op) },
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Whole { bytes, .. } | Self::Cells { bytes, .. } => *bytes,
+        }
+    }
+
+    fn append_whole(self, ops: &mut Vec<Op>) {
+        match self {
+            Self::Whole { op, .. } => ops.push(op),
+            Self::Cells { sheet_id, grid, outside, .. } => {
+                if !grid.is_empty() {
+                    ops.push(Op::SetCells {
+                        sheet_id: sheet_id.clone(),
+                        cells: grid.into_iter().map(|(cell, _)| cell).collect(),
+                        form: CellForm::Grid,
+                    });
+                }
+                if !outside.is_empty() {
+                    let cells = outside.into_iter().map(|(cell, _)| cell).collect();
+                    ops.push(Op::SetCells { sheet_id, cells, form: CellForm::List });
+                }
             }
-            _ => Cut::Whole(op.clone()),
         }
     }
 }
@@ -123,6 +143,7 @@ impl Packing {
     /// Cells set as a grid (in the grid's order, each with its size), as many as fit into each part in turn.
     fn grid(&mut self, sheet_id: &str, cells: Vec<(CellToSet, usize)>) -> Result<(), TooLarge> {
         let mut piece = GridPiece::new(sheet_id);
+        let mut was_split = false;
         for (cell, size) in cells {
             let comma = usize::from(!self.part.is_empty());
             let cost = piece.add(cell, size);
@@ -130,7 +151,8 @@ impl Packing {
             if over(cost, self) && !(self.part.is_empty() && piece.cells.len() == 1) {
                 let cell = piece.cells.pop().expect("just added");
                 if !piece.cells.is_empty() {
-                    self.part.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells: piece.cells, listed: false });
+                    self.part.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells: piece.cells, form: CellForm::Auto });
+                    was_split = true;
                 }
                 self.close();
                 piece = GridPiece::new(sheet_id);
@@ -145,7 +167,8 @@ impl Packing {
         }
         if !piece.cells.is_empty() {
             self.filled += usize::from(!self.part.is_empty()) + piece.cost();
-            self.part.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells: piece.cells, listed: false });
+            let form = if was_split { CellForm::Auto } else { CellForm::Grid };
+            self.part.push(Op::SetCells { sheet_id: sheet_id.to_owned(), cells: piece.cells, form });
         }
         Ok(())
     }
@@ -192,28 +215,59 @@ impl Packing {
     }
 }
 
-/// The parts `ops` (with `reverse`, as `Workbook::apply` gives it) are sent in; `None` when the edit is sent whole.
+/// The wire operations and their division into parts. A cell operation's before and after inputs
+/// determine its encoding even when everything fits into one part.
 pub fn of(ops: &[Op], reverse: &[Op]) -> Result<Option<Vec<Vec<Op>>>, TooLarge> {
     let n = ops.len();
-    if reverse.len() != n {
+    if n == 0 || reverse.len() != n {
         return Ok(None);
     }
+    let preferred_list = ops.iter().any(|op| matches!(op, Op::SetCells { form: CellForm::ListUnlessLarge, .. }));
+    let cut_ops = |compact_lists| {
+        ops.iter().zip(reverse.iter().rev()).map(|(op, old)| Cut::of(op, old, compact_lists)).collect::<Vec<_>>()
+    };
+    let size = |cuts: &[Cut]| {
+        cuts.iter().fold(1usize, |total, cut| total.saturating_add(cut.bytes()).saturating_add(1))
+    };
+    let mut cuts = cut_ops(false);
+    // Dropdown edits keep their original cell order in a list whenever the full edit fits.
+    if preferred_list && size(&cuts) > WHOLE {
+        cuts = cut_ops(true);
+    }
+    let planned_cells = cuts.iter().any(|cut| matches!(cut, Cut::Cells { .. }));
+    if size(&cuts) <= WHOLE {
+        return Ok(planned_cells.then(|| {
+            let mut ops = Vec::with_capacity(n);
+            for cut in cuts {
+                cut.append_whole(&mut ops);
+            }
+            vec![ops]
+        }));
+    }
+
     let mut packing = Packing { parts: Vec::new(), part: Vec::new(), filled: 2, cells: 0 };
-    for (i, op) in ops.iter().enumerate() {
-        match Cut::of(op, &reverse[n - 1 - i]) {
-            Cut::Whole(op) => packing.whole(op)?,
-            Cut::Cells(sheet_id, cells) => packing.grid(&sheet_id, cells)?,
-            Cut::Formats(sheet_id, blocks) => {
+    for cut in cuts {
+        match cut {
+            Cut::Whole { op: Op::SetCellFormats { sheet_id, formats }, .. } if !formats.is_empty() => {
                 let empty = written(&Op::SetCellFormats { sheet_id: sheet_id.clone(), formats: Vec::new() });
+                let blocks = formats.iter().flat_map(blocks).collect();
                 packing.pieces(empty, blocks, |formats| Op::SetCellFormats { sheet_id: sheet_id.clone(), formats })?;
+            }
+            Cut::Whole { op, .. } => packing.whole(op)?,
+            Cut::Cells { sheet_id, grid, outside, .. } => {
+                packing.grid(&sheet_id, grid)?;
+                if !outside.is_empty() {
+                    let list = |cells| Op::SetCells { sheet_id: sheet_id.clone(), cells, form: CellForm::List };
+                    let empty = written(&list(Vec::new()));
+                    packing.pieces(empty, outside, list)?;
+                }
             }
         }
     }
     if !packing.part.is_empty() {
         packing.close();
     }
-    // An edit that fits into one part is sent whole.
-    Ok((packing.parts.len() > 1).then_some(packing.parts))
+    Ok((planned_cells || packing.parts.len() > 1).then_some(packing.parts))
 }
 
 fn digits(n: u32) -> usize {

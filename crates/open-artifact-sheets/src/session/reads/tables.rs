@@ -19,12 +19,12 @@ use crate::workbook::layout::CellIds;
 use crate::workbook::objects::CellTable;
 use crate::workbook::{Sheet, Workbook};
 
-mod filter;
-mod guess;
+pub(crate) mod filter;
+pub(super) mod guess;
 mod live;
 pub(crate) mod values;
 
-pub(super) use guess::{declared_tables, DeclaredRecords};
+pub(super) use guess::{tables_for_formatting, TableForFormatting};
 
 pub const KINDS: &[&str] = &[
     "readTableAtCell",
@@ -142,12 +142,12 @@ pub fn answer_while(workbook: &Workbook, request: &Json, is_calculation_due: boo
 }
 
 /// A sheet (`unknownSheet`).
-fn sheet<'a>(workbook: &'a Workbook, sheet_id: &str) -> Result<&'a Sheet, &'static str> {
+pub(in crate::session) fn sheet<'a>(workbook: &'a Workbook, sheet_id: &str) -> Result<&'a Sheet, &'static str> {
     workbook.sheet_index(sheet_id).map(|i| &workbook.sheets[i]).ok_or("unknownSheet")
 }
 
 /// A cell's row and column, neither deleted (`unknownRow`, `unknownColumn`).
-fn cell_at(workbook: &Workbook, sheet: &Sheet, cell: &CellIds) -> Result<(usize, usize), &'static str> {
+pub(in crate::session) fn cell_at(workbook: &Workbook, sheet: &Sheet, cell: &CellIds) -> Result<(usize, usize), &'static str> {
     let row = workbook.bases.parse(&cell.r).and_then(|l| sheet.rows.position(l)).ok_or("unknownRow")?;
     let column = workbook.bases.parse(&cell.c).and_then(|l| sheet.columns.position(l)).ok_or("unknownColumn")?;
     Ok((row, column))

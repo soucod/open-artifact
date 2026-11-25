@@ -1,7 +1,8 @@
 import type { SheetId } from '@open-artifact/sheets-core';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from './initial-state.ts';
-import type { ActOfKind, PageContext, PageEvent, RowsAskedForActedOn } from './event-reducer.ts';
+import type { ErrorsOffered, PageState } from './initial-state.ts';
+import type { PageContext, PageEvent, RowsAskedForActedOn } from './event-reducer.ts';
+import type { DropdownEditorAct } from '../chips/dropdown-editor.ts';
 import type { EditOutcome } from '../store/workbook-sync.ts';
 import type { PageEffect, PageTransition } from './transitions.ts';
 import { readsWithFormatsToCome, withTellOthersWhomViewFollows, stepViewFollowing } from '../presence/follow-person.ts';
@@ -19,6 +20,7 @@ import {
   isOwnFilterKeyUnused,
   ownFilterKeyNotDrawnYet,
   isOwnFilterDrawn,
+  ownSortToUndo,
 } from '../tables/own-filters.ts';
 import {
   tableKeyOfFilterBarTurnedOn,
@@ -49,7 +51,10 @@ import { dropStaleRangeWalked } from '../selection/walk-range.ts';
 import { dropCaretAtEndOfOtherSheet } from '../grid/lines-at-end.ts';
 import { keepTabRun } from '../selection/tab-run.ts';
 import { noteRowAddedAfterEntry, givesNewRowsFormulas } from '../edits/insert-lines.ts';
-import { noteStepsAndAnswerAwaited, isRedoGivingNewRowsFormulas } from './notes-of-steps.ts';
+import { noteStepsAndAnswerAwaited, isRedoGivingNewRowsFormulas, cellsOfColumnsWentToAfter } from './notes-of-steps.ts';
+import { pivotTypingToEnter, pivotTableOfSidePane, settlePivotTablePane } from '../tables/pivot-tables.ts';
+import { takeSavedNamedView } from '../tables/named-view-actions.ts';
+import { stepCellsLinkedTo } from '../agent/shown-by-agent.ts';
 import { closeFindWithReplaceInPane } from '../ui/find-in-pane.ts';
 import { stepWaysIn } from './ways-in.ts';
 import { contextBarMenuAfterEvent, isPointerOrMenuEvent, dropDragIfRowsOutOfViewChanged } from './context-bar.ts';
@@ -124,24 +129,24 @@ export function reduceSheetsPage(state: PageState, event: PageEvent, context: Pa
   let reads = readsWithFormatsToCome(context.reads, state);
   context = {
     ...context,
-    reads: reads,
+    reads,
   };
   let stateIn = updateCommentModePicksCells(state, context);
-  let result = shutCommentBoxLeftBehind(
+  let transition = shutCommentBoxLeftBehind(
     stateIn,
     shutCommentLeftBehind(stateIn, reduceEventWithFollowUps(stateIn, event, context), context.reads),
     context.reads,
   );
   if (
     context.areFormulasLeft &&
-    result.effects.some(({ kind: kind }: PageEffect) => kind === 'putOnClipboard' || kind === 'workOutFormulasLeft')
+    transition.effects.some(({ kind }: PageEffect) => kind === 'putOnClipboard' || kind === 'workOutFormulasLeft')
   )
     return withFormulasLeftToWorkOut(stateIn, event);
-  let stateAfter = updateCommentModePicksCells(result.state, context);
+  let stateAfter = updateCommentModePicksCells(transition.state, context);
   let resultWithComments = checkAgentWhenOfferGone(
     stateIn,
     checkAgentWhenFixCellGone(stateIn, {
-      ...result,
+      ...transition,
       state: updateFixesToOffer(updateReasonsForErrors(stateAfter, context.reads, context.areFormulasLeft), context.reads),
     }),
   );
@@ -166,9 +171,9 @@ export function reduceEventWithFollowUps(state: PageState, event: PageEvent, con
       giveUpEvent === GIVE_UP_ROWS_ASKED_FOR_KEEPING_FILTER && eventResult.state.ownFilterList !== null
         ? tableKeyOfFilterBarTurnedOn(state)
         : eventResult.state.filterKeptOnForColumnsCard;
-    let { ownFilterList: ownFilterList } = eventResult.state;
+    let { ownFilterList } = eventResult.state;
     let isFilterNotDrawnYet = filterKeptOnForColumnsCard !== null && state.rowsAskedFor.isFilterNotDrawnYet;
-    let { isTableGuessed: isTableGuessed, tableUnderLetters: tableUnderLetters, table: table } = state.rowsAskedFor;
+    let { isTableGuessed, tableUnderLetters, table } = state.rowsAskedFor;
     let isListOfGuessedTable = isTableGuessed && ownFilterList?.tableKey === table?.key;
     let sort = isListOfGuessedTable && tableUnderLetters === null ? null : (ownFilterList?.sort ?? null);
     let nextOwnFilterList =
@@ -178,12 +183,12 @@ export function reduceEventWithFollowUps(state: PageState, event: PageEvent, con
             ...ownFilterList,
             isFilterNotDrawnYet: isFilterNotDrawnYet || ownFilterList.isFilterNotDrawnYet,
             isTableGuessed: isListOfGuessedTable,
-            sort: sort,
+            sort,
           };
     return {
       state: {
         ...eventResult.state,
-        filterKeptOnForColumnsCard: filterKeptOnForColumnsCard,
+        filterKeptOnForColumnsCard,
         ownFilterList: nextOwnFilterList,
       },
       effects: [...givenUp.effects, ...eventResult.effects],
@@ -287,8 +292,9 @@ export function reduceEventWithFollowUps(state: PageState, event: PageEvent, con
   let stepsToUndo = stepsToUndoAfter(stateIn.stepsToUndo, event);
   let stepsToRedo = stepsToRedoAfterEvent(stateIn.stepsToRedo, event);
   let areStepsUnchanged = stepsToUndo === stateIn.stepsToUndo && stepsToRedo === stateIn.stepsToRedo;
-  let formatAsTableChosenLast =
-    areStepsUnchanged && withWaysIn.state.sheetId === stateIn.sheetId ? withWaysIn.state.formatAsTableChosenLast : null;
+  let isSameSheetAsBefore = areStepsUnchanged && withWaysIn.state.sheetId === stateIn.sheetId;
+  let formatAsTableChosenLast = isSameSheetAsBefore ? withWaysIn.state.formatAsTableChosenLast : null;
+  let ownSortChosenLast = isSameSheetAsBefore ? ownSortToUndo(withWaysIn.state) : null;
   let chartBeingMade =
     (withWaysIn.state.sheetPointedIn ?? withWaysIn.state.sheetId) === (stateIn.sheetPointedIn ?? stateIn.sheetId)
       ? withWaysIn.state.chartBeingMade
@@ -300,16 +306,18 @@ export function reduceEventWithFollowUps(state: PageState, event: PageEvent, con
         chartBeingMade === withWaysIn.state.chartBeingMade &&
         offersAtSelection === withWaysIn.state.offersAtSelection &&
         formatAsTableChosenLast === withWaysIn.state.formatAsTableChosenLast &&
+        ownSortChosenLast === withWaysIn.state.ownSortChosenLast &&
         areStepsUnchanged
         ? withWaysIn.state
         : {
             ...withWaysIn.state,
-            contextBarMenu: contextBarMenu,
-            offersAtSelection: offersAtSelection,
-            stepsToUndo: stepsToUndo,
-            stepsToRedo: stepsToRedo,
-            formatAsTableChosenLast: formatAsTableChosenLast,
-            chartBeingMade: chartBeingMade,
+            contextBarMenu,
+            offersAtSelection,
+            stepsToUndo,
+            stepsToRedo,
+            formatAsTableChosenLast,
+            ownSortChosenLast,
+            chartBeingMade,
           },
       context.reads,
       event.kind === 'fixInPlaceAsked' && event.cardOf !== null
@@ -388,7 +396,7 @@ export function reduceEventWithFollowUps(state: PageState, event: PageEvent, con
 export function withFilterKeptOnForColumnsCard(stateBefore: PageState, state: PageState): PageState {
   let tableKey = state.ownFilterList?.tableKey;
   if (tableKey === undefined) return state;
-  let hasFilterOn = ({ ownFilterTried: ownFilterTried, ...withoutFilterTried }: PageState) => {
+  let hasFilterOn = ({ ownFilterTried, ...withoutFilterTried }: PageState) => {
     let heldFilter = ownFilterTried?.before.held;
     let ownFilter = heldFilter?.key === tableKey ? heldFilter : ownFilterByKey(withoutFilterTried, tableKey);
     return ownFilter !== null && !isOwnFilterUnused(ownFilter);
@@ -401,7 +409,7 @@ export function withFilterKeptOnForColumnsCard(stateBefore: PageState, state: Pa
     : state;
 }
 export function settleListFilterOnceUsed(state: PageState): PageState {
-  let { ownFilterList: ownFilterList, ownFilterTried: ownFilterTried } = state;
+  let { ownFilterList, ownFilterTried } = state;
   if (ownFilterList === null || !ownFilterList.isFilterNotDrawnYet || ownFilterTried !== null) return state;
   let ownFilter = ownFilterByKey(state, ownFilterList.tableKey);
   return ownFilter === null || isOwnFilterUnused(ownFilter)
@@ -414,32 +422,32 @@ export function settleListFilterOnceUsed(state: PageState): PageState {
         },
       };
 }
-export function dropFilterKeptOnForColumnsCard(result: PageTransition, { reads: reads }: PageContext): PageTransition {
-  let tableKey = result.state.filterKeptOnForColumnsCard;
-  if (tableKey === null || result.state.ownFilterList !== null) return result;
+export function dropFilterKeptOnForColumnsCard(transition: PageTransition, { reads }: PageContext): PageTransition {
+  let tableKey = transition.state.filterKeptOnForColumnsCard;
+  if (tableKey === null || transition.state.ownFilterList !== null) return transition;
   let state = {
-    ...result.state,
+    ...transition.state,
     filterKeptOnForColumnsCard: null,
   };
   let isFilterGone = isOwnFilterKeyUnused(state, tableKey);
   return {
-    ...result,
+    ...transition,
     state: isFilterGone
       ? clearOwnFilters(state, reads, {
-          tableKey: tableKey,
+          tableKey,
         })
       : state,
   };
 }
 export function settleOwnFilterOnceDrawn(
   stateBefore: PageState,
-  result: PageTransition,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: PageContext,
+  transition: PageTransition,
+  { reads, refusalOfEveryEdit }: PageContext,
 ): PageTransition {
-  let { state: state } = result;
+  let { state } = transition;
   let tableKey = ownFilterKeyNotDrawnYet(stateBefore);
   let ownFilter = tableKey === null ? null : ownFilterByKey(state, tableKey);
-  if (ownFilter === null || isOwnFilterUnused(ownFilter) || !isOwnFilterDrawn(state, ownFilter)) return result;
+  if (ownFilter === null || isOwnFilterUnused(ownFilter) || !isOwnFilterDrawn(state, ownFilter)) return transition;
   let declared = declareCellTableOfNewFilter(
     clearOwnFilters(state, reads, {
       tableKey: ownFilter.key,
@@ -450,27 +458,27 @@ export function settleOwnFilterOnceDrawn(
   );
   return {
     state: declared.state,
-    effects: [...result.effects, ...declared.effects],
+    effects: [...transition.effects, ...declared.effects],
   };
 }
-export function giveUpRowsAskedForWhenDue(result: PageTransition, event: PageEvent, context: PageContext): PageTransition {
-  if (!shouldEndRowsAsk(result.state)) return result;
-  let { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit } = context;
+export function giveUpRowsAskedForWhenDue(transition: PageTransition, event: PageEvent, context: PageContext): PageTransition {
+  if (!shouldEndRowsAsk(transition.state)) return transition;
+  let { reads, refusalOfEveryEdit } = context;
   if (event.kind === 'rowsAskedForActedOn' && event.act.kind === 'giveUp') {
-    let { state: state, effects: effects } = actOnRowsAsk(result.state, reads, event.act, refusalOfEveryEdit === null);
+    let { state, effects } = actOnRowsAsk(transition.state, reads, event.act, refusalOfEveryEdit === null);
     return {
-      state: state,
-      effects: [...result.effects, ...effects],
+      state,
+      effects: [...transition.effects, ...effects],
     };
   }
-  let givenUp = reduceEventWithFollowUps(result.state, GIVE_UP_ROWS_ASKED_FOR, context);
+  let givenUp = reduceEventWithFollowUps(transition.state, GIVE_UP_ROWS_ASKED_FOR, context);
   return {
     ...givenUp,
-    effects: [...result.effects, ...givenUp.effects],
+    effects: [...transition.effects, ...givenUp.effects],
   };
 }
 export function hideExplanationUnderPointer(state: PageState): PageState {
-  let { pointedAt: pointedAt, hiddenUnderPointer: hiddenUnderPointer } = state.explainedUnderCell;
+  let { pointedAt, hiddenUnderPointer } = state.explainedUnderCell;
   return {
     ...state,
     explainedUnderCell: {
@@ -490,18 +498,18 @@ export function selectErrorsAtOpening(state: PageState, reads: ReadsWithTextMeas
     reads,
   );
 }
-export function giveUpOwnFilterTryWhenDue(result: PageTransition, event: PageEvent, context: PageContext): PageTransition {
-  if (!isOwnFilterTrialLeftOpen(result.state)) return result;
+export function giveUpOwnFilterTryWhenDue(transition: PageTransition, event: PageEvent, context: PageContext): PageTransition {
+  if (!isOwnFilterTrialLeftOpen(transition.state)) return transition;
   if (event.kind === 'ownFilterListActedIn' && event.act.kind === 'giveUp')
     return {
-      ...result,
+      ...transition,
       state: {
-        ...result.state,
+        ...transition.state,
         ownFilterTried: null,
       },
     };
   let givenUp = reduceEventWithFollowUps(
-    result.state,
+    transition.state,
     {
       kind: 'ownFilterListActedIn',
       act: {
@@ -512,14 +520,14 @@ export function giveUpOwnFilterTryWhenDue(result: PageTransition, event: PageEve
   );
   return {
     ...givenUp,
-    effects: [...result.effects, ...givenUp.effects],
+    effects: [...transition.effects, ...givenUp.effects],
   };
 }
 export function trackInsertOfRowsForErrorsOffered(state: PageState, event: PageEvent, effects: PageEffect[], areFormulasLeft: boolean): PageState {
-  let { errorsOffered: errorsOffered } = state;
+  let { errorsOffered } = state;
   if (errorsOffered === null) return state;
   let endsAwaitOfInsert =
-    effects.some(({ kind: kind }) => kind === 'queueEdit' || kind === 'undoOrRedo' || kind === 'queueEditsThatTakeBack') ||
+    effects.some(({ kind }) => kind === 'queueEdit' || kind === 'undoOrRedo' || kind === 'queueEditsThatTakeBack') ||
     (!areFormulasLeft &&
       ((event.kind === 'editAnswered' && givesNewRowsFormulas(event.edit)) ||
         event.kind === 'undoOrRedoAnswered' ||
@@ -544,10 +552,10 @@ export function trackInsertOfRowsForErrorsOffered(state: PageState, event: PageE
 }
 export function withErrorsOfferedRead(
   state: PageState,
-  { reads: reads, areFormulasLeft: areFormulasLeft, refusalOfEveryEdit: refusalOfEveryEdit }: PageContext,
+  { reads, areFormulasLeft, refusalOfEveryEdit }: PageContext,
 ): PageState {
-  let { errorsOffered: errorsOffered, errorsReadAsOf: errorsReadAsOf, sheetId: sheetId, workbookChangeCount: workbookChangeCount } = state;
-  let { formulasWorkedOutCount: formulasWorkedOutCount } = state;
+  let { errorsOffered, errorsReadAsOf, sheetId, workbookChangeCount } = state;
+  let { formulasWorkedOutCount } = state;
   let isReadUpToDate =
     errorsReadAsOf?.sheetId === sheetId &&
     errorsReadAsOf.workbookChangeCount === workbookChangeCount &&
@@ -557,14 +565,14 @@ export function withErrorsOfferedRead(
   if ((errorsOffered?.sheetId !== sheetId || areErrorsAtOpeningToBeRead) && (areFormulasLeft || reads.calculationTookTooLong)) return state;
   let hasWorkbookChanged = errorsReadAsOf?.workbookChangeCount !== workbookChangeCount;
   let nextErrorsOffered = updateErrorsOffered(errorsOffered, reads, sheetId, hasWorkbookChanged, areFixesWaiting(state));
-  let { offerDueBackOn: offerDueBackOn } = state.fixesOnCells;
+  let { offerDueBackOn } = state.fixesOnCells;
   let isOfferDueBack = offerDueBackOn.includes(sheetId);
   return {
     ...readErrorsAtOpening(state, reads),
     errorsReadAsOf: {
-      sheetId: sheetId,
-      workbookChangeCount: workbookChangeCount,
-      formulasWorkedOutCount: formulasWorkedOutCount,
+      sheetId,
+      workbookChangeCount,
+      formulasWorkedOutCount,
     },
     errorsOffered: isOfferDueBack ? updateErrorsOffered(resetBaselineOfOffer(nextErrorsOffered), reads, sheetId, false) : nextErrorsOffered,
     ...(isOfferDueBack && {
@@ -576,26 +584,43 @@ export function withErrorsOfferedRead(
   };
 }
 export function reduceCommittingDropdownEditor(state: PageState, event: PageEvent, context: PageContext): PageTransition {
-  let result = reduceEventWithTidying(state, event, context);
+  let transition = reduceEventWithTidying(state, event, context);
   if (
     event.kind === 'dropdownEditorActedIn' ||
+    event.kind === 'pivotTablePaneActedIn' ||
     event.kind === 'workbookChanged' ||
     event.kind === 'formulasWorkedOut' ||
     event.kind === 'editAnswered' ||
     event.kind === 'undoOrRedoAnswered' ||
-    event.kind === 'editOfChartAsked' ||
-    !hasUnsavedDropdownTyping(state)
+    event.kind === 'editOfChartAsked'
   )
-    return result;
-  if (!hasQueueEditEffect(result) && !hasLeftDropdownPane(state, result.state)) return result;
-  let actInDropdownEditor = (act: ActOfKind, isBeforeKeep: boolean = false) =>
+    return transition;
+  let pivotTyping = pivotTypingToEnter(state);
+  if (pivotTyping !== null) {
+    if (!hasQueueEditEffect(transition) && (pivotTableOfSidePane(transition.state)?.typed ?? null) !== null) return transition;
+    let entered = reduceEventWithTidying(state, pivotTyping, context);
+    let [firstEffect] = entered.effects;
+    return firstEffect?.kind === 'queueEdit'
+      ? {
+          state: entered.state,
+          effects: [
+            withIfQueued(firstEffect, {
+              thenEvent: event,
+            }),
+          ],
+        }
+      : transition;
+  }
+  if (!hasUnsavedDropdownTyping(state)) return transition;
+  if (!hasQueueEditEffect(transition) && !hasLeftDropdownPane(state, transition.state)) return transition;
+  let actInDropdownEditor = (act: DropdownEditorAct, isBeforeKeep: boolean = false) =>
     reduceEventWithTidying(
       state,
       {
         kind: 'dropdownEditorActedIn',
-        act: act,
+        act,
         ...(isBeforeKeep && {
-          isBeforeKeep: isBeforeKeep,
+          isBeforeKeep,
         }),
       },
       context,
@@ -635,9 +660,9 @@ export function reduceCommittingDropdownEditor(state: PageState, event: PageEven
       kind: 'enter',
       thenStartsOption: false,
     },
-    keepsAgentsFormula(result),
+    keepsAgentsFormula(transition),
   );
-  if (entered.effects.length === 0) return result;
+  if (entered.effects.length === 0) return transition;
   let [firstEffectOfEnter] = entered.effects;
   if (
     ((event.kind === 'cardRowChosen' && optionIdOfMenuKey(state.dropdown?.card?.ofRow ?? null) !== null) ||
@@ -661,24 +686,24 @@ export function reduceCommittingDropdownEditor(state: PageState, event: PageEven
   };
 }
 export function reduceEventWithTidying(state: PageState, event: PageEvent, context: PageContext): PageTransition {
-  let result = reduceEventWithDerivedState(state, event, context);
-  let withChanges = withTellOthersWhomViewFollows(state, result, event);
+  let transition = reduceEventWithDerivedState(state, event, context);
+  let withChanges = withTellOthersWhomViewFollows(state, transition, event);
   let isFiguresDue = event.kind === 'figuresOfSelectionDue';
   return {
     ...withChanges,
     state: updateFiguresOfSelection(state, withXlsxFileToldWhenFree(withChanges.state), context.reads, isFiguresDue),
   };
 }
-export function answerEntriesEndedAtOnce(result: PageTransition, context: PageContext): PageTransition {
-  return result.effects.reduce(
+export function answerEntriesEndedAtOnce(transition: PageTransition, context: PageContext): PageTransition {
+  return transition.effects.reduce(
     (acc: PageTransition, effect) => {
       let withEffect = (addedEffect: PageEffect): PageTransition => ({
         state: acc.state,
         effects: [...acc.effects, addedEffect],
       });
       if (effect.kind !== 'queueEdit' || effect.ifQueued.endsEntryAtOnce !== true) return withEffect(withoutEntryOfPressedCell(effect));
-      let { edit: edit, ifQueued: ifQueued } = effect;
-      let { endsEntryAtOnce: endsEntryAtOnce, ...ifQueuedRest } = ifQueued;
+      let { edit, ifQueued } = effect;
+      let { endsEntryAtOnce, ...ifQueuedRest } = ifQueued;
       if (edit.kind !== 'enter' || !canEntryBeAnsweredLater(acc.state, context, effect))
         return withEffect(
           withoutEntryOfPressedCell({
@@ -694,21 +719,21 @@ export function answerEntriesEndedAtOnce(result: PageTransition, context: PageCo
         acc.state,
         {
           kind: 'editAnswered',
-          edit: edit,
-          outcome: outcome,
+          edit,
+          outcome,
           ifQueued: ifQueuedRest,
         },
         context,
       );
-      let { formatsToCome: formatsToCome } = ifQueuedRest;
+      let { formatsToCome } = ifQueuedRest;
       let cellWithList = cellWithListOfEntry(edit, context.reads);
       let entryUnanswered = {
         ...unansweredEntryOf(edit),
         ...(cellWithList !== null && {
-          cellWithList: cellWithList,
+          cellWithList,
         }),
         ...(formatsToCome !== undefined && {
-          formatsToCome: formatsToCome,
+          formatsToCome,
         }),
       };
       return {
@@ -720,25 +745,25 @@ export function answerEntriesEndedAtOnce(result: PageTransition, context: PageCo
       };
     },
     {
-      state: result.state,
+      state: transition.state,
       effects: [],
     },
   );
 }
-export function endVersionLookWhenEditsLost(stateBefore: PageState, result: PageTransition): PageTransition {
+export function endVersionLookWhenEditsLost(stateBefore: PageState, transition: PageTransition): PageTransition {
   let isLookNotShownYet = versionHistoryOfPane(stateBefore)?.look?.shown === null;
-  let { notice: notice, newsOfLoss: newsOfLoss } = result.state;
+  let { notice, newsOfLoss } = transition.state;
   let isLossNew =
     (notice !== stateBefore.notice && notice?.kind === 'entriesNotKept') || (newsOfLoss !== stateBefore.newsOfLoss && newsOfLoss !== null);
-  return isLookNotShownYet && (isLossNew || triesToEdit(stateBefore, result))
+  return isLookNotShownYet && (isLossNew || triesToEdit(stateBefore, transition))
     ? {
-        ...result,
-        state: endVersionLook(result.state),
+        ...transition,
+        state: endVersionLook(transition.state),
       }
-    : result;
+    : transition;
 }
 export function reduceEventWithDerivedState(state: PageState, event: PageEvent, context: PageContext): PageTransition {
-  let { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit } = context;
+  let { reads, refusalOfEveryEdit } = context;
   let reduced = answerEntriesEndedAtOnce(withFormatsOfRowsAbove(reduceSheetsEvent(state, event, context), state, reads), context);
   let withAnswerTracked =
     event.kind === 'editAnswered' && !hasQueuedEntryBeforeLine(reduced)
@@ -749,7 +774,7 @@ export function reduceEventWithDerivedState(state: PageState, event: PageEvent, 
       : reduced;
   let withFiltersReapplied = {
     ...withAnswerTracked,
-    state: reapplyOwnFiltersAfterAnswer(withAnswerTracked.state, reads, event),
+    state: takeSavedNamedView(reapplyOwnFiltersAfterAnswer(withAnswerTracked.state, reads, event, cellsOfColumnsWentToAfter(state, event)), reads, event),
   };
   let guarded =
     refusalOfEveryEdit === null
@@ -758,7 +783,7 @@ export function reduceEventWithDerivedState(state: PageState, event: PageEvent, 
           guardEditsAgainstRowsOutOfView(state, addFilterValuesToInserts(withFiltersReapplied, reads), reads, event.kind === 'editAnswered'),
         )
       : refuseEditsOfTransition(state, withFiltersReapplied, refusalOfEveryEdit);
-  let { state: nextState, effects: effects } =
+  let { state: nextState, effects } =
     refusalOfEveryEdit === null && doesCommentModePick(state) ? refuseEditsInCommentMode(state, guarded, event) : guarded;
   let effectsAfterLook = endLookEffects(state, nextState, effects, event);
   let stateWithoutMovedOffer = withoutMoveReplacedOffer(state, nextState, event);
@@ -792,14 +817,22 @@ export function reduceEventWithDerivedState(state: PageState, event: PageEvent, 
                           state,
                           dropDoneCardOnEvent(
                             stopSayingWorkingWhenCursorGone(
-                              stepViewFollowing(
+                              stepCellsLinkedTo(
                                 state,
                                 {
-                                  state: countedState,
+                                  state: stepViewFollowing(
+                                    state,
+                                    {
+                                      state: countedState,
+                                      effects: effectsAfterLook,
+                                    },
+                                    event,
+                                    context,
+                                  ),
                                   effects: effectsAfterLook,
                                 },
                                 event,
-                                context,
+                                reads,
                               ),
                               context,
                             ),
@@ -895,7 +928,7 @@ export function reduceEventWithDerivedState(state: PageState, event: PageEvent, 
   );
   let finalState = noteSelectionLeftByPerson(
     state,
-    updateErrorsAtOpening(state, settleSelectionSeen(settledState, settleSortPane(resultWithAsks.state, reads), reads), event),
+    updateErrorsAtOpening(state, settleSelectionSeen(settledState, settlePivotTablePane(settleSortPane(resultWithAsks.state, reads), reads, event, context.areFormulasLeft), reads), event),
     event,
   );
   let finalResult = askForCellHistory(
@@ -927,6 +960,10 @@ export function updateCalculatingShown(state: PageState, reads: WorkbookReads): 
   let isCalculatingShown = state.isActShownAsCalculated || state.areFormulasShownAsLeft;
   return {
     ...state,
+    ...(isCalculatingShown &&
+      !state.isActShownAsCalculated && {
+        ownViewShownAsApplied: null,
+      }),
     calculatingShown: (isCalculatingShown ? startCalculatingShown : endCalculatingShown)(state.calculatingShown),
     longCalculationTold: isCalculatingShown
       ? longCalculationOnCalculating(state.longCalculationTold)
@@ -952,6 +989,8 @@ export const OWN_FILTER_EVENT_KINDS = new Set<PageEvent['kind']>([
   'ownFilterLineRemoved',
   'ownSortRemoved',
   'ownSortMadeForEveryone',
+  'namedViewPicked',
+  'namedViewsChanged',
   'ownFiltersCleared',
   'ownFiltersRefreshed',
   'ownFilterListAsked',
@@ -959,7 +998,7 @@ export const OWN_FILTER_EVENT_KINDS = new Set<PageEvent['kind']>([
   'ownFilterListSortChosen',
   'ownFiltersBroughtBack',
 ]);
-export const withErrorsOfferedFromStart = (state: PageState, reads: WorkbookReads, errorsOffered: PageState['errorsOffered']): PageState => ({
+export const withErrorsOfferedFromStart = (state: PageState, reads: WorkbookReads, errorsOffered: ErrorsOffered): PageState => ({
   ...state,
   errorsOffered: updateErrorsOffered(
     {
@@ -971,7 +1010,7 @@ export const withErrorsOfferedFromStart = (state: PageState, reads: WorkbookRead
     false,
   ),
 });
-export const hasQueuedEntryBeforeLine = ({ effects: effects }: PageTransition): boolean =>
+export const hasQueuedEntryBeforeLine = ({ effects }: PageTransition): boolean =>
   effects.some((effect) => effect.kind === 'queueEdit' && effect.ifQueued.entryBeforeLine !== undefined);
-export const hasQueueEditEffect = ({ effects: effects }: PageTransition): boolean =>
+export const hasQueueEditEffect = ({ effects }: PageTransition): boolean =>
   effects.some((effect) => effect.kind === 'queueEdit');

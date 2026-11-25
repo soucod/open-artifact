@@ -9,7 +9,7 @@
  */
 
 import type { CSSProperties } from 'react';
-import { DEFAULT_FONT_STACK, SLIDE_HEIGHT, SLIDE_WIDTH, type StyleMap } from '@open-artifact/slides-core';
+import { DEFAULT_FONT_STACK, SLIDE_HEIGHT, SLIDE_WIDTH, type ItemMargin, type StyleMap } from '@open-artifact/slides-core';
 
 /** Section declarations that lay out its flow children (they go on the flow root). */
 export const SECTION_LAYOUT = new Set<string>([
@@ -44,6 +44,12 @@ export interface StyleOptions {
   only?: ReadonlySet<string>;
   /** Resolves `url(…)` references inside backgrounds. */
   resolveUrl?: (url: string) => string;
+}
+
+/** A list's style with the margin of its items, which the slide stylesheet gives every `<li>` under it. */
+export function withItemMargin(style: CSSProperties, margin: ItemMargin | undefined): CSSProperties {
+  if (!margin) return style;
+  return { ...style, '--open-artifact-item-top': `${margin.top}px`, '--open-artifact-item-bottom': `${margin.bottom}px` } as CSSProperties;
 }
 
 /** Converts a style map into a React style object. */
@@ -112,12 +118,13 @@ const SLIDE_STYLESHEET_BASE = `
 .${SLIDE_CLASS} h2{font-size:calc(64px * var(--open-artifact-fit, 1));font-weight:600;line-height:1.2}
 .${SLIDE_CLASS} h3{font-size:calc(44px * var(--open-artifact-fit, 1));font-weight:600;line-height:1.2}
 .${SLIDE_CLASS} ul,.${SLIDE_CLASS} ol{padding-left:1.25em}
-.${SLIDE_CLASS} ul{list-style:disc}
-.${SLIDE_CLASS} ol{list-style:decimal}
-.${SLIDE_CLASS} ul ul{list-style:circle}
-.${SLIDE_CLASS} ul ul ul{list-style:square}
-.${SLIDE_CLASS} ol ol{list-style:lower-alpha}
-.${SLIDE_CLASS} ol ol ol{list-style:lower-roman}
+.${SLIDE_CLASS} ul{list-style-type:disc}
+.${SLIDE_CLASS} ol{list-style-type:decimal}
+.${SLIDE_CLASS} ul ul{list-style-type:circle}
+.${SLIDE_CLASS} ul ul ul{list-style-type:square}
+.${SLIDE_CLASS} ol ol{list-style-type:lower-alpha}
+.${SLIDE_CLASS} ol ol ol{list-style-type:lower-roman}
+.${SLIDE_CLASS} li{margin-top:var(--open-artifact-item-top, 0);margin-bottom:var(--open-artifact-item-bottom, 0)}
 .${SLIDE_CLASS} li[data-level]{margin-left:calc(var(--open-artifact-level) * 1.25em)}
 .${SLIDE_CLASS} li::marker{color:currentColor}
 .${SLIDE_CLASS} a{color:inherit;text-decoration:underline}

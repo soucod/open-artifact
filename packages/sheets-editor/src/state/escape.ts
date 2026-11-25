@@ -14,12 +14,13 @@ export const hasLayerForEscape = (state: PageState): boolean =>
   state.dragging !== null ||
   state.find !== null ||
   state.followed !== null ||
+  state.cellsLinkedTo !== null ||
   state.copiedCells?.activeCell.sheetId === state.sheetId ||
   isSidePaneShuttable(state) ||
   state.newCommentOn !== null ||
   hasOpenCommentCard(state);
 export const hasOpenCommentCard = (state: PageState): boolean =>
-  state.comments?.some(({ isOpen: isOpen }) => isOpen) === true;
+  state.comments?.some(({ isOpen }) => isOpen) === true;
 export const commentToShutOnEscape = (state: PageState): CommentToShut | null => {
   if (
     hasLayerForEscape({

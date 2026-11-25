@@ -116,6 +116,13 @@ pub struct Axis {
 }
 
 impl Axis {
+    /// Builds a snapshot axis in one pass, keeping deleted lines in their original positions.
+    pub(crate) fn from_snapshot(all: Vec<LineId>, deleted: HashSet<LineId>) -> Option<Self> {
+        let mut axis = Self { all, deleted, ..Self::default() };
+        axis.reindex();
+        (axis.all.len() == axis.indices.len() && axis.deleted.iter().all(|&id| axis.knows(id))).then_some(axis)
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -242,9 +249,39 @@ impl Axis {
         back
     }
 
+    /// Puts lines (each in the axis) in an order among themselves, in the places they take: the first of `lines`
+    /// where the first of them is, and so on; every other line (deleted ones too) stays where it is.
+    pub fn reorder(&mut self, lines: &[LineId]) {
+        let mut places: Vec<usize> = lines.iter().map(|l| self.indices[l]).collect();
+        places.sort_unstable();
+        for (&place, &line) in places.iter().zip(lines) {
+            self.all[place] = line;
+        }
+        self.reindex();
+    }
+
     /// The lines as runs: consecutive ids of one base make one run.
     pub fn runs(&self, bases: &Bases) -> Vec<IdRun> {
         runs_of(&self.lines, bases)
+    }
+
+    /// The axis with its lines from `from` on (not deleted) in another order, `lines`: the deleted lines where they
+    /// were.
+    pub(crate) fn reordered(&self, from: usize, lines: &[LineId]) -> Axis {
+        let mut all = self.all.clone();
+        let mut p = 0;
+        for line in all.iter_mut() {
+            if self.deleted.contains(line) {
+                continue;
+            }
+            if (from..from + lines.len()).contains(&p) {
+                *line = lines[p - from];
+            }
+            p += 1;
+        }
+        let mut axis = Axis { all, deleted: self.deleted.clone(), ..Axis::default() };
+        axis.reindex();
+        axis
     }
 
     fn reindex(&mut self) {
@@ -309,7 +346,7 @@ pub fn runs_of(lines: &[LineId], bases: &Bases) -> Vec<IdRun> {
     let mut last: Option<LineId> = None;
     for &line in lines {
         match (runs.last_mut(), last) {
-            (Some(run), Some(prev)) if prev.base == line.base && prev.n + 1 == line.n => run.count += 1,
+            (Some(run), Some(prev)) if prev.base == line.base && prev.n.checked_add(1) == Some(line.n) => run.count += 1,
             _ => runs.push(IdRun { base: bases.name(line.base).to_owned(), first: line.n, count: 1 }),
         }
         last = Some(line);
@@ -323,6 +360,125 @@ pub enum AxisError {
     Unknown,
     /// One of the new ids is already in the sheet.
     Taken,
+}
+
+/// Runs of ids as a list of runs of each base (format 43): `{base, runs: [[first, count], …]}`, each base once, its
+/// runs in order with a gap between them; a list holds runs in this form or none. The rows of cells to format are
+/// written so when there are 100 runs or more; rows deleted or undeleted are read so too.
+pub mod listed_runs {
+    use super::IdRun;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value as Json;
+
+    /// The fewest runs written as lists.
+    pub const FEWEST: usize = 100;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<IdRun>, D::Error> {
+        let items = Vec::<Json>::deserialize(deserializer)?;
+        read(items).ok_or_else(|| serde::de::Error::custom("runs not readable"))
+    }
+
+    fn read(items: Vec<Json>) -> Option<Vec<IdRun>> {
+        if !items.iter().any(|item| item.get("runs").is_some()) {
+            return items.into_iter().map(|item| IdRun::deserialize(item).ok()).collect();
+        }
+        let mut bases = Vec::new();
+        let mut out = Vec::new();
+        for item in items {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Listed {
+                base: String,
+                runs: Vec<(u32, u32)>,
+            }
+            let Listed { base, runs } = Listed::deserialize(item).ok()?;
+            if runs.is_empty() || bases.contains(&base) {
+                return None;
+            }
+            let mut end: Option<u64> = None;
+            for &(first, count) in &runs {
+                if count == 0 || end.is_some_and(|end| u64::from(first) <= end) {
+                    return None;
+                }
+                end = Some(u64::from(first) + u64::from(count));
+                out.push(IdRun { base: base.clone(), first, count });
+            }
+            bases.push(base);
+        }
+        Some(out)
+    }
+
+    pub fn serialize<S: Serializer>(runs: &[IdRun], serializer: S) -> Result<S::Ok, S::Error> {
+        if runs.len() < FEWEST {
+            return runs.serialize(serializer);
+        }
+        written(runs).serialize(serializer)
+    }
+
+    /// Rows deleted or undeleted, and whether they are written as lists of runs: as they were read, and from
+    /// `FEWEST` runs on in an edit made here. The reverse of an operation keeps its form (the rows of `apply` are given back as
+    /// they were given, 100 runs written one by one too).
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct RowRuns {
+        pub runs: Vec<IdRun>,
+        pub listed: bool,
+    }
+
+    impl RowRuns {
+        /// Rows an edit deletes or undeletes, listed from `FEWEST` runs on.
+        pub fn written(runs: Vec<IdRun>) -> Self {
+            let listed = runs.len() >= FEWEST;
+            RowRuns { runs, listed }
+        }
+
+        /// Other runs in the same form.
+        pub fn like(&self, runs: Vec<IdRun>) -> Self {
+            RowRuns { runs, listed: self.listed }
+        }
+    }
+
+    impl std::ops::Deref for RowRuns {
+        type Target = Vec<IdRun>;
+        fn deref(&self) -> &Vec<IdRun> {
+            &self.runs
+        }
+    }
+
+    impl std::ops::DerefMut for RowRuns {
+        fn deref_mut(&mut self) -> &mut Vec<IdRun> {
+            &mut self.runs
+        }
+    }
+
+    impl Serialize for RowRuns {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self.listed {
+                true => written(&self.runs).serialize(serializer),
+                false => self.runs.serialize(serializer),
+            }
+        }
+    }
+
+    impl<'de> Deserialize<'de> for RowRuns {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let items = Vec::<Json>::deserialize(deserializer)?;
+            let listed = items.iter().any(|item| item.get("runs").is_some());
+            let runs = read(items).ok_or_else(|| serde::de::Error::custom("runs not readable"))?;
+            Ok(RowRuns { runs, listed })
+        }
+    }
+
+    /// The runs as lists of each base, in the order the bases come.
+    fn written(runs: &[IdRun]) -> Vec<Json> {
+        let mut bases: Vec<(&str, Vec<[u32; 2]>)> = Vec::new();
+        for run in runs {
+            match bases.iter_mut().find(|(base, _)| *base == run.base) {
+                Some((_, list)) => list.push([run.first, run.count]),
+                None => bases.push((&run.base, vec![[run.first, run.count]])),
+            }
+        }
+        bases.into_iter().map(|(base, runs)| serde_json::json!({"base": base, "runs": runs})).collect()
+    }
 }
 
 #[cfg(test)]

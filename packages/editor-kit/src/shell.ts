@@ -45,7 +45,11 @@ export interface ShellDrawsState {
   framed: boolean;
 }
 
-/** A handler of Shell commands; may answer an `exports` request with items. */
+/**
+ * A handler of Shell commands; may answer an `exports` request with items.
+ * Every command reaches every handler, `follow` too (sent where the report
+ * has `following`, with a key from its `peers` or `null` to stop).
+ */
 export type ShellCommandHandler = (command: ChromeCommand) => ChromeExportItem[] | void;
 
 /** A bridge made by {@link createShellBridge}. */
@@ -72,11 +76,13 @@ export function createShellBridge(shell: () => ShellConnection | null | undefine
   const useShellDraws = create<ShellDrawsState>()(() => ({ draws: new Set(), framed: false }));
   let report: ChromeReport = {};
   let scheduled = false;
+  let active: ShellConnection | null = null;
+  let generation = 0;
   const handlers = new Set<ShellCommandHandler>();
 
   function send(): void {
     scheduled = false;
-    shell()?.report(report);
+    active?.report(report);
   }
 
   function setShellReport(part: Partial<ChromeReport>): void {
@@ -90,9 +96,10 @@ export function createShellBridge(shell: () => ShellConnection | null | undefine
     }
     if (!changed) return;
     report = next;
-    if (!scheduled) {
+    if (active && !scheduled) {
       scheduled = true;
-      queueMicrotask(send);
+      const owner = generation;
+      queueMicrotask(() => { if (owner === generation) send(); });
     }
   }
 
@@ -103,7 +110,10 @@ export function createShellBridge(shell: () => ShellConnection | null | undefine
 
   function startShell(): () => void {
     const connection = shell();
-    if (!connection) return () => {};
+    const owner = ++generation;
+    scheduled = false;
+    active = connection ?? null;
+    if (!connection) return () => { if (generation === owner) report = {}; };
     useShellDraws.setState({ draws: connection.draws, framed: true });
     const stops = [
       connection.onHello((draws) => useShellDraws.setState({ draws })),
@@ -120,6 +130,12 @@ export function createShellBridge(shell: () => ShellConnection | null | undefine
     send();
     return () => {
       for (const stop of stops) stop();
+      if (generation !== owner) return;
+      generation++;
+      active = null;
+      scheduled = false;
+      report = {};
+      useShellDraws.setState({ draws: new Set(), framed: false });
     };
   }
 

@@ -6,8 +6,8 @@
  * - Local edits arrive through the board store's sink ({@link changeBoard}).
  *   Each becomes one step that records what changed field by field, so
  *   undoing a move never takes back someone else's text edit. Edits with
- *   the same `coalesce` key in quick succession (a drag's frames, typing)
- *   merge into one step.
+ *   the same gesture key merge into one step, including across pauses.
+ *   Repeated keyboard edits and follow-up corrections merge in quick succession.
  * - The engine's snapshots flow back into the board store: the board, the
  *   save status, refusals and one-time notices (shown as toasts). Once the
  *   fonts have loaded, the board shown is fitted to them (text wraps widen
@@ -24,15 +24,17 @@
  */
 
 import { toast } from '@open-artifact/ui';
-import type { ChromeCommand, ChromeReport } from '@open-artifact/runtime';
+import type { ChromeCommand } from '@open-artifact/runtime';
 import {
   AGENT_STEP_LABEL,
+  applyBoardDiff,
   createBoardStepCommitter,
   createCommandHistory,
   createFontFitContent,
   createLiveBoardDocument,
   createStepSaysUndo,
   createTableEditor,
+  diffBoardContents,
   planSectionGrowth,
   sectionStillNeedsGrowth,
   type Board,
@@ -48,17 +50,21 @@ import {
   type SyncChangeEvent,
   type SyncTransport,
 } from '@open-artifact/whiteboard-core';
+import { onBoardFontsLoaded } from '../lib/fonts.ts';
+import { shellSaved } from './save-state.ts';
 import { setBoardSink, setBoardSnapshot, tellRemoteChange, useBoard, type ChangeOptions, type SyncStatus } from '../state/board.ts';
 import { useHistory } from '../state/history.ts';
 import { currentMeasures } from '../state/measures.ts';
 import { useSelection } from '../state/selection.ts';
+import { isGestureKey } from '../tools/gesture.ts';
 import { askedRecently, useAgent } from './agent.ts';
 import { installUndoHandler, redo, undo } from './commands.ts';
 import { session } from './session.ts';
 import { onShellCommand, setShellReport, useShellDraws } from './shell.ts';
+import { boardScope } from './storage-scope.ts';
 import { flushTableCell, setTableEditor } from './table-edits.ts';
 
-/** Longest pause between two edits with the same `coalesce` key that still merge into one step. */
+/** Longest pause between keyboard edits or follow-up corrections that still merge. */
 export const COALESCE_WINDOW_MS = 1500;
 /** The agent's writes count as an answer to this page when it asked within this long. */
 export const AGENT_ANSWER_WINDOW_MS = 15 * 60 * 1000;
@@ -80,12 +86,20 @@ export function liveBoard(): LiveBoardDocument | null {
 }
 
 /**
- * The saved copy of this page's board in local storage, keyed by the page's
- * path. Too large a copy is dropped rather than kept stale; storage that is
- * unavailable (private windows, blocked site data) just means no copy.
+ * The saved copy of this page's board in local storage, filed by the board's
+ * {@link boardScope} and the viewer (another account on this browser, or the
+ * same one with another role, never opens someone else's copy). Too large a
+ * copy is dropped rather than kept stale; storage that is unavailable
+ * (private windows, blocked site data) just means no copy.
  */
-export function savedCopyCache(key = `wb-saved-copy:${location.pathname}`): LiveCache {
+export function savedCopyCache(key = savedCopyKey()): LiveCache {
   return localStorageCache(key);
+}
+
+/** The key of this viewer's saved copy of this board. */
+export function savedCopyKey(scope = boardScope()): string {
+  const { viewer } = session();
+  return `wb-copy:${scope}:${encodeURIComponent(viewer.id)}:${viewer.role}`;
 }
 
 /** Board store status for an engine status. */
@@ -104,26 +118,6 @@ function storeStatus(snapshot: LiveSnapshot<Board>): SyncStatus {
   }
 }
 
-/** The Shell's save badge for an engine status (`undefined` while loading). */
-function shellSaved(snapshot: LiveSnapshot<Board>): ChromeReport['saved'] {
-  switch (snapshot.status) {
-    case 'ready':
-      return 'saved';
-    case 'dirty':
-    case 'error':
-      return 'unsaved';
-    case 'saving':
-      return 'saving';
-    case 'offline':
-    case 'cached':
-      return 'reconnecting';
-    case 'readonly':
-      return 'readonly';
-    default:
-      return undefined;
-  }
-}
-
 /** The element id a document path names (`elements/<id>`), if any. */
 function elementIdOfPath(path: string): ElementId | undefined {
   const match = /^elements\/([^/]+)$/.exec(path);
@@ -132,9 +126,13 @@ function elementIdOfPath(path: string): ElementId | undefined {
 
 /** A coalescing step still open for merging. */
 interface OpenStep {
-  key: string;
+  /** The run's coalesce key; `undefined` for a step only a follow-up joins. */
+  key: string | undefined;
+  label: string;
   /** The content before the first edit of the run. */
   start: BoardContent;
+  /** The content after the last edit of the run. */
+  end: BoardContent;
   step: HistoryStep;
   at: number;
 }
@@ -161,8 +159,8 @@ export function startSync(options: SyncOptions = {}): () => void {
 
   // ---- the board as shown (fitted to the loaded fonts) -----------------------------------------------------------
 
-  const fitContent = createFontFitContent();
-  let fontsReady = false;
+  let fitContent = createFontFitContent();
+  let fontsReady = document.fonts?.status === 'loaded';
   let lastRaw: Board | undefined;
   let lastShown: Board | undefined;
   /** The document's board, fitted to the fonts once they have loaded. */
@@ -218,6 +216,7 @@ export function startSync(options: SyncOptions = {}): () => void {
   const transport: SyncTransport = {
     get: (path) => db.get(path),
     list: (collection) => db.list(collection),
+    listing: async (collection) => (db.listing ? db.listing(collection) : { documents: await db.list(collection) }),
     // Paths come from the board codec, which only writes well-formed document paths.
     write: (writes) => db.write(writes as Parameters<typeof db.write>[0]),
     onChange: (listener) =>
@@ -290,6 +289,8 @@ export function startSync(options: SyncOptions = {}): () => void {
     removeCol: (...args) => (beforeTableEdit(), tables.removeCol(...args)),
     colWidth: (...args) => (beforeTableEdit(), tables.colWidth(...args)),
     fill: (...args) => (beforeTableEdit(), tables.fill(...args)),
+    setFills: (...args) => (beforeTableEdit(), tables.setFills(...args)),
+    setHeat: (...args) => (beforeTableEdit(), tables.setHeat(...args)),
   });
   stops.push(() => {
     flushTableCell();
@@ -308,27 +309,35 @@ export function startSync(options: SyncOptions = {}): () => void {
    */
   const commitLocal = (before: BoardContent, after: BoardContent, change: ChangeOptions): void => {
     closeAnswer();
-    const label = change.label ?? 'Edit';
-    const key = change.coalesce;
     const now = Date.now();
-    const run = key !== undefined && open?.key === key && now - open.at <= COALESCE_WINDOW_MS ? open : null;
-    open = null;
+    const coalesce = change.coalesce;
+    const sameKey = coalesce !== undefined && open?.key === coalesce;
+    const joins = open !== null && (
+      (sameKey && isGestureKey(coalesce)) ||
+      (now - open.at <= COALESCE_WINDOW_MS && (sameKey || change.follows === true))
+    );
+    const run = joins ? open : null;
+    const label = change.follows === true && run ? run.label : (change.label ?? 'Edit');
+    const key = change.follows === true && run ? run.key : change.coalesce;
     lastSeeded = undefined;
     refused = false;
     if (!commitStep(label, before, after)) {
       if (!refused) doc.setContent(after);
       return;
     }
+    open = null;
     let step = lastSeeded;
     let start = before;
     // Join the run only when its step is right below this one (nothing else was recorded between).
     if (run && step !== undefined && raw.above(run.step)?.length === 1 && raw.drop(step) && raw.drop(run.step)) {
       lastSeeded = undefined;
-      start = run.start;
+      // Keep remote changes that arrived between the two local edits out of the undo step.
+      const intervening = run.end === before ? null : diffBoardContents(run.end, before);
+      start = intervening ? applyBoardDiff(run.start, intervening, 'forward') : run.start;
       // `false`: the run ended where it began (dragged back), so it leaves no step.
-      step = commitStep(label, run.start, stepDoc.content()) ? lastSeeded : undefined;
+      step = commitStep(label, start, stepDoc.content()) ? lastSeeded : undefined;
     }
-    if (step !== undefined && key !== undefined) open = { key, start, step, at: now };
+    if (step !== undefined) open = { key, label, start, end: stepDoc.content(), step, at: now };
   };
 
   const publishHistory = (): void => {
@@ -392,10 +401,13 @@ export function startSync(options: SyncOptions = {}): () => void {
     }),
   );
 
-  void document.fonts?.ready.then(() => {
+  // Fonts that arrive later (a board font first used by a remote edit) refit too.
+  stops.push(onBoardFontsLoaded(() => {
     fontsReady = true;
+    lastRaw = undefined;
+    fitContent = createFontFitContent();
     publish();
-  });
+  }));
 
   setBoardSink((next, previous, change) => {
     if (next.title !== previous.title) doc.setTitle(next.title);

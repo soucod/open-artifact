@@ -1,20 +1,20 @@
 import type { NewsOfLoss, Notice, PageState } from './initial-state.ts';
-export const dropdownEditorOfPane = ({ sidePane: sidePane }: Pick<PageState, 'sidePane'>) => (sidePane?.kind === 'dropdown' ? sidePane.editor : null);
-export const conditionalRulesOfPane = ({ sidePane: sidePane }: Pick<PageState, 'sidePane'>) =>
+export const dropdownEditorOfPane = ({ sidePane }: Pick<PageState, 'sidePane'>) => (sidePane?.kind === 'dropdown' ? sidePane.editor : null);
+export const conditionalRulesOfPane = ({ sidePane }: Pick<PageState, 'sidePane'>) =>
   sidePane?.kind === 'conditionalFormats' ? sidePane.rules : null;
 export const isSidePaneShownAsPane = (view: Pick<PageState, 'sidePane'>): boolean =>
   view.sidePane !== null && (conditionalRulesOfPane(view)?.drawnAs ?? 'pane') === 'pane';
 export const canOfferAgentForRules = (view: Pick<PageState, 'sidePane' | 'isAgentForRulesNotToBeHad' | 'hasViewNoAgentForRules'>): boolean =>
   !view.isAgentForRulesNotToBeHad && !view.hasViewNoAgentForRules && !isSidePaneShownAsPane(view);
-export const versionHistoryOfPane = ({ sidePane: sidePane }: Pick<PageState, 'sidePane'>) =>
+export const versionHistoryOfPane = ({ sidePane }: Pick<PageState, 'sidePane'>) =>
   sidePane?.kind === 'versionHistory' ? sidePane.history : null;
 export const newsOfLossIfTypingLost = (
-  { mode: mode, newsOfLoss: newsOfLoss }: Pick<PageState, 'mode' | 'newsOfLoss'>,
+  { mode, newsOfLoss }: Pick<PageState, 'mode' | 'newsOfLoss'>,
   kind: NewsOfLoss['kind'],
 ): NewsOfLoss | null =>
   mode.kind === 'editing' && mode.text !== mode.textAtStart
     ? {
-        kind: kind,
+        kind,
       }
     : newsOfLoss;
 export const NOTICE_GIVES_WAY = {
@@ -26,6 +26,7 @@ export const NOTICE_GIVES_WAY = {
   editRefused: true,
   cellHoldsNoMorePeople: true,
   groupsTooDeep: true,
+  tooManyNamedViews: true,
   sheetNameRefused: false,
   dropdownCellsRefused: false,
   mergeWouldClearCells: true,

@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Edit, EditKind, SheetId, RowId, ColumnId } from '@open-artifact/sheets-core';
 import { selectedArea, mergedAreaOrCellOf } from '../selection/model.ts';
 import { withNoEffects } from '../state/transitions.ts';
 import { shownRowRunsOfSpan, spansLeftByOwnFilters } from '../model/cell-blocks.ts';
@@ -12,13 +12,16 @@ import { filteredRowRunsIn, shownRowCountIn } from '../tables/filtered-rows.ts';
 import { editsOfQueued } from '../engine/cause-of-error-cache.ts';
 import { isSelectionOneCell } from '../selection/keyboard.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { LinesDeletedOffer, PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasurer, kind?: Dynamic) {
+import type { PageTransition } from '../state/transitions.ts';
+import type { LineSizes } from '../model/line-sizes.ts';
+import type { ActStoppedByHiddenRows } from '../messages/filter-refusals.ts';
+export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasurer, kind: 'deleteRows' | 'deleteColumns'): PageTransition {
   let area = selectedArea(state, reads);
   if (area === null) return withNoEffects(state);
-  let { sheetId: sheetId } = state;
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount } = area;
+  let { sheetId } = state;
+  let { topRowIndex, leftColumnIndex, rowCount, columnCount } = area;
   let firstCellId = reads.cellIdAt(sheetId, topRowIndex, leftColumnIndex);
   let lastCellId = reads.cellIdAt(sheetId, topRowIndex + rowCount - 1, leftColumnIndex + columnCount - 1);
   let rows = shownRowRunsOfSpan(state, reads, sheetId, {
@@ -28,7 +31,7 @@ export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasur
   if (firstCellId === null || lastCellId === null || rows === null) return withNoEffects(state);
   let layout = layoutOfView(state, reads);
   let isRows = kind === 'deleteRows';
-  let [firstIndex, count, lineCount, lineEdges] = isRows
+  let [firstIndex, count, lineCount, lineEdges]: [number, number, number, LineSizes] = isRows
     ? [topRowIndex, rowCount, layout.rowCount, layout.rowEdges]
     : [leftColumnIndex, columnCount, layout.columnCount, layout.columnEdges];
   let countLeft = lineCount - count;
@@ -41,8 +44,8 @@ export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasur
         state,
         {
           kind: 'deleteRows',
-          sheetId: sheetId,
-          rows: rows,
+          sheetId,
+          rows,
         },
         {
           ...IF_QUEUED_DEFAULTS,
@@ -66,7 +69,7 @@ export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasur
         state,
         {
           kind: 'deleteColumns',
-          sheetId: sheetId,
+          sheetId,
           oneColumn: firstCellId.columnId,
           otherColumn: lastCellId.columnId,
         },
@@ -86,13 +89,13 @@ export function deleteSelectedLines(state: PageState, reads: ReadsWithTextMeasur
         },
       );
 }
-export function isOwnSortInTheWay(state: PageState, reads: WorkbookReads, act?: Dynamic) {
+export function isOwnSortInTheWay(state: PageState, reads: WorkbookReads, act: ActStoppedByHiddenRows): boolean {
   let ownRowOrder = ownRowOrderOfSheet(reads, state.sheetId);
   let runsIn = act === 'cut' ? rowStretchesIn : rowSpansIn;
   return (
     ownRowOrder !== null &&
     areasOfAllRanges(state, reads).some(
-      ({ topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic) =>
+      ({ topRowIndex, rowCount }) =>
         runsIn('stored', ownRowOrder, {
           firstIndex: topRowIndex,
           count: rowCount,
@@ -100,40 +103,40 @@ export function isOwnSortInTheWay(state: PageState, reads: WorkbookReads, act?: 
     )
   );
 }
-export function deleteSelectedRows(state: PageState, reads: ReadsWithTextMeasurer) {
-  let result = deleteSelectedLines(state, reads, 'deleteRows');
+export function deleteSelectedRows(state: PageState, reads: ReadsWithTextMeasurer): PageTransition {
+  let transition = deleteSelectedLines(state, reads, 'deleteRows');
   let area = selectedArea(state, reads);
-  if (area === null || filteredRowRunsIn(state, reads, area).length === 0) return result;
-  let undoOffer = {
+  if (area === null || filteredRowRunsIn(state, reads, area).length === 0) return transition;
+  let undoOffer: LinesDeletedOffer = {
     kind: 'rowsDeleted',
     ...rowLabelEnds(area, ownRowOrderOfSheet(reads, state.sheetId)),
     countInView: shownRowCountIn(state, reads, area),
     isSaved: false,
   };
-  let [queueEffect] = result.effects;
+  let [queueEffect] = transition.effects;
   return queueEffect?.kind !== 'queueEdit'
-    ? result
+    ? transition
     : {
-        ...result,
+        ...transition,
         effects: [
           {
             ...queueEffect,
             ifQueued: {
               ...queueEffect.ifQueued,
               select: null,
-              undoOffer: undoOffer,
+              undoOffer,
             },
           },
         ],
       };
 }
-export function editTouchesRowsOutOfView(edit: Dynamic, state: PageState, reads: WorkbookReads) {
-  let rowsHiddenOn = (sheetId?: Dynamic) => rowsHiddenByOwnFilters(state, reads, sheetId);
-  let isCellOutOfView = (sheetId?: Dynamic, rowId?: Dynamic, columnId?: Dynamic) => {
+export function editTouchesRowsOutOfView(edit: Edit, state: PageState, reads: WorkbookReads): boolean {
+  let rowsHiddenOn = (sheetId: SheetId) => rowsHiddenByOwnFilters(state, reads, sheetId);
+  let isCellOutOfView = (sheetId: SheetId, rowId: RowId, columnId: ColumnId) => {
     let area = mergedAreaOrCellOf(reads, {
-      sheetId: sheetId,
-      rowId: rowId,
-      columnId: columnId,
+      sheetId,
+      rowId,
+      columnId,
     });
     return (
       area !== null &&
@@ -146,7 +149,7 @@ export function editTouchesRowsOutOfView(edit: Dynamic, state: PageState, reads:
   if (edit.kind === 'moveRows') return rowsHiddenOn(edit.sheetId).length > 0;
   if (edit.kind === 'importTableIntoSheet') return edit.table.how.kind !== 'addRows' && rowsHiddenOn(edit.table.sheetId).length > 0;
   if (edit.kind === 'pasteTexts')
-    return rowsHiddenOn(edit.sheetId).length > 0 && edit.cells.some(({ r: r2, c: c }: Dynamic) => isCellOutOfView(edit.sheetId, r2, c));
+    return rowsHiddenOn(edit.sheetId).length > 0 && edit.cells.some(({ r: rowId, c: columnId }) => isCellOutOfView(edit.sheetId, rowId, columnId));
   return (
     (edit.kind === 'enter' ||
       edit.kind === 'addUserToCell' ||
@@ -156,20 +159,25 @@ export function editTouchesRowsOutOfView(edit: Dynamic, state: PageState, reads:
     isCellOutOfView(edit.sheetId, edit.cell.r, edit.cell.c)
   );
 }
-export function guardEditsAgainstRowsOutOfView(state: Dynamic, result: Dynamic, reads: WorkbookReads, isRefusedQuietly?: Dynamic) {
-  if (result.state.rowsOutOfViewByOwnFilters.size === 0) return result;
-  let [edit] = result.effects.flatMap(
-    (effect?: Dynamic) =>
+export function guardEditsAgainstRowsOutOfView(
+  state: PageState,
+  transition: PageTransition,
+  reads: WorkbookReads,
+  isRefusedQuietly: boolean,
+): PageTransition {
+  if (transition.state.rowsOutOfViewByOwnFilters.size === 0) return transition;
+  let [edit] = transition.effects.flatMap(
+    (effect) =>
       effect.kind === 'queueEdit' && effect.ifQueued.reachesRowsOutOfView !== true
-        ? editsOfQueued(effect).filter((edit2?: Dynamic) => editTouchesRowsOutOfView(edit2, result.state, reads))
+        ? editsOfQueued(effect).filter((queuedEdit) => editTouchesRowsOutOfView(queuedEdit, transition.state, reads))
         : [],
   );
-  if (edit === undefined) return result;
+  if (edit === undefined) return transition;
   let act = actOfEdit(edit);
   return isRefusedQuietly || edit.kind === 'importTableIntoSheet'
     ? {
-        ...noticeRowsOutOfViewInTheWay(result.state, act),
-        effects: result.effects.filter(({ kind: kind }: Dynamic) => kind !== 'queueEdit'),
+        ...noticeRowsOutOfViewInTheWay(transition.state, act),
+        effects: transition.effects.filter(({ kind }) => kind !== 'queueEdit'),
       }
     : noticeRowsOutOfViewInTheWay(
         {
@@ -180,32 +188,32 @@ export function guardEditsAgainstRowsOutOfView(state: Dynamic, result: Dynamic, 
         act,
       );
 }
-export const noticeRowsOutOfViewInTheWay = (state?: Dynamic, act?: Dynamic) =>
+export const noticeRowsOutOfViewInTheWay = (state: PageState, act: ActStoppedByHiddenRows): PageTransition =>
   withNoEffects({
     ...state,
     lastDone: null,
     notice: {
       kind: 'rowsOutOfViewInTheWay',
-      act: act,
+      act,
     },
   });
-export const refuseIfRowsOutOfViewInTheWay = (state: PageState, reads: WorkbookReads, act?: Dynamic) =>
+export const refuseIfRowsOutOfViewInTheWay = (state: PageState, reads: WorkbookReads, act: ActStoppedByHiddenRows): PageTransition | null =>
   isOwnSortInTheWay(state, reads, act)
     ? withNoEffects({
         ...state,
         lastDone: null,
         notice: {
           kind: 'ownSortInTheWay',
-          act: act,
+          act,
         },
       })
-    : allRangesOf(state).some((range?: Dynamic) => {
+    : allRangesOf(state).some((range) => {
           let area = selectedArea(range, reads);
           return area !== null && !isSelectionOneCell(range, reads) && filteredRowRunsIn(state, reads, area).length > 0;
         })
       ? noticeRowsOutOfViewInTheWay(state, act)
       : null;
-export const ACT_OF_EDIT_KIND = {
+export const ACT_OF_EDIT_KIND: Partial<Record<EditKind, ActStoppedByHiddenRows>> = {
   mergeCells: 'mergeCells',
   fillCells: 'fill',
   moveCells: 'moveCells',
@@ -215,4 +223,5 @@ export const ACT_OF_EDIT_KIND = {
   pasteValuesOfCopiedCells: 'paste',
   pasteCellsOfAnotherProgram: 'paste',
 };
-export const actOfEdit = ({ kind: kind }: Dynamic) => ACT_OF_EDIT_KIND[kind] ?? 'otherEdit';
+export const actOfEdit = ({ kind }: Pick<Edit, 'kind'>): ActStoppedByHiddenRows =>
+ ACT_OF_EDIT_KIND[kind] ?? 'otherEdit';

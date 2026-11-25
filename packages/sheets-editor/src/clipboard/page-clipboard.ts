@@ -1,34 +1,84 @@
-import type { Dynamic } from '../dynamic.ts';
 import { readHtmlTags, decodeHtmlEntities, rowspanOf, colspanOf } from './html-reading.ts';
+import type { HtmlAttributes } from './html-reading.ts';
 import { readCellsOfAnotherProgram } from './other-programs.ts';
+import type { CellsOfAnotherProgram } from './other-programs.ts';
 import { isCopiedFromSheets, keepDaysReadAsOthersAsText, copiedCellsLocaleOf, cellsToTsv, normalizeLineEnds } from './formats.ts';
 import { encodeChartForClipboard, decodeChartFromClipboard } from './chart-marker.ts';
+import type { ChartOfSheet } from './chart-marker.ts';
 import { escapeClipboardCellText } from './text-escaping.ts';
 import { programOfHtmlTag } from './css-looks.ts';
 import { isOverByteLimit } from '../agent/prompt-text.ts';
 import { EN_US_LOCALE } from '../format/number-signs.ts';
-export function readPlainHtmlTable(html?: Dynamic) {
-  let rows: Dynamic = [];
-  let lastRowOfColumns: Dynamic = [];
-  let cellCount: Dynamic = 0;
-  let isOnlySpaceSoFar: Dynamic = true;
-  let [tableWidth, rowOfWidth]: Dynamic = [0, 0];
-  let isInTable: Dynamic = false;
-  let isTableClosed: Dynamic = false;
-  let columnIndex: Dynamic = 0;
-  let textColumn: Dynamic = null;
-  let cellText: Dynamic = '';
-  for (let token of readHtmlTags(html) as Dynamic) {
-    if (token.kind === 'unreadable') return null;
-    if (token.kind === 'styleSheet') continue;
-    let { name: tagName, isClosing: isClosing, attributes: attributes } = token;
+import type { ClipboardContent, ValuesOfCopiedCells } from '../state/controller.ts';
+import type { PasteChosen } from '../state/event-reducer.ts';
+
+/** Clipboard data a paste is read from: the browser's, or what this page put on the clipboard last. */
+export interface ClipboardDataToRead {
+  readonly types: readonly string[];
+  getData(mimeType: string): string;
+}
+
+/** The text a paste writes into cells, and how it is to be read. */
+export type PastedText = Pick<PasteChosen, 'text' | 'isPlainText' | 'pastedTextIs' | 'localeOfTexts'>;
+
+/** What the cell menu asks to paste. */
+export type PasteAsked = 'all' | 'valuesOnly';
+
+/** What the last copy put on the clipboard: the cells cut, or copied. */
+export type WhatLastPutHereHolds = 'cutCells' | 'copiedCells';
+
+/** What this page keeps of its last copy, to paste it as copied while the clipboard still holds its text. */
+export interface KeptOfLastPut {
+  text: string;
+  textWithNumbersWhole: string;
+  valuesOfCopiedCells: ValuesOfCopiedCells | null;
+}
+
+/** A row of a plain HTML table: a cell's text at each column a cell starts at (none where a span covers it). */
+export type HtmlTableRow = (string | undefined)[];
+
+/** The page's side of the clipboard: what it puts there on a copy, and what it reads back on a paste. */
+export interface SheetClipboard {
+  putOnClipboard(copied: ClipboardContent): void;
+  putChartOnClipboard(chart: ChartOfSheet, chartTitle: string): void;
+  chartAtPasteOf(clipboardData: ClipboardDataToRead | null): ChartOfSheet | 'ofAnotherSheet' | null;
+  keptOfLastPutAtPasteOf(clipboardData: ClipboardDataToRead | null): KeptOfLastPut | null;
+  /** Lets `copy` put its forms on the clipboard data of a copy event. */
+  duringCopy(clipboardData: DataTransfer, copy: () => void): void;
+  /** Asks the browser for a copy or cut of the cells; tells whether it made one. */
+  askBrowserToCopyOrCutCells(commandName: 'copy' | 'cut'): boolean;
+  isBrowserAskedForCells(): boolean;
+  lastPutHere(): ClipboardDataToRead | null;
+  whatLastPutHereHolds(): WhatLastPutHereHolds | null;
+  valuesOfLastPutHere(): ValuesOfCopiedCells | null;
+  forgetLastPutHere(): void;
+  somethingElseCopiedHere(): void;
+  /** Calls `listener` when what this page put on the clipboard last changes; answers how to stop. */
+  onLastPutHereChange(listener: () => void): () => void;
+}
+
+export function readPlainHtmlTable(html: string): HtmlTableRow[] | null {
+  const rows: HtmlTableRow[] = [];
+  let lastRowOfColumns: number[] = [];
+  let cellCount = 0;
+  let isOnlySpaceSoFar = true;
+  let [tableWidth, rowOfWidth] = [0, 0];
+  let isInTable = false;
+  let isTableClosed = false;
+  let columnIndex = 0;
+  let textColumn: number | null = null;
+  let cellText = '';
+  for (let piece of readHtmlTags(html)) {
+    if (piece.kind === 'unreadable') return null;
+    if (piece.kind === 'styleSheet') continue;
+    let { name: tagName, isClosing, attributes } = piece;
     if (isHtmlOfOfficeProgram(tagName, attributes)) return null;
     if (isOnlySpaceSoFar && attributes.get('class') === 'Apple-interchange-newline') return null;
     if (textColumn !== null) {
-      let textOrRowSpan = decodeHtmlEntities(token.writtenBefore);
-      if (textOrRowSpan === null) return null;
-      isOnlySpaceSoFar &&= !/\S/.test(textOrRowSpan);
-      cellText += textOrRowSpan + (tagName === 'img' ? (attributes.get('alt') ?? '') : '');
+      const textBefore = decodeHtmlEntities(piece.writtenBefore);
+      if (textBefore === null) return null;
+      isOnlySpaceSoFar &&= !/\S/.test(textBefore);
+      cellText += textBefore + (tagName === 'img' ? (attributes.get('alt') ?? '') : '');
     }
     let isTable = tagName === 'table';
     if (isTable && (isClosing ? !isInTable : isInTable || isTableClosed)) return null;
@@ -46,9 +96,9 @@ export function readPlainHtmlTable(html?: Dynamic) {
       columnIndex = 0;
       if (tagName === 'caption') [textColumn, cellText, columnIndex] = [0, '', 1];
     } else if ((tagName === 'td' || tagName === 'th') && !isClosing) {
-      let textOrRowSpan = rowspanOf(attributes);
+      const rowSpan = rowspanOf(attributes);
       let columnSpan = colspanOf(attributes);
-      if (lastRow === undefined || textOrRowSpan === null) return null;
+      if (lastRow === undefined || rowSpan === null) return null;
       let firstColumnOfCell = columnIndex;
       while ((lastRowOfColumns[columnIndex] ?? 0) >= rows.length) columnIndex += 1;
       textColumn = columnIndex;
@@ -58,25 +108,25 @@ export function readPlainHtmlTable(html?: Dynamic) {
       if (rowOfWidth === rows.length) tableWidth = columnIndex;
       else if (columnIndex > tableWidth) return null;
       cellCount += columnIndex - firstColumnOfCell;
-      for (let column: Dynamic = textColumn; column < columnIndex; column += 1)
-        lastRowOfColumns[column] = Math.max(lastRowOfColumns[column] ?? 0, rows.length - 1 + textOrRowSpan);
+      for (let column = textColumn; column < columnIndex; column += 1)
+        lastRowOfColumns[column] = Math.max(lastRowOfColumns[column] ?? 0, rows.length - 1 + rowSpan);
     }
     if (cellCount > MAX_PASTED_HTML_TABLE_CELLS) return null;
   }
-  let filledRows = rows.filter((row?: Dynamic) => row.length > 0);
+  let filledRows = rows.filter((row) => row.length > 0);
   return isTableClosed && !(filledRows.length === 2 && !/\S/.test(filledRows[1]?.[0] ?? '')) ? filledRows : null;
 }
-export function cellsOfPlainTextByHtmlTable(html?: Dynamic, plainText?: Dynamic) {
+export function cellsOfPlainTextByHtmlTable(html: string, plainText: string): string[][] | null {
   let htmlRows = /<table[\s>]/i.test(html) ? readPlainHtmlTable(html) : null;
   if (htmlRows === null) return null;
   let wordPattern = /\S+/g;
-  let rows: Dynamic = [];
-  for (let htmlRow of htmlRows as Dynamic) {
-    let row: Dynamic = [];
-    for (let htmlCell of htmlRow as Dynamic) {
+  const rows: string[][] = [];
+  for (let htmlRow of htmlRows) {
+    const row: string[] = [];
+    for (let htmlCell of htmlRow) {
       let cellLetters = (htmlCell ?? '').replaceAll(/\s+/g, '').toUpperCase();
-      let cellStart: Dynamic = null;
-      for (let index: Dynamic = 0; index < cellLetters.length; ) {
+      let cellStart: number | null = null;
+      for (let index = 0; index < cellLetters.length; ) {
         let match = wordPattern.exec(plainText);
         let word = match?.[0].toUpperCase() ?? '';
         if (match === null || !cellLetters.startsWith(word, index)) return null;
@@ -90,9 +140,9 @@ export function cellsOfPlainTextByHtmlTable(html?: Dynamic, plainText?: Dynamic)
   }
   return wordPattern.lastIndex === 0 || wordPattern.test(plainText) ? null : rows;
 }
-export function wasExecCommandHandled(ownerDocument?: Dynamic, commandName?: Dynamic) {
-  let wasHandled: Dynamic = false;
-  let onCommand = (event?: Dynamic) => {
+export function wasExecCommandHandled(ownerDocument: Document, commandName: string): boolean {
+  let wasHandled = false;
+  let onCommand = (event: Event) => {
     wasHandled = event.defaultPrevented;
   };
   ownerDocument.defaultView?.addEventListener(commandName, onCommand);
@@ -103,22 +153,22 @@ export function wasExecCommandHandled(ownerDocument?: Dynamic, commandName?: Dyn
     ownerDocument.defaultView?.removeEventListener(commandName, onCommand);
   }
 }
-export function readCutToken(clipboardData?: Dynamic) {
+export function readCutToken(clipboardData: ClipboardDataToRead | null): string | null {
   let cutToken = clipboardData?.getData(CUT_TOKEN_MIME) ?? '';
   return cutToken === '' ? null : cutToken;
 }
-export function readCopiedCellsText(clipboardData?: Dynamic) {
+export function readCopiedCellsText(clipboardData: ClipboardDataToRead | null): string | null {
   let cellsText = clipboardData?.getData(SHEETS_CELLS_MIME) ?? '';
   return cellsText === '' || isPastedTextTooLarge(cellsText) || CONTROL_OR_SURROGATE_CHAR_PATTERN.test(cellsText) ? null : cellsText;
 }
-export function readPasteOfAnotherProgram(clipboardData?: Dynamic) {
+export function readPasteOfAnotherProgram(clipboardData: ClipboardDataToRead | null): CellsOfAnotherProgram | null {
   let html = clipboardData?.getData('text/html') ?? '';
   let plainText = clipboardData?.getData('text/plain') ?? '';
   if (html === '' || isPastedTextTooLarge(html) || isPastedTextTooLarge(plainText)) return null;
   let compactTable = clipboardData?.getData(GOOGLE_SHEETS_COMPACT_TABLE_MIME) ?? '';
   return readCellsOfAnotherProgram(html, plainText, isPastedTextTooLarge(compactTable) ? '' : compactTable);
 }
-export function readTextWrittenFromCells(clipboardData?: Dynamic) {
+export function readTextWrittenFromCells(clipboardData: ClipboardDataToRead | null): PastedText | null {
   let typedText = clipboardData?.getData(TYPED_WITH_NUMBER_FORMATS_MIME) ?? '';
   if (typedText !== '') {
     let locale = clipboardData?.getData(LOCALE_OF_TEXTS_MIME) ?? '';
@@ -139,7 +189,7 @@ export function readTextWrittenFromCells(clipboardData?: Dynamic) {
     localeOfTexts: localeOfTextsOrDefault(copiedCellsLocaleOf(html)),
   };
 }
-export function readPastedText(clipboardData?: Dynamic) {
+export function readPastedText(clipboardData: ClipboardDataToRead | null): PastedText {
   let fromCells = readTextWrittenFromCells(clipboardData);
   if (fromCells !== null) return fromCells;
   let html = clipboardData?.getData('text/html') ?? '';
@@ -153,7 +203,7 @@ export function readPastedText(clipboardData?: Dynamic) {
     localeOfTexts: null,
   };
 }
-export function pasteChosenFrom(clipboard?: Dynamic, clipboardData?: Dynamic, plainOnly?: Dynamic) {
+export function pasteChosenFrom(clipboard: SheetClipboard, clipboardData: ClipboardDataToRead | null, plainOnly: boolean): PasteChosen {
   let chosenData = plainOnly && clipboardData !== null ? plainTextPartOf(clipboardData) : clipboardData;
   let keptOfLastPut = clipboard.keptOfLastPutAtPasteOf(chosenData);
   let pasted = readPastedText(chosenData);
@@ -161,6 +211,9 @@ export function pasteChosenFrom(clipboard?: Dynamic, clipboardData?: Dynamic, pl
     kind: 'pasteChosen',
     cutToken: readCutToken(chosenData),
     copiedCellsAsText: readCopiedCellsText(chosenData),
+    ...((chosenData?.getData(FORMULAS_LEFT_OUT_MIME) ?? '') !== '' && {
+      areFormulasLeftOut: true,
+    }),
     ofAnotherProgram: readPasteOfAnotherProgram(chosenData),
     valuesOfCopiedCells: keptOfLastPut?.valuesOfCopiedCells ?? null,
     ...pasted,
@@ -176,7 +229,7 @@ export function pasteChosenFrom(clipboard?: Dynamic, clipboardData?: Dynamic, pl
     localeOfTexts: chosenData === clipboardData ? pasted.localeOfTexts : (readTextWrittenFromCells(clipboardData)?.localeOfTexts ?? null),
   };
 }
-export function pasteOfLastPutHere(clipboard?: Dynamic, pasteWhat?: Dynamic) {
+export function pasteOfLastPutHere(clipboard: SheetClipboard, pasteWhat: PasteAsked): PasteChosen | null {
   let lastPut = clipboard.lastPutHere();
   if (lastPut === null) return null;
   if (pasteWhat === 'all') return pasteChosenFrom(clipboard, lastPut, false);
@@ -187,66 +240,67 @@ export function pasteOfLastPutHere(clipboard?: Dynamic, pasteWhat?: Dynamic) {
     valuesOfCopiedCells: valuesOfLastPut,
   };
 }
-export function createSheetClipboard(ownerDocument: Dynamic = null, chartKeyPromise: Dynamic = null) {
-  let chartKey: Dynamic = null;
-  chartKeyPromise?.then((key?: Dynamic) => {
+export function createSheetClipboard(ownerDocument: Document | null = null, chartKeyPromise: Promise<string> | null = null): SheetClipboard {
+  let chartKey: string | null = null;
+  chartKeyPromise?.then((key) => {
     chartKey = key;
     return;
   });
-  let clipboardDataOfCopy: Dynamic = null;
-  let isBrowserAskedForCells: Dynamic = false;
-  let keptOfLastPut: Dynamic = null;
-  let lastPutHere: Dynamic = null;
-  let lastPutListeners = new (Set as Dynamic)();
-  let setLastPutHere = (entries?: Dynamic) => {
+  let clipboardDataOfCopy: DataTransfer | null = null;
+  let isBrowserAskedForCells = false;
+  let keptOfLastPut: KeptOfLastPut | null = null;
+  let lastPutHere: Map<string, string> | null = null;
+  const lastPutListeners = new Set<() => void>();
+  let setLastPutHere = (entries: Map<string, string> | null) => {
     if (entries === lastPutHere) return;
     lastPutHere = entries;
-    for (let listener of lastPutListeners as Dynamic) listener();
+    for (let listener of lastPutListeners) listener();
   };
   return {
-    putOnClipboard(copied?: Dynamic) {
+    putOnClipboard(copied) {
       let {
-        cutToken: cutToken,
-        copiedCellsAsText: copiedCellsAsText,
-        valuesOfCopiedCells: valuesOfCopiedCells,
-        textWithNumbersWhole: textWithNumbersWhole,
-        localeOfTexts: localeOfTexts,
-        typed: typed,
-        text: text,
-        html: html,
+        cutToken,
+        copiedCellsAsText,
+        valuesOfCopiedCells,
+        textWithNumbersWhole,
+        localeOfTexts,
+        typed,
+        text,
+        html,
       } = copied;
       if (clipboardDataOfCopy === null) return setLastPutHere(null);
-      let entries = new (Map as Dynamic)();
+      const entries = new Map<string, string>();
       if (cutToken !== null) entries.set(CUT_TOKEN_MIME, cutToken);
       if (copiedCellsAsText !== null) entries.set(SHEETS_CELLS_MIME, copiedCellsAsText);
+      if (copied.areFormulasLeftOut) entries.set(FORMULAS_LEFT_OUT_MIME, '-');
       entries.set(TYPED_WITH_NUMBER_FORMATS_MIME, typed);
       if (localeOfTexts !== null) entries.set(LOCALE_OF_TEXTS_MIME, localeOfTexts);
       entries.set('text/plain', text);
       entries.set('text/html', html);
       let isNothingCopied = text === '' && html === '';
       if (isNothingCopied) entries.set(NOTHING_COPIED_MIME, '-');
-      for (let [mimeType, data] of entries as Dynamic) clipboardDataOfCopy.setData(mimeType, data);
+      for (let [mimeType, data] of entries) clipboardDataOfCopy.setData(mimeType, data);
       keptOfLastPut = {
         text: normalizeLineEnds(text),
-        textWithNumbersWhole: textWithNumbersWhole,
-        valuesOfCopiedCells: valuesOfCopiedCells,
+        textWithNumbersWhole,
+        valuesOfCopiedCells,
       };
       setLastPutHere(isNothingCopied ? null : entries);
     },
-    putChartOnClipboard(chart?: Dynamic, chartTitle?: Dynamic) {
+    putChartOnClipboard(chart, chartTitle) {
       keptOfLastPut = null;
       if (chartKey !== null) clipboardDataOfCopy?.setData(SHEETS_CHART_MIME, encodeChartForClipboard(chart, chartKey));
       clipboardDataOfCopy?.setData('text/plain', cellsToTsv([[escapeClipboardCellText(chartTitle)]]));
     },
-    chartAtPasteOf: (clipboardData?: Dynamic) => decodeChartFromClipboard(clipboardData?.getData(SHEETS_CHART_MIME) ?? '', chartKey),
-    keptOfLastPutAtPasteOf(clipboardData?: Dynamic) {
+    chartAtPasteOf: (clipboardData) => decodeChartFromClipboard(clipboardData?.getData(SHEETS_CHART_MIME) ?? '', chartKey),
+    keptOfLastPutAtPasteOf(clipboardData) {
       if (normalizeLineEnds(clipboardData?.getData('text/plain') ?? '') !== keptOfLastPut?.text) {
         keptOfLastPut = null;
         setLastPutHere(null);
       }
       return keptOfLastPut !== null && keptOfLastPut.text !== '' && holdsOnlyPlainText(clipboardData) ? keptOfLastPut : null;
     },
-    duringCopy(clipboardData?: Dynamic, copy?: Dynamic) {
+    duringCopy(clipboardData, copy) {
       setLastPutHere(null);
       clipboardDataOfCopy = clipboardData;
       try {
@@ -255,7 +309,7 @@ export function createSheetClipboard(ownerDocument: Dynamic = null, chartKeyProm
         clipboardDataOfCopy = null;
       }
     },
-    askBrowserToCopyOrCutCells(commandName?: Dynamic) {
+    askBrowserToCopyOrCutCells(commandName) {
       isBrowserAskedForCells = true;
       try {
         return ownerDocument !== null && wasExecCommandHandled(ownerDocument, commandName);
@@ -265,11 +319,11 @@ export function createSheetClipboard(ownerDocument: Dynamic = null, chartKeyProm
     },
     isBrowserAskedForCells: () => isBrowserAskedForCells,
     lastPutHere() {
-      let entries = lastPutHere;
+      const entries = lastPutHere;
       if (entries === null) return null;
       return {
-        types: Array.from<Dynamic>(entries.keys()),
-        getData: (mimeType?: Dynamic) => entries.get(mimeType) ?? '',
+        types: Array.from(entries.keys()),
+        getData: (mimeType: string) => entries.get(mimeType) ?? '',
       };
     },
     whatLastPutHereHolds() {
@@ -282,7 +336,7 @@ export function createSheetClipboard(ownerDocument: Dynamic = null, chartKeyProm
       keptOfLastPut = null;
       setLastPutHere(null);
     },
-    onLastPutHereChange(listener?: Dynamic) {
+    onLastPutHereChange(listener) {
       lastPutListeners.add(listener);
       return () => void lastPutListeners.delete(listener);
     },
@@ -290,13 +344,13 @@ export function createSheetClipboard(ownerDocument: Dynamic = null, chartKeyProm
 }
 export const MAX_PASTED_HTML_TABLE_CELLS = 200000;
 export const MAX_PASTED_HTML_CELL_SPAN = 250000;
-export const HTML_TABLE_PART_TAGS = new (Set as Dynamic)('caption col colgroup tbody td tfoot th thead tr'.split(' '));
-export const isHtmlOfOfficeProgram = (tagName?: Dynamic, attributes?: Dynamic) =>
+export const HTML_TABLE_PART_TAGS = new Set('caption col colgroup tbody td tfoot th thead tr'.split(' '));
+export const isHtmlOfOfficeProgram = (tagName: string, attributes: HtmlAttributes): boolean =>
   programOfHtmlTag(tagName, attributes) !== null || (tagName === 'meta' && /^(?:progid|generator)$/i.test(attributes.get('name') ?? ''));
-export const tidyPastedCellSpaces = (text?: Dynamic) =>
+export const tidyPastedCellSpaces = (text: string): string =>
   text.replaceAll(
     /\s+/g,
-    (spaces?: Dynamic) =>
+    (spaces) =>
       /[\n\r]/.test(spaces)
         ? `
 `
@@ -307,15 +361,16 @@ export const SHEETS_CELLS_MIME = 'application/x-sheets-cells';
 export const LOCALE_OF_TEXTS_MIME = 'application/x-sheets-locale-of-texts';
 export const NOTHING_COPIED_MIME = 'application/x-sheets-nothing';
 export const CUT_TOKEN_MIME = 'application/x-sheets-cut-token';
+export const FORMULAS_LEFT_OUT_MIME = 'application/x-sheets-formulas-left-out';
 export const SHEETS_CHART_MIME = 'application/x-sheets-chart';
 export const MAX_PASTED_TEXT_BYTES = 16777216;
-export const isPastedTextTooLarge = (text?: Dynamic) => isOverByteLimit(text, MAX_PASTED_TEXT_BYTES);
+export const isPastedTextTooLarge = (text: string): boolean => isOverByteLimit(text, MAX_PASTED_TEXT_BYTES);
 export const CONTROL_OR_SURROGATE_CHAR_PATTERN = /[\p{Cc}\p{Cs}]/u;
 export const GOOGLE_SHEETS_COMPACT_TABLE_MIME = 'application/x-vnd.google-spreadsheet-compact-table+json';
-export const localeOfTextsOrDefault = (locale?: Dynamic) => locale ?? EN_US_LOCALE;
-export const holdsOnlyPlainText = (clipboardData?: Dynamic) =>
+export const localeOfTextsOrDefault = (locale: string | null): string => locale ?? EN_US_LOCALE;
+export const holdsOnlyPlainText = (clipboardData: ClipboardDataToRead | null): boolean =>
   clipboardData?.types.length === 1 && clipboardData.types[0] === 'text/plain';
-export const plainTextPartOf = (clipboardData?: Dynamic) => ({
-  types: clipboardData.types.filter((mimeType?: Dynamic) => mimeType === 'text/plain'),
-  getData: (mimeType?: Dynamic) => (mimeType === 'text/plain' ? clipboardData.getData(mimeType) : ''),
+export const plainTextPartOf = (clipboardData: ClipboardDataToRead): ClipboardDataToRead => ({
+  types: clipboardData.types.filter((mimeType) => mimeType === 'text/plain'),
+  getData: (mimeType: string) => (mimeType === 'text/plain' ? clipboardData.getData(mimeType) : ''),
 });

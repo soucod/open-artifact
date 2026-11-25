@@ -36,6 +36,7 @@ import {
 } from './schema.ts';
 import { tableTotalHeight, tableWidth } from './table.ts';
 import { MAX_LIST_INDENT_LEVEL } from './text/markup.ts';
+import { textOrPlaceholder } from './text/placeholder.ts';
 
 /* -------------------------------------------------------------------------- */
 /* Basic types                                                                */
@@ -418,7 +419,7 @@ export function elementLayoutBox(element: BoardElement, measures?: ElementMeasur
     case 'text': {
       const measured = measures?.get(element.id);
       const size =
-        measured?.w !== undefined && measured.h !== undefined ? { w: measured.w, h: measured.h } : estimateTextBlockSize(element.text, element.size, element.wrap);
+        measured?.w !== undefined && measured.h !== undefined ? { w: measured.w, h: measured.h } : estimateTextBlockSize(textOrPlaceholder(element), element.size, element.wrap);
       return { x: element.x, y: element.y, w: element.wrap ?? size.w, h: size.h };
     }
     case 'stroke': {

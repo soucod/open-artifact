@@ -1,6 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
-export function filterHidesRowsRefusal(askedEdit?: Dynamic) {
+
+/** The kind of edit that rows hidden by a filter stopped. */
+export type ActStoppedByHiddenRows = 'mergeCells' | 'cut' | 'fill' | 'dropdown' | 'moveCells' | 'moveRows' | 'paste' | 'otherEdit';
+
+export function filterHidesRowsRefusal(askedEdit: ActStoppedByHiddenRows): string {
   switch (askedEdit) {
     case 'mergeCells':
       return translateMessage({

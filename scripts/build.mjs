@@ -3,6 +3,7 @@
  * Builds everything the type server serves into `dist/server/`:
  *
  *   dist/server/cli.mjs                 the `open-artifact-type-server` CLI and type server (one file, Node ≥ 22)
+ *   dist/server/motion-tools.html       the page the CLI's `stills` draws a motion artifact's stills in (headless Chromium)
  *   dist/server/support.js              the board runtime loaded by every artboard
  *   dist/server/editors/<type>/         each editor page (Vite)
  *   dist/server/pdf-reader.mjs          PDF.js, loaded only when a PDF is imported into a doc
@@ -21,11 +22,12 @@
  *   plugins/dsh/lib, vendor/                the DSH plugin and its vendored daemon
  *
  * Usage: node scripts/build.mjs [--only cli|support|editors|types|shell|frame|dsh]
+ *        node scripts/build.mjs --only sea [--node <file>]   the single executable (scripts/build-sea.mjs), never by default
  */
 
 import { build as esbuild } from 'esbuild';
-import { build as vite } from 'vite';
-import { chmod, cp, mkdir, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -33,6 +35,12 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'dist/server');
+const VITE_BIN = join(ROOT, 'node_modules/vite/bin/vite.js');
+
+/** Runs one Vite build in its own process so memory from eight editors does not pile up in one heap. */
+function runVite(config) {
+  execFileSync(process.execPath, [VITE_BIN, 'build', '--config', config, '--logLevel', 'warn'], { cwd: ROOT, stdio: 'inherit' });
+}
 
 /** Editors by type name → their package folder. */
 const EDITORS = {
@@ -43,6 +51,7 @@ const EDITORS = {
   slides: 'packages/slides-editor',
   sheets: 'packages/sheets-editor',
   docs: 'packages/docs-editor',
+  motion: 'packages/motion-editor',
 };
 
 const only = (() => {
@@ -85,6 +94,10 @@ async function buildCli() {
   await chmod(outfile, 0o755);
   // The workbook engine, read from beside the bundle (`@open-artifact/wasm-sheets/node`).
   await cp(join(ROOT, 'packages/wasm-sheets/generated/open_artifact_sheets_bg.wasm'), join(OUT, 'sheets.wasm'));
+  // The page `stills` loads a motion artifact into in a headless Chromium: the stage runtime and its driver, in one file.
+  const { buildToolsPage } = await import('../packages/motion-stage/src/build.ts');
+  const { STILLS_TOOLS_PAGE } = await import('../packages/motion-stage/src/stills.ts');
+  await writeFile(join(OUT, STILLS_TOOLS_PAGE), await buildToolsPage());
 }
 
 /**
@@ -117,14 +130,14 @@ async function buildEditors() {
       console.warn(`skip ${type}: ${folder} has no index.html yet`);
       continue;
     }
-    await vite({ configFile: config, logLevel: 'warn' });
+    runVite(config);
   }
 }
 
 /** The daemon's Shell and home pages. */
 async function buildShell() {
   for (const config of ['vite.config.ts', 'vite.home.config.ts']) {
-    await vite({ configFile: join(ROOT, 'packages/shell', config), logLevel: 'warn' });
+    runVite(join(ROOT, 'packages/shell', config));
   }
 }
 
@@ -152,12 +165,12 @@ async function buildFrame() {
     logLevel: 'warning',
   });
   await chmod(join(out, 'frame-host.mjs'), 0o755);
-  for (const name of ['runtime', 'shell']) {
+  for (const name of ['runtime', 'shell', 'imports']) {
     await esbuild({
       entryPoints: [join(src, `src/frame/client/${name}.ts`)],
       outfile: join(out, 'client', `${name}.js`),
       bundle: true,
-      format: 'iife',
+      format: name === 'imports' ? 'esm' : 'iife',
       platform: 'browser',
       target: 'es2022',
       charset: 'utf8',
@@ -167,7 +180,7 @@ async function buildFrame() {
   }
   for (const file of ['shell.html', 'shell.css']) await cp(join(src, 'src/frame/client', file), join(out, 'client', file));
   // The comment views (React and the editor kit's): comments.js and comments.css beside them.
-  await vite({ configFile: join(src, 'vite.frame.config.ts'), logLevel: 'warn' });
+  runVite(join(src, 'vite.frame.config.ts'));
 }
 
 /** The DSH plugin (it vendors the daemon, the Shell, frame-host and the design type, so it runs last). */
@@ -209,4 +222,11 @@ if (only === 'shell') {
 }
 if (wants('frame')) await buildFrame();
 if (wants('dsh')) await buildDsh();
+// The single executable (scripts/build-sea.mjs): only when asked, never part of the whole build; `--node <file>` passes on.
+if (only === 'sea') {
+  const { spawnSync } = await import('node:child_process');
+  const node = process.argv.indexOf('--node');
+  const result = spawnSync(process.execPath, [join(ROOT, 'scripts/build-sea.mjs'), ...(node > 0 ? ['--node', process.argv[node + 1]] : [])], { stdio: 'inherit' });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
 console.log(`built ${only ?? 'everything'} in ${((Date.now() - started) / 1000).toFixed(1)}s`);

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { type DiskDoc, isAtom, proposalIds, suggestionAsOf } from '@open-artifact/docs-core';
 import type { DocTabResponse } from '@open-artifact/runtime/doc-api';
-import { rewriteContext, rewriteText, selectedText } from '../src/suggest/request.ts';
 import { describeSuggestion, sentenceText } from '../src/suggest/summary.ts';
 import { type DocServer, startDocServer, texts } from './harness.ts';
 
@@ -90,35 +89,5 @@ describe('taking back a decision on several suggestions at once', () => {
     await doc.settle(page);
     assert.deepEqual(proposalIds(page.sync.shadow.blocks).sort(), [...ids].sort());
     await page.stop();
-  });
-});
-
-describe('what Edit with Agent sends', () => {
-  const targets = [
-    { block: 's1.2', fromChar: 's1.3', toChar: 's1.9', text: 'quick fox' },
-    { block: 's1.20', fromChar: 's1.21', toChar: 's1.25', text: 'jumps' },
-  ];
-
-  it('names each range of the selection and fences the words', () => {
-    const text = rewriteText({ tab: 't1', ask: '  Make it shorter ', targets });
-    assert.match(text, /tab t1/);
-    assert.match(text, /"suggest": true/);
-    assert.match(text, /- block s1\.2: chars s1\.3 to s1\.9/);
-    assert.match(text, /- block s1\.20: chars s1\.21 to s1\.25/);
-    assert.match(text, /The person asks: Make it shorter\n/);
-    assert.match(text, /untrusted data/);
-    assert.ok(text.includes('quick fox\njumps'));
-    assert.equal(selectedText(targets), 'quick fox\njumps');
-  });
-
-  it('gives the ranges as data too', () => {
-    assert.deepEqual(rewriteContext({ tab: 't1', ask: ' Fix spelling and grammar ', targets }), {
-      tab: 't1',
-      ask: 'Fix spelling and grammar',
-      selection: [
-        { block: 's1.2', range: ['s1.3', 's1.9'] },
-        { block: 's1.20', range: ['s1.21', 's1.25'] },
-      ],
-    });
   });
 });

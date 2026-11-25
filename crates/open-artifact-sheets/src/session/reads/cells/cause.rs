@@ -13,8 +13,8 @@
 //!   row) that shows it;
 //! - a function called with too few arguments (`argumentIsMissing`: the first not given), too many
 //!   (`tooManyArguments`), or half a pair (`pairIsIncomplete`); a name that is a function written without
-//!   parentheses (`functionWithoutParentheses`), one nobody knows (`unknownName`, as written), a function nobody
-//!   knows (`noSuchFunction`);
+//!   parentheses (`functionWithoutParentheses`), a cell past the sheet's end (`noSuchCell`), one nobody knows
+//!   (`unknownName`, as written), a function nobody knows (`noSuchFunction`);
 //! - a function's argument that comes to the error: the first that does (a function that reads only where a
 //!   reference points reads no cells); else a lookup that finds nothing (`lookupFindsNothing`), a FILTER that keeps
 //!   nothing (`filterKeepsNothing`);
@@ -98,14 +98,9 @@ fn worked_out(workbook: &Workbook) -> Calculation {
         let Some(outcome) = workbook.outcome(&sheet.id, r, c) else {
             continue;
         };
-        if let Some(SpillOutcome::Fills { to: (bottom, right), .. }) = outcome.spill {
-            for rr in row..=bottom {
-                for cc in column..=right {
-                    if (rr, cc) != (row, column) {
-                        calculation.covered.insert((s, rr, cc), i);
-                    }
-                }
-            }
+        if let Some(SpillOutcome::Fills { array, to: (bottom, right), .. }) = &outcome.spill {
+            let area = Place { sheet: s, top: row, left: column, bottom: *bottom, right: *right };
+            calculation.covered.add(i, area, array);
         }
         calculation.formulas[i].state = State::Done(outcome.clone());
     }
@@ -195,7 +190,7 @@ impl<'a> Finder<'a> {
         match self.calculation.eval(self.f, expr) {
             Operand::Value(v) => v == Value::Error(self.error),
             Operand::Range(place) => self.cell_with_the_error(place).is_some(),
-            Operand::Array(a) | Operand::Values(a) => a.values().contains(&Value::Error(self.error)),
+            Operand::Array(a) | Operand::Values(a) => a.values().any(|v| v.error() == Some(self.error)),
         }
     }
 
@@ -216,9 +211,14 @@ impl<'a> Finder<'a> {
                 }
                 match functions::find(name) {
                     Some(id) => Some(json!({"kind": "functionWithoutParentheses", "function": id.name()})),
+                    // A cell past the sheet's end, its address in capitals.
+                    None if crate::formula::parse::looks_like_a_cell(name) => {
+                        Some(json!({"kind": "noSuchCell", "address": name.to_ascii_uppercase()}))
+                    }
                     None => Some(json!({"kind": "unknownName", "name": self.as_written(name)})),
                 }
             }
+            Expr::Call { function: None, name, arguments, .. } if name.as_ref() == "PIVOT" => self.pivot(arguments),
             Expr::Call { function: None, name, .. } => Some(json!({"kind": "noSuchFunction", "name": &**name})),
             Expr::Call { function: Some(id), arguments, .. } => self.call(expr, *id, arguments),
             Expr::Unary(op, operand) => self.operands(&[operand], *op != UnaryOp::Plus),
@@ -291,6 +291,44 @@ impl<'a> Finder<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Why a PIVOT comes to the error: arguments it does not take, an argument that comes to it, a word
+    /// it does not read, no total, columns with several totals, or fields of different sizes.
+    fn pivot(&mut self, arguments: &'a [Expr]) -> Option<Json> {
+        use crate::formula::pivot::{count_of_arguments, Formula, NotRead};
+        if let Some(cause) = count_of_arguments(arguments.len()) {
+            return (self.error == CellError::NotAvailable).then_some(cause);
+        }
+        for (i, argument) in arguments.iter().enumerate() {
+            if crate::evaluate::pivot::pivot_works_out(i, argument, arguments) && self.has_the_error(argument) {
+                return self.cause(argument);
+            }
+        }
+        let (read, worked) = self.calculation.pivot_read(self.f, arguments).ok()?;
+        match Formula::read_telling_why(&read) {
+            Ok(formula) => {
+                // Fields of cells and fields written or worked out as arrays alike.
+                let own = self.calculation.formulas[self.f].places.len();
+                let sizes = formula
+                    .columns_used()
+                    .map(|i| match i.checked_sub(own) {
+                        None => self.place(i).map(|p| (p.rows(), p.columns())),
+                        Some(k) => worked.get(k).map(|field| (field.rows(), field.columns())),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let differ = sizes.iter().all(|&(_, columns)| columns == 1) && sizes.iter().any(|&(rows, _)| rows != sizes[0].0);
+                (self.error == CellError::Value && differ).then(|| json!({"kind": "rangesOfDifferentSizes", "function": "PIVOT"}))
+            }
+            Err((error, _)) if error != self.error => None,
+            Err((_, NotRead::Word(word))) => Some(json!({"kind": "wordIsNotRead", "function": "PIVOT", "word": word})),
+            Err((_, NotRead::TotalsNothing)) => Some(json!({"kind": "pivotTotalsNothing"})),
+            Err((_, NotRead::WithColumnsTotalsSeveral)) => Some(json!({"kind": "pivotWithColumnsTotalsSeveral"})),
+            Err((_, NotRead::SeveralValues)) => {
+                Some(json!({"kind": "severalCellsForOneValue", "function": "PIVOT", "argument": "use"}))
+            }
+            Err((_, NotRead::Other)) => None,
         }
     }
 
@@ -381,9 +419,10 @@ impl<'a> Finder<'a> {
             Operand::Value(v) => v == Value::Error(error),
             Operand::Range(place) => {
                 let values = self.calculation.range_values(place);
-                values.values().contains(&Value::Error(error))
+                let found = values.values().any(|v| v.error() == Some(error));
+                found
             }
-            Operand::Array(a) | Operand::Values(a) => a.values().contains(&Value::Error(error)),
+            Operand::Array(a) | Operand::Values(a) => a.values().any(|v| v.error() == Some(error)),
         }
     }
 
@@ -444,8 +483,8 @@ impl<'a> Finder<'a> {
             let operand = self.calculation.eval(self.f, include);
             let values = match operand {
                 Operand::Value(v) => vec![v],
-                Operand::Range(place) => self.calculation.range_values(place).values().to_vec(),
-                Operand::Array(a) | Operand::Values(a) => a.values().to_vec(),
+                Operand::Range(place) => self.calculation.range_values(place).values().cloned().collect(),
+                Operand::Array(a) | Operand::Values(a) => a.values().cloned().collect(),
             };
             if values.iter().any(|v| v.error().is_some()) {
                 return None;

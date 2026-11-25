@@ -11,7 +11,7 @@ use crate::ids::LineId;
 use crate::workbook::formats::Leaf;
 use crate::workbook::layout::RangeIds;
 use crate::workbook::load::Op;
-use crate::workbook::objects::{RangeOnASheet, View, ViewElement};
+use crate::workbook::objects::{RangeOnASheet, View};
 use crate::workbook::{Sheet, Workbook};
 
 /// The most cells an answer tells of one by one, in all sheets; past it, it tells of everything, unless they are no
@@ -122,6 +122,18 @@ impl Changes {
         self.renamed.extend(other.renamed);
     }
 
+    /// What an operation tried and taken back changes (`workbook` as it is again): as `of_op`, but rows or columns
+    /// deleted or undeleted tell only that the lines changed, not the cells in them.
+    pub fn of_op_taken_back(&mut self, op: &Op, workbook: &Workbook) {
+        match op {
+            Op::DeleteRows { sheet_id, .. }
+            | Op::UndeleteRows { sheet_id, .. }
+            | Op::DeleteColumns { sheet_id, .. }
+            | Op::UndeleteColumns { sheet_id, .. } => self.lines(sheet_id),
+            _ => self.of_op(op, workbook),
+        }
+    }
+
     /// What applying an operation changes, the workbook as it is after it.
     pub fn of_op(&mut self, op: &Op, after: &Workbook) {
         match op {
@@ -206,11 +218,12 @@ impl Changes {
             | Op::SetRowGroups { sheet_id, .. }
             | Op::SetColumnGroups { sheet_id, .. }
             | Op::SetPlacements { sheet_id, .. }
+            | Op::SetNamedViews { sheet_id, .. }
             | Op::SetCellTables { sheet_id, .. } => self.layout(sheet_id),
             Op::SetDropdowns { sheet_id, dropdowns } => {
                 self.layout(sheet_id);
                 // The cells holding an option that is not one of the dropdowns the operation leaves alone show it
-                // otherwise now.
+                // otherwise now; not a cell of a deleted row or column, which shows nothing.
                 let Some(i) = after.sheet_index(sheet_id) else { return };
                 let sheet = &after.sheets[i];
                 let set: HashSet<&str> = dropdowns.iter().map(|d| d.dropdown_id.as_str()).collect();
@@ -221,6 +234,9 @@ impl Changes {
                     .flat_map(|(_, options)| options.iter().map(|o| o.option_id.as_str()))
                     .collect();
                 for ((r, c), cell) in &sheet.cells {
+                    if sheet.rows.position(*r).is_none() || sheet.columns.position(*c).is_none() {
+                        continue;
+                    }
                     if let crate::workbook::Input::DropdownOption { option_id, .. } = &cell.input {
                         if !untouched.contains(option_id.as_str()) {
                             self.cell(sheet_id, &after.bases.text(*r), &after.bases.text(*c));
@@ -288,14 +304,14 @@ impl Changes {
         for sheet in &workbook.sheets {
             let Some(changes) = self.sheets.get(&sheet.id) else { continue };
             let mut cells: Vec<(usize, usize, &String, &String)> = Vec::new();
-            // Cells of rows or columns deleted are told after the others, by the ids of their row
-            // and column (not where they stand).
-            let mut deleted: Vec<(LineId, LineId, &String, &String)> = Vec::new();
+            // Cells of rows or columns deleted are told after the others, in the order of the ids of their row and
+            // column as texts (`.10` before `.2`; not where they stand).
+            let mut deleted: Vec<(&String, &String)> = Vec::new();
             for (r, c) in &changes.cells {
                 let (Some(row_id), Some(column_id)) = (workbook.bases.parse(r), workbook.bases.parse(c)) else { continue };
                 match (sheet.rows.position(row_id), sheet.columns.position(column_id)) {
                     (Some(row), Some(column)) => cells.push((row, column, r, c)),
-                    _ => deleted.push((row_id, column_id, r, c)),
+                    _ => deleted.push((r, c)),
                 }
             }
             cells.sort();
@@ -307,10 +323,13 @@ impl Changes {
             // And a view an input of which reads one: what it shows may have too.
             let positions: Vec<(usize, usize)> = cells.iter().map(|&(row, column, _, _)| (row, column)).collect();
             views.extend(views_reading(workbook, sheet, &positions));
+            // Rows or columns changed: every view with an input on the sheet; its layout (formats, widths): every
+            // interactive with one, which shows its inputs' cells as they look.
             if changes.are_lines_changed {
-                views.extend(views_on(workbook, sheet));
+                views.extend(views_on(workbook, sheet, false));
+            } else if changes.is_layout_changed {
+                views.extend(views_on(workbook, sheet, true));
             }
-            let deleted = deleted.into_iter().map(|(_, _, r, c)| (r, c));
             let cells: Vec<Json> =
                 cells.into_iter().map(|(_, _, r, c)| (r, c)).chain(deleted).map(|(r, c)| json!({"r": r, "c": c})).collect();
             let mut out = json!({"sheetId": sheet.id, "cells": cells, "isLayoutChanged": changes.is_layout_changed});
@@ -354,10 +373,11 @@ fn reads_a_conditional_format(workbook: &Workbook, sheet: &Sheet, (row, column):
     })
 }
 
-/// The views, placed or not, with an input on the sheet.
-fn views_on(workbook: &Workbook, sheet: &Sheet) -> Vec<String> {
+/// The views, placed or not, with an input on the sheet (only the interactives, when asked).
+fn views_on(workbook: &Workbook, sheet: &Sheet, interactives: bool) -> Vec<String> {
     let on = |view: &View| {
-        view.elements.iter().any(|ViewElement::Widget { inputs, .. }| inputs.iter().any(|i| i.range.sheet_id == sheet.id))
+        (!interactives || view.is_interactive())
+            && view.elements.iter().any(|element| element.parts().2.iter().any(|i| i.range.sheet_id == sheet.id))
     };
     workbook.views.values().filter(|(_, view)| on(view)).map(|(id, _)| id.clone()).collect()
 }
@@ -375,7 +395,7 @@ fn views_reading(workbook: &Workbook, sheet: &Sheet, cells: &[(usize, usize)]) -
             })
     };
     let reads_one = |view: &View| {
-        view.elements.iter().any(|ViewElement::Widget { inputs, .. }| inputs.iter().any(|i| reads(&i.range)))
+        view.elements.iter().any(|element| element.parts().2.iter().any(|i| reads(&i.range)))
     };
     workbook.views.values().filter(|(_, view)| reads_one(view)).map(|(id, _)| id.clone()).collect()
 }

@@ -1,0 +1,196 @@
+{
+  "rev": 4,
+  "blocks": [
+    {
+      "id": "il1xxcfq7p0.1",
+      "type": "paragraph",
+      "attrs": {
+        "heading": 1
+      },
+      "inline": [
+        {
+          "id": "il1xxcfq7p0.2",
+          "text": "Docs Browser QA"
+        }
+      ]
+    },
+    {
+      "id": "il1xxcfq7p0.17",
+      "type": "paragraph",
+      "inline": [
+        {
+          "id": "il1xxcfq7p0.18",
+          "text": "Browser smoke test with "
+        },
+        {
+          "id": "il1xxcfq7p0.42",
+          "text": "bold",
+          "marks": {
+            "bold": true
+          }
+        },
+        {
+          "id": "il1xxcfq7p0.46",
+          "text": " and "
+        },
+        {
+          "id": "il1xxcfq7p0.51",
+          "text": "a link",
+          "marks": {
+            "link": "https://example.com"
+          }
+        },
+        {
+          "id": "il1xxcfq7p0.57",
+          "text": "."
+        },
+        {
+          "id": "bt6qsnwbhbn.0",
+          "text": " 中文自动保存检查"
+        }
+      ]
+    },
+    {
+      "id": "il1xxcfq7p0.58",
+      "type": "paragraph",
+      "attrs": {
+        "heading": 2
+      },
+      "inline": [
+        {
+          "id": "il1xxcfq7p0.59",
+          "text": "Goals"
+        }
+      ]
+    },
+    {
+      "id": "il1xxcfq7p0.64",
+      "type": "list",
+      "attrs": {
+        "kind": "bullet"
+      },
+      "children": [
+        {
+          "id": "il1xxcfq7p0.65",
+          "type": "listItem",
+          "children": [
+            {
+              "id": "il1xxcfq7p0.66",
+              "type": "paragraph",
+              "inline": [
+                {
+                  "id": "il1xxcfq7p0.67",
+                  "text": "First goal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "il1xxcfq7p0.77",
+          "type": "listItem",
+          "children": [
+            {
+              "id": "il1xxcfq7p0.78",
+              "type": "paragraph",
+              "inline": [
+                {
+                  "id": "il1xxcfq7p0.79",
+                  "text": "Second goal"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "il1xxcfq7p0.90",
+      "type": "table",
+      "children": [
+        {
+          "id": "il1xxcfq7p0.91",
+          "type": "tableRow",
+          "children": [
+            {
+              "id": "il1xxcfq7p0.92",
+              "type": "cell",
+              "attrs": {
+                "header": true
+              },
+              "children": [
+                {
+                  "id": "il1xxcfq7p0.93",
+                  "type": "paragraph",
+                  "inline": [
+                    {
+                      "id": "il1xxcfq7p0.94",
+                      "text": "Owner"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "il1xxcfq7p0.99",
+              "type": "cell",
+              "attrs": {
+                "header": true
+              },
+              "children": [
+                {
+                  "id": "il1xxcfq7p0.100",
+                  "type": "paragraph",
+                  "inline": [
+                    {
+                      "id": "il1xxcfq7p0.101",
+                      "text": "Status"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "il1xxcfq7p0.107",
+          "type": "tableRow",
+          "children": [
+            {
+              "id": "il1xxcfq7p0.108",
+              "type": "cell",
+              "children": [
+                {
+                  "id": "il1xxcfq7p0.109",
+                  "type": "paragraph",
+                  "inline": [
+                    {
+                      "id": "il1xxcfq7p0.110",
+                      "text": "Ana"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "il1xxcfq7p0.113",
+              "type": "cell",
+              "children": [
+                {
+                  "id": "il1xxcfq7p0.114",
+                  "type": "paragraph",
+                  "inline": [
+                    {
+                      "id": "il1xxcfq7p0.115",
+                      "text": "Ready"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

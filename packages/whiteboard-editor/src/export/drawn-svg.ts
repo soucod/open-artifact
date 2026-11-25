@@ -7,9 +7,12 @@
  * light boards, light chalk on dark ones. Unless a drawing asks for the
  * `clean` look, solid fills become marker hatching and thin strokes become
  * brushed ink, and chalk drawings are layered so they read on dark paper.
- * Parts the restyling cannot safely touch (gradients, references, unusual
- * attributes) are left alone. Everything runs on the core's own XML tree,
- * so no DOM is needed.
+ * That is the `plain` look; `draft`, `comic` and `blueprint` rewrite the
+ * SVG (`whiteboard-core`'s `looks.ts`), and the painted looks (marker,
+ * watercolor, paper) show plain here until the look service has painted
+ * them. Parts the restyling cannot safely touch (gradients, references,
+ * unusual attributes) are left alone. Everything runs on the core's own XML
+ * tree, so no DOM is needed.
  */
 
 import {
@@ -21,16 +24,24 @@ import {
   SVG_NAMESPACE,
   SVG_VET_CACHE_MAX_CHARS,
   UNREADABLE_DRAWING_SVG,
+  blueprintDrawnSvg,
   brushSvgStrokes,
+  comicDrawnSvg,
   decodeSvgDataUrl,
+  drawingCutParts,
+  drawingLookRenderer,
+  imageDrawingLook,
   hatchSvgFills,
   isSvgBase64DataUrl,
   layerSvgForContrast,
   parseSvgTree,
   serializeXml,
+  sketchDrawnSvg,
   svgToBase64DataUrl,
   unknownSvgParts,
   type ColorScheme,
+  type DrawingStyle,
+  type ImageElement,
   type XmlAttribute,
   type XmlElement,
 } from '@open-artifact/whiteboard-core';
@@ -166,6 +177,8 @@ function inlineStyleAttribute(element: XmlElement): void {
 interface RestylableDrawing {
   root: XmlElement;
   shut: ReadonlySet<XmlElement>;
+  /** Parts marked as section cuts (`class="cut"`; the class itself is dropped). */
+  cuts: ReadonlySet<XmlElement>;
 }
 
 /**
@@ -186,6 +199,7 @@ export function parseRestylableDrawnSvg(svg: string): RestylableDrawing | undefi
   const nodes = root.descendants();
   if (nodes.length > MAX_RESTYLABLE_ELEMENTS || nodes.some((node) => node.namespaceURI !== SVG_NAMESPACE || /^(?:style|set|animate.*|discard)$/.test(node.localName))) return undefined;
   const all = [root, ...nodes];
+  const cuts = drawingCutParts(root);
   const hasReferences = all.some((node) => node.attributes.some((attribute) => /href$/i.test(attribute.name) || /url\(|\\/i.test(attribute.value)));
   if (hasReferences && all.some((node) => /^wb(?:-\d+)?$/.test(node.getAttribute('id') ?? ''))) return undefined;
   for (const node of all) {
@@ -212,7 +226,7 @@ export function parseRestylableDrawnSvg(svg: string): RestylableDrawing | undefi
     ),
   );
   if (shut.has(root)) return undefined;
-  return { root, shut };
+  return { root, shut, cuts };
 }
 
 /** The color a pen paints `currentColor` in. */
@@ -269,4 +283,65 @@ export function drawnImageSrcForPen(src: string, pen: DrawnPen): string {
   }
   penCache[pen].set(src, result);
   return result;
+}
+
+/** Longest rewritten drawing a look may produce; longer ones draw plain. */
+export const MAX_LOOK_SVG_CHARS = 1_500_000;
+
+/** The color scheme a pen draws for. */
+function penScheme(pen: DrawnPen): ColorScheme {
+  return pen === 'ink' ? 'light' : 'dark';
+}
+
+/**
+ * A vetted drawing in a style's look for a pen. `draft`, `comic` and
+ * `blueprint` rewrite the drawing; `plain` and the painted looks draw it
+ * with the pen (the painted looks are replaced once painted). A drawing a
+ * look cannot rewrite draws plain.
+ */
+export function applyLookToDrawnSvg(svg: string, look: DrawingStyle, pen: DrawnPen): string {
+  const plain = (): string => applyPenToDrawnSvg(svg, pen);
+  if (look === 'plain' || drawingLookRenderer(look) === 'raster') return plain();
+  try {
+    const drawing = parseRestylableDrawnSvg(svg);
+    if (drawing === undefined) return plain();
+    const { root, shut, cuts } = drawing;
+    const scheme = penScheme(pen);
+    const rewritten = look === 'draft' ? sketchDrawnSvg(root, scheme, shut) : look === 'comic' ? comicDrawnSvg(root, scheme, shut) : blueprintDrawnSvg(root, scheme, shut, cuts);
+    const result = rewritten ? serializeXml(root) : undefined;
+    return result !== undefined && result.length <= MAX_LOOK_SVG_CHARS ? result : plain();
+  } catch {
+    return plain();
+  }
+}
+
+/** Drawings in a look by look and pen, bounded by {@link SVG_VET_CACHE_MAX_CHARS}. */
+const lookCache = new Map<string, string>();
+let lookCacheChars = 0;
+
+/** The image source of a drawing in a style's look (pictures and uploads unchanged). */
+export function drawnImageSrcForLook(src: string, look: DrawingStyle, pen: DrawnPen): string {
+  const key = `${look}|${pen}|${src}`;
+  const cached = lookCache.get(key);
+  if (cached !== undefined) return cached;
+  const svg = decodeSvgDataUrl(src);
+  if (svg === undefined && !isSvgBase64DataUrl(src)) return src;
+  const themed = svg === undefined || unknownSvgParts(svg).length > 0 ? UNREADABLE_DRAWING_SVG : applyLookToDrawnSvg(svg, look, pen);
+  const result = themed === svg ? src : svgToBase64DataUrl(themed);
+  lookCacheChars += src.length + result.length;
+  if (lookCacheChars > SVG_VET_CACHE_MAX_CHARS) {
+    lookCache.clear();
+    lookCacheChars = src.length + result.length;
+  }
+  lookCache.set(key, result);
+  return result;
+}
+
+/**
+ * The source an image element draws with a pen: a drawing in its look
+ * (plain and the painted looks with the pen), anything else unchanged.
+ */
+export function drawnImageSrc(image: Pick<ImageElement, 'src' | 'style'>, pen: DrawnPen): string {
+  const look = imageDrawingLook(image);
+  return look === undefined || look === 'plain' || drawingLookRenderer(look) === 'raster' ? drawnImageSrcForPen(image.src, pen) : drawnImageSrcForLook(image.src, look, pen);
 }

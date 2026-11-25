@@ -270,6 +270,12 @@ describe('LAN sharing', () => {
     assert.equal(roleMay('viewer', '_api/presence'), true);
     assert.equal(roleMay('viewer', '_api/comments/reply'), false);
     assert.equal(roleMay('editor', '_api/something-new'), false);
+    // A commenter reaches the store's write route only on a type with documents of their own (it checks each path).
+    assert.equal(roleMay('commenter', '_api/db/write'), false);
+    assert.equal(roleMay('commenter', '_api/db/write', { commenterWrites: true }), true);
+    assert.equal(roleMay('viewer', '_api/db/write', { commenterWrites: true }), false);
+    assert.equal(roleMay('commenter', '_api/publish', { commenterWrites: true }), false);
+    assert.equal(roleMay('editor', '_api/db/write', { commenterWrites: true }), true);
   });
 });
 

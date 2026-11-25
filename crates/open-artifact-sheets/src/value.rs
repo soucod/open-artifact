@@ -128,17 +128,43 @@ impl From<bool> for Value {
 }
 
 /// A rectangle of values, row by row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Array {
     rows: usize,
     columns: usize,
-    values: Vec<Value>,
+    values: ArrayValues,
+}
+
+#[derive(Clone, Debug)]
+enum ArrayValues {
+    Dense(Vec<Value>),
+    Sparse(Vec<((usize, usize), Value)>),
+}
+
+impl PartialEq for Array {
+    fn eq(&self, other: &Self) -> bool {
+        if (self.rows, self.columns) != (other.rows, other.columns) {
+            return false;
+        }
+        match (&self.values, &other.values) {
+            (ArrayValues::Dense(a), ArrayValues::Dense(b)) => a == b,
+            _ => self.entries().eq(other.entries()),
+        }
+    }
 }
 
 impl Array {
     pub fn new(rows: usize, columns: usize, values: Vec<Value>) -> Array {
         assert_eq!(rows * columns, values.len(), "an array's values fill it");
-        Array { rows, columns, values }
+        Array { rows, columns, values: ArrayValues::Dense(values) }
+    }
+
+    pub(crate) fn sparse(rows: usize, columns: usize, mut values: Vec<((usize, usize), Value)>) -> Array {
+        values.retain(|(_, value)| !matches!(value, Value::Blank));
+        values.sort_unstable_by_key(|(position, _)| *position);
+        debug_assert!(values.iter().all(|&((r, c), _)| r < rows && c < columns));
+        debug_assert!(values.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        Array { rows, columns, values: ArrayValues::Sparse(values) }
     }
 
     pub fn from_rows(rows: Vec<Vec<Value>>) -> Array {
@@ -160,19 +186,87 @@ impl Array {
     }
 
     pub fn get(&self, row: usize, column: usize) -> &Value {
-        &self.values[row * self.columns + column]
+        match &self.values {
+            ArrayValues::Dense(values) => &values[row * self.columns + column],
+            ArrayValues::Sparse(values) => values
+                .binary_search_by_key(&(row, column), |(position, _)| *position)
+                .map_or(&Value::Blank, |i| &values[i].1),
+        }
     }
 
-    pub fn values(&self) -> &[Value] {
-        &self.values
+    pub(crate) fn get_flat(&self, index: usize) -> &Value {
+        self.get(index / self.columns, index % self.columns)
     }
 
-    pub fn into_values(self) -> Vec<Value> {
-        self.values
+    /// Values of the whole rectangle, including empty cells.
+    pub fn values(&self) -> impl ExactSizeIterator<Item = &Value> + '_ {
+        let (dense, sparse) = match &self.values {
+            ArrayValues::Dense(values) => (Some(values.as_slice()), &[][..]),
+            ArrayValues::Sparse(values) => (None, values.as_slice()),
+        };
+        let mut sparse = sparse.iter().peekable();
+        (0..self.rows * self.columns).map(move |index| match dense {
+            Some(values) => &values[index],
+            None => {
+                let position = (index / self.columns, index % self.columns);
+                if sparse.peek().is_some_and(|(next, _)| *next == position) {
+                    &sparse.next().unwrap().1
+                } else {
+                    &Value::Blank
+                }
+            }
+        })
     }
 
-    pub fn row(&self, row: usize) -> &[Value] {
-        &self.values[row * self.columns..(row + 1) * self.columns]
+    /// The nonblank entries in row-major order. Sparse arrays only visit stored values.
+    pub fn entries(&self) -> impl Iterator<Item = ((usize, usize), &Value)> + '_ {
+        self.stored_entries().filter(|(_, value)| !matches!(value, Value::Blank))
+    }
+
+    pub(crate) fn stored_entries(&self) -> impl Iterator<Item = ((usize, usize), &Value)> + '_ {
+        let (dense, sparse) = match &self.values {
+            ArrayValues::Dense(values) => (values.as_slice(), &[][..]),
+            ArrayValues::Sparse(values) => (&[][..], values.as_slice()),
+        };
+        dense.iter().enumerate()
+            .map(|(i, value)| ((i / self.columns, i % self.columns), value))
+            .chain(sparse.iter().map(|(position, value)| (*position, value)))
+    }
+
+    pub fn is_sparse(&self) -> bool {
+        matches!(self.values, ArrayValues::Sparse(_))
+    }
+
+    /// The rectangle containing nonempty values that participate in a spill.
+    pub(crate) fn occupied_dimensions(&self) -> (usize, usize) {
+        let filled = |value: &Value| !matches!(value, Value::Blank) && !matches!(value, Value::Text(t) if t.is_empty());
+        match &self.values {
+            ArrayValues::Dense(values) => {
+                let rows = (0..self.rows).rev().find(|&r| {
+                    values[r * self.columns..(r + 1) * self.columns].iter().any(filled)
+                }).map_or(1, |r| r + 1);
+                let columns = (0..self.columns).rev().find(|&c| {
+                    (0..rows).any(|r| filled(self.get(r, c)))
+                }).map_or(1, |c| c + 1);
+                (rows, columns)
+            }
+            ArrayValues::Sparse(values) => values.iter().filter(|(_, value)| filled(value)).fold(
+                (1, 1), |(rows, columns), ((r, c), _)| (rows.max(r + 1), columns.max(c + 1)),
+            ),
+        }
+    }
+
+    pub(crate) fn crop(&self, rows: usize, columns: usize) -> Array {
+        match &self.values {
+            ArrayValues::Dense(_) => Array::new(rows, columns, (0..rows).flat_map(|r| {
+                (0..columns).map(move |c| self.get(r, c).clone())
+            }).collect()),
+            ArrayValues::Sparse(values) => Array {
+                rows,
+                columns,
+                values: ArrayValues::Sparse(values.iter().filter(|((r, c), _)| *r < rows && *c < columns).cloned().collect()),
+            },
+        }
     }
 
     pub fn is_single(&self) -> bool {
@@ -180,7 +274,10 @@ impl Array {
     }
 
     pub fn transposed(&self) -> Array {
-        let mut values = Vec::with_capacity(self.values.len());
+        if self.is_sparse() {
+            return Array::sparse(self.columns, self.rows, self.entries().map(|((r, c), v)| ((c, r), v.clone())).collect());
+        }
+        let mut values = Vec::with_capacity(self.rows * self.columns);
         for c in 0..self.columns {
             for r in 0..self.rows {
                 values.push(self.get(r, c).clone());
@@ -190,7 +287,7 @@ impl Array {
     }
 
     pub fn map(&self, f: impl FnMut(&Value) -> Value) -> Array {
-        Array::new(self.rows, self.columns, self.values.iter().map(f).collect())
+        Array::new(self.rows, self.columns, self.values().map(f).collect())
     }
 }
 

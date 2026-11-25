@@ -32,8 +32,9 @@ import { viewportCenter } from './services/commands.ts';
 import { installClipboard } from './services/clipboard.ts';
 import { startDesignSystems } from './services/design-systems.ts';
 import { startAnnouncer } from './services/announce.ts';
-import { pageInAddress, startPageHistory } from './services/page-link.ts';
+import { openPlaceInAddress, pageInAddress, startPageHistory } from './services/page-link.ts';
 import { startRecovery } from './services/recovery.ts';
+import { guardFileDrops } from '@open-artifact/editor-kit';
 import { Announcer } from '@open-artifact/editor-kit/react';
 import { FindBar } from './components/FindBar.tsx';
 import { RecoveryBanner } from './components/RecoveryBanner.tsx';
@@ -52,10 +53,12 @@ async function boot(): Promise<void> {
   const view = useView.getState();
   const launch = canvas.launch;
   const firstPage = canvas.pages[0]?.id ?? null;
-  // A page link (`#page=<id>`) wins over the launch view.
+  // A link to a place (`#artboard-<name>`, `#page-<id>`) or a page (`#page=<id>`) wins over the launch view.
   const linked = pageInAddress();
-  view.setPage(linked ?? (launch?.view === 'canvas' && launch.page && canvas.pages.some((p) => p.id === launch.page) ? launch.page : firstPage));
-  if (!linked && launch?.view === 'focused' && canvas.boards[launch.file]) view.focus(launch.file);
+  if (!openPlaceInAddress()) {
+    view.setPage(linked ?? (launch?.view === 'canvas' && launch.page && canvas.pages.some((p) => p.id === launch.page) ? launch.page : firstPage));
+    if (!linked && launch?.view === 'focused' && canvas.boards[launch.file]) view.focus(launch.file);
+  }
   startPageHistory();
   startDesignSystems();
   startAnnouncer();
@@ -106,7 +109,12 @@ export function App() {
       booted = true;
       void boot();
     }
-    return installKeyboard();
+    const offKeys = installKeyboard();
+    const offDrops = guardFileDrops(window);
+    return () => {
+      offKeys();
+      offDrops();
+    };
   }, []);
 
   useEffect(() => {

@@ -1,10 +1,43 @@
-import type { Dynamic } from '../dynamic.ts';
-export const deepFreezeCatalogData = (value?: Dynamic) => {
+export type FunctionFamily = 'math' | 'statistical' | 'logical' | 'lookup' | 'text' | 'dateAndTime' | 'financial';
+/** What an argument expects to be given. */
+export type ArgumentTakes = 'oneValue' | 'severalCells' | 'onlyThePlace' | 'aName';
+/** What an error value in the argument does to the function's answer. */
+export type ErrorInArgument = 'isTheAnswer' | 'mayBePassedOver' | 'mayBeCaughtOrNeverRead';
+/** What the function gives back. */
+export type FunctionAnswers = 'oneValue' | 'anArray' | 'anArgumentAsItCame' | 'partOfAnArgument';
+// Type aliases rather than interfaces, so that they fit `CatalogData`'s index signature.
+export type FunctionArgument = {
+  readonly name: string;
+  readonly isOptional: boolean;
+  readonly repeats: boolean;
+  readonly isHidden: boolean;
+  readonly takes: ArgumentTakes;
+  readonly errorInIt: ErrorInArgument;
+};
+export type CatalogFunction = {
+  readonly name: string;
+  readonly family: FunctionFamily;
+  readonly description: string;
+  readonly isCommon: boolean;
+  readonly arguments: readonly FunctionArgument[];
+  readonly answers: FunctionAnswers;
+  readonly canBeNotAvailableByItself: boolean;
+};
+export type CatalogData = string | boolean | readonly CatalogData[] | { readonly [key: string]: CatalogData };
+export const deepFreezeCatalogData = <T extends CatalogData>(value: T): Readonly<T> => {
   if (typeof value === 'object') Object.values(value).forEach(deepFreezeCatalogData);
   return Object.freeze(value);
 };
-export const FUNCTION_FAMILIES = deepFreezeCatalogData(['math', 'statistical', 'logical', 'lookup', 'text', 'dateAndTime', 'financial']);
-export const FUNCTION_CATALOG = deepFreezeCatalogData([
+export const FUNCTION_FAMILIES = deepFreezeCatalogData<readonly FunctionFamily[]>([
+  'math',
+  'statistical',
+  'logical',
+  'lookup',
+  'text',
+  'dateAndTime',
+  'financial',
+]);
+export const FUNCTION_CATALOG = deepFreezeCatalogData<readonly CatalogFunction[]>([
   {
     name: 'ABS',
     family: 'math',

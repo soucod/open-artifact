@@ -1,11 +1,9 @@
 /**
  * Suggestions: proposed edits (the agent's, or a person's in Suggesting mode) drawn in the text, their cards beside it
- * to accept or reject (and undo), the mode menu on the page bar, and Edit with Agent on the selection toolbar.
+ * to accept or reject (and undo), and the mode menu on the page bar.
  */
 import './suggest.css';
-import { WandSparkles } from 'lucide-react';
 import { docClient } from '../app/doc-client.ts';
-import { provideSelectionAction } from '../app/selection-actions.ts';
 import { fillSlot } from '../app/slots.ts';
 import { getDocs, setDocs, useDocs } from '../app/store.ts';
 import { addEditorExtension } from '../editor/DocEditor.tsx';
@@ -14,10 +12,9 @@ import { undoDecisionByKeys } from './decide.ts';
 import { DecisionNotice } from './DecisionNotice.tsx';
 import { suggestingPlugin } from './in-doc.ts';
 import { SuggestModeControl } from './ModeControl.tsx';
-import { EditWithAgentPrompt } from './EditWithAgent.tsx';
+import { unfoldSuggestion } from './folded.ts';
 import { refreshOpenSuggestions, useOpenSuggestions } from './model.ts';
 import { showUi, suggestPlugins } from './plugin.ts';
-import { editWithAgentAvailable, openEditWithAgent, stopEditWithAgent, watchEditWithAgent } from './rewrite.ts';
 import { getSuggest, useSuggest } from './store.ts';
 import { SuggestionColumnFeed } from './SuggestionColumnFeed.tsx';
 import { SuggestionFloat } from './SuggestionFloat.tsx';
@@ -28,31 +25,13 @@ export { provideSuggestionReply, type SuggestionReplyHandler, type SuggestionRep
 // Suggesting mode goes first: the person's edits become suggestions before any other key or input handler sees them.
 addEditorExtension({ plugins: () => [suggestingPlugin()] });
 
-addEditorExtension({
-  plugins: () =>
-    suggestPlugins({
-      undoDecision: undoDecisionByKeys,
-      escape() {
-        if (getSuggest().rewrite?.phase !== 'working') return false;
-        stopEditWithAgent();
-        return true;
-      },
-    }),
-});
+addEditorExtension({ plugins: () => suggestPlugins({ undoDecision: undoDecisionByKeys }) });
 
 fillSlot('layer', 'suggestion-margin', SuggestionMargin, 20);
 fillSlot('layer', 'suggestion-column', SuggestionColumnFeed, 21);
-fillSlot('layer', 'edit-with-agent', EditWithAgentPrompt, 12);
 fillSlot('float', 'suggestion-float', SuggestionFloat, 20);
 fillSlot('float', 'decision-notice', DecisionNotice, 30);
 fillSlot('pageBar', 'suggest-mode', SuggestModeControl, 90);
-
-provideSelectionAction('editWithAgent', {
-  label: 'Edit with Agent',
-  icon: WandSparkles,
-  available: editWithAgentAvailable,
-  run: () => openEditWithAgent(),
-});
 
 // The suggestion the text outlines: the card under the pointer, else the words under it, else the looked-at one.
 let drawing = false;
@@ -72,6 +51,13 @@ useSuggest.subscribe((state, before) => {
 });
 useDocs.subscribe((state, before) => {
   if (state.focusedSuggestion !== before.focusedSuggestion) drawHighlight();
+});
+
+// A suggestion looked at from beside the text (a marker, a card) comes out of any folded section hiding it.
+useDocs.subscribe((state, before) => {
+  const id = state.focusedSuggestion;
+  const view = currentView();
+  if (id && id !== before.focusedSuggestion && view) unfoldSuggestion(view, id);
 });
 
 // The cards follow the shown tab as the page holds it: its own writes, others' read in, and the tab shown.
@@ -101,5 +87,3 @@ useOpenSuggestions.subscribe(({ cards }) => {
   if ((hoveredCard && !cards.some(card => card.id === hoveredCard)) || (hoveredText && !cards.some(card => card.id === hoveredText)))
     useSuggest.setState({ hoveredCard: null, hoveredText: null });
 });
-
-watchEditWithAgent();

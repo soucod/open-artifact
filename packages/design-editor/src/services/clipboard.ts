@@ -34,9 +34,10 @@ import { useView, type ElementSelection } from '../state/view.ts';
 import { templateOf } from './agent.ts';
 import { addNote, deleteSelection, edit, selectedElements, viewportCenter } from './commands.ts';
 import { boardApi, frameOf } from './frames.ts';
+import { maybeSession } from './session.ts';
 import { liveElementOf, standaloneHtml } from './capture.ts';
 import { carriedCss, dependsOnArtboard, helmetFor, renderedMarkup } from './carry.ts';
-import { isTextField } from '@open-artifact/editor-kit';
+import { isTextField, writeClipboard, writeClipboardText } from '@open-artifact/editor-kit';
 
 export { clipboardData, payloadFromHtml, type ClipboardPayload };
 
@@ -127,17 +128,19 @@ export function cutSelection(): ClipboardPayload | null {
   return payload;
 }
 
-/** Copy for callers without a clipboard event: writes the system clipboard when the browser lets us. */
+/**
+ * Copy for callers without a clipboard event: writes the system clipboard
+ * when the browser (or, where it keeps the clipboard from the framed editor,
+ * the Shell) lets us. The in-page copy is kept either way.
+ */
 export function copyToSystem(cut = false): void {
   const payload = cut ? cutSelection() : copySelection();
   if (!payload) return;
   const { html, text } = clipboardData(payload);
-  try {
-    const item = new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) });
-    void navigator.clipboard?.write([item]).catch(() => undefined);
-  } catch {
-    void navigator.clipboard?.writeText(text).catch(() => undefined);
-  }
+  const shell = maybeSession()?.shell;
+  void writeClipboard({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) }, shell)
+    .catch(() => writeClipboardText(text, shell))
+    .catch(() => undefined);
 }
 
 /* --------------------------------- paste --------------------------------- */

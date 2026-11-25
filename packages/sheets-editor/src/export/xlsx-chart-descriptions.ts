@@ -1,57 +1,99 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellReadByAnInput } from '@open-artifact/sheets-core';
 import { isPromptDataTooLong } from '../agent/prompt-text.ts';
 import { chartOfView } from '../charts/placed-views.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function toldCellsOfChartInput(cells?: Dynamic) {
+import type { InputRow, WorkbookReads } from '../model/workbook.ts';
+import type { AgentThatMayBeAway, ChartDescribers } from '../state/controller.ts';
+declare global {
+  /** Read when no `chartsForXlsx` is given: describes charts for an xlsx file without the agent. */
+  var
+ __agentSheetsLocal: { chartsForXlsx?: ChartsForXlsx } | undefined;
+}
+/** A chart of the workbook to describe for an xlsx file: its view, its name, the node of its code, and its inputs as read. */
+export interface ChartForXlsx {
+  viewId: string;
+  name: string;
+  nodeId: string;
+  inputs: Record<string, InputRow[]>;
+}
+/** A chart for an xlsx file with the code that draws it, as it is told to the agent. */
+export interface ChartWithCode extends Omit<ChartForXlsx, 'nodeId'> {
+  code: string;
+}
+/** How many cells of a row or column of an input there are, and the texts of the ones told. */
+export interface CellsToldOfInput {
+  count: number;
+  texts: (string | null)[];
+}
+/** An ask of the agent to describe charts, and the view of each chart by the short name it is told by. */
+export interface AskToDescribeCharts {
+  asked: { words: string; data: string };
+  viewIdByShortName: Map<string, string>;
+}
+/** A chart's description for an xlsx file as the agent or the server gave it, unchecked; null when it is not one. */
+export interface ChartDescribedForXlsx {
+  viewId: string;
+  description: unknown;
+}
+type ChartAgentReply = Awaited<ReturnType<ChartDescribers['agent']['ask']>>;
+/** What describing the charts needs: the agent and its permission, the charts' code, and a clock. */
+export interface ChartDescribingDeps extends Omit<ChartDescribers, 'agent'> {
+  agent: AgentThatMayBeAway<AskToDescribeCharts['asked'], ChartAgentReply>;
+  afterMs(ms: number, then: () => void): void;
+  isFileStillWanted(): boolean;
+}
+export function toldCellsOfChartInput(cells: readonly CellReadByAnInput[]): CellsToldOfInput {
   let [firstCount, lastCount] = [CHART_INPUT_FIRST_TEXTS, CHART_INPUT_LAST_TEXTS];
   let toldCells = cells.length <= firstCount + lastCount ? cells : [...cells.slice(0, firstCount), ...cells.slice(-lastCount)];
   return {
     count: cells.length,
-    texts: toldCells.map(({ text: text }: Dynamic) => (text.length <= MAX_CHART_INPUT_TEXT_LENGTH ? text : null)),
+    texts: toldCells.map(({ text }) => (text.length <= MAX_CHART_INPUT_TEXT_LENGTH ? text : null)),
   };
 }
-export function xlsxChartAsksInBatches(asks?: Dynamic) {
-  let fitsInOneAsk = (batch?: Dynamic) => !isPromptDataTooLong(askToDescribeChartsForXlsx(batch).asked);
-  let batches: Dynamic = [];
-  for (let ask of asks as Dynamic) {
-    if (!fitsInOneAsk([ask])) continue;
+export function xlsxChartAsksInBatches(charts: readonly ChartWithCode[]): AskToDescribeCharts[] {
+  let fitsInOneAsk = (batch: readonly ChartWithCode[]) => !isPromptDataTooLong(askToDescribeChartsForXlsx(batch).asked);
+  let batches: ChartWithCode[][] = [];
+  for (let chart of charts) {
+    if (!fitsInOneAsk([chart])) continue;
     let lastBatch = batches.at(-1);
-    if (lastBatch !== undefined && fitsInOneAsk([...lastBatch, ask])) lastBatch.push(ask);
-    else batches.push([ask]);
+    if (lastBatch !== undefined && fitsInOneAsk([...lastBatch, chart])) lastBatch.push(chart);
+    else batches.push([chart]);
   }
   return batches.map(askToDescribeChartsForXlsx);
 }
-export function readXlsxChartDescriptions(answer: Dynamic, { viewIdByShortName: viewIdByShortName }: Dynamic) {
+export function readXlsxChartDescriptions(
+  answer: unknown,
+  { viewIdByShortName }: Pick<AskToDescribeCharts, 'viewIdByShortName'>,
+): ChartDescribedForXlsx[] {
   let charts = isChartAnswerObject(answer) ? answer.charts : null;
-  let chartList = Array.isArray(charts) ? charts : [];
-  let descriptionsByViewId = new (Map as Dynamic)();
-  for (let chart of chartList as Dynamic) {
+  let chartList: unknown[] = Array.isArray(charts) ? charts : [];
+  let descriptionsByViewId = new Map<string, ChartDescribedForXlsx>();
+  for (let chart of chartList) {
     let shortName = isChartAnswerObject(chart) ? chart.id : null;
     let viewId = typeof shortName === 'string' ? viewIdByShortName.get(shortName) : undefined;
     if (!isChartAnswerObject(chart) || viewId === undefined || descriptionsByViewId.has(viewId)) continue;
     let description = chart.description;
     let isDescriptionValid = description !== undefined && isNestedNoDeeperThan(MAX_CHART_DESCRIPTION_DEPTH, description);
     descriptionsByViewId.set(viewId, {
-      viewId: viewId,
+      viewId,
       description: isDescriptionValid ? description : null,
     });
   }
   return [...descriptionsByViewId.values()];
 }
-export function chartsOfWorkbookForXlsx(reads: WorkbookReads) {
+export function chartsOfWorkbookForXlsx(reads: WorkbookReads): ChartForXlsx[] {
   return [
-    ...new (Set as Dynamic)(
+    ...new Set(
       reads
         .listSheets()
-        .flatMap(({ sheetId: sheetId }: Dynamic) => reads.placementsIn(sheetId).map(({ viewId: viewId }: Dynamic) => viewId)),
+        .flatMap(({ sheetId }) => reads.placementsIn(sheetId).map(({ viewId }) => viewId)),
     ),
-  ].flatMap((viewId?: Dynamic) => {
+  ].flatMap((viewId) => {
     let view = reads.viewAsItStands(viewId);
     let chartSource = chartOfView(view);
     if (view === null || chartSource.kind === 'none') return [];
     return [
       {
-        viewId: viewId,
+        viewId,
         name: view.view.name,
         nodeId: chartSource.nodeId,
         inputs: chartSource.inputs,
@@ -62,63 +104,63 @@ export function chartsOfWorkbookForXlsx(reads: WorkbookReads) {
 /** Asks the server to describe the charts, by view id, as the file's own kind of chart; a chart it cannot describe is left out. */
 export type ChartsForXlsx = (viewIds: readonly string[]) => Promise<readonly { viewId: string; description?: unknown }[]>;
 export function describeChartsForXlsx(
-  charts: Dynamic,
+  charts: readonly ChartForXlsx[],
   {
-    agent: agent,
-    viewerAllowsAgent: viewerAllowsAgent,
-    codeOfChart: codeOfChart,
-    chartsForXlsx: chartsForXlsx,
-    afterMs: afterMs,
-    isFileStillWanted: isFileStillWanted,
-  }: Dynamic,
-) {
-  let descriptions: Dynamic = [];
-  let isDone: Dynamic = false;
+    agent,
+    viewerAllowsAgent,
+    codeOfChart,
+    chartsForXlsx,
+    afterMs,
+    isFileStillWanted,
+  }: ChartDescribingDeps,
+): Promise<ChartDescribedForXlsx[]> {
+  let descriptions: ChartDescribedForXlsx[] = [];
+  let isDone = false;
   let isOver = () => isDone;
   let isStillWanted = () => !isOver() && isFileStillWanted();
-  let askInTurn = async ([ask, ...restOfAsks]: Dynamic): Promise<Dynamic> => {
+  let askInTurn = async ([ask, ...restOfAsks]: readonly AskToDescribeCharts[]): Promise<void> => {
     if (ask === undefined || !isStillWanted()) return;
     let reply = await agent.ask(ask.asked, () => {});
     if (isOver() || reply.kind === 'stopped' || reply.kind === 'notToBeHad') return;
-    if (reply.kind === 'answered') (descriptions.push as Dynamic)(...readXlsxChartDescriptions(reply.answer, ask));
+    if (reply.kind === 'answered') descriptions.push(...readXlsxChartDescriptions(reply.answer, ask));
     await askInTurn(restOfAsks);
   };
-  let askAll = async (): Promise<Dynamic> => {
+  let askAll = async (): Promise<void> => {
     let chartsWithCode = await Promise.all(
-      charts.map(async ({ nodeId: nodeId, ...chart }: Dynamic): Promise<Dynamic> => {
+      charts.map(async ({ nodeId, ...chart }): Promise<ChartWithCode[]> => {
         let code = await codeOfChart(nodeId);
         return code === null
           ? []
           : [
               {
                 ...chart,
-                code: code,
+                code,
               },
             ];
       }),
     );
     await askInTurn(xlsxChartAsksInBatches(chartsWithCode.flat()).slice(0, MAX_XLSX_CHART_ASKS));
   };
-  return new (Promise as Dynamic)((resolve?: Dynamic, reject?: Dynamic) => {
+  return new Promise<ChartDescribedForXlsx[]>((resolve, reject) => {
     let finish = () => {
       isDone = true;
       resolve([...descriptions]);
     };
-    let finishAfterMs = (ms?: Dynamic) =>
+    let finishAfterMs = (ms: number) =>
       afterMs(ms, () => {
         if (!isOver()) agent.stop();
         finish();
       });
-    let start = async (): Promise<Dynamic> => {
+    let start = async (): Promise<void> => {
       // The server describes the charts that its stock programs draw (sheets-core's xlsxChartsOf); the page has no
       // model of its own to ask, so a chart of any other code is left out of the file, as `notCarriedOver` says.
       let describedLocally: ChartsForXlsx | undefined =
-        typeof chartsForXlsx === 'function' ? chartsForXlsx : (globalThis as Dynamic).__agentSheetsLocal?.chartsForXlsx;
+        typeof chartsForXlsx === 'function' ? chartsForXlsx : globalThis.__agentSheetsLocal?.chartsForXlsx;
       if (typeof describedLocally === 'function') {
-        let told = await describedLocally(charts.map(({ viewId: viewId }: Dynamic) => viewId)).catch(() => []);
+        let told = await describedLocally(charts.map(({ viewId }) => viewId)).catch(() => []);
         if (!isStillWanted()) return;
-        let asked = new Set(charts.map(({ viewId: viewId }: Dynamic) => viewId));
-        for (let chart of told as Dynamic)
+        let asked = new Set(charts.map(({ viewId }) => viewId));
+        for (let chart of told)
           if (asked.has(chart?.viewId))
             descriptions.push({
               viewId: chart.viewId,
@@ -169,41 +211,42 @@ Answer with only this JSON, with one item for each chart, in the order given: {"
 export const CHART_INPUT_FIRST_TEXTS = 30;
 export const CHART_INPUT_LAST_TEXTS = 10;
 export const MAX_CHART_INPUT_TEXT_LENGTH = 60;
-export const chartToldForXlsx = ({ name: name, code: code, inputs: inputs }: Dynamic, id?: Dynamic) => ({
-  id: id,
-  name: name,
+export const chartToldForXlsx = ({ name, code, inputs }: ChartWithCode, id: string) => ({
+  id,
+  name,
   inputs: Object.fromEntries(
     Object.entries(inputs).map(
-      ([inputName, cells]: Dynamic) => [
+      ([inputName, cells]) => [
         inputName,
         {
           firstRow: toldCellsOfChartInput(cells[0] ?? []),
-          firstColumn: toldCellsOfChartInput(cells.flatMap((row?: Dynamic) => row.slice(0, 1))),
+          firstColumn: toldCellsOfChartInput(cells.flatMap((row) => row.slice(0, 1))),
         },
       ],
     ),
   ),
-  code: code,
+  code,
 });
-export const askToDescribeChartsForXlsx = (charts?: Dynamic) => {
+export const askToDescribeChartsForXlsx = (charts: readonly ChartWithCode[]): AskToDescribeCharts => {
   let named = charts.map(
-    (chart?: Dynamic, index?: Dynamic) => ({
-      chart: chart,
+    (chart, index) => ({
+      chart,
       shortName: `c${index + 1}`,
     }),
   );
   return {
     asked: {
       words: XLSX_CHART_DESCRIPTION_PROMPT,
-      data: JSON.stringify(named.map(({ chart: chart, shortName: shortName }: Dynamic) => chartToldForXlsx(chart, shortName))),
+      data: JSON.stringify(named.map(({ chart, shortName }) => chartToldForXlsx(chart, shortName))),
     },
-    viewIdByShortName: new (Map as Dynamic)(named.map(({ chart: chart, shortName: shortName }: Dynamic) => [shortName, chart.viewId])),
+    viewIdByShortName: new Map(named.map(({ chart, shortName }) => [shortName, chart.viewId])),
   };
 };
-export const isChartAnswerObject = (value?: Dynamic) => typeof value === 'object' && value !== null;
+export const isChartAnswerObject = (value: unknown): value is Record<PropertyKey, unknown> => typeof value === 'object' && value !== null;
 export const MAX_CHART_DESCRIPTION_DEPTH = 3;
-export const isNestedNoDeeperThan = (depth?: Dynamic, value?: Dynamic) =>
-  !isChartAnswerObject(value) || (depth > 0 && Object.values(value).every((child?: Dynamic) => isNestedNoDeeperThan(depth - 1, child)));
+export const isNestedNoDeeperThan = (depth: number, value: unknown): boolean =>
+
+  !isChartAnswerObject(value) || (depth > 0 && Object.values(value).every((child) => isNestedNoDeeperThan(depth - 1, child)));
 export const XLSX_CHART_DESCRIBING_MS = 45000;
 export const XLSX_CHART_PERMISSION_WAIT_MS = 900000;
 export const MAX_XLSX_CHART_ASKS = 4;

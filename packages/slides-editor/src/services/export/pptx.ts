@@ -16,17 +16,21 @@
  * backgrounds. Anything that cannot carry over is recorded as an export note.
  */
 
-import { nodeAt, parsePathKey, SLIDE_HEIGHT, SLIDE_WIDTH, type ConnectorNode, type HeadKind, type ImageNode, type ShapeNode, type SlideNode } from '@open-artifact/slides-core';
+import { clipPathPoints, nodeAt, parseClipPath, parsePathKey, SLIDE_HEIGHT, SLIDE_WIDTH, type ConnectorNode, type HeadKind, type ImageNode, type ShapeNode, type SlideNode } from '@open-artifact/slides-core';
 import { connectorGeometry, connectorStroke, parseStroke, SHAPE_POLYGONS, type Point } from '../../render/geometry.ts';
 import { mountSlide, slidePicture, type MountedSlide } from '../capture.ts';
 import {
+  cornerRadii,
   cornerRadius,
   intersect,
   objectContentRect,
+  officeShadow,
   parseAngle,
   parseBoxShadow,
   parseColor,
   parseLinearGradient,
+  pictureOutline,
+  polygonOutline,
   pptxFont,
   px,
   splitTop,
@@ -38,6 +42,9 @@ import {
 import { setEastAsianFonts, collectFontUses, embedDeckFonts, fontNoticeText, networkFetchers, noteFontEmbedding, type EmbeddedFont } from './font-embedding.ts';
 import { breathe, hasBuilds, type ExportJob, type ExportSlide } from './job.ts';
 import {
+  centerSingleLine,
+  collapseGaps,
+  edgeSpaceAsInset,
   writePptx,
   type Arrowhead,
   type Box,
@@ -347,7 +354,10 @@ class SlideReader {
   /** Reads every drawn element, in paint (document) order. */
   async read(): Promise<void> {
     const slide = this.entry.slide;
+    // The last element drawn with its polygon clip: whatever it holds was drawn with it.
+    let clipRoot: Element | undefined;
     for (const el of Array.from(this.root.querySelectorAll('[data-open-artifact-kind]'))) {
+      if (clipRoot?.contains(el)) continue;
       const kind = el.getAttribute('data-open-artifact-kind') as SlideNode['kind'];
       const node = nodeAt(slide, parsePathKey(el.getAttribute('data-open-artifact-path') ?? ''));
       if (el.getClientRects().length === 0 || this.style(el).visibility !== 'visible') continue;
@@ -355,6 +365,15 @@ class SlideReader {
       if (alpha <= 0.001) continue;
       const frame = this.frame(el);
       if (frame.box.w < 0.5 && frame.box.h < 0.5 && kind !== 'rule' && kind !== 'connector') continue;
+      const clipPath = node?.style['clip-path'];
+      if (node && clipPath && clipPath !== 'none') {
+        const clip = parseClipPath(clipPath);
+        if (clip.ok && clip.value) {
+          await this.clippedElement(el, node, frame, alpha, clipPathPoints(clip.value, frame.w, frame.h));
+          clipRoot = el;
+          continue;
+        }
+      }
       switch (kind) {
         case 'text':
         case 'list':
@@ -395,15 +414,53 @@ class SlideReader {
     }
   }
 
+  /**
+   * An element with a polygon `clip-path` (points in px of its border box):
+   * a plain panel as a custom shape, a picture cut to the polygon, and
+   * anything an office shape cannot carry (children, borders, effects,
+   * rounded corners, a crossing outline) as a picture of what shows.
+   */
+  private async clippedElement(el: Element, node: SlideNode, frame: Frame, alpha: number, points: [number, number][]): Promise<void> {
+    const style = this.style(el);
+    const borders = this.borders(style, alpha);
+    const effects = [style.boxShadow, style.filter, style.backdropFilter].some((value) => value && value !== 'none');
+    const rounded = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius].some((value) => parseFloat(value) > 0);
+    const composition = node.kind === 'textbox' || (node.kind === 'box' && node.children.length > 0);
+    const outline = polygonOutline(points, { x: 0, y: 0, w: frame.w, h: frame.h });
+    if (outline === null || !(el instanceof HTMLElement) || composition || effects || rounded || Object.values(borders).some(Boolean)) {
+      await this.clippedPicture(el, node, frame, points);
+    } else if (outline.length && node.kind === 'image') {
+      await this.image(el, frame, alpha, node, outline);
+    } else if (outline.length) {
+      await this.panel(el, frame, alpha, this.name('Shape'), { outline });
+    }
+  }
+
+  /** A clipped element as a picture of what its polygon shows, noted as such. */
+  private async clippedPicture(el: Element, node: SlideNode, frame: Frame, points: [number, number][]): Promise<void> {
+    const placed = points.map(([x, y]) => frame.toSlide(x, y));
+    const xs = placed.map(([x]) => x);
+    const ys = placed.map(([, y]) => y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    this.job.notes.add('polygonPicture', this.entry.number);
+    if (node.kind === 'image' && node.video) this.job.notes.add(node.src ? 'video' : 'videoMissing', this.entry.number);
+    await this.raster(el, this.name('Clipped element'), {
+      bounds: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y },
+      description: node.kind === 'image' ? node.alt || undefined : undefined,
+    });
+  }
+
   /** A picture of just this element (or of its own background and border, `bare`). */
-  private async raster(el: Element, name: string, options: { bare?: boolean; fonts?: boolean; description?: string }): Promise<void> {
+  private async raster(el: Element, name: string, options: { bare?: boolean; fonts?: boolean; description?: string; bounds?: Rect }): Promise<void> {
     const rect = el.getBoundingClientRect();
+    const bounds = options.bounds ?? { x: rect.left - this.origin.left, y: rect.top - this.origin.top, w: rect.width, h: rect.height };
     const style = this.style(el);
     const pad = (style.filter && style.filter !== 'none') || (style.boxShadow && style.boxShadow !== 'none') ? EFFECT_PAD : 2;
-    const left = Math.floor(rect.left - this.origin.left - pad);
-    const top = Math.floor(rect.top - this.origin.top - pad);
+    const left = Math.floor(bounds.x - pad);
+    const top = Math.floor(bounds.y - pad);
     const area = intersect(
-      { x: left, y: top, w: Math.ceil(rect.right - this.origin.left + pad) - left, h: Math.ceil(rect.bottom - this.origin.top + pad) - top },
+      { x: left, y: top, w: Math.ceil(bounds.x + bounds.w + pad) - left, h: Math.ceil(bounds.y + bounds.h + pad) - top },
       { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT },
     );
     if (area.w < 1 || area.h < 1) return;
@@ -435,7 +492,7 @@ class SlideReader {
    * An element's own painting: background, border and shadow, as one
    * shape. Picture and patterned backgrounds are drawn as a picture.
    */
-  private async panel(el: HTMLElement, frame: Frame, alpha: number, name: string, options: { shadow?: boolean } = {}): Promise<void> {
+  private async panel(el: HTMLElement, frame: Frame, alpha: number, name: string, options: { shadow?: boolean; outline?: Point[] } = {}): Promise<void> {
     const style = this.style(el);
     const image = style.backgroundImage;
     let fill: Fill = { type: 'none' };
@@ -455,8 +512,7 @@ class SlideReader {
     const borders = this.borders(style, alpha);
     const sides = [borders.t, borders.r, borders.b, borders.l];
     const uniform = sides.every((line) => line && sides[0] && line.width === sides[0].width && line.color.hex === sides[0].color.hex && line.color.alpha === sides[0].color.alpha && line.dash === sides[0].dash);
-    const css = options.shadow === false ? null : parseBoxShadow(style.boxShadow);
-    const shadow: Shadow | undefined = css ? { x: css.x, y: css.y, blur: css.blur, color: withOpacity(css.color, alpha) } : undefined;
+    const shadow = options.shadow === false ? undefined : this.shadow(style.boxShadow, frame, alpha);
     const line = uniform ? borders.t : undefined;
     if (fill.type !== 'none' || line || shadow) {
       // CSS borders lie inside the box; office outlines straddle the edge.
@@ -465,7 +521,8 @@ class SlideReader {
       const radiusValue = style.borderTopLeftRadius;
       const radius = cornerRadius(radiusValue, frame.w, frame.h) * frame.sx - inset;
       let geometry: Geometry = { preset: 'rect' };
-      if (/%$/.test(radiusValue.trim()) && parseFloat(radiusValue) >= 50) geometry = { preset: 'ellipse' };
+      if (options.outline) geometry = { path: options.outline.map(([x, y]) => [x * frame.sx, y * frame.sy]), closed: true };
+      else if (/%$/.test(radiusValue.trim()) && parseFloat(radiusValue) >= 50) geometry = { preset: 'ellipse' };
       else if (radius > 0.5) geometry = { preset: 'roundRect', radius };
       this.elements.push({ type: 'shape', name, box, geometry, fill, line, shadow });
     }
@@ -485,14 +542,21 @@ class SlideReader {
     }
   }
 
-  /** Notes what an element's own painting loses as an office shape: inner, layered or spread shadows, double borders, blend modes, filters. */
+  /** The first outer `box-shadow` of an element as an office shadow. */
+  private shadow(value: string | undefined, frame: Frame, alpha: number): Shadow | undefined {
+    const css = parseBoxShadow(value);
+    const own = css ? officeShadow(css, { w: frame.w, h: frame.h }) : null;
+    return css && own ? { ...own, color: withOpacity(css.color, alpha) } : undefined;
+  }
+
+  /** Notes what an element's own painting loses as an office shape: inner, layered or growing shadows, double borders, blend modes, filters. */
   private noteEffects(style: CSSStyleDeclaration, shadow: boolean): void {
     const n = this.entry.number;
     if (shadow && style.boxShadow && style.boxShadow !== 'none') {
       const layers = splitTop(style.boxShadow);
       if (layers.some((layer) => /\binset\b/.test(layer))) this.job.notes.add('shadowInset', n);
       if (layers.filter((layer) => !/\binset\b/.test(layer)).length > 1) this.job.notes.add('shadowLayers', n);
-      if ((parseBoxShadow(style.boxShadow)?.spread ?? 0) !== 0) this.job.notes.add('shadowSpread', n);
+      if ((parseBoxShadow(style.boxShadow)?.spread ?? 0) > 0) this.job.notes.add('shadowSpread', n);
     }
     if ([style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle].includes('double')) this.job.notes.add('borderDouble', n);
     if (style.mixBlendMode && style.mixBlendMode !== 'normal') this.job.notes.add('blend', n);
@@ -581,29 +645,32 @@ class SlideReader {
   /**
    * The paragraphs of a list, one per item (bullets hang in the list's left
    * padding); a nested list's items follow their parent item, one level in.
+   * `ownMargins` adds the list's own margins around them, for a list among
+   * other blocks.
    */
-  private listParagraphs(list: HTMLElement, alpha: number, level = 0, outer = 0): { paragraphs: Paragraph[]; elements: HTMLElement[] } {
+  private listParagraphs(list: HTMLElement, alpha: number, level = 0, outer = 0, ownMargins = true): { paragraphs: Paragraph[]; elements: HTMLElement[] } {
     const style = this.style(list);
-    const type = style.listStyleType;
-    const chars: Record<string, string> = { disc: '•', circle: '◦', square: '▪' };
-    const bullet: Paragraph['bullet'] =
-      type === 'none'
-        ? undefined
-        : chars[type]
-          ? { type: 'char', char: chars[type]! }
-          : { type: 'number', start: list instanceof HTMLOListElement ? list.start || 1 : 1, scheme: NUMBER_SCHEMES[type] };
+    const bullet = this.listMarker(list, style);
     const items = Array.from(list.children).filter((child): child is HTMLLIElement => child instanceof HTMLLIElement);
     const padding = px(style.paddingLeft);
     const marginLeft = outer + padding || undefined;
     const paragraphs: Paragraph[] = [];
     const elements: HTMLElement[] = [];
-    items.forEach((item, i) => {
+    // An item's margins sit around all it holds, nested lists included; touching margins collapse to the larger one.
+    const widen = (p: Paragraph | undefined, side: 'spaceBefore' | 'spaceAfter', margin: number): void => {
+      if (p && margin > (p[side] ?? 0)) p[side] = margin;
+    };
+    items.forEach((item) => {
       const nested = Array.from(item.children).filter((c): c is HTMLElement => c instanceof HTMLUListElement || c instanceof HTMLOListElement);
       const own = this.runs(item, alpha).some((run) => run.text.trim() || run.lineBreak);
+      const first = paragraphs.length;
       if (own || nested.length === 0) {
-        const p = this.paragraph(item, alpha, { bullet: this.style(item).listStyleType === 'none' ? undefined : bullet, marginLeft, ...(level ? { hanging: padding, level } : {}) });
-        if (i === 0) p.spaceBefore = (p.spaceBefore ?? 0) + px(style.marginTop) || undefined;
-        if (i === items.length - 1 && nested.length === 0) p.spaceAfter = (p.spaceAfter ?? 0) + px(style.marginBottom) || undefined;
+        const p = this.paragraph(item, alpha, { bullet: this.style(item).listStyleType === 'none' ? undefined : bullet, marginLeft, spaceBefore: undefined, spaceAfter: undefined, ...(level ? { hanging: padding, level } : {}) });
+        if (p.bullet) {
+          const color = resolveColor(getComputedStyle(item, '::marker').color);
+          const text = p.runs.find((run) => run.text.trim())?.color;
+          if (color && (!text || color.hex !== text.hex || color.alpha !== text.alpha)) p.bullet = { ...p.bullet, color: withOpacity(color, alpha) };
+        }
         paragraphs.push(p);
         elements.push(item);
       }
@@ -612,8 +679,38 @@ class SlideReader {
         paragraphs.push(...inner.paragraphs);
         elements.push(...inner.elements);
       }
+      const itemStyle = this.style(item);
+      widen(paragraphs[first], 'spaceBefore', px(itemStyle.marginTop));
+      widen(paragraphs[paragraphs.length - 1], 'spaceAfter', px(itemStyle.marginBottom));
     });
+    if (level === 0) {
+      // The list itself is a flex item, so its own margins stay apart from its items'.
+      collapseGaps(paragraphs);
+      const head = paragraphs[0];
+      const tail = paragraphs[paragraphs.length - 1];
+      if (head && ownMargins) head.spaceBefore = (head.spaceBefore ?? 0) + px(style.marginTop) || undefined;
+      if (tail && ownMargins) tail.spaceAfter = (tail.spaceAfter ?? 0) + px(style.marginBottom) || undefined;
+    } else {
+      widen(paragraphs[0], 'spaceBefore', px(style.marginTop));
+      widen(paragraphs[paragraphs.length - 1], 'spaceAfter', px(style.marginBottom));
+    }
     return { paragraphs, elements };
+  }
+
+  /** The marker a list draws, with notes for what PowerPoint numbering cannot follow. */
+  private listMarker(list: HTMLElement, style: CSSStyleDeclaration): Paragraph['bullet'] {
+    const type = style.listStyleType;
+    if (type === 'none') return undefined;
+    if (style.listStylePosition === 'inside') this.job.notes.add('listInside', this.entry.number);
+    const chars: Record<string, string> = { disc: '•', circle: '◦', square: '▪' };
+    if (chars[type]) return { type: 'char', char: chars[type]! };
+    const text = /^"(.*)"$/s.exec(type);
+    if (text) return text[1] ? { type: 'char', char: text[1], ownFont: true } : undefined;
+    const ordered = list instanceof HTMLOListElement ? list : undefined;
+    if (ordered?.reversed) this.job.notes.add('listReversed', this.entry.number);
+    const start = ordered?.hasAttribute('start') ? ordered.start : 1;
+    if (start < 1) this.job.notes.add('listStart', this.entry.number);
+    return { type: 'number', start, scheme: NUMBER_SCHEMES[type] };
   }
 
   /** Text, lists and text boxes as a text box over their panel. */
@@ -626,11 +723,7 @@ class SlideReader {
       paragraphs.push({ ...this.paragraph(el, alpha), spaceBefore: undefined, spaceAfter: undefined });
       elements.push(el);
     } else if (kind === 'list') {
-      const list = this.listParagraphs(el, alpha);
-      list.paragraphs.forEach((p, i) => {
-        if (i === 0) p.spaceBefore = undefined;
-        if (i === list.paragraphs.length - 1) p.spaceAfter = undefined;
-      });
+      const list = this.listParagraphs(el, alpha, 0, 0, false);
       paragraphs.push(...list.paragraphs);
       elements.push(...list.elements);
       listPadding = px(style.paddingLeft);
@@ -659,7 +752,9 @@ class SlideReader {
     if (align === 'ctr') box.x -= extra / 2;
     else if (align === 'r') box.x -= extra;
     box.w += extra;
-    const body: TextBody = { paragraphs, inset, anchor: anchorOf(style), wrap: !single };
+    let body: TextBody = { paragraphs, inset, anchor: anchorOf(style), wrap: !single };
+    if (kind === 'list') body = edgeSpaceAsInset(body);
+    if (single) body = centerSingleLine(body, frame.h);
     this.elements.push({ type: 'shape', name: this.name('Text'), box, geometry: { preset: 'rect' }, fill: { type: 'none' }, text: body, textBox: true });
   }
 
@@ -699,7 +794,7 @@ class SlideReader {
   }
 
   /** A picture frame: its panel, then the picture, cropped to what shows. */
-  private async image(el: HTMLElement, frame: Frame, alpha: number, node: ImageNode | undefined): Promise<void> {
+  private async image(el: HTMLElement, frame: Frame, alpha: number, node: ImageNode | undefined, mask?: [number, number][]): Promise<void> {
     const style = this.style(el);
     const img = Array.from(el.children).find((child): child is HTMLImageElement => child instanceof HTMLImageElement) ?? null;
     const src = img ? img.currentSrc || img.getAttribute('src') || '' : '';
@@ -715,10 +810,15 @@ class SlideReader {
       const natural = { w: img.naturalWidth || picture?.width || imgBox.w, h: img.naturalHeight || picture?.height || imgBox.h };
       const content = objectContentRect(own.objectFit, own.objectPosition, imgBox, natural);
       const visible = intersect(content, intersect(imgBox, clip));
+      const cut = mask ? polygonOutline(mask, visible) : undefined;
+      if (cut === null && node && mask) {
+        await this.clippedPicture(el, node, frame, mask);
+        return;
+      }
       const whole = Math.abs(visible.x - clip.x) < 1 && Math.abs(visible.y - clip.y) < 1 && Math.abs(visible.w - clip.w) < 1 && Math.abs(visible.h - clip.h) < 1;
       // The frame's shadow goes on the picture when the picture fills it.
-      await this.panel(el, frame, alpha, this.name('Shape'), { shadow: !(whole && plain) });
-      if (visible.w >= 0.5 && visible.h >= 0.5 && content.w > 0 && content.h > 0) {
+      await this.panel(el, frame, alpha, this.name('Shape'), { shadow: !(whole && plain), outline: mask });
+      if (visible.w >= 0.5 && visible.h >= 0.5 && content.w > 0 && content.h > 0 && (!cut || cut.length > 0)) {
         const key = known ?? this.media.add(picture!.data, picture!.type, this.job.capture.assets.url(src));
         const crop = {
           l: (visible.x - content.x) / content.w,
@@ -730,24 +830,31 @@ class SlideReader {
         const [cx, cy] = frame.toSlide(visible.x + visible.w / 2, visible.y + visible.h / 2);
         const w = visible.w * frame.sx;
         const h = visible.h * frame.sy;
-        const css = whole && plain ? parseBoxShadow(style.boxShadow) : null;
-        const radius = whole ? cornerRadius(style.borderTopLeftRadius, frame.w, frame.h) * frame.sx : 0;
+        const radiusValue = style.borderTopLeftRadius;
+        const radius = whole ? cornerRadius(radiusValue, frame.w, frame.h) * frame.sx : 0;
+        const oval = whole && /%$/.test(radiusValue.trim()) && parseFloat(radiusValue) >= 50;
+        const outline = cut ?? (whole ? undefined : this.roundedCut(el, style, visible, clip));
         this.elements.push({
           type: 'picture',
           name: this.name(node?.video ? 'Video' : 'Picture'),
           box: { x: cx - w / 2, y: cy - h / 2, w, h, rot: frame.box.rot },
           media: key,
           crop: cropped ? crop : undefined,
-          radius: radius > 0.5 ? radius : undefined,
-          shadow: css ? { x: css.x, y: css.y, blur: css.blur, color: withOpacity(css.color, alpha) } : undefined,
+          radius: !oval && radius > 0.5 ? radius : undefined,
+          oval: oval || undefined,
+          outline: outline?.map(([x, y]) => [x * frame.sx, y * frame.sy] as const),
+          shadow: whole && plain ? this.shadow(style.boxShadow, frame, alpha) : undefined,
           alpha: alpha < 1 ? alpha : undefined,
           description: node?.alt || undefined,
         });
       }
       placed = true;
       if (node?.video) this.job.notes.add('video', this.entry.number);
+    } else if (mask && node?.video) {
+      await this.clippedPicture(el, node, frame, mask);
+      return;
     } else {
-      await this.panel(el, frame, alpha, this.name('Shape'));
+      await this.panel(el, frame, alpha, this.name('Shape'), { outline: mask });
     }
     if (placed) return;
     if (node?.video) {
@@ -756,6 +863,20 @@ class SlideReader {
     } else if (src) {
       this.job.notes.add('picture', this.entry.number);
     }
+  }
+
+  /**
+   * The outline of a picture that leaves a gap inside its rounded frame, cut
+   * where it reaches into the frame's curves (inside the borders).
+   */
+  private roundedCut(el: HTMLElement, style: CSSStyleDeclaration, picture: Rect, clip: Rect): Array<[number, number]> | undefined {
+    const values = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius] as const;
+    const outer = cornerRadii(values, el.offsetWidth, el.offsetHeight);
+    if (!outer.some((r) => r.x > 0.5 && r.y > 0.5)) return undefined;
+    const [l, t, r, b] = [style.borderLeftWidth, style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth].map(px) as [number, number, number, number];
+    const sides: Array<[number, number]> = [[l, t], [r, t], [r, b], [l, b]];
+    const inner = outer.map((radius, i) => ({ x: Math.max(0, radius.x - sides[i]![0]), y: Math.max(0, radius.y - sides[i]![1]) }));
+    return pictureOutline(picture, clip, inner);
   }
 
   /** A dark frame with a play mark, for a video without a poster picture. */
@@ -807,7 +928,6 @@ class SlideReader {
         const [x = 0, y = 0] = pair.split(',').map(Number);
         return [(x / 100) * w, (y / 100) * h];
       });
-    const css = parseBoxShadow(node.style['box-shadow']);
     this.elements.push({
       type: 'shape',
       name: this.name('Shape'),
@@ -815,7 +935,7 @@ class SlideReader {
       geometry: { path: points, closed: true },
       fill: fillColor && fillColor.alpha > 0 ? { type: 'solid', color: withOpacity(fillColor, alpha) } : { type: 'none' },
       line: stroke && strokeColor ? { width: stroke.width, color: withOpacity(strokeColor, alpha), dash: dashOf(stroke.line) } : undefined,
-      shadow: css ? { x: css.x, y: css.y, blur: css.blur, color: withOpacity(css.color, alpha) } : undefined,
+      shadow: this.shadow(node.style['box-shadow'], frame, alpha),
     });
   }
 

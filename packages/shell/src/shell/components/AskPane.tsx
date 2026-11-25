@@ -2,6 +2,9 @@
  * The "Ask agent" pane beside the page: the owner session's state, what was
  * sent from here, and a box whose messages go to that session
  * (`artifacts.ask`).
+ *
+ * On a cloud host no session owns the artifact: the pane says what the host says of the owner's agent (a linked
+ * computer connected or away, an MCP client used lately, or none), and, once sent, whether it has the request now.
  */
 
 import { Send, X } from 'lucide-react';
@@ -9,22 +12,32 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, IconButton } from '@open-artifact/ui';
 import { OwnerBadge } from '../../components/OwnerBadge.tsx';
 import { ago } from '../../lib/format.ts';
+import { cloudAskLine } from '../../lib/cloud.ts';
 import { t, type MessageKey } from '../../lib/i18n.ts';
 import { ask } from '../actions.ts';
-import { useAgentName, useOwner, useOwnerState } from '../hooks.ts';
+import { useAgentName, useCloudAgent, useOwner, useOwnerState, useRole } from '../hooks.ts';
 import type { Delivery } from '../model.ts';
 import { useShell } from '../store.ts';
 
-const DELIVERY: Record<Delivery, MessageKey> = { delivered: 'viaDelivered', inbox: 'viaInbox', failed: 'viaFailed' };
+const DELIVERY: Record<Delivery, MessageKey> = { delivered: 'viaDelivered', drafted: 'viaDrafted', inbox: 'viaInbox', failed: 'viaFailed' };
 
 /** The pane's heading lines for the owner's state. */
 function useStateLines(agent: string): { state: string; note: string } {
   const owner = useOwner();
   const status = useOwnerState();
+  const cloudAgent = useCloudAgent();
+  const role = useRole();
+  if (cloudAgent && status !== 'working') {
+    const said = cloudAskLine(cloudAgent, role === 'owner');
+    return { state: t(said.key, said.vars), note: '' };
+  }
+  if (cloudAgent) return { state: t('working', { agent: cloudAgent.name }), note: '' };
   if (!owner) return { state: t('noOwner'), note: t('noOwnerNote') };
-  if (status === 'working') return { state: t('working', { agent }), note: t('ownerNote', { harness: owner.harness }) };
-  if (owner.live) return { state: t('agentIdle', { agent }), note: t('ownerNote', { harness: owner.harness }) };
-  return { state: t('sessionOffline'), note: t('offlineNote', { agent, harness: owner.harness }) };
+  // The harness's display name when its profile gives one, else its id as it is.
+  const harness = owner.harnessTitle ?? owner.harness;
+  if (status === 'working') return { state: t('working', { agent }), note: t('ownerNote', { harness }) };
+  if (owner.live) return { state: t('agentIdle', { agent }), note: t('ownerNote', { harness }) };
+  return { state: t('sessionOffline'), note: t('offlineNote', { agent, harness }) };
 }
 
 /** The ask pane. */
@@ -33,7 +46,11 @@ export function AskPane() {
   const sent = useShell((state) => state.sent);
   const status = useShell((state) => state.askStatus);
   const ownerStatus = useOwnerState();
+  const cloudAgent = useCloudAgent();
+  const owner = useOwner();
   const { state, note } = useStateLines(agent);
+  // A cloud host's agent: its own words for the dot, and "waiting for the agent" (there is no session to wait for).
+  const badgeLabel = cloudAgent && ownerStatus !== 'working' ? t(cloudAgent.state === 'online' ? 'statusConnected' : cloudAgent.state === 'none' ? 'statusNoAgent' : 'statusOffline') : undefined;
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -58,18 +75,18 @@ export function AskPane() {
     >
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line pl-3.5 pr-1.5">
         <span className="min-w-0 flex-1 truncate font-medium">{agent}</span>
-        <OwnerBadge state={ownerStatus} />
+        <OwnerBadge state={ownerStatus} {...(badgeLabel ? { label: badgeLabel } : {})} />
         <IconButton label={t('hideAsk')} icon={<X className="size-4" />} size="lg" onClick={() => useShell.getState().setAskOpen(false)} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3.5">
         <p className="mb-1 mt-0 font-medium">{state}</p>
-        <p className="mb-3.5 mt-0 text-xs text-fg-muted">{note}</p>
+        {note ? <p className="mb-3.5 mt-0 text-xs text-fg-muted">{note}</p> : <div className="mb-3.5" />}
         <ol ref={log} className="m-0 flex list-none flex-col gap-2.5 p-0">
           {sent.map((message, index) => (
             <li key={`${message.at}-${index}`} className="max-w-[92%] self-end whitespace-pre-wrap break-words rounded-2xl bg-surface-2 px-3 py-2">
               {message.text}
               <span className="mt-0.5 block text-[11px] text-fg-muted">
-                {ago(message.at)} · {t(DELIVERY[message.delivery])}
+                {ago(message.at)} · {t(cloudAgent && message.delivery === 'inbox' ? 'viaWaitingAgent' : DELIVERY[message.delivery])}
               </span>
             </li>
           ))}
@@ -102,7 +119,7 @@ export function AskPane() {
             {status}
           </span>
           <Button type="submit" size="lg" variant="primary" disabled={busy || !text.trim()} icon={<Send className="size-3.5" />}>
-            {t('sendToAgent', { agent })}
+            {t(owner?.wakeMode === 'draft' ? 'sendToConversation' : 'sendToAgent', { agent })}
           </Button>
         </div>
       </form>

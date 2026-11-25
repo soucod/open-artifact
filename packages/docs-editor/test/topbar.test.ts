@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { SHORTCUT_GROUPS, keyLabel } from '../src/topbar/shortcuts.ts';
-import { cleanDocName, defaultPaper, exportedTitle, exportFailure, notesText, otherNotes } from '../src/topbar/words.ts';
+import { cleanDocName, defaultPaper, exportedTitle, exportFailure, notesText, otherNotes, printToPdfWords } from '../src/topbar/words.ts';
 
 describe('key labels', () => {
   it('writes chords the platform’s way', () => {
@@ -47,6 +47,13 @@ describe('renaming', () => {
 });
 
 describe('export words', () => {
+  it('tells the person to pick "Save as PDF" in the print dialog, in Chinese for a Chinese browser', () => {
+    assert.match(printToPdfWords(['en-US']).description, /“Save as PDF”/);
+    assert.match(printToPdfWords(['zh-CN', 'en']).description, /“另存为 PDF”/);
+    assert.match(printToPdfWords([]).title, /Print to PDF/);
+    assert.match(exportFailure('pdf', 'doc', 'no_print'), /print dialog/);
+  });
+
   it('titles the file, naming the pictures it came without', () => {
     assert.equal(exportedTitle('pdf'), 'Exported as a PDF');
     assert.equal(exportedTitle('docx', [{ code: 'kept_as_text', what: 'image (not available here)', count: 2 }]), 'Exported as Word without 2 images');
@@ -63,5 +70,8 @@ describe('export words', () => {
     assert.match(exportFailure('pdf', 'tab', 'no_chrome'), /Chrome/);
     assert.equal(exportFailure('docx', 'tab', 'no_node'), 'This tab can’t be exported.');
     assert.equal(exportFailure('markdown', 'doc', 'weird'), 'Couldn’t export this document as Markdown. Try again in a moment.');
+    // A refusal says the host's own words, or a plain one without them.
+    assert.equal(exportFailure('docx', 'doc', 'not_writer', 'The owner has not let viewers download or export this artifact.'), 'The owner has not let viewers download or export this artifact.');
+    assert.equal(exportFailure('pdf', 'doc', 'not_granted'), 'You can’t export this document.');
   });
 });

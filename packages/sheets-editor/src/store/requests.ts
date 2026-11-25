@@ -116,6 +116,12 @@ export function readUpdatedRevision(outcome: StoreOutcome): number | null {
   return isUint32(revision) ? revision : 0;
 }
 
+/** The revision an answer says the log stands at, or 0 when it says none. */
+export function revisionOfAnswer(outcome: StoreOutcome): number {
+  const revision = answerOf(outcome)?.revision;
+  return isUint32(revision) ? revision : 0;
+}
+
 /** The revision of a workbook whose sheets are all blank in `locale`, or null. */
 export function blankWorkbookRevision(locale: string, outcome: StoreOutcome): number | null {
   const answer = answerOf(outcome);
@@ -173,6 +179,7 @@ export const PAGE_OUT_OF_DATE_FAILURES: ReadonlyMap<string, Omit<StoreFailure, '
 export const ENGINE_REFUSAL_FAILURES: ReadonlyMap<string, Omit<StoreFailure, 'word'>> = new Map([
   ['unknownFormatVersion', storeFailure('storeBehind', 'notTakenForNow')],
   ['unknownReadKind', storeFailure('storeBehind')],
+  ['unknownLoadForm', storeFailure('storeBehind')],
   ['unreadableEdit', storeFailure('requestUnreadable')],
   ['formatVersionDoesNotFitOperations', storeFailure('requestUnreadable')],
   ['unreadableRead', storeFailure('requestUnreadable')],

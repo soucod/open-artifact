@@ -4,10 +4,13 @@
  * selects that open chrome menus, and a 16px color well.
  */
 
+import { Combobox as BaseCombobox } from '@base-ui/react/combobox';
 import { Select as BaseSelect } from '@base-ui/react/select';
 import { Check, ChevronDown, Palette } from 'lucide-react';
 import { forwardRef, useEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { cn } from '@open-artifact/ui';
+import { cn, isComposingKey } from '@open-artifact/ui';
+import { historyKeyOf, stepLength } from '../lib/field-keys.ts';
+import { redo, undo } from '../services/commands.ts';
 import { ChromeMenu, ChromeMenuItem, ChromeMenuLabel, Tip } from '@open-artifact/editor-kit/react';
 
 /** A design-system color a color field offers (see services/design-systems.ts `useSystemSwatches`). */
@@ -62,14 +65,6 @@ const FIELD =
 /** Fields fill their row unless given a width. */
 const fill = (className?: string) => (className?.includes('w-[') ? null : 'w-full flex-1');
 
-/** Bumps the number in a CSS length by `delta`, keeping its unit. */
-function bump(text: string, delta: number): string | null {
-  const match = /^(-?\d*\.?\d+)([a-z%]*)$/i.exec(text.trim());
-  if (!match) return null;
-  const next = Math.round((Number(match[1]) + delta) * 100) / 100;
-  return `${next}${match[2]}`;
-}
-
 /** Props of {@link PInput}. */
 export interface PInputProps {
   value: string;
@@ -87,12 +82,21 @@ export interface PInputProps {
 
 /**
  * A text field that keeps a draft and commits on Enter or blur; Escape
- * reverts. Arrow keys step numbers (Shift: by 10).
+ * reverts. Enter keeps the focus, with the text selected, so the next value
+ * can be typed at once. Arrow keys step numbers (Shift: by 10); an empty
+ * field steps from its placeholder. Undo and redo with nothing typed undo
+ * the design, not the field's text.
  */
 export function PInput({ value, onCommit, placeholder, unit, prefix, disabled, className, mono, ...aria }: PInputProps) {
   const [draft, setDraft] = useState(value);
   const cancelled = useRef(false);
-  useEffect(() => setDraft(value), [value]);
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    setDraft(value);
+    // After an Enter the new value is selected again once it shows.
+    const input = field.current;
+    if (input && input.ownerDocument.activeElement === input) requestAnimationFrame(() => input.ownerDocument.activeElement === input && input.select());
+  }, [value]);
   const commit = (text = draft) => {
     const trimmed = text.trim();
     const next = unit && /^-?\d*\.?\d+$/.test(trimmed) ? `${trimmed}${unit}` : trimmed;
@@ -102,6 +106,7 @@ export function PInput({ value, onCommit, placeholder, unit, prefix, disabled, c
     <label className={cn(FIELD, fill(className), 'flex items-center gap-1 px-2', className)}>
       {prefix ? <span className="shrink-0 text-[11px] text-chrome-muted">{prefix}</span> : null}
       <input
+        ref={field}
         aria-label={aria['aria-label']}
         value={draft}
         placeholder={placeholder}
@@ -113,15 +118,21 @@ export function PInput({ value, onCommit, placeholder, unit, prefix, disabled, c
           cancelled.current = false;
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') {
-            event.currentTarget.blur();
+          if (isComposingKey(event.nativeEvent)) return;
+          const history = historyKeyOf(event);
+          if (history && draft === value) {
+            event.preventDefault();
+            if (history === 'undo') undo();
+            else redo();
+          } else if (event.key === 'Enter') {
+            commit();
+            event.currentTarget.select();
           } else if (event.key === 'Escape') {
             cancelled.current = true;
             setDraft(value);
             event.currentTarget.blur();
           } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-            const base = draft.trim() || placeholder || '';
-            const stepped = bump(base, (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 10 : 1));
+            const stepped = stepLength(draft, placeholder ?? '', (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 10 : 1), unit !== undefined);
             if (stepped === null) return;
             event.preventDefault();
             const shown = unit && stepped.endsWith(unit) ? stepped.slice(0, -unit.length) : stepped;
@@ -221,6 +232,88 @@ export function PSelect({
         </BaseSelect.Positioner>
       </BaseSelect.Portal>
     </BaseSelect.Root>
+  );
+}
+
+/**
+ * A {@link PSelect} with a search field over its list: typing narrows the
+ * options by name, arrow keys move and Enter picks.
+ */
+export function PSearchSelect({
+  value,
+  options,
+  onChange,
+  placeholder = '—',
+  searchLabel = 'Search',
+  disabled,
+  className,
+  ...aria
+}: {
+  value: string | null;
+  options: POption[];
+  onChange: (value: string) => void;
+  placeholder?: ReactNode;
+  /** Name and placeholder of the search field. */
+  searchLabel?: string;
+  disabled?: boolean;
+  className?: string;
+  'aria-label'?: string;
+}) {
+  const byValue = new Map(options.map((option) => [option.value, option]));
+  const current = value === null ? undefined : byValue.get(value);
+  const nameOf = (item: string) => {
+    const label = byValue.get(item)?.label;
+    return typeof label === 'string' ? label : item;
+  };
+  return (
+    <BaseCombobox.Root
+      items={options.map((option) => option.value)}
+      value={current ? value : null}
+      onValueChange={(next: string | null) => next !== null && onChange(next)}
+      itemToStringLabel={nameOf}
+      autoHighlight
+      disabled={disabled}
+    >
+      <BaseCombobox.Trigger
+        aria-label={aria['aria-label']}
+        className={cn(FIELD, fill(className), 'flex cursor-default items-center gap-1 pl-2 pr-[6px] text-left data-[disabled]:opacity-50', className)}
+      >
+        <span className={cn('min-w-0 flex-1 truncate', !current && 'text-chrome-muted')}>{current?.label ?? (value || placeholder)}</span>
+        <ChevronDown className="size-4 shrink-0 text-chrome-muted" strokeWidth={1.5} />
+      </BaseCombobox.Trigger>
+      <BaseCombobox.Portal>
+        <BaseCombobox.Positioner sideOffset={4} className="z-[1000]">
+          <BaseCombobox.Popup className="flex max-h-[min(420px,var(--available-height))] min-w-[var(--anchor-width)] flex-col rounded-[14px] bg-chrome p-1.5 text-[13px] text-chrome-fg shadow-chrome-popup outline-none">
+            <BaseCombobox.Input
+              aria-label={searchLabel}
+              placeholder={searchLabel}
+              autoComplete="off"
+              spellCheck={false}
+              className="mb-1 h-7 shrink-0 rounded-[8px] bg-chrome-field px-2 text-chrome-fg outline-none shadow-[inset_0_0_0_1px_var(--dc-field-ring)] placeholder:text-chrome-muted focus:shadow-[inset_0_0_0_1px_#257de0]"
+            />
+            <BaseCombobox.Empty className="px-2.5 py-1.5 text-chrome-muted empty:hidden">No matches</BaseCombobox.Empty>
+            <BaseCombobox.List className="min-h-0 flex-1 overflow-y-auto">
+              {(item: string) => (
+                <BaseCombobox.Item
+                  key={item}
+                  value={item}
+                  className="flex h-7 cursor-default select-none items-center gap-2 rounded-[8px] pl-2 pr-2.5 outline-none data-[highlighted]:bg-chrome-hover"
+                >
+                  <span className="flex size-4 shrink-0 items-center justify-center">
+                    <BaseCombobox.ItemIndicator>
+                      <Check className="size-4 text-chrome-accent" strokeWidth={2.25} />
+                    </BaseCombobox.ItemIndicator>
+                  </span>
+                  <span className="truncate" style={byValue.get(item)?.style}>
+                    {byValue.get(item)?.label ?? item}
+                  </span>
+                </BaseCombobox.Item>
+              )}
+            </BaseCombobox.List>
+          </BaseCombobox.Popup>
+        </BaseCombobox.Positioner>
+      </BaseCombobox.Portal>
+    </BaseCombobox.Root>
   );
 }
 

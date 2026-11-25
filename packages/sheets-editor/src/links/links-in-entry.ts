@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import {
   linkSpansOfLooks,
   plainLooks,
@@ -21,10 +20,18 @@ import { TEXT_PREFIX_QUOTE, addTextPrefixQuote, stripTextPrefixQuote } from '../
 import { textToEditAt, startEntryEditing } from '../editor/start-entry.ts';
 import { looksOfRichCellText } from '../editor/entry-looks.ts';
 import { queueEdit, enterEntryEdit, IF_QUEUED_DEFAULTS } from '../model/edit-effects.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { EntryLooks, FontMark, LastDone, PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function trimmedEntrySpan(text?: Dynamic, { start: start, end: end }: Dynamic = {}) {
+import type { PageTransition } from '../state/transitions.ts';
+import type { AddressPastedOverWords, CaretInEntry } from '../state/event-reducer.ts';
+import type { CaretSpan } from '../keys/key-acts.ts';
+import type { LinkSpan } from '../editor/text-looks.ts';
+/** An address pasted over words of an entry, to link them to: where the words start and end. */
+export interface LinkOverWords extends CaretSpan {
+  address: string;
+}
+export function trimmedEntrySpan(text: string, { start, end }: CaretSpan = {} as CaretSpan): CaretSpan {
   let from = Math.max(start, spanOfEntryText(text).start);
   let picked = text.slice(from, Math.max(from, end));
   return {
@@ -32,8 +39,8 @@ export function trimmedEntrySpan(text?: Dynamic, { start: start, end: end }: Dyn
     end: from + picked.trimEnd().length,
   };
 }
-export function addressWordAt(text?: Dynamic, at?: Dynamic) {
-  let [start, end]: Dynamic = [at, at];
+export function addressWordAt(text: string, at: number): CaretSpan | null {
+  let [start, end] = [at, at];
   while (start > 0 && !ADDRESS_BREAK_PATTERN.test(text.charAt(start - 1))) start -= 1;
   while (end < text.length && !ADDRESS_BREAK_PATTERN.test(text.charAt(end))) end += 1;
   let word = text.slice(start, end);
@@ -46,30 +53,30 @@ export function addressWordAt(text?: Dynamic, at?: Dynamic) {
       }
     : null;
 }
-export function wordSpanAtCaret(text?: Dynamic, looks?: Dynamic, at?: Dynamic) {
-  if (typeof (Intl as Dynamic).Segmenter !== 'function') return null;
+export function wordSpanAtCaret(text: string, looks: EntryLooks, at: number): CaretSpan | null {
+  if (typeof Intl.Segmenter !== 'function') return null;
   let word = [
-    ...new (Intl as Dynamic).Segmenter(undefined, {
+    ...new Intl.Segmenter(undefined, {
       granularity: 'word',
     }).segment(text),
   ].find(
-    ({ segment: segment, index: index, isWordLike: isWordLike }: Dynamic) =>
+    ({ segment, index, isWordLike }) =>
       isWordLike === true && index <= at && at <= index + segment.length,
   );
   if (word === undefined) return null;
   let span = addressWordAt(text, at) ?? spanBetween(word.index, word.index + word.segment.length);
   let linkSpans = linkSpansOfLooks(looks);
   return {
-    start: Math.max(span.start, ...linkSpans.filter(({ end: end }: Dynamic) => end <= at).map(({ end: end }: Dynamic) => end)),
+    start: Math.max(span.start, ...linkSpans.filter(({ end }) => end <= at).map(({ end }) => end)),
     end: Math.min(
       span.end,
-      ...linkSpans.filter(({ start: start }: Dynamic) => start >= at).map(({ start: start }: Dynamic) => start),
+      ...linkSpans.filter(({ start }) => start >= at).map(({ start }) => start),
     ),
   };
 }
-export function linkSpansAcrossLines(text?: Dynamic, looks?: Dynamic) {
-  let spans: Dynamic = [];
-  for (let span of linkSpansOfLooks(looks) as Dynamic) {
+export function linkSpansAcrossLines(text: string, looks: EntryLooks): LinkSpan[] {
+  let spans: LinkSpan[] = [];
+  for (let span of linkSpansOfLooks(looks)) {
     let last = spans.at(-1);
     if (last?.link === span.link && /^\n+$/.test(text.slice(last.end, span.start)))
       spans[spans.length - 1] = {
@@ -80,16 +87,21 @@ export function linkSpansAcrossLines(text?: Dynamic, looks?: Dynamic) {
   }
   return spans;
 }
-export function openLinkFormInEntry(state: PageState, reads: ReadsWithTextMeasurer, picked?: Dynamic, opensEntry: Dynamic = false) {
-  let { mode: mode } = state;
+export function openLinkFormInEntry(
+  state: PageState,
+  reads: ReadsWithTextMeasurer,
+  picked: CaretSpan,
+  opensEntry: boolean = false,
+): PageState | null {
+  let { mode } = state;
   if (mode.kind !== 'editing') return null;
   let isCaret = picked.start === picked.end;
-  let { start: start, end: end } = trimmedEntrySpan(mode.text, picked);
+  let { start, end } = trimmedEntrySpan(mode.text, picked);
   if (!isCaret && start >= end) return null;
   let cellId = activeAnchorCell(state, reads);
   let looks = mode.looks ?? plainLooks(mode.text, fontMarksOfStyle(reads.formatOf(cellId)));
   let linkSpan = linkSpansAcrossLines(mode.text, looks).find(
-    ({ start: spanStart, end: spanEnd, link: link }: Dynamic) => spanStart <= start && end <= spanEnd && acceptedLinkUrl(link) !== null,
+    ({ start: spanStart, end: spanEnd, link }) => spanStart <= start && end <= spanEnd && acceptedLinkUrl(link) !== null,
   );
   let wordSpan = isCaret ? wordSpanAtCaret(mode.text, looks, start) : null;
   let { start: formStart, end: formEnd } = linkSpan ?? wordSpan ?? spanBetween(start, end);
@@ -102,14 +114,14 @@ export function openLinkFormInEntry(state: PageState, reads: ReadsWithTextMeasur
     menu: null,
     mode: {
       ...mode,
-      looks: looks,
+      looks,
       selectedInEntry: {
         start: formStart,
         end: formEnd,
       },
     },
     linkForm: {
-      cellId: cellId,
+      cellId,
       entry: mode.text,
       text: mode.text.slice(formStart, formEnd),
       address: (linkSpan === undefined ? null : acceptedLinkUrl(linkSpan.link)) ?? '',
@@ -120,13 +132,13 @@ export function openLinkFormInEntry(state: PageState, reads: ReadsWithTextMeasur
         end: formEnd,
       },
       ...(opensEntry && {
-        opensEntry: opensEntry,
+        opensEntry,
       }),
     },
   };
 }
-export function openEntryLinkForm(state: PageState, reads: ReadsWithTextMeasurer, caretInEntry?: Dynamic) {
-  let { mode: mode } = state;
+export function openEntryLinkForm(state: PageState, reads: ReadsWithTextMeasurer, caretInEntry: CaretInEntry | undefined): PageState | null {
+  let { mode } = state;
   let cellId = activeAnchorCell(state, reads);
   if (mode.kind === 'navigating' && isRichTextCell(reads, cellId)) {
     if (hasRichTextLink(reads, cellId))
@@ -147,32 +159,32 @@ export function openEntryLinkForm(state: PageState, reads: ReadsWithTextMeasurer
   if (caretInEntry === undefined || caretInEntry.text !== mode.text || caretInEntry.isComposing) return null;
   return openLinkFormInEntry(state, reads, caretInEntry);
 }
-export function editLinkOfUrlInEntry(state: PageState, reads: ReadsWithTextMeasurer, url?: Dynamic) {
+export function editLinkOfUrlInEntry(state: PageState, reads: ReadsWithTextMeasurer, url: string): PageState | null {
   let linkSpan = state.mode.kind === 'editing' ? linkSpanWithUrl(state.mode.looks, url) : undefined;
   return linkSpan === undefined ? null : openLinkFormInEntry(state, reads, linkSpan, true);
 }
 export function looksWithSpanReplaced(
-  { text: text, looks: looks }: Dynamic,
-  marks?: Dynamic,
-  { start: start, end: end }: Dynamic = {},
-  newText?: Dynamic,
-) {
+  { text, looks }: { text: string; looks: EntryLooks },
+  marks: FontMark[],
+  { start, end }: CaretSpan = {} as CaretSpan,
+  newText: string,
+): EntryLooks {
   if (newText === text.slice(start, end)) return looks;
   if (start < end) return looksWithRangeReplaced(looks, text, start, end, newText);
   let textAfter = text.slice(0, start) + newText + text.slice(end);
   return looksAfterTyping(looks, text, textAfter, start + newText.length, marks);
 }
-export function submitLinkFormInEntry(state: PageState, reads: ReadsWithTextMeasurer, text?: Dynamic, address?: Dynamic) {
-  let { linkForm: form, mode: mode } = state;
+export function submitLinkFormInEntry(state: PageState, reads: ReadsWithTextMeasurer, text: string, address: string): PageTransition {
+  let { linkForm: form, mode } = state;
   let span = form?.inEntry;
   if (span === undefined || mode.kind !== 'editing' || mode.looks === undefined) return withNoEffects(state);
   if (linkAddressProblem(address, true) !== null) return withNoEffects(state);
   if (address.trim() === '' && form?.hasLink !== true) return withNoEffects(state);
-  let finish = (stateAfter?: Dynamic, lastDone?: Dynamic) =>
+  let finish = (stateAfter: PageState, lastDone: LastDone | null) =>
     (form?.opensEntry === true ? commitEntryInPlaceIfEditing(stateAfter, reads) : null) ??
     withNoEffects({
       ...stateAfter,
-      lastDone: lastDone,
+      lastDone,
     });
   let oldText = mode.text.slice(span.start, span.end);
   let typedUrl = linkAddressOfTyped(address);
@@ -224,22 +236,26 @@ export function submitLinkFormInEntry(state: PageState, reads: ReadsWithTextMeas
     },
   );
 }
-export function linkOfAddressPastedOverWords(text?: Dynamic, selected?: Dynamic, pasted?: Dynamic) {
+export function linkOfAddressPastedOverWords(text: string, selected: CaretSpan, pasted: string): LinkOverWords | null {
   let address = encodedLinkUrl(safeLinkUrl(pasted));
   if (address === null || linkAddressProblem(address, true) !== null) return null;
-  let { start: start, end: end } = trimmedEntrySpan(text, selected);
+  let { start, end } = trimmedEntrySpan(text, selected);
   let words = text.slice(start, end);
   return !isFormulaText(text) && words !== '' && !words.includes('\n') && safeLinkUrl(words) === null
     ? {
-        address: address,
-        start: start,
-        end: end,
+        address,
+        start,
+        end,
       }
     : null;
 }
-export function withAddressPastedOverWords(state: PageState, reads: WorkbookReads, pasted?: Dynamic) {
-  let { mode: mode } = state;
-  let { address: address, text: text, start: start, end: end, caretAt: caretAt } = pasted;
+export function withAddressPastedOverWords(
+  state: PageState,
+  reads: WorkbookReads,
+  pasted: LinkOverWords & Pick<AddressPastedOverWords, 'text' | 'caretAt'>,
+): PageState {
+  let { mode } = state;
+  let { address, text, start, end, caretAt } = pasted;
   if (mode.kind !== 'editing' || mode.text !== text) return state;
   let looks = mode.looks ?? plainLooks(text, fontMarksOfStyle(reads.formatOf(activeAnchorCell(state, reads))));
   return {
@@ -254,19 +270,19 @@ export function withAddressPastedOverWords(state: PageState, reads: WorkbookRead
     },
     lastDone: {
       what: 'linkSetInEntry',
-      link: linkSpansOfLooks(looks).some((span: Dynamic) => span.start < end && start < span.end) ? 'changed' : 'added',
+      link: linkSpansOfLooks(looks).some((span) => span.start < end && start < span.end) ? 'changed' : 'added',
     },
   };
 }
-export function removeLinkOfUrlFromCell(state: PageState, reads: ReadsWithTextMeasurer, cellKey?: Dynamic, url?: Dynamic) {
+export function removeLinkOfUrlFromCell(state: PageState, reads: ReadsWithTextMeasurer, cellKey: string, url: string): PageTransition {
   let card = cellExplained(state, reads);
   if (card === null || cellKeyText(card.cellId) !== cellKey) return withNoEffects(state);
   let text = textToEditAt(state, reads, card.cellId);
   let looks = looksOfRichCellText(reads, card.cellId, text);
   if (looks === undefined || linkSpanWithUrl(looks, url) === undefined) return withNoEffects(state);
   let looksUnlinked = linkSpansOfLooks(looks)
-    .filter(({ link: link }: Dynamic) => safeLinkUrl(link) === url)
-    .reduce((looksSoFar: Dynamic, { start: start, end: end }: Dynamic) => withLinkSet(looksSoFar, start, end, null), looks);
+    .filter(({ link }) => safeLinkUrl(link) === url)
+    .reduce((looksSoFar, { start, end }) => withLinkSet(looksSoFar, start, end, null), looks);
   let moved = moveActiveCellTo(state, reads, card.cellId, 'pointer');
   return queueEdit(moved, enterEntryEdit(card.cellId, richTextFromLooks(text, looksUnlinked)), {
     ...IF_QUEUED_DEFAULTS,
@@ -274,17 +290,17 @@ export function removeLinkOfUrlFromCell(state: PageState, reads: ReadsWithTextMe
     done: null,
   });
 }
-export const isRichTextCell = (reads: WorkbookReads, cellId?: Dynamic) => reads.cellOf(cellId)?.input.kind === 'richText';
-export const spanOfEntryText = (text?: Dynamic) => ({
+export const isRichTextCell = (reads: WorkbookReads, cellId: CellId): boolean => reads.cellOf(cellId)?.input.kind === 'richText';
+export const spanOfEntryText = (text: string): CaretSpan => ({
   start: text.length - stripTextPrefixQuote(text).length,
   end: text.length,
 });
-export const spanBetween = (start?: Dynamic, end?: Dynamic) => ({
-  start: start,
-  end: end,
+export const spanBetween = (start: number, end: number): CaretSpan => ({
+  start,
+  end,
 });
 export const ADDRESS_BREAK_PATTERN = /[\s\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Thai}\p{sc=Lao}\p{sc=Khmer}\p{sc=Myanmar}]/u;
 export const entryStartedAtActiveCell = (state: PageState, reads: ReadsWithTextMeasurer) =>
   startEntryEditing(state, reads, textToEditAt(state, reads, activeAnchorCell(state, reads)), 'cell');
-export const linkSpanWithUrl = (looks?: Dynamic, url?: Dynamic) =>
-  looks === undefined ? undefined : linkSpansOfLooks(looks).find(({ link: link }: Dynamic) => safeLinkUrl(link) === url);
+export const linkSpanWithUrl = (looks: EntryLooks | undefined, url: string): LinkSpan | undefined =>
+  looks === undefined ? undefined : linkSpansOfLooks(looks).find(({ link }) => safeLinkUrl(link) === url);

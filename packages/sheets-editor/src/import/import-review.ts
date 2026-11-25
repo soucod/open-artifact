@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { withNoEffects } from '../state/transitions.ts';
 import { partialPlanFromAnswer, askForImportPlan, askWithWish, planForAgent } from './agent-plan.ts';
 import {
@@ -22,27 +21,55 @@ import { NEW_SHEET_DESTINATION } from './import-basics.ts';
 import { matchHeadingsToColumns, fileHeadingsOf } from './places.ts';
 import { joinPrompts } from '../agent/prompt-text.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function receivePartialImportAnswer(state: PageState, reads?: Dynamic, askId?: Dynamic, partialAnswer?: Dynamic) {
-  let importOfAFile = state.importOfAFile;
+import type {
+  AgentOfImport,
+  ImportChangeStood,
+  ImportDestination,
+  ImportOfAFile,
+  ImportPlanSoFar,
+  ImportQuestion,
+  ImportQuestionExample,
+  ImportStood,
+  PageState,
+} from '../state/initial-state.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { ImportChangeByHand, ImportDestinationPick } from '../state/event-reducer.ts';
+import type { ColumnId, SheetId } from '@open-artifact/sheets-core';
+/** The plan as far as it is known: the agent's so far while it writes, else the plan shown. */
+export interface ImportPlanAsFarAsKnown extends ImportPlanSoFar {
+  isAwaited: boolean;
+}
+/** A line of the file left out of the import, as the settings list it. */
+export interface ImportLineLeftOut {
+  line: number;
+  isLeftOut: boolean;
+  canComeBack: boolean;
+}
+export interface ImportLinesLeftOut {
+  lines: ImportLineLeftOut[];
+  /** Lines left out that are not listed. */
+  moreCount: number;
+}
+export function receivePartialImportAnswer(state: PageState, reads: WorkbookReads, askId: number, partialAnswer: unknown): PageTransition {
+  const importOfAFile = state.importOfAFile;
   if (importOfAFile === null || importOfAFile.agent.kind !== 'isAsked' || importOfAFile.agent.askId !== askId) return withNoEffects(state);
   let soFar = importOfAFile.soFar;
   if (soFar === null || importOfAFile.agent.attempt > 1) return withNoEffects(state);
   let partialPlan = partialPlanFromAnswer(partialAnswer, importOfAFile.table, importOfAFile.plan, importOfAFile.words.names);
-  let planWithByHand2 = importPlanWithByHand({
+  let shownPlan = importPlanWithByHand({
     ...importOfAFile,
     plan: {
       ...partialPlan.plan,
       summary: partialPlan.summary,
     },
   });
-  let asking = {
+  let planRead = {
     ...partialPlan,
-    plan: planWithByHand2,
-    summary: planWithByHand2.summary ?? null,
+    plan: shownPlan,
+    summary: shownPlan.summary ?? null,
   };
-  if (!(asking.columnsReadCount > soFar.columnsReadCount || (asking.isTableFound && !soFar.isTableFound))) {
-    let { summary: summary, isSummaryWhole: isSummaryWhole } = asking;
+  if (!(planRead.columnsReadCount > soFar.columnsReadCount || (planRead.isTableFound && !soFar.isTableFound))) {
+    let { summary, isSummaryWhole } = planRead;
     return summary === soFar.summary && isSummaryWhole === soFar.isSummaryWhole
       ? withNoEffects(state)
       : withNoEffects({
@@ -51,83 +78,85 @@ export function receivePartialImportAnswer(state: PageState, reads?: Dynamic, as
             ...importOfAFile,
             soFar: {
               ...soFar,
-              summary: summary,
-              isSummaryWhole: isSummaryWhole,
+              summary,
+              isSummaryWhole,
             },
           },
         });
   }
-  let previewColumns = previewImportColumns(importOfAFile.table, asking.plan, reads, soFar, dropdownOptionsForImport);
+  let preview = previewImportColumns(importOfAFile.table, planRead.plan, reads, soFar, dropdownOptionsForImport);
   return withNoEffects({
     ...state,
     importOfAFile: {
       ...importOfAFile,
       soFar: {
-        ...asking,
-        preview: previewColumns,
+        ...planRead,
+        preview,
       },
     },
   });
 }
-export function importLinesLeftOut(importOfAFile?: Dynamic) {
-  let { plan: plan, preview: preview } = importPlanSoFar(importOfAFile);
-  let value = (input?: Dynamic) => input > (plan.headerLine ?? 0);
-  let linesByHand = Object.keys(importOfAFile.byHand.lines).map(Number).filter(value);
-  let linesLeftOut = [...new (Set as Dynamic)([...linesByHand, ...preview.linesLeftOut])]
-    .toSorted((input?: Dynamic, options?: Dynamic) => input - options)
+export function importLinesLeftOut(importOfAFile: ImportOfAFile): ImportLinesLeftOut {
+  let { plan, preview } = importPlanSoFar(importOfAFile);
+  let isBelowHeadings = (line: number) => line > (plan.headerLine ?? 0);
+  let linesByHand = Object.keys(importOfAFile.byHand.lines).map(Number).filter(isBelowHeadings);
+  let linesLeftOut = [...new Set([...linesByHand, ...preview.linesLeftOut])]
+    .toSorted((line, otherLine) => line - otherLine)
     .map(
-      (input?: Dynamic) => ({
-        line: input,
-        isLeftOut: !value(input) || plan.linesLeftOut.includes(input),
-        canComeBack: value(input),
+      (line): ImportLineLeftOut => ({
+        line,
+        isLeftOut: !isBelowHeadings(line) || plan.linesLeftOut.includes(line),
+        canComeBack: isBelowHeadings(line),
       }),
     );
-  let length = linesLeftOut.filter(({ isLeftOut: isLeftOut }: Dynamic) => isLeftOut).length;
+  let listedCount = linesLeftOut.filter(({ isLeftOut }) => isLeftOut).length;
   return {
     lines: linesLeftOut,
-    moreCount: preview.lineLeftOutCount - length,
+    moreCount: preview.lineLeftOutCount - listedCount,
   };
 }
-export function importNotesToShow(importOfAFile?: Dynamic) {
+export function importNotesToShow(importOfAFile: ImportOfAFile): string[] {
   if (!importOfAFile.isPlanByAgent) return [];
-  let { whyThere: whyThere, notes: notes } = importOfAFile.plan;
-  let askedBefore = new (Set as Dynamic)(importPlanSoFar(importOfAFile).plan.notes);
+  let { whyThere, notes } = importOfAFile.plan;
+  let notesSoFar = new Set(importPlanSoFar(importOfAFile).plan.notes);
   return [
-    ...new (Set as Dynamic)([
+    ...new Set([
       ...(importPlacesLeft(importOfAFile).length > 0 && whyThere !== null ? [whyThere] : []),
-      ...notes.filter((note?: Dynamic) => askedBefore.has(note)),
+      ...notes.filter((note) => notesSoFar.has(note)),
     ]),
   ];
 }
-export function columnsQuestionDecides({ options: options }: Dynamic) {
+/** The columns whose reading depends on the option chosen for a question. */
+export function columnsQuestionDecides({ options }: Pick<ImportQuestion, 'options'>): number[] {
   return [
-    ...new (Set as Dynamic)(
-      options.flatMap(({ readings: readings }: Dynamic) => readings.map(({ columnIndex: columnIndex }: Dynamic) => columnIndex)),
+    ...new Set(
+      options.flatMap(({ readings }) => readings.map(({ columnIndex }) => columnIndex)),
     ),
-  ].filter((input?: Dynamic) => {
-    let mapped = options.map(
-      ({ readings: readings }: Dynamic) =>
-        JSON.stringify(readings.find((reading?: Dynamic) => reading.columnIndex === input)?.reading),
+  ].filter((columnIndex) => {
+    let readingsOfColumn = options.map(
+      ({ readings }) =>
+        JSON.stringify(readings.find((reading) => reading.columnIndex === columnIndex)?.reading),
     );
-    return new (Set as Dynamic)(mapped).size > 1;
+    return new Set(readingsOfColumn).size > 1;
   });
 }
-export function openImportQuestionIds(importOfAFile?: Dynamic) {
+export function openImportQuestionIds(importOfAFile: ImportOfAFile): string[] {
   let destination = importDestinationOf(importOfAFile);
-  let questions = destination.kind === 'sheet' && destination.how.kind === 'mergeByKey' ? destination.how.keyColumnIndex : null;
-  let decided = new (Set as Dynamic)(columnsLeftOutByHand(importOfAFile.byHand).filter((input?: Dynamic) => input !== questions));
+  let keyColumnIndex = destination.kind === 'sheet' && destination.how.kind === 'mergeByKey' ? destination.how.keyColumnIndex : null;
+  let columnsLeftOut = new Set(columnsLeftOutByHand(importOfAFile.byHand).filter((columnIndex) => columnIndex !== keyColumnIndex));
   return importPlanWithByHand(importOfAFile)
     .questions.filter(
-      (question?: Dynamic) =>
-        importOfAFile.answers[question.id] === undefined && columnsQuestionDecides(question).some((input?: Dynamic) => !decided.has(input)),
+      (question) =>
+        importOfAFile.answers[question.id] === undefined &&
+        columnsQuestionDecides(question).some((columnIndex) => !columnsLeftOut.has(columnIndex)),
     )
-    .map(({ id: id }: Dynamic) => id);
+    .map(({ id }) => id);
 }
-export function stopAwaitingImportPlan(state: PageState) {
+export function stopAwaitingImportPlan(state: PageState): PageTransition {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null) return withNoEffects(state);
   if (isImportPlanComing(importOfAFile)) {
-    let stopped = {
+    let stopped: ImportOfAFile = {
       ...importOfAFile,
       agent: {
         kind: 'wasStopped',
@@ -143,7 +172,7 @@ export function stopAwaitingImportPlan(state: PageState) {
     );
   }
   if (importOfAFile.agent.kind !== 'isAsked') return withNoEffects(state);
-  let nextState = {
+  let agentFailed: AgentOfImport = {
     kind: 'hasFailed',
     wish: importOfAFile.agent.wish,
   };
@@ -153,37 +182,37 @@ export function stopAwaitingImportPlan(state: PageState) {
       ...state,
       importOfAFile: {
         ...importOfAFile,
-        agent: nextState,
+        agent: agentFailed,
       },
     }),
   );
 }
-export function answerImportQuestion(state: PageState, reads: WorkbookReads, questionId?: Dynamic, optionIndex?: Dynamic) {
-  let importOfAFile = state.importOfAFile;
+export function answerImportQuestion(state: PageState, reads: WorkbookReads, questionId: string, optionIndex: number): PageTransition {
+  const importOfAFile = state.importOfAFile;
   if (importOfAFile === null) return withNoEffects(state);
-  let question = importOfAFile.plan.questions.find(({ id: question2 }: Dynamic) => question2 === questionId);
+  let question = importOfAFile.plan.questions.find(({ id }) => id === questionId);
   if (question?.options[optionIndex] === undefined) return withNoEffects(state);
-  let isInDoubt = questionColumnIndexes(question).every(
-    (input?: Dynamic) => importOfAFile.byHand.columns[input]?.reading !== undefined,
+  let areReadingsByHand = questionColumnIndexes(question).every(
+    (columnIndex) => importOfAFile.byHand.columns[columnIndex]?.reading !== undefined,
   );
-  if (importOfAFile.answers[questionId] === optionIndex && !isInDoubt) return withNoEffects(state);
-  let answered = {
+  if (importOfAFile.answers[questionId] === optionIndex && !areReadingsByHand) return withNoEffects(state);
+  let answers = {
     ...importOfAFile.answers,
     [questionId]: optionIndex,
   };
-  let answers = isInDoubt ? withoutReadingsByHand(importOfAFile.byHand, questionColumnIndexes(question)) : importOfAFile.byHand;
-  let questionsAnswered = importPlanWithByHand(importOfAFile).questions.filter(({ id: id }: Dynamic) => id === questionId);
+  let byHand = areReadingsByHand ? withoutReadingsByHand(importOfAFile.byHand, questionColumnIndexes(question)) : importOfAFile.byHand;
+  let questionsAnswered = importPlanWithByHand(importOfAFile).questions.filter(({ id }) => id === questionId);
   let columnsAnswered = [...importOfAFile.columnsAnswered, ...questionsAnswered.flatMap(questionColumnIndexes)];
-  let nextState = {
+  let withAnswer = {
     ...withStoodNotPointedAt(importOfAFile),
-    answers: answered,
-    byHand: answers,
+    answers,
+    byHand,
     isAnAnswerInDoubt: false,
   };
   let refreshed = refreshImportPreview(
     {
-      ...nextState,
-      columnsAnswered: columnsAnswered,
+      ...withAnswer,
+      columnsAnswered,
     },
     reads,
     importOfAFile,
@@ -193,30 +222,30 @@ export function answerImportQuestion(state: PageState, reads: WorkbookReads, que
     importOfAFile: refreshed,
   });
 }
-export function changeImportByHand(state: PageState, reads: WorkbookReads, change?: Dynamic) {
+export function changeImportByHand(state: PageState, reads: WorkbookReads, change: ImportChangeByHand): PageTransition {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null || isImportPlanComing(importOfAFile) || importOfAFile.agent.kind === 'isAsked') return withNoEffects(state);
-  let byHand =
+  let optionOfReading =
     change.kind === 'column' && change.reading !== undefined && importOfAFile.asTheSheetHolds[change.columnIndex] === undefined
       ? questionOptionOfReading(importOfAFile.plan.questions, change.columnIndex, change.reading)
       : null;
-  if (byHand !== null) return answerImportQuestion(state, reads, byHand.questionId, byHand.optionIndex);
-  let planWithChange = applyByHandChange(importOfAFile.byHand, change);
+  if (optionOfReading !== null) return answerImportQuestion(state, reads, optionOfReading.questionId, optionOfReading.optionIndex);
+  let byHand = applyByHandChange(importOfAFile.byHand, change);
   if (
     (change.kind === 'line' || change.kind === 'headings') &&
     importRecordCount({
       ...importOfAFile,
-      byHand: planWithChange,
+      byHand,
     }) === 0 &&
     importRecordCount(importOfAFile) > 0
   )
     return withNoEffects(state);
-  let value = importOfAFile.isAnAnswerInDoubt && !('reading' in change);
+  let isAnAnswerInDoubt = importOfAFile.isAnAnswerInDoubt && !('reading' in change);
   let nextImport = refreshImportPreview(
     {
       ...withStoodNotPointedAt(importOfAFile),
-      byHand: planWithChange,
-      isAnAnswerInDoubt: value,
+      byHand,
+      isAnAnswerInDoubt,
     },
     reads,
     importOfAFile,
@@ -226,60 +255,62 @@ export function changeImportByHand(state: PageState, reads: WorkbookReads, chang
     importOfAFile: dropDestinationIfSheetGone(nextImport, reads),
   });
 }
-export function loadImportColumnKinds(state: PageState, reads: WorkbookReads, columnIndex?: Dynamic) {
+export function loadImportColumnKinds(state: PageState, reads: WorkbookReads, columnIndex: number): PageTransition {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null || importOfAFile.kinds[columnIndex] !== undefined) return withNoEffects(state);
   let mostOptions = reads.mostOptionsInADropdown();
   let plan = importPlanAsShown(importOfAFile);
-  let columns = [plan, planWithAnswers(importOfAFile.plan, importOfAFile.answers)].flatMap(
-    ({ columns: columns2 }: Dynamic) => columns2[columnIndex]?.reading ?? [],
+  let readingsPlanned = [plan, planWithAnswers(importOfAFile.plan, importOfAFile.answers)].flatMap(
+    ({ columns }) => columns[columnIndex]?.reading ?? [],
   );
   let fromAgent =
     importOfAFile.isPlanByAgent && importOfAFile.asTheSheetHolds[columnIndex] === undefined ? importOfAFile.readingsOfAgent[columnIndex] : undefined;
-  let value = (columns[1]?.kind === fromAgent?.kind ? columns[1] : fromAgent) ?? null;
-  let readingKinds = readingKindsOfColumn(importOfAFile.table, plan, columnIndex, columns, value, reads, mostOptions);
-  let value2 = importDestinationOf(importOfAFile).kind === 'newSheet' ? readingKinds : readingKinds.map(withoutDecimalPlacesDigits);
+  let agentsPick = (readingsPlanned[1]?.kind === fromAgent?.kind ? readingsPlanned[1] : fromAgent) ?? null;
+  let readingKinds = readingKindsOfColumn(importOfAFile.table, plan, columnIndex, readingsPlanned, agentsPick, reads, mostOptions);
+  let kindsOfColumn = importDestinationOf(importOfAFile).kind === 'newSheet' ? readingKinds : readingKinds.map(withoutDecimalPlacesDigits);
   let kinds = {
     ...importOfAFile.kinds,
-    [columnIndex]: value2,
+    [columnIndex]: kindsOfColumn,
   };
   return withNoEffects({
     ...state,
     importOfAFile: {
       ...importOfAFile,
-      kinds: kinds,
+      kinds,
     },
   });
 }
-export function importDestinationFor(importOfAFile?: Dynamic, chosen?: Dynamic) {
+export function importDestinationFor(importOfAFile: ImportOfAFile, chosen: ImportDestinationPick): ImportDestination | null {
   if (chosen.kind === 'newSheet') return NEW_SHEET_DESTINATION;
-  let place = importPlacesLeft(importOfAFile).find(({ table: table }: Dynamic) => table.sheetId === chosen.sheetId);
+  let place = importPlacesLeft(importOfAFile).find(({ table }) => table.sheetId === chosen.sheetId);
   if (place === undefined) return null;
-  let { destination: destination2, destinationQuestion: destinationQuestion } = importOfAFile.plan;
-  let value = [
+  let { destination: plannedDestination, destinationQuestion } = importOfAFile.plan;
+  let destinationsOnSheet = [
     importDestinationOf(importOfAFile),
-    destination2,
-    ...(destinationQuestion?.options ?? []).map((option?: Dynamic) => option.destination),
-  ].flatMap((input?: Dynamic) => (input.kind === 'sheet' && input.sheetId === chosen.sheetId ? [input] : []));
-  let { how: how } = chosen;
-  let columnsInto = (input?: Dynamic) => how.kind !== 'mergeByKey' || (input[how.keyColumnIndex] ?? null) !== null;
-  let destination =
+    plannedDestination,
+    ...(destinationQuestion?.options ?? []).map((option) => option.destination),
+  ].flatMap((destination) => (destination.kind === 'sheet' && destination.sheetId === chosen.sheetId ? [destination] : []));
+  let { how } = chosen;
+  let hasKeyColumn = (intoColumns: (ColumnId | null)[]) => how.kind !== 'mergeByKey' || (intoColumns[how.keyColumnIndex] ?? null) !== null;
+  let intoColumns =
     (
-      [...value.slice(0, 1), ...value.filter((input?: Dynamic) => isSameJson(input.how, how)), ...value].find(
-        (input?: Dynamic) => columnsInto(input.intoColumns),
-      ) ?? value[0]
+      [
+        ...destinationsOnSheet.slice(0, 1),
+        ...destinationsOnSheet.filter((destination) => isSameJson(destination.how, how)),
+        ...destinationsOnSheet,
+      ].find((destination) => hasKeyColumn(destination.intoColumns)) ?? destinationsOnSheet[0]
     )?.intoColumns ?? matchHeadingsToColumns(fileHeadingsOf(importOfAFile.table, importPlanWithByHand(importOfAFile)), place.table.columns);
-  if (!columnsInto(destination)) return null;
-  let { sheetId: sheetId, headerRowId: headerRowId } = place.table;
+  if (!hasKeyColumn(intoColumns)) return null;
+  let { sheetId, headerRowId } = place.table;
   return {
     kind: 'sheet',
-    sheetId: sheetId,
-    headerRowId: headerRowId,
-    intoColumns: destination,
-    how: how,
+    sheetId,
+    headerRowId,
+    intoColumns,
+    how,
   };
 }
-export function chooseImportDestination(state: PageState, reads: WorkbookReads, choice?: Dynamic) {
+export function chooseImportDestination(state: PageState, reads: WorkbookReads, choice: ImportDestinationPick): PageTransition {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null || (importOfAFile.agent.kind === 'isAsked' && importOfAFile.agent.wish !== null)) return withNoEffects(state);
   let destination = importDestinationFor(importOfAFile, choice);
@@ -298,10 +329,10 @@ export function chooseImportDestination(state: PageState, reads: WorkbookReads, 
     importOfAFile: dropDestinationIfSheetGone(nextImport, reads),
   });
 }
-export function withImportPlacesGone(importOfAFile?: Dynamic, sheetIdsGone?: Dynamic) {
-  let isOnSheetGone = (input?: Dynamic) => input?.kind === 'sheet' && sheetIdsGone.includes(input.sheetId);
-  let { plan: plan } = importOfAFile;
-  let isAskedAboutGone = plan.destinationQuestion?.options.some((option?: Dynamic) => isOnSheetGone(option.destination));
+export function withImportPlacesGone(importOfAFile: ImportOfAFile, sheetIdsGone: SheetId[]): ImportOfAFile {
+  let isOnSheetGone = (destination: ImportDestination | null) => destination?.kind === 'sheet' && sheetIdsGone.includes(destination.sheetId);
+  let { plan } = importOfAFile;
+  let isAskedAboutGone = plan.destinationQuestion?.options.some((option) => isOnSheetGone(option.destination));
   return {
     ...importOfAFile,
     placesGone: [...importOfAFile.placesGone, ...sheetIdsGone],
@@ -317,55 +348,55 @@ export function withImportPlacesGone(importOfAFile?: Dynamic, sheetIdsGone?: Dyn
           },
   };
 }
-export function dropDestinationIfSheetGone(importOfAFile?: Dynamic, sheetIdsGone?: Dynamic) {
+export function dropDestinationIfSheetGone(importOfAFile: ImportOfAFile, reads: WorkbookReads): ImportOfAFile {
   let destination = importDestinationOf(importOfAFile);
-  let { intoSheet: intoSheet } = importOfAFile;
-  let value =
+  let { intoSheet } = importOfAFile;
+  let isDestinationGone =
     intoSheet?.kind === 'refused' &&
     (intoSheet.refusal === 'unknownSheet' || intoSheet.refusal === 'unknownRow' || intoSheet.refusal === 'unknownColumn');
-  return destination.kind === 'newSheet' || !value
+  return destination.kind === 'newSheet' || !isDestinationGone
     ? importOfAFile
-    : refreshImportPreview(withImportPlacesGone(importOfAFile, [destination.sheetId]), sheetIdsGone, importOfAFile);
+    : refreshImportPreview(withImportPlacesGone(importOfAFile, [destination.sheetId]), reads, importOfAFile);
 }
-export function refreshImportNewSheet(importOfAFile: Dynamic, reads: WorkbookReads) {
+export function refreshImportNewSheet(importOfAFile: ImportOfAFile, reads: WorkbookReads): ImportOfAFile {
   if (importOfAFile.newSheet === null) return importOfAFile;
   let newSheet = newSheetForImport(importOfAFile, reads, importOfAFile.newSheet.filledCellCount);
   return isSameJson(newSheet, importOfAFile.newSheet)
     ? importOfAFile
     : {
         ...importOfAFile,
-        newSheet: newSheet,
+        newSheet,
       };
 }
-export function refreshImportOnWorkbookChange(state: PageState, reads: WorkbookReads) {
+export function refreshImportOnWorkbookChange(state: PageState, reads: WorkbookReads): PageTransition {
   if (state.importOfAFile === null) return withNoEffects(state);
   let importOfAFile = refreshImportNewSheet(state.importOfAFile, reads);
-  let importBefore =
+  let stateWithImport =
     importOfAFile === state.importOfAFile
       ? state
       : {
           ...state,
-          importOfAFile: importOfAFile,
+          importOfAFile,
         };
-  if (importOfAFile.places === null) return placeImportAndAskAgent(importBefore, importOfAFile, reads);
+  if (importOfAFile.places === null) return placeImportAndAskAgent(stateWithImport, importOfAFile, reads);
   if (importOfAFile.agent.kind === 'isAsked' && importOfAFile.agent.replyUnread !== null)
-    return receiveImportAnswer(importBefore, reads, importOfAFile.agent.askId, importOfAFile.agent.replyUnread);
-  let sheetIdsNow = new (Set as Dynamic)(reads.listSheets().map(({ sheetId: sheetId }: Dynamic) => sheetId));
-  let placesLeft = importPlacesLeft(importOfAFile).flatMap(
-    ({ table: table }: Dynamic) => (sheetIdsNow.has(table.sheetId) ? [] : [table.sheetId]),
+    return receiveImportAnswer(stateWithImport, reads, importOfAFile.agent.askId, importOfAFile.agent.replyUnread);
+  let sheetIdsNow = new Set(reads.listSheets().map(({ sheetId }) => sheetId));
+  let sheetIdsGone = importPlacesLeft(importOfAFile).flatMap(
+    ({ table }) => (sheetIdsNow.has(table.sheetId) ? [] : [table.sheetId]),
   );
-  if (placesLeft.length === 0 && importDestinationOf(importOfAFile).kind === 'newSheet') return withNoEffects(importBefore);
-  let nextImport = refreshImportPreview(withImportPlacesGone(importOfAFile, placesLeft), reads, importOfAFile);
+  if (sheetIdsGone.length === 0 && importDestinationOf(importOfAFile).kind === 'newSheet') return withNoEffects(stateWithImport);
+  let nextImport = refreshImportPreview(withImportPlacesGone(importOfAFile, sheetIdsGone), reads, importOfAFile);
   return withNoEffects({
-    ...importBefore,
+    ...stateWithImport,
     importOfAFile: dropDestinationIfSheetGone(nextImport, reads),
   });
 }
-export function sendImportWish(state: PageState, wish?: Dynamic) {
+export function sendImportWish(state: PageState, wish: string): PageTransition {
   let importOfAFile = state.importOfAFile;
   if (importOfAFile === null || wish.trim() === '') return withNoEffects(state);
-  let request = importOfAFile.agent.kind !== 'isAsked' && importOfAFile.agent.kind !== 'isNotToBeHad';
-  if (!importOfAFile.isPlanByAgent || !request) return withNoEffects(state);
+  let mayAskAgent = importOfAFile.agent.kind !== 'isAsked' && importOfAFile.agent.kind !== 'isNotToBeHad';
+  if (!importOfAFile.isPlanByAgent || !mayAskAgent) return withNoEffects(state);
   return askAgentAboutImport(state, importOfAFile, {
     asked: joinPrompts(
       askForImportPlan(importOfAFile.dataForAgent),
@@ -380,19 +411,19 @@ export function sendImportWish(state: PageState, wish?: Dynamic) {
     isAskedAgain: false,
   });
 }
-export function askImportPlanAgain(state: PageState) {
+export function askImportPlanAgain(state: PageState): PageTransition {
   let importOfAFile = state.importOfAFile;
-  let request = importOfAFile?.agent.kind === 'hasFailed' || importOfAFile?.agent.kind === 'wasStopped';
-  if (importOfAFile === null || !request || importOfAFile.isPlanByAgent) return withNoEffects(state);
-  let dataForAgent = askForImportPlan(importOfAFile.dataForAgent);
+  let isAskableAgain = importOfAFile?.agent.kind === 'hasFailed' || importOfAFile?.agent.kind === 'wasStopped';
+  if (importOfAFile === null || !isAskableAgain || importOfAFile.isPlanByAgent) return withNoEffects(state);
+  let asked = askForImportPlan(importOfAFile.dataForAgent);
   return askAgentAboutImport(state, importOfAFile, {
-    asked: dataForAgent,
+    asked,
     attempt: 1,
     wish: null,
     isAskedAgain: true,
   });
 }
-export const importPlanSoFar = (importOfAFile?: Dynamic) =>
+export const importPlanSoFar = (importOfAFile: ImportOfAFile): ImportPlanAsFarAsKnown =>
   importOfAFile.soFar === null
     ? {
         plan: importPlanAsShown(importOfAFile),
@@ -407,15 +438,15 @@ export const importPlanSoFar = (importOfAFile?: Dynamic) =>
         ...importOfAFile.soFar,
         isAwaited: true,
       };
-export const NO_STOOD_CHANGES: Dynamic = [];
-export const NOTHING_STOOD = {
+export const NO_STOOD_CHANGES: ImportChangeStood[] = [];
+export const NOTHING_STOOD: ImportStood = {
   stood: [],
   namesOfStood: {},
   isStoodPointedAt: false,
 };
-export const stoodByHandChanges = ({ agent: agent }: Dynamic) =>
+export const stoodByHandChanges = ({ agent }: Pick<ImportOfAFile, 'agent'>): ImportChangeStood[] =>
   (agent.kind === 'hasChangedNothing' || agent.kind === 'hasPlanned') && agent.isStoodPointedAt ? agent.stood : NO_STOOD_CHANGES;
-export const withStoodNotPointedAt = (importOfAFile?: Dynamic) =>
+export const withStoodNotPointedAt = (importOfAFile: ImportOfAFile): ImportOfAFile =>
   importOfAFile.agent.kind === 'hasChangedNothing' || importOfAFile.agent.kind === 'hasPlanned'
     ? {
         ...importOfAFile,
@@ -425,22 +456,22 @@ export const withStoodNotPointedAt = (importOfAFile?: Dynamic) =>
         },
       }
     : importOfAFile;
-export const whyNoAgentForImport = ({ agent: agent, isPlanByAgent: isPlanByAgent }: Dynamic) =>
+export const whyNoAgentForImport = ({ agent, isPlanByAgent }: Pick<ImportOfAFile, 'agent' | 'isPlanByAgent'>) =>
   !isPlanByAgent && agent.kind === 'isNotToBeHad' && agent.leftUndone === null ? agent.why : null;
-export const wasQuestionAskedBefore = ({ plansOfAgent: plansOfAgent }: Dynamic, { ask: ask }: Dynamic) =>
-  plansOfAgent.some(({ questions: questions }: Dynamic) => questions.some((question?: Dynamic) => question.ask === ask));
-export const isDestinationQuestionOpen = (importOfAFile?: Dynamic) =>
+export const wasQuestionAskedBefore = ({ plansOfAgent }: Pick<ImportOfAFile, 'plansOfAgent'>, { ask }: Pick<ImportQuestion, 'ask'>) =>
+  plansOfAgent.some(({ questions }) => questions.some((question) => question.ask === ask));
+export const isDestinationQuestionOpen = (importOfAFile: ImportOfAFile) =>
   importOfAFile.plan.destinationQuestion !== null && importOfAFile.destinationChosen === null;
-export const openImportQuestionCount = (importOfAFile?: Dynamic) =>
+export const openImportQuestionCount = (importOfAFile: ImportOfAFile) =>
   openImportQuestionIds(importOfAFile).length + (isDestinationQuestionOpen(importOfAFile) ? 1 : 0);
-export const isImportPlanComing = ({ soFar: soFar }: Dynamic) => soFar !== null;
-export const describeImportChoicesForAgent = (importOfAFile?: Dynamic) =>
+export const isImportPlanComing = ({ soFar }: Pick<ImportOfAFile, 'soFar'>) => soFar !== null;
+export const describeImportChoicesForAgent = (importOfAFile: ImportOfAFile) =>
   [
     ...chosenAnswersOf(importPlanWithByHand(importOfAFile), importOfAFile.answers).map(
-      ({ question: { ask: input, options: input2 }, chosenIndex: chosenIndex }: Dynamic) =>
-        `To "${input}" they answered "${input2[chosenIndex]?.label ?? ''}".`,
+      ({ question: { ask, options }, chosenIndex }) =>
+        `To "${ask}" they answered "${options[chosenIndex]?.label ?? ''}".`,
     ),
     ...(importOfAFile.destinationChosen === null ? [] : ['They chose the destination in that plan themselves.']),
   ].join(' ');
-export const importQuestionExamples = (importOfAFile?: Dynamic, questionId?: Dynamic) =>
-  importOfAFile.examples[importOfAFile.plan.questions.findIndex(({ id: question }: Dynamic) => question === questionId)] ?? [];
+export const importQuestionExamples = (importOfAFile: ImportOfAFile, questionId: string): ImportQuestionExample[][] =>
+  importOfAFile.examples[importOfAFile.plan.questions.findIndex(({ id }) => id === questionId)] ?? [];

@@ -116,8 +116,11 @@ fn cell_at(workbook: &Workbook, s: usize, cell: &CellAt) -> Result<(LineId, Line
 /// The cells that hold something, and the empty ones an array spills into.
 fn read_cells(workbook: &Workbook, s: usize, cells: &[(LineId, LineId)], locale: &Locale) -> Json {
     let sheet = &workbook.sheets[s];
-    // The empty cells the sheet's arrays fill, by their places.
-    let fills: hashbrown::HashMap<(usize, usize), Json> = workbook.spilled_cells(s, locale).into_iter().collect();
+    let positions: hashbrown::HashSet<_> = cells.iter()
+        .filter_map(|&(r, c)| sheet.rows.position(r).zip(sheet.columns.position(c)))
+        .collect();
+    let fills: hashbrown::HashMap<_, _> = workbook
+        .spilled_cells_where(s, locale, |r, c| positions.contains(&(r, c))).into_iter().collect();
     let mut contents = Vec::new();
     let mut spilled = Vec::new();
     for &(r, c) in cells {

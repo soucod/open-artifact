@@ -21,8 +21,9 @@ import { EdgePiles, edgePiles, stackPins } from './cds/edge-piles.tsx';
 import { CommentsLayer, InLayer } from './cds/layer.tsx';
 import { commentMarkdown } from './cds/markdown.tsx';
 import { commentTime } from './cds/time.ts';
-import { openMessageCount, queuedNote, type CommentsController } from './comments.ts';
+import { openMessageCount, queuedNote, WAIT_FOR_STATUS_CHANGE, type CommentsController } from './comments.ts';
 import { ALL_COMMENTS_RIGHT } from './CommentList.tsx';
+import { draftedText } from '../agent.ts';
 import { screenBox, toScreenPoint, toWorldPoint, type AnchorState, type Box, type Camera, type PinPlace, type Point } from './pins.ts';
 
 /** Pixels the pointer must travel before a press becomes a drag. */
@@ -333,13 +334,13 @@ export function CommentPopover({ pin, corner, viewport, width: wanted = CARD_WID
     if (typeof children === 'function') maxHeight = cardMaxHeight(pin, viewport);
   }
   // Unmeasured, it is see-through rather than hidden: a hidden textarea can't take focus.
-  const style: CSSProperties = {
+  const style: CSSProperties & { '--comment-card-room'?: string } = {
     position: 'absolute',
     left,
     top,
     width,
     pointerEvents: 'auto',
-    ...(maxHeight === undefined ? {} : { maxHeight, display: 'flex', flexDirection: 'column' }),
+    ...(maxHeight === undefined ? {} : { maxHeight, '--comment-card-room': `${maxHeight}px`, display: 'flex', flexDirection: 'column' }),
     ...(height ? {} : { opacity: 0, pointerEvents: 'none' }),
   };
   return (
@@ -591,7 +592,7 @@ export function CommentPins<A>({ comments, camera, viewport, place, highlight, a
           <>
             <PinButton pin={pinBox(focus.screen, viewport)} draft label="New comment" avatar={<Avatar name={comments.viewerName()} size="sm" />} />
             <CommentPopover pin={pinBox(focus.screen, viewport)} viewport={viewport} onEscape={() => comments.store.getState().setDraft(null)}>
-              <CommentComposer comments={comments} agent={agent} anchor={draft} />
+              {() => <CommentComposer comments={comments} agent={agent} anchor={draft} />}
             </CommentPopover>
           </>
         ) : null}
@@ -741,9 +742,9 @@ export function ThreadCard<A>(props: ThreadCardProps<A>): ReactNode {
 
 function ThreadCardBody<A>({ comments, agent, thread, state, maxHeight, onClose }: ThreadCardProps<A>): ReactNode {
   const [confirming, setConfirming] = useState(false);
-  const [resolving, setResolving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [replying, setReplying] = useState(false);
+  const change = comments.store((s) => s.statusChange);
   const nameId = useId();
   const region = useRef<HTMLDivElement>(null);
   const follow = useFollowReplies(region, thread);
@@ -817,14 +818,15 @@ function ThreadCardBody<A>({ comments, agent, thread, state, maxHeight, onClose 
               {commenting ? (
                 <ResolveAction
                   resolved={thread.status === 'resolved'}
-                  busy={resolving}
-                  onResolve={() => {
-                    setResolving(true);
-                    void comments.resolve(thread.id, true).finally(() => setResolving(false));
-                  }}
+                  disabled={change !== null}
+                  onResolve={() => void comments.resolve(thread.id, true)}
                 />
               ) : null}
-              <MoreMenu items={topItems} />
+              <MoreMenu
+                items={topItems}
+                disabled={change !== null && change.id !== thread.id}
+                waitReason={change?.id === thread.id ? WAIT_FOR_STATUS_CHANGE : undefined}
+              />
             </Actions>
           ) : undefined
         }
@@ -838,7 +840,7 @@ function ThreadCardBody<A>({ comments, agent, thread, state, maxHeight, onClose 
               {commentMarkdown(message.text)}
             </Comment>
           ))}
-          {working ? <Comment authorName={agent.name} agent working={working} footnote={working === 'queued' ? queuedNote(agent) : 'Working…'} /> : null}
+          {working ? <Comment authorName={agent.name} agent working={working} footnote={working === 'queued' ? queuedNote(agent) : thread.agent?.drafted ? draftedText(agent.name).label : 'Working…'} /> : null}
         </Replies>
       ) : null}
     </CommentCard>

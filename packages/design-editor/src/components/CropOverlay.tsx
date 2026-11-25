@@ -14,6 +14,8 @@ import { boardApi } from '../services/frames.ts';
 import { templateOf } from '../services/agent.ts';
 import { edit } from '../services/commands.ts';
 import { announce } from '../services/announce.ts';
+import { isTextField } from '@open-artifact/editor-kit';
+import { endsMode } from '../lib/mode-keys.ts';
 import { CROP_HANDLES, dragCrop, formatInset, parseInset, type CropHandle, type Insets } from '../lib/crop.ts';
 
 const CURSOR: Record<CropHandle, string> = {
@@ -63,7 +65,7 @@ export function CropOverlay() {
   useEffect(() => {
     if (!crop) return;
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' && event.key !== 'Enter') return;
+      if (!endsMode(event, isTextField(event.target))) return;
       event.preventDefault();
       event.stopPropagation();
       useView.getState().setCrop(null);

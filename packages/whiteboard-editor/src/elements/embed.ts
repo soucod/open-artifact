@@ -29,6 +29,11 @@
  * - hides an embed that stops answering pings, and stops it when it stays
  *   silent ({@link createHeartbeat});
  * - comes back to the board on Escape inside the frame.
+ *
+ * Until the embed is entered (a press inside it, or the board's
+ * {@link EmbedEnterMessage} when Enter hands it the keyboard), the bootstrap
+ * keeps typing, key chords, function keys, Delete, paste and drops from the
+ * embed's page; Escape always goes through and ends the entry.
  */
 
 import { MAX_HTML_STATE_CHARS } from '@open-artifact/whiteboard-core';
@@ -90,6 +95,14 @@ export interface EmbedPingMessage {
   ping: number;
 }
 
+/** A message from the board to an embed's bootstrap on its private port: the embed was entered (`true`) or left (`false`). */
+export interface EmbedEnterMessage {
+  enter: boolean;
+}
+
+/** What the board sends an embed's bootstrap on its private port. */
+export type EmbedBoardMessage = EmbedPingMessage | EmbedEnterMessage;
+
 /** Whether a posted message offers an embed's private port. */
 export function isEmbedPortOffer(data: unknown): data is EmbedPortOffer {
   return typeof data === 'object' && data !== null && (data as { boardEmbed?: unknown }).boardEmbed === 'port';
@@ -125,10 +138,14 @@ export function embedBootstrap(state: string | undefined): string {
   return `(function(){
 var apply=Reflect.apply,send=MessagePort.prototype.postMessage,now=performance.now.bind(performance),channel=new MessageChannel(),port=channel.port1;
 function tell(message){try{apply(send,port,[message]);}catch(e){}}
-port.onmessage=function(event){var data=event.data;if(data&&typeof data.ping==='number')tell({kind:'echo',n:data.ping});};
+var entered=false,hold=Event.prototype.preventDefault,halt=Event.prototype.stopImmediatePropagation;
+port.onmessage=function(event){var data=event.data;if(!data)return;if(typeof data.ping==='number')tell({kind:'echo',n:data.ping});else if(typeof data.enter==='boolean')entered=data.enter;};
 parent.postMessage({boardEmbed:'port'},'*',[channel.port2]);
-addEventListener('pointerdown',function(event){if(event.isTrusted)tell({kind:'press',age:now()-event.timeStamp});},true);
-addEventListener('keydown',function(event){if(event.isTrusted&&!event.repeat&&!event.isComposing&&event.key==='Escape')tell({kind:'key',key:'Escape'});},true);
+function keep(event){if(!event.isTrusted||entered)return;apply(hold,event,[]);apply(halt,event,[]);}
+addEventListener('pointerdown',function(event){if(event.isTrusted){entered=true;tell({kind:'press',age:now()-event.timeStamp});}},true);
+addEventListener('keydown',function(event){if(!event.isTrusted)return;if(event.key==='Escape'){entered=false;if(!event.repeat&&!event.isComposing)tell({kind:'key',key:'Escape'});return;}keep(event);},true);
+['keypress','keyup','beforeinput','paste','drop'].forEach(function(type){addEventListener(type,keep,true);});
+addEventListener('dragover',function(event){if(event.isTrusted&&!entered){apply(hold,event,[]);apply(halt,event,[]);if(event.dataTransfer)event.dataTransfer.dropEffect='none';}},true);
 var state=${scriptJson(state ?? null)},listeners=[],MAX=${MAX_HTML_STATE_CHARS};
 function parse(text){if(text==null)return null;try{return JSON.parse(text);}catch(e){return null;}}
 var api={

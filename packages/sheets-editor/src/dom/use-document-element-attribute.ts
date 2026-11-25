@@ -1,10 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
-export function useDocumentElementAttribute(attributeName?: Dynamic) {
+export function useDocumentElementAttribute(attributeName: string): string | null {
   let subscribe = React.useCallback(
-    (onChange?: Dynamic) => {
-      let observer = new (MutationObserver as Dynamic)(onChange);
-      observer.observe((document as Dynamic).documentElement, {
+    (onChange: () => void) => {
+      let observer = new MutationObserver(onChange);
+      observer.observe(document.documentElement, {
         attributes: true,
         attributeFilter: [attributeName],
       });
@@ -14,7 +13,7 @@ export function useDocumentElementAttribute(attributeName?: Dynamic) {
   );
   return React.useSyncExternalStore(
     subscribe,
-    () => (document as Dynamic).documentElement.getAttribute(attributeName),
+    () => document.documentElement.getAttribute(attributeName),
     () => null,
   );
 }

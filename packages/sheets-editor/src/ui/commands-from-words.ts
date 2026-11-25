@@ -1,40 +1,57 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { OwnRowOrder } from '../model/line-ids.ts';
+import type { SelectionSeen } from '../state/selection-seen.ts';
+import type { SampleRequest } from '../agent/sampling.ts';
 import { cleanTextForAgent } from '../agent/prompt-text.ts';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { taggedJson } from '../format/conditional/agent-prompts.ts';
 import { isNonNullObject } from '../utils/objects.ts';
-export function commandsNameableFromWords(commands?: Dynamic, numberFormats?: Dynamic) {
+/** A command as the agent is told of it: its id, and its label, which is its full name. */
+export interface CommandForAgent {
+  id: string;
+  label: string;
+}
+/** Which number format commands suit the selection: none, the date ones, or all of them. */
+export type CommandScope = 'none' | 'forDates' | 'all';
+/** The selection as the agent is told of it when it names commands. */
+export interface SelectionForCommands extends SelectionSeen {
+  areas: CellArea[];
+  ownRowOrder: OwnRowOrder | null;
+  /** What the "Currency" command shows 1234.5 as. */
+  currencyShows: string;
+}
+export function commandsNameableFromWords(commands: readonly CommandForAgent[], numberFormats: CommandScope): CommandForAgent[] {
   let nameable = commands
     .filter(
-      ({ id: id }: Dynamic) =>
+      ({ id }) =>
         ALWAYS_NAMEABLE_COMMANDS.has(id) ||
-        (NAMEABLE_COMMAND_PREFIXES.some((prefix?: Dynamic) => id.startsWith(`${prefix}.`)) &&
+        (NAMEABLE_COMMAND_PREFIXES.some((prefix) => id.startsWith(`${prefix}.`)) &&
           !UNNAMEABLE_COMMANDS.has(id) &&
           !isColorValueCommand(id)) ||
         (numberFormats !== 'none' && (DATE_FORMAT_COMMANDS.has(id) || GENERAL_FORMAT_COMMANDS.has(id))) ||
         (numberFormats === 'all' && NUMBER_FORMAT_COMMANDS.has(id)),
     )
     .map(
-      ({ id: id, label: label }: Dynamic) => ({
-        id: id,
-        label: label,
+      ({ id, label }) => ({
+        id,
+        label,
       }),
     );
-  return commands.some(({ id: id }: Dynamic) => id === RULE_FROM_WORDS_COMMAND_ID) ? [...nameable, RULE_FROM_WORDS_COMMAND] : nameable;
+  return commands.some(({ id }) => id === RULE_FROM_WORDS_COMMAND_ID) ? [...nameable, RULE_FROM_WORDS_COMMAND] : nameable;
 }
 export function commandsFromWordsRequest(
-  words: Dynamic,
-  { areas: areas, ownRowOrder: ownRowOrder, shape: shape, cellsAre: cellsAre, currencyShows: currencyShows }: Dynamic,
-  commands?: Dynamic,
-) {
+  words: string,
+  { areas, ownRowOrder, shape, cellsAre, currencyShows }: SelectionForCommands,
+  commands: readonly CommandForAgent[],
+): SampleRequest | null {
   let typed = cleanTextForAgent(words, MAX_COMMAND_WORDS_LENGTH);
   if (typed === '' || commands.length === 0 || areas.length === 0) return null;
   let selection = {
     cells: areas
       .slice(0, MAX_SELECTION_ADDRESSES)
-      .map((area?: Dynamic) => areaToA1AsStored(area, ownRowOrder))
+      .map((area) => areaToA1AsStored(area, ownRowOrder))
       .join(','),
-    count: areas.reduce((total: Dynamic, { rowCount: rowCount, columnCount: columnCount }: Dynamic) => total + rowCount * columnCount, 0),
+    count: areas.reduce((total, { rowCount, columnCount }) => total + rowCount * columnCount, 0),
     shape: shape === 'mergedOnly' ? 'merged' : shape,
     holds: cellsAre === 'neverWraps' || cellsAre === 'trueOrFalse' ? 'text' : cellsAre,
     currency: currencyShows,
@@ -46,10 +63,10 @@ export function commandsFromWordsRequest(
     data: null,
   };
 }
-export function closingBracketIndex(text?: Dynamic, start?: Dynamic) {
-  let depth: Dynamic = 0;
-  let inString: Dynamic = false;
-  for (let index: Dynamic = start; index < text.length; index++) {
+export function closingBracketIndex(text: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  for (let index = start; index < text.length; index++) {
     let character = text.charAt(index);
     if (inString) {
       if (character === '\\') index++;
@@ -60,36 +77,38 @@ export function closingBracketIndex(text?: Dynamic, start?: Dynamic) {
   }
   return null;
 }
-export function mendCommandsReply(reply?: Dynamic) {
+/** Finds the first JSON list of strings in a reply that is not quite JSON. */
+export function mendCommandsReply(reply: string): string[] | undefined {
   let head = reply.slice(0, MAX_COMMANDS_REPLY_LENGTH);
-  for (let openIndex: Dynamic = head.indexOf('['); openIndex >= 0; openIndex = head.indexOf('[', openIndex + 1)) {
+  for (let openIndex = head.indexOf('['); openIndex >= 0; openIndex = head.indexOf('[', openIndex + 1)) {
     let closeIndex = closingBracketIndex(head, openIndex);
     if (closeIndex === null) continue;
     try {
-      let parsed = JSON.parse(head.slice(openIndex, closeIndex + 1));
-      if (Array.isArray(parsed) && parsed.every((item?: Dynamic) => typeof item === 'string')) return parsed;
+      let parsed: unknown = JSON.parse(head.slice(openIndex, closeIndex + 1));
+      if (Array.isArray(parsed) && parsed.every((item: unknown): item is string => typeof item === 'string')) return parsed;
     } catch {}
   }
   return;
 }
-export function commandIdsOfReply(answer?: Dynamic) {
+/** The list in the agent's answer: the answer itself, or the one list it holds. */
+export function commandIdsOfReply(answer: unknown): unknown[] {
   if (Array.isArray(answer)) return answer;
   let values = isNonNullObject(answer) ? Object.values(answer) : [];
   let [only] = values;
   return values.length === 1 && Array.isArray(only) ? only : [];
 }
-export function commandIdsAnswered(answer?: Dynamic, commands?: Dynamic) {
-  let ids = new (Set as Dynamic)(commands.map(({ id: id }: Dynamic) => id));
-  let named = commandIdsOfReply(answer).filter((id?: Dynamic) => typeof id === 'string' && ids.has(id));
-  return [...new (Set as Dynamic)(named)].slice(0, MAX_COMMANDS_NAMED);
+export function commandIdsAnswered(answer: unknown, commands: readonly CommandForAgent[]): string[] {
+  let ids = new Set(commands.map(({ id }) => id));
+  let named = commandIdsOfReply(answer).filter((id): id is string => typeof id === 'string' && ids.has(id));
+  return [...new Set(named)].slice(0, MAX_COMMANDS_NAMED);
 }
 export const MAX_COMMANDS_NAMED = 6;
 export const MAX_COMMAND_WORDS_LENGTH = 500;
 export const RULE_FROM_WORDS_COMMAND_ID = 'agent.ruleFromWords';
 export const MAX_SELECTION_ADDRESSES = 20;
-export const ALWAYS_NAMEABLE_COMMANDS = new (Set as Dynamic)([
+export const ALWAYS_NAMEABLE_COMMANDS = new Set<string>([
   ...['bold', 'italic', 'underline', 'strikethrough', 'conditionalFormatting'].flatMap(
-    (command?: Dynamic) => [`menu.${command}`, `bar.${command}`],
+    (command) => [`menu.${command}`, `bar.${command}`],
   ),
   'menu.customSort.range',
   'menu.customSort.sheet',
@@ -112,22 +131,22 @@ export const NAMEABLE_COMMAND_PREFIXES = [
   'bar.fillColor',
   'bar.borders',
 ];
-export const UNNAMEABLE_COMMANDS = new (Set as Dynamic)(['bar.borders.color']);
-export const isColorValueCommand = (commandId?: Dynamic) => commandId.includes('#');
-export const NUMBER_FORMAT_COMMANDS = new (Set as Dynamic)([
-  ...['number', 'roundedNumber', 'numberInParentheses', 'currency', 'roundedCurrency', 'percent', 'scientific'].map(
-    (format?: Dynamic) => `bar.numberFormat.${format}`,
+export const UNNAMEABLE_COMMANDS = new Set<string>(['bar.borders.color']);
+export const isColorValueCommand = (commandId: string): boolean => commandId.includes('#');
+export const NUMBER_FORMAT_COMMANDS = new Set<string>([
+  ...['number', 'roundedNumber', 'numberInParentheses', 'currency', 'roundedCurrency', 'percent', 'roundedPercent', 'scientific'].map(
+    (format) => `bar.numberFormat.${format}`,
   ),
   'bar.moreDecimalPlaces',
   'bar.fewerDecimalPlaces',
 ]);
-export const GENERAL_FORMAT_COMMANDS = new (Set as Dynamic)(['bar.numberFormat.general', 'bar.numberFormat.customFormat']);
-export const DATE_FORMAT_COMMANDS = new (Set as Dynamic)(
+export const GENERAL_FORMAT_COMMANDS = new Set<string>(['bar.numberFormat.general', 'bar.numberFormat.customFormat']);
+export const DATE_FORMAT_COMMANDS = new Set<string>(
   ['date', 'mediumDate', 'longDate', 'monthAndDay', 'monthAndYear', 'time', 'dateAndTime', 'duration'].map(
-    (format?: Dynamic) => `bar.numberFormat.${format}`,
+    (format) => `bar.numberFormat.${format}`,
   ),
 );
-export const RULE_FROM_WORDS_COMMAND = {
+export const RULE_FROM_WORDS_COMMAND: CommandForAgent = {
   id: RULE_FROM_WORDS_COMMAND_ID,
   label: 'Conditional formatting: make a rule from these words',
 };

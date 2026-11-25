@@ -8,6 +8,7 @@
  *   crates/open-artifact-canvas    → packages/wasm-canvas/generated/    the WebGL2 canvas engine
  *   crates/open-artifact-data-rules → packages/wasm-data-rules/generated/ Data rule patterns (linear-time matching)
  *   crates/open-artifact-sheets    → packages/wasm-sheets/generated/    the Sheets workbook engine, run in a Worker
+ *   crates/open-artifact-motion    → packages/wasm-motion/generated/    Motion GIF and MOV encoding, flash analysis
  *
  * Each package gets the wasm-bindgen glue (`<crate>.js` + `.d.ts`) and the
  * optimized module embedded as base64 (`bytes.js`), so it loads
@@ -40,6 +41,7 @@ const CRATES = {
   'open-artifact-canvas': { pkg: 'packages/wasm-canvas', opt: '-O3' },
   'open-artifact-data-rules': { pkg: 'packages/wasm-data-rules', opt: '-Oz' },
   'open-artifact-sheets': { pkg: 'packages/wasm-sheets', opt: '-O3', file: true },
+  'open-artifact-motion': { pkg: 'packages/wasm-motion', opt: '-O3' },
 };
 
 const FEATURES = ['--enable-bulk-memory', '--enable-nontrapping-float-to-int', '--enable-sign-ext', '--enable-mutable-globals', '--enable-reference-types', '--enable-multivalue'];

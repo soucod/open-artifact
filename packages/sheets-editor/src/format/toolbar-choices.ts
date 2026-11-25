@@ -1,8 +1,13 @@
-import type { Dynamic } from '../dynamic.ts';
 import { numberFormatOfChoice } from './number-format-choices.ts';
-import { isCheckboxFormat } from '../chips/checkboxes.ts';
-import { booleanOfValue } from '../chips/checkbox-presses.ts';
-export function generalAlignmentOf(value?: Dynamic) {
+import { isCheckboxFormat, booleanOfValue } from '../chips/checkboxes.ts';
+import { wrappingOfWrapText } from '../grid/text-overflow.ts';
+import type { PatternsOfChoices } from './number-format-choices.ts';
+import type { CellFormatChoice } from '../i18n/change-labels.ts';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { CellFormat, HorizontalAlignment, ValueContents } from '@open-artifact/sheets-core';
+/** Where a cell's text is drawn across it, once a general alignment is worked out from its value. */
+export type ShownHorizontalAlignment = Exclude<HorizontalAlignment, 'general'>;
+export function generalAlignmentOf(value: ValueContents | null): ShownHorizontalAlignment {
   switch (value?.kind) {
     case 'number':
       return 'right';
@@ -14,7 +19,7 @@ export function generalAlignmentOf(value?: Dynamic) {
       return 'left';
   }
 }
-export function formatOfToolbarChoice(choice?: Dynamic, reads?: Dynamic) {
+export function formatOfToolbarChoice(choice: CellFormatChoice, reads: PatternsOfChoices): CellFormat {
   if (choice.bold !== undefined)
     return {
       font: {
@@ -66,7 +71,7 @@ export function formatOfToolbarChoice(choice?: Dynamic, reads?: Dynamic) {
   if (choice.wrapText !== undefined)
     return {
       alignment: {
-        wrap: choice.wrapText,
+        wrap: wrappingOfWrapText(choice.wrapText),
       },
     };
   if (choice.fillColor !== undefined)
@@ -84,11 +89,11 @@ export function formatOfToolbarChoice(choice?: Dynamic, reads?: Dynamic) {
       },
     };
   return {
-    numberFormat: numberFormatOfChoice(choice.numberFormatChoice, reads),
+    numberFormat: numberFormatOfChoice(choice.numberFormatChoice!, reads),
   };
 }
-export const HORIZONTAL_ALIGNMENTS = ['left', 'center', 'right', 'general'];
-export const resolvedHorizontalAlignment = (alignment?: Dynamic, value?: Dynamic) =>
+export const HORIZONTAL_ALIGNMENTS: HorizontalAlignment[] = ['left', 'center', 'right', 'general'];
+export const resolvedHorizontalAlignment = (alignment: HorizontalAlignment, value: ValueContents | null): ShownHorizontalAlignment =>
   alignment === 'general' ? generalAlignmentOf(value) : alignment;
-export const shownHorizontalAlignment = (format?: Dynamic, value?: Dynamic) =>
+export const shownHorizontalAlignment = (format: Pick<WholeCellFormat, 'cellControl' | 'alignment'>, value: ValueContents | null): ShownHorizontalAlignment =>
   isCheckboxFormat(format) && booleanOfValue(value) !== null ? 'center' : resolvedHorizontalAlignment(format.alignment.horizontal, value);

@@ -294,6 +294,25 @@ export function isColor(input: string): boolean {
   return parseColor(input) !== null;
 }
 
+/** Typed text with the `#` added when it is bare hex digits of a color (`abc`, `abcd`, `aabbcc`, `aabbccdd`). */
+export function withHexHash(input: string): string {
+  const text = input.trim();
+  return /^(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(text) ? `#${text}` : text;
+}
+
+/** What a color field says when typed text is not a color and the field went back to `previous`. */
+export function colorRevertMessage(previous: string): string {
+  const text = previous.trim();
+  return text ? `Not a color, so it went back to ${text}.` : 'Not a color, so the field stayed empty.';
+}
+
+const HUE_NAMES = ['red', 'orange', 'yellow', 'yellow-green', 'green', 'spring green', 'cyan', 'sky blue', 'blue', 'violet', 'magenta', 'pink'] as const;
+
+/** A plain name for a hue in degrees (the nearest of twelve, 30° apart), for screen readers. */
+export function hueName(degrees: number): string {
+  return HUE_NAMES[Math.round(wrapHue(degrees) / 30) % HUE_NAMES.length]!;
+}
+
 /* -------------------------------- formatting ------------------------------ */
 
 const hex2 = (n: number) => Math.round(clamp(n, 0, 255)).toString(16).padStart(2, '0');

@@ -8,7 +8,9 @@
  * `null` where there is none); an optional one may be left out.
  */
 
-import type { CellAt, ColumnId, IdRun, RangeCorners, RangeOnASheet, RowId, SheetId } from './ids.ts';
+import type { SortDirection } from './edits.ts';
+import type { CellAt, ColumnId, IdRun, RangeCorners, RangeOnASheet, RowId, RunsOfABase, SheetId } from './ids.ts';
+import type { Filter } from './reads.ts';
 
 // ---------------------------------------------------------------------------
 // What a cell holds
@@ -161,6 +163,12 @@ export interface NumberFormat {
   pattern: string;
 }
 
+/** How a format writes the wrapping of a cell's text: as a flag, or by name (overflowing, wrapped, clipped at the edge). */
+export type WrapWritten = boolean | 'overflow' | 'wrap' | 'clip';
+
+/** The wrapping of a cell's text as it is kept: wrapped or not, or clipped at the cell's edge. */
+export type Wrap = boolean | 'clip';
+
 /**
  * A cell's format, as set and read back. Set, only the properties written
  * change; a property set to its default is taken away. Defaults: General, a
@@ -169,7 +177,7 @@ export interface NumberFormat {
  */
 export interface CellFormat {
   numberFormat?: NumberFormat;
-  alignment?: { horizontal?: HorizontalAlignment; vertical?: VerticalAlignment; wrap?: boolean };
+  alignment?: { horizontal?: HorizontalAlignment; vertical?: VerticalAlignment; wrap?: WrapWritten };
   fillColor?: Color;
   cellControl?: CellControl;
   border?: { top?: Border; bottom?: Border; left?: Border; right?: Border };
@@ -186,7 +194,7 @@ export interface CellFormat {
 
 /** Cells to format: every row by every column, and the format they take. */
 export interface CellsToFormat {
-  rows: IdRun[];
+  rows: IdRun[] | RunsOfABase[];
   columns: IdRun[];
   format: CellFormat;
 }
@@ -215,6 +223,12 @@ export interface SheetSettings {
   lastFrozenRow?: RowId | null;
   lastFrozenColumn?: ColumnId | null;
   areGridlinesHidden?: boolean;
+  /**
+   * The interactive view (a view id) the sheet shows in place of its grid
+   * (`null`: none). Set only on an empty sheet, to a view with an interactive
+   * element; while it is set, edits to the sheet's grid are refused.
+   */
+  interactive?: string | null;
 }
 
 export interface SheetToSet {
@@ -399,7 +413,33 @@ export interface InputOfAWidget {
   range: RangeOnASheet;
 }
 
-export type ViewElement = { kind: 'widget'; elementId: string; embed: Embed; inputs: InputOfAWidget[] };
+/** A value an interactive element writes to a cell of one of its inputs. */
+export type InteractiveValue =
+  | { kind: 'number'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'boolean'; value: boolean };
+
+/** A cell of an input and the value saved for it (`null`: empty). */
+export interface InteractiveCell {
+  r: RowId;
+  c: ColumnId;
+  value: InteractiveValue | null;
+}
+
+/** The values an interactive element keeps for one of its inputs, which a reset writes back. */
+export interface InteractiveWrite {
+  /** The name of one of the element's inputs. */
+  input: string;
+  saved: InteractiveCell[];
+}
+
+/**
+ * An element of a view. A widget reads its inputs; an interactive element also
+ * writes to them, and keeps the values its inputs were saved with.
+ */
+export type ViewElement =
+  | { kind: 'widget'; elementId: string; embed: Embed; inputs: InputOfAWidget[] }
+  | { kind: 'interactive'; elementId: string; embed: Embed; inputs: InputOfAWidget[]; writes: InteractiveWrite[] };
 
 /** A view: its name and what it shows. Kept as written: its ranges do not follow rows that move. */
 export interface View {
@@ -467,6 +507,38 @@ export interface SheetName {
 // The operations
 // ---------------------------------------------------------------------------
 
+
+/** A filter and a sort a sheet keeps under a name. It outlives the cell table it was made for. */
+export interface NamedView {
+  name: string;
+  cellTableId: string;
+  filter: Filter | null;
+  sortBy: { c: ColumnId; direction: SortDirection }[];
+}
+
+/** `null` removes the named view. */
+export interface NamedViewToSet {
+  namedViewId: string;
+  namedView: NamedView | null;
+}
+
+/**
+ * Rows put in an order among themselves. `order` is base 64 (`A`–`Z`, `a`–`z`,
+ * `0`–`9`, `-`, `_`), each index in as many digits as the largest needs: the
+ * `k`th place the rows take gets the row at index `order[k]` of `ids`. A rising
+ * run is written as its first index, `+` and how many follow.
+ */
+export interface RowsInOrder {
+  ids: RunsOfABase[];
+  order: string;
+}
+
+/** A key of the sort that put the rows in order. */
+export interface SortedBy {
+  c: ColumnId;
+  direction: SortDirection;
+}
+
 /** Every operation, by `kind`. Lists in an operation are never empty, and runs never of no ids. */
 export type Op =
   | { kind: 'insertSheet'; sheetId: SheetId; name: string; after: SheetId | null }
@@ -475,9 +547,9 @@ export type Op =
   /** Written as `cells`, or as `grid` for 32 cells or more set by typing, pasting, filling or copying. */
   | { kind: 'setCells'; sheetId: SheetId; cells: CellToSet[] }
   | { kind: 'setCells'; sheetId: SheetId; grid: CellGrid }
-  | { kind: 'deleteRows'; sheetId: SheetId; rows: IdRun[] }
+  | { kind: 'deleteRows'; sheetId: SheetId; rows: IdRun[] | RunsOfABase[] }
   | { kind: 'deleteColumns'; sheetId: SheetId; columns: IdRun[] }
-  | { kind: 'undeleteRows'; sheetId: SheetId; rows: IdRun[] }
+  | { kind: 'undeleteRows'; sheetId: SheetId; rows: IdRun[] | RunsOfABase[] }
   | { kind: 'undeleteColumns'; sheetId: SheetId; columns: IdRun[] }
   | { kind: 'deleteSheet'; sheetId: SheetId }
   | { kind: 'undeleteSheet'; sheetId: SheetId }
@@ -503,7 +575,9 @@ export type Op =
   | { kind: 'setViews'; views: ViewToSet[] }
   | { kind: 'setPlacements'; sheetId: SheetId; placements: PlacementToSet[] }
   | { kind: 'setCellTables'; sheetId: SheetId; cellTables: CellTableToSet[] }
+  | { kind: 'setNamedViews'; sheetId: SheetId; namedViews: NamedViewToSet[] }
   | { kind: 'moveRows'; sheetId: SheetId; moves: RowMove[] }
+  | { kind: 'reorderRows'; sheetId: SheetId; rows: RowsInOrder; sortedBy: SortedBy[] }
   | { kind: 'moveColumns'; sheetId: SheetId; moves: ColumnMove[] }
   | { kind: 'moveSheets'; moves: SheetMove[] };
 
@@ -515,7 +589,7 @@ export type OpOf<K extends OpKind> = Extract<Op, { kind: K }>;
 /** The oldest version of the operations' format the engine reads. */
 export const OLDEST_FORMAT_VERSION = 17;
 /** The newest version of the operations' format the engine writes. */
-export const NEWEST_FORMAT_VERSION = 39;
+export const NEWEST_FORMAT_VERSION = 47;
 
 /**
  * An edit as recorded for the server: the version of the format its operations

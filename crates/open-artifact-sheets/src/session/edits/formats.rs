@@ -18,6 +18,7 @@ use crate::number_format::{NumberFormat, Room};
 use crate::session::place::Place;
 use crate::shown::{shown, ShownValue};
 use crate::value::Value;
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{read_format, sorted_runs, write_format, CellFormats, Leaf};
 use crate::workbook::layout::{CellIds, RangeIds};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
@@ -83,6 +84,16 @@ pub fn read(edit: &Json) -> Option<Edit> {
     };
     let run = |r: &IdRun| r.count > 0 && r.first as u64 + r.count as u64 <= 1 << 32;
     (readable && !cells.rows.is_empty() && cells.rows.iter().all(run)).then_some(edit)
+}
+
+impl Edit {
+    /// The sheet a border is set on, in the order the person sees its rows (`seen`).
+    pub fn in_seen_order(&self) -> Option<&str> {
+        match self {
+            Edit::SetBorders { cells, .. } => Some(&cells.sheet_id),
+            _ => None,
+        }
+    }
 }
 
 pub fn make(workbook: &Workbook, edit: Edit, _context: &Context) -> Result<Made, Refused> {
@@ -211,10 +222,15 @@ fn format_cells(workbook: &Workbook, cells: &Cells, format: &Json) -> Result<Mad
     if changes {
         let mut rows: Vec<LineId> = block.rows.iter().map(|&p| block.row(p)).collect();
         let mut columns: Vec<LineId> = (block.left..=block.right).map(|p| block.column(p)).collect();
+        let mut written = write_format(&leaves);
+        // The wrapping is sent as the page wrote it (by name or as a boolean), though it is kept as one of three.
+        if let (Some(wrap), Some(alignment)) = (format.pointer("/alignment/wrap"), written.get_mut("alignment")) {
+            alignment["wrap"] = wrap.clone();
+        }
         let format = CellsToFormat {
             rows: sorted_runs(&workbook.bases, &mut rows),
             columns: sorted_runs(&workbook.bases, &mut columns),
-            format: write_format(&leaves),
+            format: written,
         };
         ops.push(Op::SetCellFormats { sheet_id: sheet.id.clone(), formats: vec![format] });
     }
@@ -247,7 +263,7 @@ fn format_cells(workbook: &Workbook, cells: &Cells, format: &Json) -> Result<Mad
         inputs.extend(controlled);
     }
     if !inputs.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: inputs.into_values().collect(), listed: true });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: inputs.into_values().collect(), form: CellForm::List });
     }
     // No formatting of cells is sent in parts: too large to send whole, it is refused.
     if serde_json::to_string(&ops).map_or(0, |text| text.len()) > MOST_BYTES {
@@ -569,7 +585,7 @@ fn merge_cells(workbook: &Workbook, cells: &Cells) -> Result<Made, Refused> {
         }
         inputs.extend(filled[1..].iter().map(|&at| set(at, None)));
         if !inputs.is_empty() {
-            ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: inputs, listed: true });
+            ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: inputs, form: CellForm::List });
         }
     }
     let corner = |(r, c): (LineId, LineId)| CellIds { r: bases.text(r), c: bases.text(c) };

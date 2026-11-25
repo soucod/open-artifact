@@ -26,13 +26,35 @@ export interface HostConnection<N extends CapabilityName> {
   shell: ShellConnection | null;
 }
 
-/** Connects to the host and resolves `names` (plus `user`, for the viewer). */
-export async function connectHost<const N extends Exclude<CapabilityName, 'user'>>(names: readonly N[]): Promise<HostConnection<N>> {
+/**
+ * Connects to the host and resolves `names` (plus `user`, for the viewer). `shell`: a Shell connection the page already
+ * opened (`null` when it knows there is none); omitted, this connects to the Shell itself.
+ */
+export async function connectHost<const N extends Exclude<CapabilityName, 'user'>>(names: readonly N[], shell?: ShellConnection | null): Promise<HostConnection<N>> {
   const runtime = installRuntime(createPageProvider());
   const [user, ...granted] = await Promise.all([runtime.use('user'), ...names.map((name) => runtime.use(name))]);
   const caps = Object.fromEntries(names.map((name, i) => [name, granted[i] ?? null])) as HostCapabilities<N>;
   const viewer: Viewer = (await user?.me()) ?? { ...GUEST_VIEWER };
-  return { caps, viewer, abilities: roleAbilities(viewer.role), shell: connectShell() };
+  const abilities = hostAbilities(viewer.role, (caps as Partial<Record<CapabilityName, unknown>>).downloads as CapabilityMap['downloads'] | null | undefined);
+  return { caps, viewer, abilities, shell: shell === undefined ? connectShell() : shell };
+}
+
+/**
+ * The role's abilities on this host. A host whose `downloads` saves in the browser (a cloud host) takes every role's
+ * files and decides there whether the person may export (a viewer only when the owner allows it), so the page sends
+ * them all through it instead of starting a download of its own.
+ */
+export function hostAbilities(role: Viewer['role'], downloads: Pick<CapabilityMap['downloads'], 'browser'> | null | undefined): RoleAbilities {
+  const abilities = roleAbilities(role);
+  return downloads?.browser === true ? { ...abilities, canSaveToHost: true } : abilities;
+}
+
+/**
+ * Whether the person may start an export that the editor otherwise keeps for the owner: the owner, or anyone on a host
+ * whose `downloads` saves in the browser (the host refuses a viewer there unless the owner allows it).
+ */
+export function mayExportHere(role: Viewer['role'], downloads: Pick<CapabilityMap['downloads'], 'browser'> | null | undefined): boolean {
+  return role === 'owner' || downloads?.browser === true;
 }
 
 /** Holds an editor's session once it started. */

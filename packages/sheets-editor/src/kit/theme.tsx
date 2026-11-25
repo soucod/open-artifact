@@ -24,8 +24,8 @@ export function useRootElement(): HTMLElement | null {
   return React.useContext(RootElementContext);
 }
 
-/** The window the nearest root lives in, which may be a frame's rather than the top one. */
-export function useUiWindow(): Window {
+/** The window the nearest root lives in, which may be a frame's rather than the top one; its constructors are that window's own. */
+export function useUiWindow(): Window & typeof globalThis {
   return ownerWindowOf(React.useContext(RootElementContext));
 }
 

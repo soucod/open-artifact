@@ -12,6 +12,8 @@ import type {
   SharedCellFormat,
   Underline,
   VerticalAlignment,
+  Wrap,
+  WrapWritten,
 } from '@open-artifact/sheets-core';
 import type { CellArea } from '../selection/model.ts';
 import { parseLineId, lastAtOrBefore, type LineIndex, type LineSpan } from './line-ids.ts';
@@ -26,7 +28,7 @@ export interface KindedNumberFormat {
 export interface WholeCellFormat {
   font: { bold: boolean; italic: boolean; underline: Underline; strikethrough: boolean; color: Color; size: number };
   numberFormat: KindedNumberFormat;
-  alignment: { horizontal: HorizontalAlignment; vertical: VerticalAlignment; wrap: boolean };
+  alignment: { horizontal: HorizontalAlignment; vertical: VerticalAlignment; wrap: Wrap };
   fillColor: Color;
   cellControl: CellControl;
   border: { top: Border; bottom: Border; left: Border; right: Border };
@@ -92,6 +94,10 @@ interface HeldStretch {
   first: number;
   heldBy: number[];
 }
+export function normalizedWrap(wrap: WrapWritten): Wrap {
+  if (wrap === 'overflow') return false;
+  return wrap === 'wrap' ? true : wrap;
+}
 export function indexRunsOfLineRuns(lineRuns: readonly IdRun[], lineIndex: LineIndex): LineSpan[] {
   let stretches = lineRuns.flatMap((run: IdRun) => lineIndex.stretchesOf(run));
   stretches.sort((oneStretch: LineSpan, otherStretch: LineSpan) => oneStretch.firstIndex - otherStretch.firstIndex);
@@ -152,10 +158,10 @@ export function borderEdgesNear(entries: readonly IndexRunsOfEntry[], area: Cell
 }
 export function numberFormatPatternsWithin(entries: readonly NumberFormatAtIndexes[], area: CellArea): string[] {
   let matches = entries.filter(
-    ({ rows: rows, columns: columns }: NumberFormatAtIndexes) =>
+    ({ rows, columns }: NumberFormatAtIndexes) =>
       runEdgesWithin(rows, area.topRowIndex, area.rowCount).length > 0 && runEdgesWithin(columns, area.leftColumnIndex, area.columnCount).length > 0,
   );
-  return [...new Set(matches.map(({ pattern: pattern }: NumberFormatAtIndexes) => pattern))];
+  return [...new Set(matches.map(({ pattern }: NumberFormatAtIndexes) => pattern))];
 }
 export function coveredCountWithin(runs: readonly LineSpan[], first: number, count: number): number {
   let edges = runEdgesWithin(runs, first, count);
@@ -165,13 +171,13 @@ export function coveredCountWithin(runs: readonly LineSpan[], first: number, cou
   return covered;
 }
 export function sharedFormatOfArea(entries: readonly FormatAtIndexes[], area: CellArea): SharedCellFormat {
-  let coverage = entries.flatMap(({ rows: rows, columns: columns, format: format }: FormatAtIndexes) => {
+  let coverage = entries.flatMap(({ rows, columns, format }: FormatAtIndexes) => {
     let columnsCovered = coveredCountWithin(columns, area.leftColumnIndex, area.columnCount);
     let cellsCovered = columnsCovered === 0 ? 0 : columnsCovered * coveredCountWithin(rows, area.topRowIndex, area.rowCount);
     return cellsCovered === 0
       ? []
       : {
-          format: format,
+          format,
           cellCount: cellsCovered,
         };
   });
@@ -183,8 +189,8 @@ export function sharedFormatOfArea(entries: readonly FormatAtIndexes[], area: Ce
       if (value === undefined) continue;
       let written = JSON.stringify(value);
       shared ??= {
-        value: value,
-        written: written,
+        value,
+        written,
       };
       if (shared.written !== written) return null;
       cellCount += covered.cellCount;
@@ -198,7 +204,7 @@ export function sharedFormatOfArea(entries: readonly FormatAtIndexes[], area: Ce
     alignment: {
       horizontal: sharedValue((format) => format.alignment?.horizontal, defaultAlignment.horizontal),
       vertical: sharedValue((format) => format.alignment?.vertical, defaultAlignment.vertical),
-      wrap: sharedValue((format) => format.alignment?.wrap, defaultAlignment.wrap),
+      wrap: sharedValue(wrapOfFormat, defaultAlignment.wrap),
     },
     fillColor: sharedValue((format) => format.fillColor, DEFAULT_CELL_FORMAT.fillColor),
     cellControl: sharedValue((format) => format.cellControl, DEFAULT_CELL_FORMAT.cellControl),
@@ -231,19 +237,19 @@ export function* colorsUsedInFormats(
   entries: readonly CellFormatContents[],
   dropdowns: readonly DropdownContents[],
 ): Generator<Color | undefined, void, undefined> {
-  for (let { format: format } of entries) {
+  for (let { format } of entries) {
     yield* [format.fillColor, format.font?.color];
     for (let side of BORDER_SIDES) {
       let border = format.border?.[side];
       if (border?.kind === 'line') yield border.color;
     }
   }
-  for (let { options: options } of dropdowns) for (let { color: color } of options) yield color;
+  for (let { options } of dropdowns) for (let { color } of options) yield color;
 }
 export function heldByStretches(runLists: readonly (readonly IdRun[])[]): Map<string, HeldStretch[]> {
   let edgesByBase = new Map<string, EdgeOfRun[]>();
   runLists.forEach((runs: readonly IdRun[], listIndex: number) => {
-    for (let { base: base, first: first, count: count } of runs) {
+    for (let { base, first, count } of runs) {
       let edges = edgesByBase.get(base) ?? [];
       edges.push(
         {
@@ -268,7 +274,7 @@ export function heldByStretches(runLists: readonly (readonly IdRun[])[]): Map<st
     );
     let lists = new Set<number>();
     let stretches: HeldStretch[] = [];
-    edges.forEach(({ at: at, list: list, isStart: isStart }: EdgeOfRun, edgeIndex: number) => {
+    edges.forEach(({ at, list, isStart }: EdgeOfRun, edgeIndex: number) => {
       if (isStart) lists.add(list);
       else lists.delete(list);
       if (edges[edgeIndex + 1]?.at !== at)
@@ -287,12 +293,12 @@ export function createRunMembership(runLists: readonly (readonly IdRun[])[]): (l
     let line = parseLineId(lineId);
     let stretches = line === null ? undefined : heldByBase.get(line.base);
     if (line === null || stretches === undefined) return NO_FORMAT_ENTRY_INDEXES;
-    let stretch = lastAtOrBefore(stretches, ({ first: first }: HeldStretch) => first, line.first);
+    let stretch = lastAtOrBefore(stretches, ({ first }: HeldStretch) => first, line.first);
     return stretch === undefined || stretch.first > line.first ? NO_FORMAT_ENTRY_INDEXES : stretch.heldBy;
   };
 }
 export function createFormatEntryLookup(entries: readonly LineRunsOfEntry[]): (rowId: string, columnId: string) => number[] {
-  let columnMembership = createRunMembership(entries.map(({ columns: columns }: LineRunsOfEntry) => columns));
+  let columnMembership = createRunMembership(entries.map(({ columns }: LineRunsOfEntry) => columns));
   let rowTesters = new Map<number, (rowId: string) => boolean>();
   let coversRow = (entryIndex: number, rowId: string) => {
     let tester = rowTesters.get(entryIndex);
@@ -312,7 +318,7 @@ export function internCellFormat(format: WholeCellFormat): WholeCellFormat {
   return interned;
 }
 export function createCellFormatLookup(entries: readonly CellFormatContents[], kindOfPattern: KindOfPattern): CellFormatLookup {
-  let formats = entries.map(({ format: format }: CellFormatContents) => withNumberFormatKind(format, kindOfPattern));
+  let formats = entries.map(({ format }: CellFormatContents) => withNumberFormatKind(format, kindOfPattern));
   let entriesAt = createFormatEntryLookup(entries);
   let cache = new Map<string, WholeCellFormat>();
   return {
@@ -347,15 +353,15 @@ export function createGivenFormatsLookup(entries: readonly CellFormatContents[])
     for (let format of formats) Object.assign(font, format.font);
     let look = {
       ...(fillColor !== undefined && {
-        fillColor: fillColor,
+        fillColor,
       }),
-      font: font,
+      font,
     };
     looks.set(key, look);
     return look;
   };
   return {
-    lookGivenTo: lookGivenTo,
+    lookGivenTo,
     formatDrawnOf(format: WholeCellFormat, rowId: string, columnId: string) {
       let look = lookGivenTo(rowId, columnId);
       if (look === null) return format;
@@ -411,17 +417,19 @@ export const DEFAULT_CELL_FORMAT: WholeCellFormat = {
     },
   },
 };
-export const hasFontFormatting = ({ font: font }: WholeCellFormat): boolean =>
+export const wrapOfFormat = ({ alignment }: Pick<KindedCellFormat, 'alignment'>): Wrap | undefined =>
+  alignment?.wrap === undefined ? undefined : normalizedWrap(alignment.wrap);
+export const hasFontFormatting = ({ font }: Pick<WholeCellFormat, 'font'>): boolean =>
   font.bold ||
   font.italic ||
   font.strikethrough ||
   font.underline !== DEFAULT_CELL_FORMAT.font.underline ||
   font.color.kind !== 'none' ||
   font.size !== DEFAULT_CELL_FORMAT.font.size;
-export const hasFontOrBorderFormatting = (format: WholeCellFormat): boolean =>
+export const hasFontOrBorderFormatting = (format: Pick<WholeCellFormat, 'font' | 'border'>): boolean =>
   hasFontFormatting(format) || BORDER_SIDES.some((side: BorderSide) => format.border[side].kind === 'line');
 export const LIGHT_GRAY_HEX = '#f3f3f3';
-export const withNumberFormatKind = ({ numberFormat: numberFormat, ...format }: CellFormat, kindOfPattern: KindOfPattern): KindedCellFormat =>
+export const withNumberFormatKind = ({ numberFormat, ...format }: CellFormat, kindOfPattern: KindOfPattern): KindedCellFormat =>
   numberFormat === undefined
     ? format
     : {
@@ -433,13 +441,14 @@ export const withNumberFormatKind = ({ numberFormat: numberFormat, ...format }: 
       };
 export const mergeCellFormat = (
   format: WholeCellFormat,
-  { alignment: alignment, border: border, font: font, ...rest }: KindedCellFormat,
+  { alignment, border, font, ...rest }: KindedCellFormat,
 ): WholeCellFormat => ({
   ...format,
   ...rest,
   alignment: {
     ...format.alignment,
     ...alignment,
+    wrap: normalizedWrap(alignment?.wrap ?? format.alignment.wrap),
   },
   border: {
     ...format.border,
@@ -451,7 +460,7 @@ export const mergeCellFormat = (
   },
 });
 export const anyEntryHasBorderLine = (entries: readonly CellFormatContents[]): boolean =>
-  entries.some(({ format: format }: CellFormatContents) => BORDER_SIDES.some((side: BorderSide) => format.border?.[side]?.kind === 'line'));
+  entries.some(({ format }: CellFormatContents) => BORDER_SIDES.some((side: BorderSide) => format.border?.[side]?.kind === 'line'));
 export const entriesToIndexRuns = (entries: readonly LineRunsOfEntry[], rows: LineIndex, columns: LineIndex): IndexRunsOfEntry[] =>
   entries.map(
     (entry: LineRunsOfEntry) => ({
@@ -461,13 +470,13 @@ export const entriesToIndexRuns = (entries: readonly LineRunsOfEntry[], rows: Li
   );
 export const borderEntryRuns = (entries: readonly CellFormatContents[], rows: LineIndex, columns: LineIndex): IndexRunsOfEntry[] =>
   entriesToIndexRuns(
-    entries.filter(({ format: format }: CellFormatContents) => format.border !== undefined),
+    entries.filter(({ format }: CellFormatContents) => format.border !== undefined),
     rows,
     columns,
   );
 export const wrapEntryRuns = (entries: readonly CellFormatContents[], rows: LineIndex, columns: LineIndex): IndexRunsOfEntry[] =>
   entriesToIndexRuns(
-    entries.filter(({ format: format }: CellFormatContents) => format.alignment?.wrap === true),
+    entries.filter(({ format }: CellFormatContents) => wrapOfFormat(format) === true),
     rows,
     columns,
   );
@@ -488,10 +497,17 @@ export const formatEntryRuns = (
 export const rowLookKey = (entries: readonly FormatAtIndexes[], rowIndex: number): string =>
   entries
     .flatMap(
-      ({ rows: rows, format: format }: FormatAtIndexes, entryIndex: number) =>
+      ({ rows, format }: FormatAtIndexes, entryIndex: number) =>
         Object.keys(format).some((key: string) => key !== 'border') && runEdgesWithin(rows, rowIndex, 1).length > 0 ? [entryIndex] : [],
     )
     .join();
+export const clipsWithin = (entries: readonly FormatAtIndexes[], area: CellArea): boolean =>
+  entries.some(
+    ({ rows, columns, format }: FormatAtIndexes) =>
+      wrapOfFormat(format) === 'clip' &&
+      coveredCountWithin(columns, area.leftColumnIndex, area.columnCount) > 0 &&
+      coveredCountWithin(rows, area.topRowIndex, area.rowCount) > 0,
+  );
 export const MAX_CUSTOM_HEX_COLORS = 8;
 export const BUILT_IN_HEX_COLORS = new Set(['#ffffff', '#f3f3f3', '#000000']);
 export const customHexColorsOfSheet = (entries: readonly CellFormatContents[], dropdowns: readonly DropdownContents[]): string[] =>

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{cell_of, CellAt};
+use crate::workbook::grid::CellForm;
 use crate::workbook::load::{CellToSet, Op, Refusal};
 use crate::workbook::rich::List;
 use crate::workbook::{Input, Workbook};
@@ -46,5 +47,5 @@ pub fn set_list_line_checked(workbook: &Workbook, edit: &Value) -> Result<Vec<Op
         c: workbook.bases.text(place.1),
         input: Some(Input::RichText { paragraphs }),
     }];
-    Ok(vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false }])
+    Ok(vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto }])
 }

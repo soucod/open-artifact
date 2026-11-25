@@ -1,7 +1,8 @@
 //! Operations: what changes a workbook. `load` applies a workbook's whole history of operations to an empty one;
 //! `apply` applies an edit's and answers the operations that would take it back (`reverse`).
 //!
-//! All 31 operations: inserting, deleting, undeleting and moving sheets, rows and columns; naming
+//! All 32 operations: inserting, deleting, undeleting and moving sheets, rows and columns, putting rows in order
+//! (`reorder.rs`); naming
 //! sheets; setting cells and cell formats (`formats.rs`); merging, sizes, sheet settings and groups (`layout.rs`);
 //! dropdowns, conditional formats, cell tables, views and placements (`objects.rs`); the time zone, the locale and
 //! the seed of random numbers.
@@ -14,10 +15,13 @@ use hashbrown::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::grid::CellForm;
 use super::formats::{blocks, read_format, Leaf};
 use super::layout::{written, ColumnsToSize, GroupToSet, RangeIds, RowsToSize, SheetToSet};
-use super::objects::{CellTableToSet, ConditionalFormatToSet, DropdownToSet, PlacementToSet, ViewToSet};
+use super::objects::{CellTableToSet, ConditionalFormatToSet, DropdownToSet, NamedViewToSet, PlacementToSet, ViewToSet};
+use super::reorder::{RowsInOrder, SortedBy};
 use super::{Cell, Input, Sheet, Workbook};
+use crate::ids::listed_runs::RowRuns;
 use crate::ids::{move_items, runs_of, split_id, Axis, AxisError, IdRun, LineId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,13 +50,13 @@ pub enum Op {
     },
     /// Written as `cells` or, 32 cells or more, as `grid`, unless `listed` (`grid.rs`, `set_cells`).
     #[serde(serialize_with = "super::grid::set_cells::serialize", deserialize_with = "super::grid::set_cells::deserialize")]
-    SetCells { sheet_id: String, cells: Vec<CellToSet>, listed: bool },
+    SetCells { sheet_id: String, cells: Vec<CellToSet>, form: CellForm },
     #[serde(rename_all = "camelCase")]
-    DeleteRows { sheet_id: String, rows: Vec<IdRun> },
+    DeleteRows { sheet_id: String, rows: crate::ids::listed_runs::RowRuns },
     #[serde(rename_all = "camelCase")]
     DeleteColumns { sheet_id: String, columns: Vec<IdRun> },
     #[serde(rename_all = "camelCase")]
-    UndeleteRows { sheet_id: String, rows: Vec<IdRun> },
+    UndeleteRows { sheet_id: String, rows: crate::ids::listed_runs::RowRuns },
     #[serde(rename_all = "camelCase")]
     UndeleteColumns { sheet_id: String, columns: Vec<IdRun> },
     #[serde(rename_all = "camelCase")]
@@ -94,7 +98,11 @@ pub enum Op {
     #[serde(rename_all = "camelCase")]
     SetCellTables { sheet_id: String, cell_tables: Vec<CellTableToSet> },
     #[serde(rename_all = "camelCase")]
+    SetNamedViews { sheet_id: String, named_views: Vec<NamedViewToSet> },
+    #[serde(rename_all = "camelCase")]
     MoveRows { sheet_id: String, moves: Vec<RowMove> },
+    #[serde(rename_all = "camelCase")]
+    ReorderRows { sheet_id: String, rows: RowsInOrder, sorted_by: Vec<SortedBy> },
     #[serde(rename_all = "camelCase")]
     MoveColumns { sheet_id: String, moves: Vec<ColumnMove> },
     MoveSheets { moves: Vec<SheetMove> },
@@ -148,10 +156,8 @@ impl Op {
                         _ => true,
                     })
             }
-            Op::DeleteRows { rows, .. }
-            | Op::DeleteColumns { columns: rows, .. }
-            | Op::UndeleteRows { rows, .. }
-            | Op::UndeleteColumns { columns: rows, .. } => runs(rows),
+            Op::DeleteRows { rows, .. } | Op::UndeleteRows { rows, .. } => runs(rows),
+            Op::DeleteColumns { columns, .. } | Op::UndeleteColumns { columns, .. } => runs(columns),
             Op::SetCellFormats { formats, .. } => {
                 !formats.is_empty()
                     && formats.iter().all(|f| runs(&f.rows) && runs(&f.columns) && read_format(&f.format).is_some_and(|l| !l.is_empty()))
@@ -159,6 +165,7 @@ impl Op {
             Op::Reseed { .. } | Op::SetTimeZone { .. } | Op::AdoptTimeZone { .. } | Op::SetLocale { .. } => true,
             Op::SetSheetNames { names } => !names.is_empty(),
             Op::MoveRows { moves, .. } => !moves.is_empty() && moves.iter().all(|m| runs(&m.rows)),
+            Op::ReorderRows { rows, .. } => rows.is_well_formed(),
             Op::MoveColumns { moves, .. } => !moves.is_empty() && moves.iter().all(|m| runs(&m.columns)),
             Op::MoveSheets { moves } => !moves.is_empty() && moves.iter().all(|m| !m.sheet_ids.is_empty()),
             _ => unreachable!("answered by layout_well_formed or objects_well_formed"),
@@ -177,6 +184,8 @@ pub struct SheetName {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CellsToFormat {
+    /// Written as lists of runs of each base when there are many (`listed_runs`).
+    #[serde(with = "crate::ids::listed_runs")]
     pub rows: Vec<IdRun>,
     pub columns: Vec<IdRun>,
     pub format: serde_json::Value,
@@ -228,6 +237,7 @@ pub enum Refusal {
     ViewNamedTwice,
     ViewInUse,
     UnknownView,
+    NamedViewNamedTwice,
     PlacementNamedTwice,
     CellTableNamedTwice,
     RangeAlreadyMerged,
@@ -437,14 +447,16 @@ impl Workbook {
                     AxisError::Unknown => lines.unknown(),
                 })?;
                 Ok(match lines {
-                    Lines::Rows => Op::DeleteRows { sheet_id: sheet_id.clone(), rows: vec![rows.clone()] },
+                    Lines::Rows => Op::DeleteRows { sheet_id: sheet_id.clone(), rows: RowRuns::written(vec![rows.clone()]) },
                     Lines::Columns => Op::DeleteColumns { sheet_id: sheet_id.clone(), columns: vec![rows.clone()] },
                 })
             }
-            Op::DeleteRows { sheet_id, rows: runs }
+            Op::DeleteRows { sheet_id, rows: RowRuns { runs, .. } }
             | Op::DeleteColumns { sheet_id, columns: runs }
-            | Op::UndeleteRows { sheet_id, rows: runs }
+            | Op::UndeleteRows { sheet_id, rows: RowRuns { runs, .. } }
             | Op::UndeleteColumns { sheet_id, columns: runs } => {
+                // The reverse gives the rows back in the form they came in.
+                let listed = matches!(op, Op::DeleteRows { rows, .. } | Op::UndeleteRows { rows, .. } if rows.listed);
                 let lines = if matches!(op, Op::DeleteRows { .. } | Op::UndeleteRows { .. }) { Lines::Rows } else { Lines::Columns };
                 let undelete = matches!(op, Op::UndeleteRows { .. } | Op::UndeleteColumns { .. });
                 let index = self.sheet_index(sheet_id).ok_or(Refusal::UnknownSheet)?;
@@ -465,9 +477,9 @@ impl Workbook {
                 }
                 let (sheet_id, runs) = (sheet_id.clone(), runs.clone());
                 Ok(match (lines, undelete) {
-                    (Lines::Rows, false) => Op::UndeleteRows { sheet_id, rows: runs },
+                    (Lines::Rows, false) => Op::UndeleteRows { sheet_id, rows: RowRuns { runs, listed } },
                     (Lines::Columns, false) => Op::UndeleteColumns { sheet_id, columns: runs },
-                    (Lines::Rows, true) => Op::DeleteRows { sheet_id, rows: runs },
+                    (Lines::Rows, true) => Op::DeleteRows { sheet_id, rows: RowRuns { runs, listed } },
                     (Lines::Columns, true) => Op::DeleteColumns { sheet_id, columns: runs },
                 })
             }
@@ -477,6 +489,7 @@ impl Workbook {
                 let moves = back.into_iter().map(|(rows, after)| RowMove { rows, after }).collect();
                 Ok(Op::MoveRows { sheet_id: sheet_id.clone(), moves })
             }
+            Op::ReorderRows { sheet_id, rows, sorted_by } => self.reorder_rows(sheet_id, rows, sorted_by),
             Op::MoveColumns { sheet_id, moves: column_moves } => {
                 let moves: Vec<(&[IdRun], Option<&str>)> =
                     column_moves.iter().map(|m| (m.columns.as_slice(), m.after.as_deref())).collect();
@@ -492,7 +505,7 @@ impl Workbook {
                 }
                 Ok(Op::SetSheetNames { names: old })
             }
-            Op::SetCells { sheet_id, cells, listed } => {
+            Op::SetCells { sheet_id, cells, form } => {
                 let index = self.sheet_index(sheet_id).ok_or(Refusal::UnknownSheet)?;
                 let mut lines = Vec::with_capacity(cells.len());
                 let mut named = hashbrown::HashSet::with_capacity(cells.len());
@@ -526,7 +539,7 @@ impl Workbook {
                         self.outcomes.remove(&super::OutcomeAt(sheet_id, r, c));
                     }
                 }
-                Ok(Op::SetCells { sheet_id: sheet_id.clone(), cells: old, listed: *listed })
+                Ok(Op::SetCells { sheet_id: sheet_id.clone(), cells: old, form: *form })
             }
             Op::SetCellFormats { sheet_id, formats } => {
                 let index = self.sheet_index(sheet_id).ok_or(Refusal::UnknownSheet)?;
@@ -604,6 +617,7 @@ impl Workbook {
             Op::SetDropdowns { .. }
             | Op::SetConditionalFormats { .. }
             | Op::SetCellTables { .. }
+            | Op::SetNamedViews { .. }
             | Op::SetViews { .. }
             | Op::SetPlacements { .. } => self.apply_objects(op),
         }

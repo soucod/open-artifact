@@ -9,7 +9,8 @@
 //! What does not carry over is told (`notCarriedOver`), in this order: formulas written as their values, random
 //! numbers (which Excel draws again), people (written as their labels), links of parts of texts, links Excel does
 //! not take, checkboxes, the colors of dropdown options, sheet names Excel does not take, blank cells' looks past
-//! the file's room for them, sizes past Excel's largest, conditional formats and views placed on sheets. A placed
+//! the file's room for them, sizes past Excel's largest, conditional formats, views placed on sheets, the charts'
+//! looks, and interactives (a sheet that shows one is written as its cells). A placed
 //! view is a chart in the file only when it is described (`charts`); every other one is in `chartsLeftOut`, with why.
 
 mod charts;
@@ -244,6 +245,8 @@ pub fn answer(workbook: &Workbook, request: &Json) -> String {
         (workbook.sheets.iter().any(|s| !s.conditional_formats.is_empty()), "conditionalFormats"),
         (!charts.left_out.is_empty(), "placedViews"),
         (drawn, "looksOfCharts"),
+        // A sheet that shows an interactive is written as its cells, without it.
+        (workbook.sheets.iter().any(|s| s.interactive.is_some()), "interactives"),
     ]
     .into_iter()
     .filter_map(|(on, name)| on.then_some(name))

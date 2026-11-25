@@ -82,6 +82,20 @@ describe('createLibraryApi', () => {
     const { fetch } = fakeFetch({ '/api/open-artifact.types': { body: {} } });
     assert.deepEqual(await createLibraryApi({ fetch }).types(), { roots: [], types: [] });
   });
+
+  it('passes the projects of types() through, and posts the types.* routes', async () => {
+    const project = { dir: '/p', root: '/p/.agents/artifact-types', trusted: false, types: [] };
+    const { fetch, calls } = fakeFetch({
+      '/api/open-artifact.types': { body: { roots: [], types: [], projects: [project] } },
+      '/api/open-artifact.types.disable': { body: { ok: true, disabledTypes: ['x'], trustedProjects: [] } },
+      '/api/open-artifact.types.trust': { body: { ok: true, disabledTypes: [], trustedProjects: ['/p'] } },
+    });
+    const api = createLibraryApi({ fetch });
+    assert.deepEqual((await api.types()).projects, [project]);
+    assert.deepEqual((await api.typesEnable('x', false)).disabledTypes, ['x']);
+    assert.deepEqual((await api.typesTrust('/p', true)).trustedProjects, ['/p']);
+    assert.ok(calls.some((c) => c.url.endsWith('/api/open-artifact.types.trust') && JSON.parse(String(c.init?.body)).dir === '/p'));
+  });
 });
 
 describe('library events', () => {

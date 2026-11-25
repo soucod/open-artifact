@@ -7,7 +7,6 @@ import {
   DASH_PARAMS_PATH,
   DASH_SETTINGS_PATH,
   DRAFTS_COLLECTION,
-  USER_DATA_COLLECTION,
   isValidDashboardFilename,
   isValidDatasetId,
   parseDataPath,
@@ -23,7 +22,8 @@ import {
   parseDataset,
   parseParameterValue,
 } from './model.ts';
-import { DATA_FILE_FORMATS, inferDataFileFormat, parseDataFileTable } from './tables.ts';
+import { DATA_FILE_FORMATS, inferDataFileFormat, parseDataFileTable, parseFileJson } from './tables.ts';
+import { MAX_SAVED_ROWS_PATH_SEGMENTS, SAVED_ROWS_ROOT, savedRowsPathProblem, type SavedRowsPathProblem } from './saved-rows.ts';
 import { getDatasetParameterNames, getSourceRuleProblems } from './fill.ts';
 import {
   CARD_LUMINANCE,
@@ -121,10 +121,14 @@ export function dataDocumentFile(path: string): string {
   return `db/${path}.json`;
 }
 
-/** Store paths the history leaves out: each person's own documents and drafts. */
+/**
+ * Store paths the history leaves out: what the page saves under `data/` (each person's own documents too), drafts,
+ * and `dash/settings` (how often the sources update).
+ */
 export function dataHistoryIgnores(path: string): boolean {
   const clean = path.replace(/^\/+/, '').replace(/\.json$/, '');
-  return [USER_DATA_COLLECTION, DRAFTS_COLLECTION].some((collection) => clean === collection || clean.startsWith(`${collection}/`));
+  if (clean === DASH_SETTINGS_PATH) return true;
+  return [SAVED_ROWS_ROOT, DRAFTS_COLLECTION].some((collection) => clean === collection || clean.startsWith(`${collection}/`));
 }
 
 /** A new, empty dashboard's documents by store path (without `.json`), as JSON text. */
@@ -138,15 +142,35 @@ type Report = (doc: string, level: Level, message: string, line?: number) => voi
 const kb = (bytes: number): string => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`);
 const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length;
 
-/** What the page reads as a document's `edit` stamp: the agent's `{via, at}` or a person's `{by, byAt}`. */
+/**
+ * The `edit` stamp is the page's own: `{by, byAt}`, the person who last changed the document on the page. History
+ * names the agent by itself, so a stamp the agent wrote (`{via, at}`) is only noted.
+ */
 function editStampProblem(edit: unknown): string | null {
-  const message = 'edit must be {via: "agent", at: <UTC ISO>} (the page ignores anything else).';
-  if (!isPlainObject(edit)) return message;
+  const leaveOut = 'leave edit out of what you write: the page stamps the person who changes it there, and History names you by itself.';
+  if (!isPlainObject(edit)) return `edit is the page’s {by, byAt}; ${leaveOut}`;
   const time = (value: unknown): boolean =>
     typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && !Number.isNaN(Date.parse(value));
-  const writer = typeof edit.via === 'string' && time(edit.at);
-  const person = typeof edit.by === 'string' && time(edit.byAt);
-  return writer || person ? null : message;
+  if (typeof edit.by === 'string' && time(edit.byAt)) return null;
+  return edit.via !== undefined ? `edit holds {via, at}, which the page ignores; ${leaveOut}` : `edit is the page’s {by, byAt}; ${leaveOut}`;
+}
+
+const SAVED_ROWS_PATH_HINT = 'a collection such as data/team/notes, or one document such as data/team/notes/today';
+
+function savedRowsPathMessage(problem: SavedRowsPathProblem, path: unknown): string {
+  const shown = JSON.stringify(path);
+  switch (problem) {
+    case 'not_text':
+      return `source.path is missing: where the page saves the rows, ${SAVED_ROWS_PATH_HINT} (data/users/me/… for each reader’s own).`;
+    case 'outside_data':
+      return `source.path ${shown} isn’t under data/: saved rows are kept in ${SAVED_ROWS_PATH_HINT}.`;
+    case 'too_deep':
+      return `source.path ${shown} has more than ${MAX_SAVED_ROWS_PATH_SEGMENTS} parts.`;
+    case 'bad_segment':
+      return `source.path ${shown}: each part is 1–200 of A–Z a–z 0–9 _ - . ~ : @ + (and not . or ..).`;
+    case 'own_report':
+      return `source.path ${shown} is one of the page’s own reports (a person’s folder, check, runs, page, history-…), not saved rows.`;
+  }
 }
 
 function checkMeta(meta: UnknownRecord | undefined, report: Report): void {
@@ -353,19 +377,26 @@ function checkDataset(
   }
   const rawSource = isPlainObject(data.source) ? data.source : null;
   if (rawSource === null) {
-    issue('needs source: {kind: "call", connector, tool, args} (a live query) or {kind: "file", url, name, format} (an upload).');
+    issue(
+      'needs source: {kind: "call", connector, tool, args} (a live query), {kind: "file", url, name, format} (an upload) or {kind: "store", path} (rows saved from the page).',
+    );
     return info;
   }
   const dataset = parseDataset(id, data);
   if (dataset === null) {
-    issue('source has no kind the page reads: give it a "kind" of "call" (a live query) or "file" (an upload).');
+    issue('source has no kind the page reads: give it a "kind" of "call" (a live query), "file" (an upload) or "store" (saved rows).');
     return info;
   }
   const { source } = dataset;
   if (source.kind === 'unsupported') {
     if (source.rawKind === 'rows')
       issue('is an old rows dataset (it shows "Didn’t load"): make its rows a JSON file, upload it, then set the document with a file source and updated.');
-    else issue(`source.kind ${JSON.stringify(source.rawKind)} isn’t one the page loads; use "call" or "file".`);
+    else issue(`source.kind ${JSON.stringify(source.rawKind)} isn’t one the page loads; use "call", "file" or "store".`);
+    return info;
+  }
+  if (source.kind === 'store') {
+    const problem = savedRowsPathProblem(rawSource.path);
+    if (problem !== null) issue(savedRowsPathMessage(problem, rawSource.path));
     return info;
   }
   if (source.kind === 'query') {
@@ -377,6 +408,8 @@ function checkDataset(
         `source.connector "${source.connector}" isn’t set up and turned on in connectors.json (${[...context.connectors].join(', ') || 'none is'}), so the query doesn’t run (runs says absent) until the person adds that server or you name one of theirs.`,
       );
     if (source.tool === '') issue('source.tool is missing: the tool the query calls.');
+    if (data.snapshot !== undefined && data.snapshot !== false)
+      issue(`snapshot is false or left out (false keeps this query's rows off a published dashboard's snapshot); the page ignores ${JSON.stringify(data.snapshot)}.`);
     if (!source.call) report(doc, 'info', 'is written with the older kind "query"; "call" takes filters with rules.');
     if (source.rulesRefused)
       issue('source.rules are refused: each names a filter and holds only type, enum, pattern, minLength, maxLength, minimum, maximum, or items with minItems and maxItems.');
@@ -421,20 +454,22 @@ function checkDataset(
   const format: DataFileFormat = source.format;
   if (loaders.has(id)) {
     // Its loader makes the rows when the page runs; runs says what it gave.
-  } else if (format === 'text') {
-    issue(`format "text" has no rows of its own: add dash.loader("${id}", {description, fn}) that makes them from the file’s text.`);
-    return info;
-  } else {
+  } else if (format !== 'text') {
+    // A "text" file is its text: a calc that takes it gets [], dash.data gives the text as its data.
     const text = context.readBlob?.(blob);
     if (text !== undefined && text !== null) {
       const table: Table | null = parseDataFileTable(text, format);
-      if (table === null) {
-        issue(
-          `the file has no rows the page can read as ${format}${format === 'json' ? ' (an array of row objects, or one under rows/data/results)' : ''}; or add dash.loader("${id}", …) that makes rows of its text.`,
-        );
+      if (table !== null) info.table = table;
+      else if (format === 'json') {
+        // Other valid JSON is the source's value, for a calc or the page's own code.
+        if (parseFileJson(text) === undefined) {
+          issue(`the file isn’t valid JSON; upload it again as JSON, or as "text" with dash.loader("${id}", …) to read it.`);
+          return info;
+        }
+      } else {
+        issue(`the file has no rows the page can read as ${format}; or add dash.loader("${id}", …) that makes rows of its text.`);
         return info;
       }
-      info.table = table;
     }
   }
   const updated = isPlainObject(data.updated) ? data.updated : null;
@@ -520,7 +555,7 @@ function checkPageReports(docs: ReadonlyMap<string, UnknownRecord>, context: Dat
       report(
         checkPath,
         level,
-        `the page's code ${did}: ${String(entry.name)}${typeof entry.file === 'string' ? ` in ${entry.file}` : ''}${times}; errors in ${runsPath} hold its words${note}.`,
+        `the page's code ${did}: ${String(entry.name)}${typeof entry.file === 'string' ? ` in ${entry.file}` : ''}${typeof entry.where === 'string' && entry.where !== '' ? `, where ${entry.where.slice(0, 80)}` : ''}${times}; errors in ${runsPath} hold its words${note}.`,
       );
     }
   }

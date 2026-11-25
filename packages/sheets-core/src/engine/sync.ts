@@ -9,9 +9,10 @@
  * syncs, and those four are refused (`syncInUse`).
  */
 
-import type { CellAt, ColumnId, PlaceChanged, RowId, SheetId } from './ids.ts';
+import type { CellAt, ColumnId, IdRun, PlaceChanged, RowId, SheetId } from './ids.ts';
 import type { Op, RecordedEdit } from './ops.ts';
 import type { Edit, OtherAnswerToAnEdit, TextThatNoCellShows } from './edits.ts';
+import type { PackedReadKinds } from './packed.ts';
 import type { CellContents, ReadKinds } from './reads.ts';
 import type { Fault, Refused, StopReason } from './refusals.ts';
 
@@ -65,7 +66,10 @@ export type Changes =
   | {
       kind: 'inSheets';
       sheets: SheetChanges[];
-      /** Views whose inputs read cells changed, or that are placed on a sheet whose lines changed. */
+      /**
+       * Views whose inputs read cells changed, or have a sheet whose lines changed; and interactive
+       * views whose inputs have a sheet whose formats or widths changed.
+       */
       views?: string[];
       isTimeZoneChanged?: true;
     };
@@ -94,7 +98,7 @@ export interface SendEditStep {
 export type NextStep =
   | null
   | { kind: 'stop'; reason: StopReason }
-  /** Fetch the page of edits starting at a revision, and give it with `receiveLoadPage`. */
+  /** Fetch the page of edits starting at a revision, and give it with `receiveLoadPage` (or `receiveLinesOfLoad`). */
   | { kind: 'fetchLoadPage'; from: number; isRepeat: boolean }
   | SendEditStep;
 
@@ -175,6 +179,22 @@ export interface ReceiveLoadPageRequest {
   next: number | null;
 }
 
+/**
+ * A page of the load written as lines of a snapshot (one JSON piece to a line)
+ * rather than as operations. The first page starts with the workbook's piece
+ * and the last ends with the end piece; a load is read one way or the other
+ * throughout, and a page that does not read stops the session (`unreadableLoad`).
+ */
+export interface ReceiveLinesOfLoadRequest {
+  kind: 'receiveLinesOfLoad';
+  from: number;
+  revision: number;
+  /** The format version of the load; the lines carry their own, so it is not read. */
+  v: number;
+  lines: string;
+  next: number | null;
+}
+
 /** An edit as the server streams it. */
 export interface StreamedEdit {
   /** Who made it, as the server tells. */
@@ -235,6 +255,20 @@ export interface QueueEditRequest {
   timeZoneOfTheBrowser?: string | null;
   editsBefore?: EditBefore[];
   editsThatGoAlong?: EditAlong[];
+  /**
+   * The sheet whose columns the edit widens where they are too narrow for the
+   * numbers it gives a pattern (`formatCells` with a number format), as a part
+   * of the same edit. Undo and redo tell the cells formatted, not the widths.
+   */
+  makesRoomForNumbersIn?: SheetId | null;
+  /**
+   * The order the person sees the sheet's rows in, when they have sorted them
+   * for themselves: fills, pastes and borders on that sheet are made in it.
+   * A row named twice is refused (`rowNamedTwice`), and so is a fill or paste
+   * that would move a formula reading another row by a relative row across the
+   * places the order changes (`formulaReadsAnotherRow`).
+   */
+  ownRowOrder?: { sheetId: SheetId; rows: IdRun[] } | null;
 }
 
 /** What became of an edit that goes along. */
@@ -400,7 +434,7 @@ export interface HistoryOfARowAnswer {
 // ---------------------------------------------------------------------------
 
 /** Each kind of session request, with what it takes and the answer it gets (refusals aside, where not listed). */
-export interface SessionKinds extends ReadKinds {
+export interface SessionKinds extends ReadKinds, PackedReadKinds {
   load: { request: LoadRequest; answer: LoadedAnswer };
   apply: { request: ApplyRequest; answer: AppliedAnswer };
   undo: { request: UndoRequest; answer: AppliedAnswer };
@@ -410,6 +444,7 @@ export interface SessionKinds extends ReadKinds {
   receiveServerRevision: { request: ReceiveServerRevisionRequest; answer: SyncStateAnswer };
   receiveClockReading: { request: ReceiveClockReadingRequest; answer: SyncStateAnswer };
   receiveLoadPage: { request: ReceiveLoadPageRequest; answer: SyncStateAnswer };
+  receiveLinesOfLoad: { request: ReceiveLinesOfLoadRequest; answer: SyncStateAnswer };
   receiveStreamedEdit: { request: ReceiveStreamedEditRequest; answer: SyncStateAnswer };
   receiveSendOutcome: { request: ReceiveSendOutcomeRequest; answer: SyncStateAnswer };
   queueEdit: { request: QueueEditRequest; answer: QueueEditAnswer };

@@ -1,7 +1,6 @@
-import type { Dynamic } from '../dynamic.ts';
 import type { PageState } from '../state/initial-state.ts';
-export function carryFormulaOfAgentDiscarded(previousState: Dynamic, state: PageState) {
-  let { lastDone: lastDone } = state;
+export function carryFormulaOfAgentDiscarded(previousState: Pick<PageState, 'lastDone'>, state: PageState): PageState {
+  let { lastDone } = state;
   return previousState.lastDone?.what === 'formulaOfAgentDiscarded' && lastDone?.what === 'sheetShown'
     ? {
         ...state,
@@ -12,7 +11,7 @@ export function carryFormulaOfAgentDiscarded(previousState: Dynamic, state: Page
       }
     : state;
 }
-export const dropFormulaOfAgentDiscarded = (state: PageState) =>
+export const dropFormulaOfAgentDiscarded = (state: PageState): PageState =>
   state.lastDone?.what === 'formulaOfAgentDiscarded'
     ? {
         ...state,

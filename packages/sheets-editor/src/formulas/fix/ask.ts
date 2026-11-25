@@ -1,4 +1,4 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { DecimalSignName } from '@open-artifact/sheets-core';
 import { cellKeyOf, errorCodeOfCell, explainCellError } from '../error-tells.ts';
 import { findFormulaFault } from '../typed-faults.ts';
 import { isSameCell, anchorCellOf, areaOfPosition, moveActiveCellTo, activeAnchorCell } from '../../selection/model.ts';
@@ -33,19 +33,46 @@ import { withNoEffects } from '../../state/transitions.ts';
 import { startEntryEditing } from '../../editor/start-entry.ts';
 import { withoutOtherRanges } from '../../selection/several-ranges.ts';
 import { syncReferencesInEntry } from '../reference-pointing.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
-import type { PageState } from '../../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../../model/workbook.ts';
+import type {
+  ActThatLosesFormulas,
+  FixOfCopyAwaited,
+  FormulaProposed,
+  FormulaWithResult,
+  LostFormula,
+  OthersMayFitBecause,
+  PageState,
+  ProposedFormulaResult,
+} from '../../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../../state/controller.ts';
-export function fewestCellsToReadAt(state: PageState, cellId?: Dynamic, decimalSign?: Dynamic) {
+import type { PageTransition } from '../../state/transitions.ts';
+import type { AgentPrompt } from '../../format/conditional/agent-prompts.ts';
+import type { LineRuns } from '../../format/conditional/pane-state.ts';
+import type { ErrorTell } from '../../messages/formula-errors.ts';
+/** An error the agent can be asked to fix: the cell it starts at, and that cell's formula before the last act broke it. */
+export interface FixableError {
+  origin: CellId;
+  formulaBefore: LostFormula | null;
+}
+/** What the agent is asked to fix a formula, with what is kept to check its answer. */
+export interface FixAsk extends Omit<FixOfCopyAwaited, 'cellId'> {
+  asked: AgentPrompt;
+  linesAsTold: LineRuns;
+  areOwnWords?: true;
+  othersMayFit?: OthersMayFitBecause;
+}
+/** Why no fix can be asked for: the sheet cannot be described, or the ask is too large to send. */
+export type WhyNoFixAsk = 'cantBeDescribed' | 'tooMuchToSend';
+export function fewestCellsToReadAt(state: PageState, cellId: CellId, decimalSign: DecimalSignName): number {
   let [formulasLostToLastAct, formulaLost] = [state.formulasLostToLastAct, formulaLostToLastAct(state, cellId)];
   return formulasLostToLastAct === null || formulaLost === undefined ? 0 : fewestCellsAfterAct(formulasLostToLastAct.act, formulaLost, decimalSign);
 }
-export function formulaBeforeSortOrMove(state: PageState, cellId?: Dynamic) {
+export function formulaBeforeSortOrMove(state: PageState, cellId: CellId): string | null {
   let act = state.formulasLostToLastAct?.act;
   return act === 'sort' || act === 'move' ? (formulaLostToLastAct(state, cellId)?.text ?? null) : null;
 }
-export function errorOriginOf(workbook: WorkbookReads, cellId?: Dynamic) {
-  let originByCell = errorOriginCache.get(workbook) ?? new (Map as Dynamic)();
+export function errorOriginOf(workbook: WorkbookReads, cellId: CellId): CellId | null | 'yetToBeKnown' {
+  let originByCell = errorOriginCache.get(workbook) ?? new Map<string, CellId | null>();
   errorOriginCache.set(workbook, originByCell);
   let cached = originByCell.get(cellKeyOf(cellId));
   if (cached !== undefined) return cached;
@@ -62,7 +89,7 @@ export function errorOriginOf(workbook: WorkbookReads, cellId?: Dynamic) {
   }
   let cause = workbook.causeOfError(cellId, `${errorCode} ${cell.formulaText}`);
   if (cause === null) return 'yetToBeKnown';
-  let { cause: saidCause, passedOnFrom: passedOnFrom } = cause.said;
+  let { cause: saidCause, passedOnFrom } = cause.said;
   let passedOnCellId =
     passedOnFrom === null
       ? null
@@ -75,20 +102,20 @@ export function errorOriginOf(workbook: WorkbookReads, cellId?: Dynamic) {
   if (cause.isLatest) originByCell.set(cellKeyOf(cellId), origin);
   return origin;
 }
-export function fixableErrorAt(state: PageState, workbook: ReadsWithTextMeasurer, cellId?: Dynamic) {
+export function fixableErrorAt(state: PageState, workbook: ReadsWithTextMeasurer, cellId: CellId): FixableError | 'yetToBeKnown' | null {
   if (workbook.calculationTookTooLong) return null;
   let origin = errorOriginOf(workbook, cellId);
   if (origin === 'yetToBeKnown') return origin;
   if (origin === null || origin.sheetId !== cellId.sheetId) return null;
   if (!isSameCell(anchorCellOf(workbook, origin), origin)) return null;
   let position = workbook.positionOfCell(origin);
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(state, workbook);
+  let { rowEdges, columnEdges } = layoutOfView(state, workbook);
   if (position === null) return null;
   if (!isLineShown(rowEdges, position.rowIndex) || !isLineShown(columnEdges, position.columnIndex)) return null;
   let cell = workbook.cellOf(origin);
   if (cell?.input.kind !== 'formula' || !isFormulaShortEnoughToFix(cell.formulaText)) return null;
   if (usesFunctionAgentMayNotWrite(cell.formulaText, workbook.decimalSign) || ADDRESS_LIKE_PATTERN.test(cell.formulaText)) return null;
-  if (cell.input.formula.references.some(({ sheetId: sheetId }: Dynamic) => sheetId !== origin.sheetId)) return null;
+  if (cell.input.formula.references.some(({ sheetId }) => sheetId !== origin.sheetId)) return null;
   let fixThatCameToNothing = state.formulaFromWords.fixThatCameToNothing;
   if (
     fixThatCameToNothing !== null &&
@@ -108,23 +135,23 @@ export function fixableErrorAt(state: PageState, workbook: ReadsWithTextMeasurer
   if (explained?.isTellOnItsWay === true) return 'yetToBeKnown';
   if (isFormulaWrittenInWords(workbook, cell.formulaText))
     return {
-      origin: origin,
-      formulaBefore: formulaBefore,
+      origin,
+      formulaBefore,
     };
   let cause = explained?.tell?.cause;
   if (cause === undefined) return null;
   return formulaBefore !== null || FIXABLE_ERROR_CAUSES.has(cause)
     ? {
-        origin: origin,
-        formulaBefore: formulaBefore,
+        origin,
+        formulaBefore,
       }
     : null;
 }
 export function cellOfFixNotice({
-  formulaFromWords: { fixThatCameToNothing: fixThatCameToNothing },
-  workbookChangeCount: workbookChangeCount,
-  sheetId: sheetId,
-}: Dynamic) {
+  formulaFromWords: { fixThatCameToNothing },
+  workbookChangeCount,
+  sheetId,
+}: Pick<PageState, 'formulaFromWords' | 'workbookChangeCount' | 'sheetId'>): CellId | null {
   return fixThatCameToNothing !== null &&
     fixThatCameToNothing.isNoticeUp &&
     fixThatCameToNothing.atChangeCount === workbookChangeCount &&
@@ -132,8 +159,8 @@ export function cellOfFixNotice({
     ? fixThatCameToNothing.cellId
     : null;
 }
-export function withFixNoticeDown(state: PageState) {
-  let { fixThatCameToNothing: fixThatCameToNothing } = state.formulaFromWords;
+export function withFixNoticeDown(state: PageState): PageState {
+  let { fixThatCameToNothing } = state.formulaFromWords;
   return fixThatCameToNothing === null || !fixThatCameToNothing.isNoticeUp
     ? state
     : {
@@ -147,9 +174,9 @@ export function withFixNoticeDown(state: PageState) {
         },
       };
 }
-export function ownWordsAskFor(state?: Dynamic, workbookSeen?: Dynamic, cellId?: Dynamic) {
+export function ownWordsAskFor(state: PageState, workbookSeen: WorkbookReads, cellId: CellId): FixAsk | WhyNoFixAsk | null {
   let workbook = readsAsStored(workbookSeen);
-  let { sheetId: sheetId } = cellId;
+  let { sheetId } = cellId;
   let position = workbook.positionOfCell(cellId);
   let typed = workbook.cellOf(cellId)?.formulaText;
   if (position === null || typed === undefined || !isFormulaWrittenInWords(workbook, typed)) return null;
@@ -162,9 +189,9 @@ export function ownWordsAskFor(state?: Dynamic, workbookSeen?: Dynamic, cellId?:
   let asked = formulaFromWordsPrompt(words, cellAddress, sheetDescription, workbook.decimalSign, true);
   if (isPromptDataTooLong(asked)) return 'tooMuchToSend';
   return {
-    asked: asked,
+    asked,
     broken: typed,
-    linesAsTold: linesAsTold,
+    linesAsTold,
     fewestCellsToRead: 0,
     formulaBeforeASortOrMove: null,
     cameToBeforeASort: null,
@@ -175,11 +202,11 @@ export function ownWordsAskFor(state?: Dynamic, workbookSeen?: Dynamic, cellId?:
 }
 export function fixAskFor(
   state: PageState,
-  workbookSeen: Dynamic,
-  { origin: origin, formulaBefore: formulaBefore }: Dynamic,
-  otherCell: Dynamic = null,
-  mayHaveOthers: Dynamic = false,
-) {
+  workbookSeen: WorkbookReads,
+  { origin, formulaBefore }: FixableError,
+  otherCell: CellId | null = null,
+  mayHaveOthers = false,
+): FixAsk | WhyNoFixAsk | null {
   let workbook = readsAsStored(workbookSeen);
   let explained = explainCellError(workbook, origin);
   let position = workbook.positionOfCell(origin);
@@ -197,14 +224,14 @@ export function fixAskFor(
             act: formulasLostToLastAct.act,
             cells: formulasLostToLastAct.cells,
           },
-    formulaBefore: formulaBefore,
+    formulaBefore,
   });
   let sheetDescription = requestData === null ? null : describeSheetForAgent(workbook, origin.sheetId, position, requestData);
   let linesAsTold = lineRunsOfSheet(workbook, origin.sheetId);
   if (requestData === null || sheetDescription === null || linesAsTold === null) return 'cantBeDescribed';
   let otherPosition = otherCell === null ? null : workbook.positionOfCell(otherCell);
   let isWrittenInWords = isFormulaWrittenInWords(workbook, broken);
-  let secondReading =
+  const secondReading =
     mayHaveOthers && !isWrittenInWords
       ? (() => {
           if (formulaBefore !== null) return formulasLostToLastAct?.areColumnsDeleted === true ? 'cellsDeleted' : null;
@@ -231,11 +258,11 @@ export function fixAskFor(
   return isPromptDataTooLong(asked)
     ? 'tooMuchToSend'
     : {
-        asked: asked,
-        broken: broken,
-        linesAsTold: linesAsTold,
-        fewestCellsToRead: fewestCellsToRead,
-        formulaBeforeASortOrMove: formulaBeforeASortOrMove,
+        asked,
+        broken,
+        linesAsTold,
+        fewestCellsToRead,
+        formulaBeforeASortOrMove,
         cameToBeforeASort: cameToBeforeASortAt(state, origin),
         callsForNoNewCell: !isWrittenInWords && explained.tell !== null && CAUSES_CALLING_FOR_NO_NEW_CELL.has(explained.tell.cause),
         isLabelOrHeadingTold: fixDataTellsLabelOrHeading(requestData),
@@ -244,7 +271,7 @@ export function fixAskFor(
         }),
       };
 }
-export function askAgentToFixFormula(state: PageState, workbook: ReadsWithTextMeasurer, cellId?: Dynamic) {
+export function askAgentToFixFormula(state: PageState, workbook: ReadsWithTextMeasurer, cellId: CellId): PageTransition {
   if (state.mode.kind === 'editing') return withNoEffects(state);
   let fixable = fixableErrorAt(state, workbook, cellId);
   let fixAsk =
@@ -253,20 +280,20 @@ export function askAgentToFixFormula(state: PageState, workbook: ReadsWithTextMe
       : (ownWordsAskFor(state, workbook, fixable.origin) ?? fixAskFor(state, workbook, fixable, null, true));
   if (fixable === null || fixable === 'yetToBeKnown' || fixAsk === null) return withNoEffects(state);
   if (typeof fixAsk === 'string') return withNoEffects(withFixThatCameToNothing(state, fixable.origin, 'tooLarge', fixAsk === 'cantBeDescribed'));
-  let {
-    asked: asked,
-    broken: broken,
-    linesAsTold: linesAsTold,
-    fewestCellsToRead: fewestCellsToRead,
-    formulaBeforeASortOrMove: formulaBeforeASortOrMove,
+  const {
+    asked,
+    broken,
+    linesAsTold,
+    fewestCellsToRead,
+    formulaBeforeASortOrMove,
   } = fixAsk;
-  let {
-    cameToBeforeASort: cameToBeforeASort,
-    callsForNoNewCell: callsForNoNewCell,
-    isLabelOrHeadingTold: isLabelOrHeadingTold,
-    areOwnWords: areOwnWords,
+  const {
+    cameToBeforeASort,
+    callsForNoNewCell,
+    isLabelOrHeadingTold,
+    areOwnWords,
   } = fixAsk;
-  let { othersMayFit: othersMayFit } = fixAsk;
+  const { othersMayFit } = fixAsk;
   let editing = startEntryEditing(withoutOtherRanges(moveActiveCellTo(state, workbook, fixable.origin)), workbook, broken, 'cell');
   if (editing.mode.kind !== 'editing') return withNoEffects(state);
   let askId = state.formulaFromWords.askCount + 1;
@@ -275,28 +302,28 @@ export function askAgentToFixFormula(state: PageState, workbook: ReadsWithTextMe
       withEntryFormulaText(withFixNoticeDown(editing), workbook, broken),
       {
         kind: 'asked',
-        askId: askId,
+        askId,
         words: broken,
-        linesAsTold: linesAsTold,
+        linesAsTold,
         isFix: true,
-        fewestCellsToRead: fewestCellsToRead,
+        fewestCellsToRead,
         ...(formulaBeforeASortOrMove !== null && {
-          formulaBeforeASortOrMove: formulaBeforeASortOrMove,
+          formulaBeforeASortOrMove,
         }),
         ...(cameToBeforeASort !== null && {
-          cameToBeforeASort: cameToBeforeASort,
+          cameToBeforeASort,
         }),
         ...(callsForNoNewCell && {
-          callsForNoNewCell: callsForNoNewCell,
+          callsForNoNewCell,
         }),
         ...(isLabelOrHeadingTold && {
-          isLabelOrHeadingTold: isLabelOrHeadingTold,
+          isLabelOrHeadingTold,
         }),
         ...(areOwnWords === true && {
-          areOwnWords: areOwnWords,
+          areOwnWords,
         }),
         ...(othersMayFit !== undefined && {
-          othersMayFit: othersMayFit,
+          othersMayFit,
         }),
       },
       {
@@ -306,84 +333,84 @@ export function askAgentToFixFormula(state: PageState, workbook: ReadsWithTextMe
     effects: [
       {
         kind: 'askAgentForAFormula',
-        askId: askId,
-        asked: asked,
+        askId,
+        asked,
       },
     ],
   };
 }
-export function refreshProposedFormula(state: PageState, workbook: ReadsWithTextMeasurer, proposed?: Dynamic) {
+export function refreshProposedFormula(state: PageState, workbook: ReadsWithTextMeasurer, proposed: FormulaProposed): PageState {
   let activeCell = activeAnchorCell(state, workbook);
   let isFixOfOthers = proposed.isFix === true && proposed.areOwnWords !== true;
-  let resultOf = (formula: Dynamic) =>
+  let comesToOf = (formula: string) =>
     isFixOfOthers && readsCellsHangingOnVolatiles(workbook, activeCell, formula, proposed.words)
       ? 'noFormula'
       : checkFormulaResult(workbook, activeCell, formula);
   if (proposed.fixes !== undefined) {
-    let results = proposed.fixes.map(({ formula: formula }: Dynamic) => resultOf(formula));
-    let fixes = proposed.fixes.flatMap((fix: Dynamic, index: Dynamic) => {
-      let result = results[index] ?? 'noFormula';
-      if (result === 'error')
+    let fixesComeTo = proposed.fixes.map(({ formula }) => comesToOf(formula));
+    let fixes = proposed.fixes.flatMap((fix, index): FormulaWithResult[] => {
+      let fixComesTo = fixesComeTo[index] ?? 'noFormula';
+      if (fixComesTo === 'error')
         return [
           {
             ...fix,
             value: EMPTY_FORMULA_VALUE,
           },
         ];
-      return typeof result === 'string' || (isFixOfOthers && fillsOtherCells(result))
+      return typeof fixComesTo === 'string' || (isFixOfOthers && fillsOtherCells(fixComesTo))
         ? []
         : [
             {
               ...fix,
-              value: result,
+              value: fixComesTo,
             },
           ];
     });
-    let picked = fixes.find(({ formula: formula }: Dynamic) => formula === proposed.formula);
-    if (picked === undefined || results.includes('makesAnAddress')) return endFixThatCameToNothing(state, workbook, 'other');
+    let picked = fixes.find(({ formula }) => formula === proposed.formula);
+    if (picked === undefined || fixesComeTo.includes('makesAnAddress')) return endFixThatCameToNothing(state, workbook, 'other');
     let { fixes: _fixesBefore, ...rest } = proposed;
     return withFormulaFromWordsStage(state, {
       ...rest,
       value: picked.value,
       ...(fixes.length > 1 && {
-        fixes: fixes,
+        fixes,
       }),
     });
   }
-  let result = resultOf(proposed.formula);
-  if (result === 'error')
+  let comesTo = comesToOf(proposed.formula);
+  if (comesTo === 'error')
     return withFormulaFromWordsStage(state, {
       ...proposed,
       value: EMPTY_FORMULA_VALUE,
     });
-  if (proposed.isFix === true && (typeof result === 'string' || (isFixOfOthers && fillsOtherCells(result))))
+  if (proposed.isFix === true && (typeof comesTo === 'string' || (isFixOfOthers && fillsOtherCells(comesTo))))
     return endFixThatCameToNothing(state, workbook, 'other');
-  if (typeof result !== 'string')
+  if (typeof comesTo !== 'string')
     return withFormulaFromWordsStage(state, {
       ...proposed,
-      value: result,
+      value: comesTo,
     });
-  let { words: words } = proposed;
+  let { words } = proposed;
   let backToWords = syncReferencesInEntry(state, withEntryFormulaText(state, workbook, words, 'wasHeld'), workbook);
-  if (result === 'noFormula') return withFormulaFromWordsStage(backToWords, FRESH_FORMULA_OFFER);
+  if (comesTo === 'noFormula') return withFormulaFromWordsStage(backToWords, FRESH_FORMULA_OFFER);
   return withFormulaFromWordsStage(backToWords, {
     kind: 'cameToNothing',
-    words: words,
-    why: result,
+    words,
+    why: comesTo,
   });
 }
-export const fewestCellsAfterAct = (act?: Dynamic, formulaLost?: Dynamic, decimalSign?: Dynamic) =>
+export const fewestCellsAfterAct = (act: ActThatLosesFormulas, formulaLost: LostFormula, decimalSign: DecimalSignName): number =>
   act === 'delete' ? 0 : (countCellsRead(formulaLost.text, decimalSign) ?? 0);
 export const formulaLostToLastAct = (
-  { formulasLostToLastAct: formulasLostToLastAct, workbookChangeCount: workbookChangeCount }: Dynamic,
-  cellId?: Dynamic,
-) =>
+  { formulasLostToLastAct, workbookChangeCount }: Pick<PageState, 'formulasLostToLastAct' | 'workbookChangeCount'>,
+  cellId: CellId,
+): LostFormula | undefined =>
   formulasLostToLastAct !== null && formulasLostToLastAct.atChangeCount === workbookChangeCount
     ? formulasLostToLastAct.byCell.get(cellKeyOf(cellId))
     : undefined;
-export const cameToBeforeASortAt = (state: PageState, cellId?: Dynamic) =>
+export const cameToBeforeASortAt = (state: PageState, cellId: CellId): LostFormula['cameTo'] =>
   state.formulasLostToLastAct?.act === 'sort' ? (formulaLostToLastAct(state, cellId)?.cameTo ?? null) : null;
-export const FIXABLE_ERROR_CAUSES = new (Set as Dynamic)([
+export const FIXABLE_ERROR_CAUSES = new Set<ErrorTell['cause']>([
   'noSuchFunction',
   'functionWithoutParentheses',
   'missingArgument',
@@ -395,15 +422,15 @@ export const FIXABLE_ERROR_CAUSES = new (Set as Dynamic)([
   'wrongSignBetweenArguments',
   'somethingMissingAtTheEnd',
 ]);
-export const CAUSES_CALLING_FOR_NO_NEW_CELL = new (Set as Dynamic)([
+export const CAUSES_CALLING_FOR_NO_NEW_CELL = new Set<ErrorTell['cause']>([
   'noSuchFunction',
   'parenthesisNotClosed',
   'tooManyClosingParentheses',
   'wrongSignBetweenArguments',
   'somethingMissingAtTheEnd',
 ]);
-export const errorOriginCache = new (WeakMap as Dynamic)();
-export const EMPTY_FORMULA_VALUE = {
+export const errorOriginCache = new WeakMap<WorkbookReads, Map<string, CellId | null>>();
+export const EMPTY_FORMULA_VALUE: ProposedFormulaResult = {
   shown: '',
   text: null,
 };

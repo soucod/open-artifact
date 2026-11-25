@@ -1,8 +1,10 @@
 import { TEST_HOME, tempDir, until } from './helpers.ts';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { after, before, test } from 'node:test';
 import {
   HARNESS_PATH,
@@ -16,6 +18,8 @@ import {
 } from '@open-artifact/protocol';
 import { HarnessClient, api, readDaemon } from '../src/client.ts';
 import { BOOT_PLACEHOLDER, startDaemon, type Daemon } from '../src/daemon.ts';
+import { harnessProfile } from '../src/harness.ts';
+import { networkPermission } from '../src/mcp-app.ts';
 import { files } from '../src/paths.ts';
 import { sessionKeyOf } from '../src/store.ts';
 
@@ -57,7 +61,8 @@ test('daemon.json and health', async () => {
   assert.equal(written.port, daemon.port);
   assert.ok(files.daemon().startsWith(TEST_HOME));
   const health = await (await fetch(`${state.url}/__open-artifact/health`)).json();
-  assert.deepEqual(health, { openArtifact: 1, version: written.version });
+  // nodeChildren: how type servers run; plain Node runs child processes.
+  assert.deepEqual(health, { openArtifact: 1, version: written.version, nodeChildren: { mode: 'process', reason: 'node', detail: 'plain Node.js runs child processes' } });
 });
 
 test('MCP: tools/list needs the token and lists the tools', async () => {
@@ -68,6 +73,65 @@ test('MCP: tools/list needs the token and lists the tools', async () => {
   const body = (await response.json()) as { result: { tools: Array<{ name: string }> } };
   const names = body.result.tools.map((t) => t.name);
   for (const name of ['Artifact', 'ArtifactData', 'ArtifactComments']) assert.ok(names.includes(name), name);
+  assert.ok(!names.includes('ShowArtifact'), 'ShowArtifact is only for clients that show MCP Apps');
+});
+
+test('MCP Apps: the view asks for the network permission its frame needs', () => {
+  for (const origin of ['http://127.0.0.1:4800', 'http://127.1.2.3:80', 'http://localhost:4800', 'http://a.frame.localhost:4800', 'http://[::1]:4800']) {
+    assert.equal(networkPermission(origin), 'loopbackNetwork', origin);
+  }
+  for (const origin of ['http://192.168.1.5:4800', 'http://10.0.0.2', 'http://172.20.0.1', 'http://169.254.1.1', 'http://studio.local:4800', 'http://[fd00::1]:4800']) {
+    assert.equal(networkPermission(origin), 'localNetwork', origin);
+  }
+  for (const origin of ['https://example.com', 'http://172.32.0.1', 'http://8.8.8.8', 'not a url']) assert.equal(networkPermission(origin), null, origin);
+});
+
+test('MCP Apps: a client that shows them gets ShowArtifact and the view of the live page', async () => {
+  type Rpc = { result: Record<string, any>; error?: { message: string } };
+  const rpc = async (method: string, params: Record<string, unknown> = {}, headers: Record<string, string> = {}): Promise<Rpc> =>
+    (await (await mcp({ jsonrpc: '2.0', id: 1, method, params }, headers)).json()) as Rpc;
+  const apps = { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } };
+
+  const plain = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {} });
+  assert.equal(plain.result.capabilities.resources, undefined);
+  assert.doesNotMatch(plain.result.instructions, /ShowArtifact/);
+  const other = await rpc('initialize', { capabilities: { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/other'] } } } });
+  assert.equal(other.result.capabilities.resources, undefined, 'a client that takes no mcp-app HTML gets none');
+  const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: apps });
+  assert.deepEqual(init.result.capabilities.resources, {});
+  assert.match(init.result.instructions, /ShowArtifact \{url\}/);
+
+  const ui = { 'X-Open-Artifact-UI': '1', 'X-Open-Artifact-Harness': 'dsh', 'X-Open-Artifact-Session': 'apps-1' };
+  const tools = (await rpc('tools/list', {}, ui)).result.tools as Array<{ name: string; _meta?: { ui?: { resourceUri?: string } } }>;
+  const show = tools.find((t) => t.name === 'ShowArtifact');
+  assert.equal(show?._meta?.ui?.resourceUri, 'ui://open-artifact/view.html');
+
+  const listed = (await rpc('resources/list', {}, ui)).result.resources as Array<{ uri: string; mimeType: string }>;
+  assert.deepEqual(listed.map((r) => [r.uri, r.mimeType]), [['ui://open-artifact/view.html', 'text/html;profile=mcp-app']]);
+  const view = (await rpc('resources/read', { uri: 'ui://open-artifact/view.html' }, ui)).result.contents[0];
+  assert.equal(view.mimeType, 'text/html;profile=mcp-app');
+  assert.deepEqual(view._meta.ui.csp.frameDomains, [state.url], 'the view frames the daemon origin, nothing else');
+  assert.deepEqual(view._meta['openai/ui'], { permissions: { loopbackNetwork: {} } }, 'a host on a public origin may frame this computer');
+  const listedMeta = (listed[0] as { _meta?: Record<string, unknown> })._meta;
+  assert.deepEqual(listedMeta?.['openai/ui'], view._meta['openai/ui'], 'the listing declares it too');
+  assert.match(view.text, /shell_hello/, 'the view knows the page showed when the Shell greets it');
+  assert.match(view.text, /securitypolicyviolation/, 'the view knows when the host refuses to frame the page');
+  assert.match(view.text, /ui\/initialize/);
+  assert.match(view.text, /ui\/notifications\/tool-result/);
+  assert.doesNotMatch(view.text, /__OPEN_ARTIFACT_VERSION__/);
+  assert.match((await mcp({ jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'ui://nope' } }, ui).then((r) => r.json()) as Rpc).error?.message ?? '', /No resource/);
+
+  const id = await createDesign('Shown inline', 'apps-1');
+  const called = (await rpc('tools/call', { name: 'ShowArtifact', arguments: { url: `open-artifact://artifact/${id}` } }, ui)).result;
+  assert.equal(called.isError, false);
+  assert.equal(called.structuredContent.url, `open-artifact://artifact/${id}`);
+  assert.equal(called.structuredContent.title, 'Shown inline');
+  assert.equal(called.structuredContent.type, 'design');
+  assert.equal(called.structuredContent.view_url, `${state.url}/a/${id}`);
+  assert.match(called.structuredContent.note, /view_url/);
+  const missing = (await rpc('tools/call', { name: 'ShowArtifact', arguments: { url: 'open-artifact://artifact/art_missing' } }, ui)).result;
+  assert.equal(missing.isError, true);
+  assert.equal(missing.structuredContent, undefined);
 });
 
 test('Artifact quickstart and publish make a design artifact from the built-in root', async () => {
@@ -84,7 +148,7 @@ test('Artifact quickstart and publish make a design artifact from the built-in r
   const types = quick.types as Array<{ id: string; scope: string; type_url: string }>;
   assert.deepEqual(
     types.map((t) => t.id),
-    ['design', 'design-system', 'slides', 'data', 'docs', 'sheets', 'whiteboard'],
+    ['design', 'design-system', 'slides', 'data', 'docs', 'motion', 'page', 'sheets', 'whiteboard'],
     'only allow-listed built-in types',
   );
   assert.equal(types[0]!.scope, 'builtin');
@@ -150,6 +214,128 @@ test('MCP from a plugin folder: the session’s folder, from its hook or its Cod
   }
 });
 
+test('Antigravity: sessionEnv, recent-session fallback when MCP has no session/PID match, and inbox routing', async () => {
+  assert.equal(harnessProfile('antigravity').sessionEnv, 'ANTIGRAVITY_CONVERSATION_ID');
+
+  const wsA = tempDir('open-artifact-ag-a-');
+  const wsB = tempDir('open-artifact-ag-b-');
+  const wsUnseen = tempDir('open-artifact-ag-c-');
+
+  const publish = async (title: string, headers: Record<string, string>) => {
+    const response = await mcp(
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'Artifact', arguments: { action: 'publish', type_url: 'open-artifact://type/design', title } } },
+      headers,
+    );
+    const body = (await response.json()) as { result: { content: Array<{ text: string }>; isError: boolean } };
+    assert.equal(body.result.isError, false, body.result.content[0]?.text);
+    const made = JSON.parse(body.result.content[0]!.text) as ToolCallResult;
+    return daemon.store.require(artifactIdOf(String(made.url))!);
+  };
+
+  // Hooks register two Antigravity sessions on a shared language_server PID (99001), plus a Claude session on 99002.
+  await api(state, 'hook', { event: 'SessionStart', harness: 'antigravity', session: 'ag-conv-a', workspace: wsA, pids: [99001] });
+  await new Promise((done) => setTimeout(done, 15));
+  await api(state, 'hook', { event: 'UserPromptSubmit', harness: 'antigravity', session: 'ag-conv-b', workspace: wsB, pids: [99001] });
+  await api(state, 'hook', { event: 'SessionStart', harness: 'claude-code', session: 'claude-other', workspace: wsA, pids: [99002] });
+
+  // 1. Plugin-folder MCP call (no session, no workspace, no matching PID, e.g. Windows / detached LS / daemon restart):
+  //    falls back to the most recently seen Antigravity session and places the artifact in its workspace.
+  const noPid = await publish('AG No PID', { 'X-Open-Artifact-Harness': 'antigravity', 'X-Open-Artifact-PPID': '88888' });
+  assert.deepEqual(noPid.owner, { harness: 'antigravity', session: 'ag-conv-b', workspace: wsB });
+  assert.ok(noPid.root.startsWith(join(wsB, 'artifacts')), noPid.root);
+
+  // 2. Ask from browser routes to antigravity:ag-conv-b (not unowned) and PreInvocation receives it.
+  const ask = await api<{ via: string }>(state, LIBRARY_ROUTES.ask, { id: noPid.id, text: 'Change the hero title' });
+  assert.equal(ask.via, 'inbox');
+  assert.equal(daemon.inbox.count('unowned'), 0);
+  const delivered = await api<{ messages: string[] }>(state, 'hook', { event: 'UserPromptSubmit', harness: 'antigravity', session: 'ag-conv-b', workspace: wsB, pids: [99001] });
+  assert.equal(delivered.messages.length, 1);
+  assert.match(delivered.messages[0]!, /Change the hero title/);
+
+  // 3. Workspace-scoped MCP call matches wsA's session even when wsB was more recent on the shared PID.
+  const byWs = await publish('AG Workspace A', {
+    'X-Open-Artifact-Harness': 'antigravity',
+    'X-Open-Artifact-Workspace': encodeURIComponent(wsA),
+    'X-Open-Artifact-PPID': '99001',
+  });
+  assert.deepEqual(byWs.owner, { harness: 'antigravity', session: 'ag-conv-a', workspace: wsA });
+  assert.ok(byWs.root.startsWith(join(wsA, 'artifacts')), byWs.root);
+
+  // 4. An unseen workspace does NOT steal another workspace's session.
+  const unseen = await publish('AG Unseen WS', {
+    'X-Open-Artifact-Harness': 'antigravity',
+    'X-Open-Artifact-Workspace': encodeURIComponent(wsUnseen),
+    'X-Open-Artifact-PPID': '99001',
+  });
+  assert.deepEqual(unseen.owner, { harness: 'antigravity', session: null, workspace: wsUnseen });
+
+  // 5. Shared PID from another harness (claude-code on 99002) is NOT hijacked by an antigravity MCP call.
+  const isolated = await publish('AG PID Isolated', {
+    'X-Open-Artifact-Harness': 'antigravity',
+    'X-Open-Artifact-Workspace': encodeURIComponent(wsA),
+    'X-Open-Artifact-PPID': '99002',
+  });
+  assert.deepEqual(isolated.owner, { harness: 'antigravity', session: 'ag-conv-a', workspace: wsA });
+
+  // 6. Plain unnamed MCP client does NOT steal Antigravity's recent session.
+  const plain = await publish('Plain MCP', { 'X-Open-Artifact-Workspace': encodeURIComponent(wsB) });
+  assert.deepEqual(plain.owner, { harness: 'mcp', session: null, workspace: wsB });
+
+  // 7. Stale sessions outside the freshness window are not matched.
+  process.env.OPEN_ARTIFACT_RECENT_SESSION_MS = '1';
+  try {
+    await new Promise((done) => setTimeout(done, 10));
+    assert.equal(daemon.harnesses.recentSession('antigravity', wsA), null);
+    assert.equal(daemon.harnesses.recentSession('antigravity', null), null);
+  } finally {
+    delete process.env.OPEN_ARTIFACT_RECENT_SESSION_MS;
+  }
+});
+
+test('MCP bridge: refreshes daemon token on 401 after a daemon restart', async () => {
+  const bin = resolve(import.meta.dirname, '..', 'src', 'bin', 'open-artifact.ts');
+  const child = spawn(process.execPath, [bin, 'mcp', '--harness', 'antigravity'], {
+    env: { ...process.env, OPEN_ARTIFACT_HOME: TEST_HOME, ANTIGRAVITY_CONVERSATION_ID: '' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = createInterface({ input: child.stdout });
+  const pending = new Map<number, (msg: Record<string, unknown>) => void>();
+  lines.on('line', (line) => {
+    try {
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      if (typeof msg.id === 'number') pending.get(msg.id)?.(msg);
+    } catch {
+      /* ignore */
+    }
+  });
+  const call = (id: number, method: string, params: Record<string, unknown> = {}) =>
+    new Promise<Record<string, unknown>>((resolveCall, rejectCall) => {
+      const timer = setTimeout(() => rejectCall(new Error(`timeout waiting for ${method}`)), 5000);
+      pending.set(id, (msg) => {
+        clearTimeout(timer);
+        pending.delete(id);
+        resolveCall(msg);
+      });
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+  try {
+    const first = await call(1, 'ping');
+    assert.deepEqual(first.result, {});
+    // Restart the daemon on the same port with a new token while the MCP bridge stays alive (forces HTTP 401).
+    const samePort = daemon.port;
+    daemon.close();
+    await new Promise((done) => setTimeout(done, 50));
+    daemon = await startDaemon({ port: samePort, quiet: true, shellDir, homeDir: join(shellDir, 'no-home') });
+    state = (await readDaemon())!;
+    assert.equal(daemon.port, samePort);
+    const second = await call(2, 'ping');
+    assert.deepEqual(second.result, {}, 'recovers on HTTP 401 after daemon restart with a new token');
+  } finally {
+    lines.close();
+    child.kill();
+  }
+});
+
 test('GET /a/<id> injects the boot object into the Shell', async () => {
   const id = await createDesign('</script><b>x</b>', 'boot-1');
   const response = await fetch(`${state.url}/a/${id}`);
@@ -163,6 +349,7 @@ test('GET /a/<id> injects the boot object into the Shell', async () => {
   assert.equal(boot.id, id);
   assert.equal(boot.type, 'design');
   assert.equal(boot.empty, true, 'no project/canvas.json yet');
+  assert.equal(boot.pending, undefined, 'an empty artifact has no page to wait for (shell-boot.test.ts has the pending boot)');
   assert.equal(boot.page, null);
   assert.match(String(boot.prompt), new RegExp(`^Take over artifact open-artifact://artifact/${id} \\(Design \\(canvas\\) "`));
   assert.match(String(boot.prompt), /call Artifact \{action: "adopt", url: "open-artifact:\/\/artifact\//);
@@ -218,6 +405,45 @@ test('wake: delivered live to a connected HarnessClient', async () => {
   }
 });
 
+test('create: the page opens in the app after the first write by default; open: "never" keeps it closed', async () => {
+  const opened: string[] = [];
+  const client = new HarnessClient({
+    harness: 'dsh',
+    caps: { open: true },
+    autoStart: false,
+    handlers: {
+      'host.open': (params) => {
+        opened.push(params.url);
+        return { opened: true };
+      },
+    },
+  });
+  const create = (title: string, extra: Record<string, unknown> = {}) =>
+    api<ToolCallResult>(state, 'tools.call', {
+      name: 'Artifact',
+      arguments: { action: 'publish', type_url: 'open-artifact://type/design', title, ...extra },
+      caller: { harness: 'dsh', session: 'open-1', workspace },
+    });
+  try {
+    await client.connect();
+    await client.attach({ session: 'open-1', workspace, status: 'idle' });
+    const made = await create('Opens by default');
+    assert.equal(made.open, 'after_first_write');
+    assert.equal(made.note, undefined);
+    const closed = await create('Stays closed', { open: 'never' });
+    assert.equal(closed.open, undefined);
+    assert.equal(closed.note, undefined);
+    assert.deepEqual(opened, [], 'nothing opens while the folder is empty');
+    writeFileSync(join(String(made.root), 'index.html'), '<!doctype html><title>x</title>');
+    writeFileSync(join(String(closed.root), 'index.html'), '<!doctype html><title>x</title>');
+    await until(() => opened.length > 0, 10_000);
+    await new Promise((done) => setTimeout(done, 3000)); // past the poll and settle for the second one
+    assert.deepEqual(opened, [made.url]);
+  } finally {
+    client.close();
+  }
+});
+
 test('wake: with no adapter connected it waits in the inbox', async () => {
   const id = await createDesign('Offline', 'gone-1');
   const result = await api<{ via: string }>(state, LIBRARY_ROUTES.ask, { id, text: 'Are you there?' });
@@ -260,6 +486,32 @@ test('Type API: presence says when an idle agent is not woken (Cursor), so the p
   assert.equal(cursor.agentName, 'Cursor');
   assert.equal(cursor.wakesIdle, false);
   assert.equal((await presenceOf(await createDesign('Codex deck', 'codex-1', 'codex'))).wakesIdle, true);
+});
+
+test('Library API: a duplicate leaves out _agent/ (the agent channel: snapshots)', async () => {
+  const id = await createDesign('Copy me', 'dup-1');
+  const root = daemon.store.require(id).root;
+  mkdirSync(join(root, '_agent', 'snapshots'), { recursive: true });
+  writeFileSync(join(root, '_agent', 'snapshots', 'snapshot-2026-01-01T00-00-00-000Z.png'), 'png');
+  const copy = await api<{ id: string }>(state, LIBRARY_ROUTES.duplicate, { id });
+  const copied = daemon.store.require(copy.id).root;
+  assert.notEqual(copied, root);
+  assert.equal(existsSync(join(copied, '_agent')), false);
+  assert.ok(existsSync(join(root, '_agent', 'snapshots')), 'the original keeps its own');
+});
+
+test('Library API: a new file under _agent/ (a snapshot) does not make the artifact look updated', async () => {
+  const id = await createDesign('Stamp me', 'stamp-1');
+  const record = daemon.store.require(id);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stamp = (): string => { (daemon as any).contentStamps.delete(record.root); return (daemon as any).contentAt(record); };
+  const was = stamp();
+  const file = join(record.root, '_agent', 'snapshots', 'snapshot-2099-01-01T00-00-00-000Z.png');
+  mkdirSync(join(record.root, '_agent', 'snapshots'), { recursive: true });
+  writeFileSync(file, 'png');
+  const later = new Date(Date.parse(was) + 3_600_000);
+  utimesSync(file, later, later);
+  assert.equal(stamp(), was);
 });
 
 test('Library API: writes need the token or the same origin', async () => {

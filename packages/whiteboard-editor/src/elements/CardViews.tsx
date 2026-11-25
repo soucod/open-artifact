@@ -3,7 +3,7 @@
  * tables and shared countdown timers.
  */
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppWindow,
   ArrowUpRight,
@@ -28,6 +28,7 @@ import {
   TIMER_HEIGHT,
   TIMER_WIDTH,
   applyTimerAction,
+  chipColorOn,
   columnWidth,
   formatTimerDuration,
   formatTimerFace,
@@ -36,6 +37,7 @@ import {
   isTimerUnstarted,
   linkSubtitle,
   linkTitle,
+  tableCellPaints,
   tableCellValue,
   tableColumnIds,
   tableFontSize,
@@ -44,17 +46,18 @@ import {
   timerRemainingMs,
   type LinkElement,
   type LinkKind,
+  type TableCellPaint,
   type TableElement,
   type TimerElement,
 } from '@open-artifact/whiteboard-core';
-import { TABLE_LINE_COLORS, TABLE_RADIUS, tableHeadColors, tableHeadWeight } from '../export/look.ts';
+import { TABLE_LINE_COLORS, TABLE_RADIUS, tableHeadColors, tableHeadWeight, tableTintDividers, type TableCellDividers } from '../export/look.ts';
 import { announce } from '../services/announce.ts';
 import { TABLE_EDITOR_HINT, flushTableCell, pasteTableCells, typeTableCell } from '../services/table-edits.ts';
 import { maybeSession } from '../services/session.ts';
 import { updateElements } from '../state/board.ts';
 import { useColorScheme } from '../state/theme.ts';
 import { useMeasureNode } from './hooks.ts';
-import { AgentChip, useItemProps } from './item.tsx';
+import { useItemProps } from './item.tsx';
 import { boardLinkTarget } from './links.ts';
 import { RichText } from './markup.tsx';
 import { PassiveLink } from './PassiveLink.tsx';
@@ -101,11 +104,13 @@ export const LinkView = memo(function LinkView({ element }: { element: LinkEleme
   return (
     <div {...item} className="wb-el wb-link" style={style}>
       {target !== undefined ? (
-        <PassiveLink href={target} className="al-face">
+        <PassiveLink href={target} link={element.href} className="al-face">
           {face}
         </PassiveLink>
       ) : (
-        <div className="al-face">{face}</div>
+        <div className="al-face" data-wb-link={element.href}>
+          {face}
+        </div>
       )}
     </div>
   );
@@ -115,7 +120,18 @@ export const LinkView = memo(function LinkView({ element }: { element: LinkEleme
 /* Table                                                                    */
 /* ------------------------------------------------------------------------ */
 
-/** A table: a grid of rich-text cells, its first row a header when `head` is set. */
+/** A tinted cell's colors: its background, text and code chips, and the paper-colored dividers toward tinted neighbors. */
+function tintedCellStyle(paint: TableCellPaint, dividers: TableCellDividers | undefined): ViewStyle {
+  return {
+    background: paint.fill,
+    '--wb-paper-chip': chipColorOn(paint.fill),
+    ...(paint.ink !== undefined ? { color: paint.ink } : {}),
+    ...(dividers?.right ? { borderRightColor: 'var(--wb-paper)' } : {}),
+    ...(dividers?.bottom ? { borderBottomColor: 'var(--wb-paper)' } : {}),
+  };
+}
+
+/** A table: a grid of rich-text cells, its first row a header when `head` is set; cells may be tinted by a fill or a heat map. */
 export const TableView = memo(function TableView({ element }: { element: TableElement }) {
   const scheme = useColorScheme();
   const item = useItemProps(element);
@@ -124,6 +140,8 @@ export const TableView = memo(function TableView({ element }: { element: TableEl
   const columns = tableColumnIds(element);
   const rows = tableRowIds(element);
   const head = tableHeadColors(element, scheme);
+  const paints = useMemo(() => tableCellPaints(element, scheme), [element, scheme]);
+  const dividers = useMemo(() => tableTintDividers(element, paints), [element, paints]);
   const px = tableFontSize(element);
   const style: ViewStyle = {
     left: element.x,
@@ -160,8 +178,14 @@ export const TableView = memo(function TableView({ element }: { element: TableEl
                     const text = tableCellValue(element, row, col);
                     const Cell = isHead ? 'th' : 'td';
                     const cellEditing = editing !== null && editing.row === row && editing.col === col ? editing : null;
+                    const paint = paints[row]?.[col];
                     return (
-                      <Cell key={col} data-wb-row={row} data-wb-col={col}>
+                      <Cell
+                        key={col}
+                        data-wb-row={row}
+                        data-wb-col={col}
+                        {...(paint !== undefined ? { 'data-wb-tint': paint.fill, style: tintedCellStyle(paint, dividers[row]?.[col]) } : {})}
+                      >
                         {cellEditing ? (
                           <TextEditor
                             target={cellEditing}
@@ -191,7 +215,6 @@ export const TableView = memo(function TableView({ element }: { element: TableEl
           {TABLE_EDITOR_HINT}
         </span>
       ) : null}
-      <AgentChip element={element} />
     </div>
   );
 });

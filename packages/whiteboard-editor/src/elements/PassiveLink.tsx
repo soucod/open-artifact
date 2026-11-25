@@ -1,45 +1,35 @@
 /**
- * A link on the board that does not get in the way of editing.
+ * A link on the board: a link in text, a link card or a linked picture's
+ * corner. Pointer clicks never follow the anchor itself; the Select tool
+ * opens the link (`services/link-card.ts`: after a short delay unless a
+ * double click follows, at once on a Mod-click), and resting on it shows
+ * its card. Enter on a focused link opens it.
  *
- * A plain click on a link card, a linked picture or a link in text selects
- * it like any element; the link opens on a Mod-click, a click on its
- * open-arrow (`[data-wb-opens]`), or any click by a viewer who cannot
- * edit. A press that turned into a drag never opens it.
+ * `data-wb-link` holds the stored address, which the card and the
+ * opening read.
  */
 
-import { useRef, type AnchorHTMLAttributes, type MouseEvent, type PointerEvent } from 'react';
-import { maybeSession } from '../services/session.ts';
-
-/** How far a press may move and still count as a click, in screen pixels. */
-const CLICK_SLOP = 4;
+import type { AnchorHTMLAttributes, MouseEvent } from 'react';
+import { openLink } from '../services/link-card.ts';
 
 /** Props of {@link PassiveLink}: an anchor's props with a required `href`. */
 export interface PassiveLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
   href: string;
-}
-
-/** Whether a click on a board link should follow it. */
-export function shouldFollowLink(event: Pick<MouseEvent, 'metaKey' | 'ctrlKey' | 'target'>, canEdit: boolean): boolean {
-  if (event.metaKey || event.ctrlKey || !canEdit) return true;
-  return event.target instanceof Element && event.target.closest('[data-wb-opens]') !== null;
+  /** The stored address, when `href` is what it opens (an artifact address resolved to the Shell). */
+  link?: string;
 }
 
 /** A board link that opens only when meant to (see the module comment). */
-export function PassiveLink({ href, children, onClick, onPointerDown, ...rest }: PassiveLinkProps) {
-  const pressed = useRef<{ x: number; y: number } | null>(null);
-  const down = (event: PointerEvent<HTMLAnchorElement>) => {
-    pressed.current = { x: event.clientX, y: event.clientY };
-    onPointerDown?.(event);
-  };
+export function PassiveLink({ href, link, children, onClick, ...rest }: PassiveLinkProps) {
   const click = (event: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(event);
-    const start = pressed.current;
-    pressed.current = null;
-    const dragged = start !== null && Math.hypot(event.clientX - start.x, event.clientY - start.y) > CLICK_SLOP;
-    if (dragged || event.defaultPrevented || !shouldFollowLink(event, maybeSession()?.canEdit ?? false)) event.preventDefault();
+    const followed = !event.defaultPrevented;
+    event.preventDefault();
+    // A click from the keyboard (Enter) has no pointer press behind it.
+    if (followed && event.detail === 0) openLink(link ?? href);
   };
   return (
-    <a {...rest} href={href} target="_blank" rel="noopener noreferrer" title={rest.title ?? href} draggable={false} onPointerDown={down} onClick={click}>
+    <a {...rest} href={href} data-wb-link={link ?? href} target="_blank" rel="noopener noreferrer" draggable={false} onClick={click}>
       {children}
     </a>
   );

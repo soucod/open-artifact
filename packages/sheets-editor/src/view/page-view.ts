@@ -3,7 +3,7 @@ import type { CellId } from '../model/workbook.ts';
 import type { LineSizes } from '../model/line-sizes.ts';
 import type { CellArea, SelectionKind } from '../selection/model.ts';
 import type { DropdownCellsRefused, DropdownEditorInPane, PageState, RulesInPane, WordsOffered } from '../state/initial-state.ts';
-import type { FigureOfCells } from '../selection/figures.ts';
+import type { FigureOfCells, SumFigure } from '../selection/figures.ts';
 import type { SelectedLines } from '../selection/move-lines.ts';
 import type { CellExplained } from '../state/explained-under-cell.ts';
 import type { PopupOverEntry } from '../state/list-cards.ts';
@@ -35,7 +35,10 @@ import {
 } from '../chips/dropdown-pane-edits.ts';
 import { MAX_DROPDOWN_OPTIONS, menuItemKey } from '../chips/dropdown-options.ts';
 import { areaToA1AsStored, areasToA1AsStored } from '../formulas/from-words/where.ts';
-import { ownRowOrderOfSheet } from '../model/line-ids.ts';
+import { ownRowOrderOfSheet, wholeRowSpanIn } from '../model/line-ids.ts';
+import { interactiveSheetOf, interactiveOfSheet, type InteractiveSheet } from '../state/places.ts';
+import { drawnPivotTablePane, pivotTableCellAt, type DrawnPivotTablePane } from '../tables/pivot-tables.ts';
+import { pivotTableOutOfDateShown } from '../state/pivot-tables-out-of-date.ts';
 import { dropdownHeaderRowState } from '../chips/dropdown-editor.ts';
 import {
   rangesOtherThanIndex,
@@ -75,6 +78,7 @@ import { showSheetPointedIn, sheetsToPointInFor } from '../formulas/sheet-pointe
 import { outlineGutters, ungroupableGroupsAtSelection, collapsibleGroupsAtSelection, expandableGroupsAtSelection } from '../grid/outline-groups.ts';
 import { rowsWithCellsBehindBars, edgesOfBarsAtFoot } from '../grid/cells-behind-bars.ts';
 import { withKeptHeadersRiding } from '../grid/moved-columns.ts';
+import type { DrawnCell, DrawnRow } from '../grid/grid-drawing.tsx';
 import { openCommentCountBySheet, canCommentModePickNow, hasCommentToOpenAtSelection, isActiveCellInOpenComment } from '../comments/comment-state.ts';
 import { hasOtherSheetWithCells } from '../state/sheet-tabs.ts';
 import { NO_PEER_FLAGS, peerFlagsOnSheet } from '../presence/selections.ts';
@@ -126,19 +130,19 @@ export function insertSortedBy<Item>(items: readonly Item[], item: Item, orderOf
   return [...items.slice(0, countBefore), item, ...items.slice(countBefore)];
 }
 export function withActiveCellElement(rowsDrawn: DrawnRowOfGrid[], state: PageState, reads: ReadsWithTextMeasurer, isReadOnly: boolean) {
-  let activeDrawnCell = rowsDrawn.find(({ cells: cells }) => cells.some(isActiveDrawnCell))?.cells.find(isActiveDrawnCell);
+  let activeDrawnCell = rowsDrawn.find(({ cells }) => cells.some(isActiveDrawnCell))?.cells.find(isActiveDrawnCell);
   if (activeDrawnCell !== undefined)
     return {
-      rowsDrawn: rowsDrawn,
+      rowsDrawn,
       activeCellElementId: activeDrawnCell.elementId,
     };
   let withoutElement = {
-    rowsDrawn: rowsDrawn,
+    rowsDrawn,
     activeCellElementId: null,
   };
   let activeArea = mergedAreaOrCellOf(reads, state.activeCell);
   if (activeArea === null || state.activeCell.sheetId !== state.sheetId) return withoutElement;
-  let { left: left, top: top } = boxOfCellRange(activeArea, layoutOfView(state, reads));
+  let { left, top } = boxOfCellRange(activeArea, layoutOfView(state, reads));
   let tinyGrid = {
     gridWidth: ROW_HEADER_WIDTH + 1,
     gridHeight: COLUMN_HEADER_HEIGHT + 1,
@@ -152,7 +156,7 @@ export function withActiveCellElement(rowsDrawn: DrawnRowOfGrid[], state: PageSt
   let [activeRow] = gridViewOf(stateAtActiveCell, reads, null, isReadOnly).rows;
   let activeCell = activeRow?.cells.find(isActiveDrawnCell);
   if (activeRow === undefined || activeCell === undefined) return withoutElement;
-  let cellsWithActiveCell = ({ top: rowTop, cells: cells }: DrawnRowOfGrid) =>
+  let cellsWithActiveCell = ({ top: rowTop, cells }: DrawnRowOfGrid) =>
     insertSortedBy(
       cells,
       {
@@ -162,7 +166,7 @@ export function withActiveCellElement(rowsDrawn: DrawnRowOfGrid[], state: PageSt
       (cell) => cell.columnNumber,
     );
   return {
-    rowsDrawn: rowsDrawn.some(({ key: key }) => key === activeRow.key)
+    rowsDrawn: rowsDrawn.some(({ key }) => key === activeRow.key)
       ? rowsDrawn.map(
           (row) =>
             row.key === activeRow.key
@@ -203,7 +207,7 @@ export function editorOverOtherSheet(state: PageState, reads: ReadsWithTextMeasu
   if (activeArea === null || activeCellBox === null || state.mode.kind !== 'editing')
     return {
       ...NO_EDITOR_LAYOUT,
-      editorKeepsClear: editorKeepsClear,
+      editorKeepsClear,
       editorScale: 1,
       editorFlagStands: null,
     };
@@ -211,7 +215,7 @@ export function editorOverOtherSheet(state: PageState, reads: ReadsWithTextMeasu
     width: pageSize.width,
     height: cellsHeightAboveFloats(state),
   };
-  let { editorBox: editorBox, ...editorLayout } = editorLayoutOf(
+  let { editorBox, ...editorLayout } = editorLayoutOf(
     state.mode,
     activeCellBox,
     clearPageSize,
@@ -242,12 +246,12 @@ export function editorOverOtherSheet(state: PageState, reads: ReadsWithTextMeasu
   return {
     editorBox: editorBoxAtFoot,
     ...editorLayout,
-    editorKeepsClear: editorKeepsClear,
+    editorKeepsClear,
     editorScale: 1,
     editorFlagStands: flagStands === 'below' && isHelpShown ? null : flagStands,
   };
 }
-export function agentStatusOfConditionalFormats({ agent: agent }: RulesInPane): AgentStatusOfRules | null | undefined {
+export function agentStatusOfConditionalFormats({ agent }: RulesInPane): AgentStatusOfRules | null | undefined {
   if ('about' in agent && agent.about === 'moreSuggestions') return 'isIdle';
   switch (agent.kind) {
     case 'isIdle':
@@ -282,7 +286,7 @@ export function conditionalFormatsViewOf(pane: RulesInPane | null): ConditionalF
 export function dropdownEditorViewOf(state: PageState, areaOfSelection: CellArea | null, reads: ReadsWithTextMeasurer): DropdownEditorView | null {
   let dropdownEditor = dropdownEditorOfPane(state);
   if (dropdownEditor === null) return null;
-  let { options: options, typed: typed, stretches: stretches, indexOfOwnStretch: indexOfOwnStretch } = dropdownEditor;
+  let { options, typed, stretches, indexOfOwnStretch } = dropdownEditor;
   let typedLabelOption = optionWithTypedLabel(dropdownEditor);
   return {
     options: optionsWithTyped(dropdownEditor),
@@ -310,7 +314,7 @@ export function dropdownEditorViewOf(state: PageState, areaOfSelection: CellArea
   };
 }
 export function selectedRowHeightOf(state: PageState, reads: ReadsWithTextMeasurer, sheetRowCount: number, topRowIndex: number): SelectedRowHeight {
-  let { rowEdges: rowEdges } = layoutOfView(state, reads);
+  let { rowEdges } = layoutOfView(state, reads);
   let rowIndex = nearestShownLine(rowEdges, sheetRowCount, topRowIndex, 1);
   let givenHeight =
     (state.menu?.holds === 'rowHeightField'
@@ -322,7 +326,7 @@ export function selectedRowHeightOf(state: PageState, reads: ReadsWithTextMeasur
     isSelectedRowHeightGiven: givenHeight !== null,
   };
 }
-export function a1OfFirstAndLast({ first: first, last: last }: FirstAndLastCells, reads: ReadsWithTextMeasurer): string | null {
+export function a1OfFirstAndLast({ first, last }: FirstAndLastCells, reads: ReadsWithTextMeasurer): string | null {
   let area = selectedArea(
     {
       activeCell: first,
@@ -391,13 +395,14 @@ export function pageViewOf(
   let peopleRows = peopleListRows(state, reads);
   let timeRows = state.timeList?.rows ?? null;
   let timeInFocus = state.timeList === null ? null : timeListFocusOf(state.timeList);
-  let highlightedTimeRow = (timeRows ?? []).findIndex(({ time: time }) => secondsOfTime(time) === timeInFocus);
+  let highlightedTimeRow = (timeRows ?? []).findIndex(({ time }) => secondsOfTime(time) === timeInFocus);
   let wordsOffered = viewOnlyBecause === null ? wordsOfferedNow(state) : null;
   let ownFilterList = ownFilterListView(state, reads);
   let stateShown = showSheetPointedIn(state, reads);
   let stateForGrid = resetScrollForFreezeDrag(stateShown);
   let groupMargins = outlineGutters(stateForGrid, reads);
   let isReadOnly = viewOnlyBecause !== null;
+  let interactive = interactiveSheetOf(reads, state.sheetId);
   let isPausedNoticeHidden =
     state.notice?.kind === 'editRefused' && state.notice.why === 'editingPaused' && viewOnlyBecause !== 'editingPaused';
   let gridView = gridViewOf(stateForGrid, reads, null, isReadOnly, shiftYetToGlide);
@@ -418,19 +423,19 @@ export function pageViewOf(
       },
       reads,
     ),
-    headersKept: headersKept,
+    headersKept,
     columnsRiding: gridView.columnsRiding === null ? null : withKeptHeadersRiding(gridView.columnsRiding, headersKept),
     cellsHeld: movedCellsView(stateForGrid, reads, isReadOnly),
     filterButtons: gridView.filterButtons.filter(
-      ({ headerKept: headerKept }: FilterButtonOfGrid) =>
-        headerKept === null || headersKept.some(({ key: key }: KeptHeaderView) => key === headerKept),
+      ({ headerKept }: FilterButtonOfGrid) =>
+        headerKept === null || headersKept.some(({ key }: KeptHeaderView) => key === headerKept),
     ),
     seams: {
       ...gridView.seams,
       rows: gridView.seams.rows.filter(
         (seamAt: SeamOfGridRows) =>
           !headersKept.some(
-            ({ areRowNumbersItsOwn: areRowNumbersItsOwn, top: top, height: height }: KeptHeaderView) =>
+            ({ areRowNumbersItsOwn, top, height }: KeptHeaderView) =>
               areRowNumbersItsOwn && seamAt >= top && seamAt < top + height,
           ),
       ),
@@ -439,12 +444,13 @@ export function pageViewOf(
   };
   let openCommentCounts = openCommentCountBySheet(state, reads);
   return {
-    grid: grid,
+    grid,
     listedSheets: reads.listSheets().map(
-      ({ sheetId: sheetId, name: name }): ListedSheet => ({
-        sheetId: sheetId,
-        name: name,
+      ({ sheetId, name }): ListedSheet => ({
+        sheetId,
+        name,
         isShown: sheetId === stateShown.sheetId,
+        isInteractive: interactiveOfSheet(reads, sheetId) !== null,
         holdsOpenEntry: sheetId === state.sheetId && isEntryInOtherSheet,
         canBeDeleted: hasOtherSheetWithCells(reads, sheetId),
         renaming:
@@ -456,12 +462,13 @@ export function pageViewOf(
             : null,
         facesOfOthers: sheetId === stateShown.sheetId ? NO_PEER_FLAGS : peerFlagsOnSheet(sheetId, state),
         isWhereAgentWorks: state.changesByAgent.some(
-          ({ fadeBeginsAtMs: fadeBeginsAtMs, cells: cells }) => fadeBeginsAtMs === null && cells.activeCell.sheetId === sheetId,
+          ({ fadeBeginsAtMs, cells }) => fadeBeginsAtMs === null && cells.activeCell.sheetId === sheetId,
         ),
         openCommentCount: openCommentCounts.get(sheetId) ?? 0,
       }),
     ),
-    nameBoxText: nameBoxText,
+    interactive,
+    nameBoxText,
     entryCellText:
       state.mode.kind === 'editing' && activeArea !== null
         ? areaToA1AsStored(
@@ -590,12 +597,15 @@ export function pageViewOf(
     dropdownEditor: dropdownEditorViewOf(state, areaOfSelection, reads),
     conditionalFormats: conditionalFormatsViewOf(conditionalRulesOfPane(state)),
     sortPane: drawnSortPane(state, reads),
+    pivotTablePane: drawnPivotTablePane(state, reads),
+    pivotTableOutOfDateAt: pivotTableOutOfDateShown(state),
+    isActiveCellOfPivotTable: state.menu !== null && pivotTableCellAt(reads, state.activeCell) !== null,
     figures: state.menu !== null && isSumWithFormulaCell(figures) ? figures : null,
     hasFiguresToWrite: viewOnlyBecause === null && isSumWithFormulaCell(figures),
-    selectionIsOf: selectionIsOf,
+    selectionIsOf,
     selectedRowCount: areaOfSelection === null ? 1 : shownRowCountIn(state, reads, areaOfSelection),
     selectedColumnCount: areaOfSelection?.columnCount ?? 1,
-    selectedCellCount: selectedCellCount,
+    selectedCellCount,
     canDropdownBeRemoved: viewOnlyBecause === null && canRemoveDropdown(state, reads),
     rowCountToSize: Math.max(
       1,
@@ -607,9 +617,15 @@ export function pageViewOf(
     ...selectedRowHeightOf(state, reads, grid.rowCount, areaOfSelection?.topRowIndex ?? 0),
     selectedColumnWidth: selectedColumnWidthOf(layoutOfView(state, reads).columnEdges, grid.columnCount, areaOfSelection?.leftColumnIndex ?? 0),
     isOneRangeNeeded: hasOtherRanges(state),
-    selectionByAddress: state.selectedToldToAgent?.byAddress ?? null,
+    selectionByAddress: interactive === null ? (state.selectedToldToAgent?.byAddress ?? null) : null,
     isSelectionCutByOwnFilters:
       areaOfSelection !== null && state.rowsOutOfViewByOwnFilters.size > 0 && hasFilteredRowsIn(state, reads, areaOfSelection),
+    isSelectionCutByOwnSort:
+      areaOfSelection !== null &&
+      wholeRowSpanIn('stored', ownRowOrderOfSheet(reads, state.sheetId), {
+        firstIndex: areaOfSelection.topRowIndex,
+        count: areaOfSelection.rowCount,
+      }) === null,
     chartsOnOffer: state.chartsOnOffer,
     canMergeSelection: areaOfSelection !== null && !isSingleCellSelected,
     canUnmergeSelection: areaOfSelection !== null && reads.mergedAreasIn(state.sheetId, areaOfSelection).length > 0,
@@ -626,7 +642,7 @@ export function pageViewOf(
             expandCount: expandableGroupsAtSelection(state, reads, linesSelected.what).length,
             levelCount: groupMargins[linesSelected.what as keyof typeof groupMargins]?.levelCount ?? 0,
           },
-    groupMargins: groupMargins,
+    groupMargins,
     canDeleteSelectedRows: areaOfSelection !== null && areaOfSelection.rowCount < grid.rowCount,
     canDeleteSelectedColumns: areaOfSelection !== null && areaOfSelection.columnCount < grid.columnCount,
     areWholeRowsSelected: areaOfSelection !== null && areaOfSelection.columnCount === grid.columnCount,
@@ -639,7 +655,12 @@ export function pageViewOf(
         : selectedCellCount === 1
           ? holdsOfTableSortColumn(state, reads)
           : sortHoldsForMenu(state, reads, 'sheet', sortColumnOfMenu(state.menu, 'sheet')),
-    canSortTableAtCell: state.menu?.holds === 'all' && selectedCellCount === 1 && state.menu.tableToSort !== null,
+    canSortTableAtCell:
+      state.menu?.holds === 'all' &&
+      selectedCellCount === 1 &&
+      state.menu.tableToSort !== null &&
+      pivotTableCellAt(reads, state.activeCell) === null,
+    menuSortsFor: state.menu?.sortsFor,
     columnsOfferedToSortBy: state.menu?.holds === 'all' && selectedCellCount > 1 ? columnsOfferedToSortBy(state, reads) : null,
     canSortSelectedRange: hasOtherRanges(state) || canSortRange(state, reads),
     columnToSortSelectedRangeBy: hasOtherRanges(state) ? null : rangeSortColumnLetters(state, reads, sortColumnOfMenu(state.menu, 'range')),
@@ -647,7 +668,7 @@ export function pageViewOf(
     keysToSortSelectedRangeBy:
       state.menu?.holds === 'all' && !hasOtherRanges(state) ? sortHoldsForMenu(state, reads, 'range', sortColumnOfMenu(state.menu, 'range')) : null,
     cellsToSortAsked: cellsToSortOfMenu(state.menu),
-    formatOfSelection: viewOnlyBecause === null ? formatOfSelectionWithEntry(state, isEntryInChipCell(state, reads)) : null,
+    formatOfSelection: viewOnlyBecause === null && interactive === null ? formatOfSelectionWithEntry(state, isEntryInChipCell(state, reads)) : null,
     selectionSeen: state.selectionSeen,
     selectionLeftByPerson: state.selectionLeftByPerson,
     figuresOfSelection: state.mode.kind === 'editing' ? NO_FIGURES_OF_SELECTION : state.figuresOfSelection,
@@ -690,9 +711,9 @@ export function pageViewOf(
               ownRowOrderOfSheet(reads, state.sheetId),
             ),
             rows: timeRows.map(
-              ({ time: time, shown: shown }) => ({
+              ({ time, shown }) => ({
                 secondOfDay: secondsOfTime(time),
-                shown: shown,
+                shown,
               }),
             ),
             highlightedRow: highlightedTimeRow === -1 ? null : highlightedTimeRow,
@@ -786,7 +807,7 @@ export function pageViewOf(
     formulaOfFixOnEntryCell:
       isReadOnly || state.mode.kind === 'editing'
         ? null
-        : (cellsOfFixes(state).find(({ cellId: cellId }: ReturnType<typeof cellsOfFixes>[number]) => isSameCell(cellId, entryCellId))?.formula ?? null),
+        : (cellsOfFixes(state).find(({ cellId }: ReturnType<typeof cellsOfFixes>[number]) => isSameCell(cellId, entryCellId))?.formula ?? null),
     pointedReference: state.pointedReference,
     referencesInEntry: state.referencesInEntry,
     sheetPointedIn: state.sheetPointedIn,
@@ -839,6 +860,7 @@ export function pageViewOf(
     hasUnsavedEdits: state.hasUnsavedEdits,
     fractionSavedToShow: fractionSavedToShow(state.savingProgress, state.saving),
     isLongCalculationTold: isLongCalculationTold(state.longCalculationTold),
+    ownViewShownAsApplied: state.ownViewShownAsApplied,
     calculating: viewOnlyBecause === 'readOnly' ? null : calculatingToShow(state.calculatingShown, reads.calculationTookTooLong),
     calculatingShownWait: calculatingShownWait(state.calculatingShown),
     savingBarWait: state.savingProgress?.wait ?? null,
@@ -846,7 +868,7 @@ export function pageViewOf(
     waitForNextEditOfAgent: state.waitForNextEditOfAgent,
     waitForAgentOnComments: state.commentsWithAgent?.wait ?? null,
     contextBarMenu: state.contextBarMenu,
-    viewOnlyBecause: viewOnlyBecause,
+    viewOnlyBecause,
     isCaretWithCellsBeforeEntryEnds: doesKeyAwaitEndOfEntry || (hasKeyInHandWaitedForPeople && !isEnterHeldInPeopleList(state, reads, true)),
     mostBytesOfAFileToImport: reads.mostBytesOfATableToImport(),
     areFormulasShown: state.areFormulasShown,
@@ -892,7 +914,7 @@ export function pageViewOf(
   };
 }
 export const OFF_SCREEN_TOP = -1e4;
-export const isActiveDrawnCell = ({ isActive: isActive }: DrawnCellOfRow): boolean => isActive;
+export const isActiveDrawnCell = ({ isActive }: DrawnCellOfRow): boolean => isActive;
 export const conditionalFormatsViewCache: WeakMap<WeakKey, ConditionalFormatsView> = new WeakMap();
 export const isDropdownEditRefused = (state: PageState): boolean =>
   dropdownEditorOfPane(state) !== null && state.notice?.kind === 'editRefused';
@@ -900,11 +922,11 @@ export const selectedColumnWidthOf = (columnEdges: LineSizes, sheetColumnCount: 
   columnEdges.sizeOf(nearestShownLine(columnEdges, sheetColumnCount, leftColumnIndex, 1));
 export const colorPickerChoicesOf = (state: PageState, reads: ReadsWithTextMeasurer): ColorPickerChoices => ({
   hexColorsInSheet: customHexColors([
-    ...(dropdownEditorOfPane(state)?.options ?? []).map(({ color: color }) => color),
+    ...(dropdownEditorOfPane(state)?.options ?? []).map(({ color }) => color),
     ...reads.hexColorsOf(state.sheetId).map(
       (hex): Color => ({
         kind: 'rgb',
-        hex: hex,
+        hex,
       }),
     ),
   ]),
@@ -919,19 +941,10 @@ export interface SizeOnPage {
   width: number;
   height: number;
 }
-/** Of a drawn cell, what is read here to find the active cell's element. */
-export interface DrawnCellOfRow {
-  isActive: boolean;
-  elementId: unknown;
-  columnNumber: number;
-}
-/** Of a drawn row of the grid, what is read here to place the active cell among the rows. */
-export interface DrawnRowOfGrid {
-  key: unknown;
-  top: number;
-  rowNumber: number;
-  cells: DrawnCellOfRow[];
-}
+/** A drawn cell, read here to find the active cell's element. */
+export type DrawnCellOfRow = DrawnCell;
+/** A drawn row of the grid, read here to place the active cell among the rows. */
+export type DrawnRowOfGrid = DrawnRow;
 /** How the agent that suggests rules of conditional formats is doing, as the pane shows it. */
 export type AgentStatusOfRules = 'isIdle' | 'writes' | 'hasFailed';
 export interface FirstAndLastCells {
@@ -969,7 +982,8 @@ export interface GridOnPage {
   rowsDrawn: ReturnType<typeof rowsWithCellsBehindBars>;
   activeCellElementId: ReturnType<typeof withActiveCellElement>['activeCellElementId'];
   headersKept: KeptHeaderView[];
-  columnsRiding: ReturnType<typeof withKeptHeadersRiding> | null;
+  /** The columns riding in hand, with the rows of the headers kept in sight riding with them. */
+  columnsRiding: ReturnType<typeof gridViewOf>['columnsRiding'];
   cellsHeld: ReturnType<typeof movedCellsView>;
   filterButtons: FilterButtonOfGrid[];
   seams: ReturnType<typeof gridViewOf>['seams'];
@@ -1015,6 +1029,7 @@ export interface ListedSheet {
   sheetId: SheetId;
   name: string;
   isShown: boolean;
+  isInteractive: boolean;
   holdsOpenEntry: boolean;
   canBeDeleted: boolean;
   renaming: { typed: NonNullable<StateOf<'sheetBeingRenamed'>>['typed']; refused: NonNullable<StateOf<'sheetBeingRenamed'>>['refused'] } | null;
@@ -1101,7 +1116,7 @@ export interface FindView {
   isInAllSheets: boolean;
   selectedCells: string | null;
   at: number | null;
-  shown: ReturnType<typeof shortenFoundText>;
+  shown: string;
   cell: string;
 }
 /** Everything the page draws, worked out from the page's state and the workbook as read. */
@@ -1109,6 +1124,7 @@ export interface PageView extends SelectedRowHeight {
   /** The grid as drawn: its rows, headers, boxes and cards; the shape comes from `gridViewOf`. */
   grid: GridOfPage;
   listedSheets: ListedSheet[];
+  interactive: InteractiveSheet | null;
   nameBoxText: string;
   entryCellText: string | null;
   entryCellKey: string | null;
@@ -1165,7 +1181,11 @@ export interface PageView extends SelectedRowHeight {
   dropdownEditor: DropdownEditorView | null;
   conditionalFormats: ConditionalFormatsView | null;
   sortPane: ReturnType<typeof drawnSortPane>;
-  figures: FigureOfCells | null;
+  pivotTablePane: DrawnPivotTablePane | null;
+  pivotTableOutOfDateAt: CellId | null;
+  isActiveCellOfPivotTable: boolean;
+  /** The sum of the numbers selected, while a menu is open and a cell can take a formula of it. */
+  figures: SumFigure | null;
   hasFiguresToWrite: boolean;
   selectionIsOf: SelectionKind;
   selectedRowCount: number;
@@ -1178,6 +1198,7 @@ export interface PageView extends SelectedRowHeight {
   isOneRangeNeeded: boolean;
   selectionByAddress: NonNullable<StateOf<'selectedToldToAgent'>>['byAddress'] | null;
   isSelectionCutByOwnFilters: boolean;
+  isSelectionCutByOwnSort: boolean;
   chartsOnOffer: StateOf<'chartsOnOffer'>;
   canMergeSelection: boolean;
   canUnmergeSelection: boolean;
@@ -1194,6 +1215,7 @@ export interface PageView extends SelectedRowHeight {
   headingToSortBy: ReturnType<typeof headingToSortBy> | '';
   keysToSortBy: ReturnType<typeof holdsOfTableSortColumn> | ReturnType<typeof sortHoldsForMenu> | null;
   canSortTableAtCell: boolean;
+  menuSortsFor: NonNullable<StateOf<'menu'>>['sortsFor'];
   columnsOfferedToSortBy: ReturnType<typeof columnsOfferedToSortBy> | null;
   canSortSelectedRange: boolean;
   columnToSortSelectedRangeBy: ReturnType<typeof rangeSortColumnLetters> | null;
@@ -1276,6 +1298,7 @@ export interface PageView extends SelectedRowHeight {
   hasUnsavedEdits: StateOf<'hasUnsavedEdits'>;
   fractionSavedToShow: number | null;
   isLongCalculationTold: boolean;
+  ownViewShownAsApplied: StateOf<'ownViewShownAsApplied'>;
   calculating: CalculatingToShow | null;
   calculatingShownWait: Wait | null;
   savingBarWait: NonNullable<StateOf<'savingProgress'>>['wait'] | null;

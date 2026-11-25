@@ -225,11 +225,9 @@ impl Writing<'_> {
             let (Some(row), Some(column)) = (sheet.rows.position(r), sheet.columns.position(c)) else { continue };
             bring((row, column), &outcome.value, outcome.brought.as_ref());
             if let Some(SpillOutcome::Fills { array, formats: Some(formats), .. }) = &outcome.spill {
-                for i in 0..array.rows() {
-                    for j in (0..array.columns()).filter(|&j| (i, j) != (0, 0)) {
-                        let brought = formats.get(i * array.columns() + j).and_then(Option::as_ref);
-                        bring((row + i, column + j), array.get(i, j), brought);
-                    }
+                for ((i, j), value) in array.entries().filter(|(at, _)| *at != (0, 0)) {
+                    let brought = formats.get(array.columns(), (i, j));
+                    bring((row + i, column + j), value, brought);
                 }
             }
         }
@@ -349,18 +347,13 @@ impl Writing<'_> {
             contents.insert((row, column), (content, quote));
         }
         for ((top, left), array, is_written) in spills {
-            for i in 0..array.rows() {
-                for j in 0..array.columns() {
-                    let value = array.get(i, j);
-                    let content = match value {
-                        _ if (i, j) == (0, 0) => continue,
-                        Value::Blank => continue,
-                        Value::Text(s) if is_written => Content::SpilledText(s.to_string()),
-                        value => value_content(value),
-                    };
-                    let quote = !is_written && is_kept_as_text(value);
-                    contents.entry((top + i, left + j)).or_insert((content, quote));
-                }
+            for ((i, j), value) in array.entries().filter(|(at, _)| *at != (0, 0)) {
+                let content = match value {
+                    Value::Text(s) if is_written => Content::SpilledText(s.to_string()),
+                    value => value_content(value),
+                };
+                let quote = !is_written && is_kept_as_text(value);
+                contents.entry((top + i, left + j)).or_insert((content, quote));
             }
         }
 

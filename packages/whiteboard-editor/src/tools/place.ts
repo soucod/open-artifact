@@ -49,8 +49,7 @@ export const DOUBLE_TAP = { ms: 500, px: 5 } as const;
 export const TRANSFORM_START_SLOP_PX = 4;
 /** Screen pixels a press on empty board must travel before the marquee starts. */
 export const MARQUEE_START_SLOP_PX = 4;
-/** Distance of an item's side dots from its edge, screen pixels. */
-export const SIDE_DOT_OFFSET_PX = 12;
+export { SIDE_DOT_OFFSET_PX } from '../lib/side-dots.ts';
 /** Side dots show only from this zoom, on an item at least this big on screen (pixels). */
 export const SIDE_DOTS_MIN_SIZE = { zoom: 0.25, px: 40 } as const;
 /**

@@ -1,33 +1,73 @@
-import type { Dynamic } from '../dynamic.ts';
-import { stockKindOfChartCode } from './widget-nodes.ts';
+import type { CopiedWidgetNode } from '@open-artifact/sheets-core';
+import type { ChartInputs } from '../chart-frame/messages.ts';
+import type { ChartChangeOutcome } from '../messages/charts.ts';
+import type { AgentAskedByPage, AgentThatMayBeAway } from '../state/controller.ts';
+import type { ChartNodeCopies } from '../state/copy-paste.ts';
+import { stockKindOfChartCode, type AskForEditOfChart, type ChartNodeSwap, type ChartWidgetNodes } from './widget-nodes.ts';
 import { canSwapChartKind, readsRowsAlone } from './chart-kind-fit.ts';
 export { canSwapChartKind, readsRowsAlone };
-import { STOCK_CHART_PROGRAMS } from './stock-programs.ts';
-import { chartEditRequest, isForChatAnswer, readChartCodeAnswer } from './chart-code-ask.ts';
+import { STOCK_CHART_PROGRAMS, type StockKind } from './stock-programs.ts';
+import { chartEditRequest, isForChatAnswer, readChartCodeAnswer, type ChartCodeAsk } from './chart-code-ask.ts';
 import { nodeIdOfRef, nodeRefOf } from './placed-views.ts';
+/** How the agent's sampler answers an ask, as far as chart asks read it. */
+export type AgentSampleReply = { kind: 'answered'; answer: unknown } | { kind: 'stopped' | 'notToBeHad' | 'failed' | 'isYetToBeAllowed' };
+/** The agent asked to write a chart's code; what it writes on the way is not read. */
+export type ChartCodeAgent = AgentThatMayBeAway<ChartCodeAsk, AgentSampleReply>;
+/** Why the agent gave no code for a chart. */
+export type WhyNoChartCodeFromAgent = 'tooLarge' | 'stopped' | 'noAgent' | 'forChat' | 'notChanged';
+export interface NoChartCodeFromAgent {
+  whyNone: WhyNoChartCodeFromAgent;
+}
+/** A chart to change: the node it shows and the rows of its inputs. */
+export interface ChartToChange {
+  nodeId: string;
+  inputs: ChartInputs;
+}
+/** A changed chart made as a preview, and how many times the chart it changes had been published. */
+export interface ChartPreviewMade {
+  preview: string;
+  pubOfFrom: number;
+}
+/** What came of asking for a change to a chart: a preview of it, or why there is none. */
+export type ChartChangeByAgent = WhyNoChartCodeFromAgent | ChartPreviewMade;
+/** Changes to charts, asked of the agent or made by the page (a swap of stock kinds). */
+export interface ChartEditsByAgent {
+  isToBeHad(): Promise<boolean>;
+  canAskAgent(): Promise<boolean>;
+  kindOf(nodeId: string): Promise<StockKind | null>;
+  ask(chartToChange: ChartToChange, asked: string, mostUnits: number, wantedKind: StockKind | null): Promise<ChartChangeByAgent>;
+  giveUp(): void;
+  pointAt(viewId: string, swap: ChartNodeSwap, pointChart: AskForEditOfChart): Promise<ChartChangeOutcome>;
+  discard(nodeId: string): void;
+}
+/** Copies of chart nodes, made when charts are pasted or their sheet duplicated. */
+export interface ChartNodeCopier {
+  copy(refs: readonly string[]): Promise<ChartNodeCopies>;
+  discard(copies: readonly CopiedWidgetNode[]): void;
+}
 export async function editChartWithAgent(
-  { charts: charts, agent: agent }: Dynamic,
-  { nodeId: nodeId, inputs: inputs }: Dynamic,
-  asked?: Dynamic,
-  mostUnits?: Dynamic,
-  wantedKind: Dynamic = null,
-  isStopped: Dynamic = () => false,
-): Promise<Dynamic> {
-  let source = await charts.sourceOf(nodeId);
+  { charts, agent }: { charts: Pick<ChartWidgetNodes, 'sourceOf' | 'makePreview'>; agent: ChartCodeAgent },
+  { nodeId, inputs }: ChartToChange,
+  asked: string,
+  mostUnits: number,
+  wantedKind: StockKind | null = null,
+  isStopped: () => boolean = () => false,
+): Promise<ChartChangeByAgent> {
+  const source = await charts.sourceOf(nodeId);
   if (isStopped()) return 'stopped';
   if (source === null) return 'notChanged';
-  let stockKind = stockKindOfChartCode(source.code);
+  const stockKind = stockKindOfChartCode(source.code);
   if (wantedKind !== null && stockKind === wantedKind) return 'notChanged';
-  let isKindSwap = wantedKind !== null && canSwapChartKind(inputs, wantedKind);
+  const isKindSwap = wantedKind !== null && canSwapChartKind(inputs, wantedKind);
   if (isKindSwap) agent.stop();
-  let newCode =
+  const newCode =
     (isKindSwap ? STOCK_CHART_PROGRAMS[wantedKind] : null) ??
     (await askAgentForChartCode(
       agent,
       chartEditRequest(
         {
           code: source.code,
-          inputs: inputs,
+          inputs,
         },
         asked,
         mostUnits,
@@ -36,7 +76,7 @@ export async function editChartWithAgent(
   if (typeof newCode !== 'string') return newCode.whyNone;
   if (newCode.trim() === source.code.trim()) return 'notChanged';
   if (isStopped()) return 'stopped';
-  let preview = await charts.makePreview(newCode);
+  const preview = await charts.makePreview(newCode);
   return typeof preview === 'string'
     ? 'notChanged'
     : {
@@ -44,12 +84,15 @@ export async function editChartWithAgent(
         pubOfFrom: source.pub,
       };
 }
-export async function askAgentForChartCode(agent?: Dynamic, request?: Dynamic): Promise<Dynamic> {
+export async function askAgentForChartCode(
+  agent: AgentAskedByPage<ChartCodeAsk, AgentSampleReply>,
+  request: ChartCodeAsk | null,
+): Promise<string | NoChartCodeFromAgent> {
   if (request === null)
     return {
       whyNone: 'tooLarge',
     };
-  let reply = await agent.ask(request, () => {
+  const reply = await agent.ask(request, () => {
     return;
   });
   if (reply.kind === 'stopped')
@@ -70,26 +113,26 @@ export async function askAgentForChartCode(agent?: Dynamic, request?: Dynamic): 
     }
   );
 }
-export function createChartEditsByAgent(charts?: Dynamic, agent?: Dynamic) {
-  let askNumber: Dynamic = 0;
+export function createChartEditsByAgent(charts: ChartWidgetNodes, agent: ChartCodeAgent): ChartEditsByAgent {
+  let askNumber = 0;
   return {
     /** Whether charts can be changed at all: a kind swap needs the page alone, any other change the agent too (canAskAgent). */
-    isToBeHad: async (): Promise<Dynamic> => charts.isToBeHad,
-    canAskAgent: async (): Promise<Dynamic> => charts.isToBeHad && (await agent.isAvailable()),
+    isToBeHad: async () => charts.isToBeHad,
+    canAskAgent: async () => charts.isToBeHad && (await agent.isAvailable()),
     /** The stock kind this chart's code is, or null: another chart's code, or one that could not be read. */
-    async kindOf(nodeId?: Dynamic): Promise<Dynamic> {
-      let source = await charts.sourceOf(nodeId);
+    async kindOf(nodeId) {
+      const source = await charts.sourceOf(nodeId);
       return source === null ? null : stockKindOfChartCode(source.code);
     },
-    async ask(chartAsk?: Dynamic, asked?: Dynamic, mostUnits?: Dynamic, wantedKind?: Dynamic): Promise<Dynamic> {
+    async ask(chartToChange, asked, mostUnits, wantedKind) {
       askNumber += 1;
-      let thisAsk = askNumber;
-      let outcome = await editChartWithAgent(
+      const thisAsk = askNumber;
+      const outcome = await editChartWithAgent(
         {
-          charts: charts,
-          agent: agent,
+          charts,
+          agent,
         },
-        chartAsk,
+        chartToChange,
         asked,
         mostUnits,
         wantedKind,
@@ -103,29 +146,29 @@ export function createChartEditsByAgent(charts?: Dynamic, agent?: Dynamic) {
       askNumber += 1;
       agent.stop();
     },
-    pointAt: (...input: Dynamic[]) => charts.pointAt(...input),
-    discard: (nodeId?: Dynamic) => charts.discard(nodeId),
+    pointAt: (...pointing: Parameters<ChartWidgetNodes['pointAt']>) => charts.pointAt(...pointing),
+    discard: (nodeId) => charts.discard(nodeId),
   };
 }
-export function createChartNodeCopier(charts?: Dynamic, reportFault?: Dynamic) {
-  let copyNode = async (nodeId?: Dynamic): Promise<Dynamic> => {
+export function createChartNodeCopier(charts: Pick<ChartWidgetNodes, 'copyOf' | 'discard'>, reportFault: (fault: unknown) => void): ChartNodeCopier {
+  const copyNode = async (nodeId: string): Promise<Awaited<ReturnType<ChartWidgetNodes['copyOf']>>> => {
     try {
       return await charts.copyOf(nodeId);
-    } catch (fault: Dynamic) {
+    } catch (fault) {
       reportFault(fault);
       return 'notNow';
     }
   };
-  let discardCopies = (copies?: Dynamic) => {
-    for (let { copy: copyRef } of copies as Dynamic) {
-      let nodeId = nodeIdOfRef(copyRef);
+  const discardCopies = (copies: readonly CopiedWidgetNode[]) => {
+    for (const { copy: copyRef } of copies) {
+      const nodeId = nodeIdOfRef(copyRef);
       if (nodeId !== null) charts.discard(nodeId);
     }
   };
-  let copyAll = async ([sourceRef, ...otherRefs]: Dynamic, copies?: Dynamic): Promise<Dynamic> => {
+  const copyAll = async ([sourceRef, ...otherRefs]: readonly string[], copies: readonly CopiedWidgetNode[]): Promise<ChartNodeCopies> => {
     if (sourceRef === undefined) return copies;
-    let nodeId = nodeIdOfRef(sourceRef);
-    let copied = nodeId === null ? 'never' : await copyNode(nodeId);
+    const nodeId = nodeIdOfRef(sourceRef);
+    const copied = nodeId === null ? 'never' : await copyNode(nodeId);
     if (typeof copied !== 'string')
       return copyAll(otherRefs, [
         ...copies,
@@ -138,7 +181,7 @@ export function createChartNodeCopier(charts?: Dynamic, reportFault?: Dynamic) {
     return copied;
   };
   return {
-    copy: (refs?: Dynamic) => copyAll(refs, []),
+    copy: (refs) => copyAll(refs, []),
     discard: discardCopies,
   };
 }

@@ -1,6 +1,6 @@
 # A page with one writer for each part
 
-Every new page's `index.html` opens with `<meta name="dash-one-writer">` and is written to this rule. It is there for an editor, the pencil in the toolbar, in which a person changes a page's words by hand. Save there writes the stored HTML, never what the screen shows, so each part has one writer. Text you know as you write, labels of tabs, columns and series too, is in the HTML, and no script writes it. Your code draws what the data decides, in elements stored empty. The rule is about who writes what, not what a page may be: a scroll story, an animation or any control fits. This file holds wherever another says otherwise, samples included. A page stored without the line is older, and of what follows only the last two sections apply to it.
+Every new page's `index.html` opens with `<meta name="dash-one-writer">` and is written to this rule. It is there for an editor, the pencil in the toolbar, in which a person changes a page's words by hand. Save there writes the stored HTML, never what the screen shows, so each part has one writer. Text you know as you write, labels of tabs, columns and series too, is in the HTML, and no script writes it. Your code draws what the data decides, in elements stored empty. The rule governs ownership rather than layout style: scroll stories, animations, forms, games, and interactive controls all fit. This file holds wherever another says otherwise, samples included. A page stored without the line is older, and of what follows only the last two sections apply to it.
 
 Anyone who can edit the dashboard has the pencil on a computer, not on a phone or tablet. Anyone else asks you for a rewording.
 
@@ -8,7 +8,7 @@ Outside a drawing a script only listens and sets `class`, `style`, `hidden`, `op
 
 ## Drawings
 
-What the data decides (a number, a word, a chart, a `<tbody>`, a `<select>`'s choices) is an element marked `data-draw="name"`, stored with at most a `—` in it. A table or part of one, a list or a `<select>` is stored empty, since a browser moves a dash out of a table. A drawing inside another is never called. A drawing is only what changes, a word and not its sentence:
+Values determined by data or live page interaction (a number, a word, a chart, a `<tbody>`, a `<select>`'s choices) go inside an element marked `data-draw="name"`, stored with at most a `—` in it. A table or part of one, a list or a `<select>` is stored empty, since a browser moves a dash out of a table. A drawing inside another is never called. A drawing is only what changes, a word and not its sentence:
 
 ```
 <p>Sales met the <b data-draw="goal">—</b> goal in <b data-draw="met" data-source="weeks" data-field="met">—</b> weeks.</p>

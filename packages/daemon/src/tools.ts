@@ -8,7 +8,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ARTIFACT_PANELS,
   COMMENT_HEADER,
@@ -16,10 +17,18 @@ import {
   OpenArtifactError,
   REQUEST_HEADER,
   SHELL_PARAMS,
-  TOOL_DEFINITIONS,
+  actionKindOf,
   agentPrompt,
+  toolDefinitions,
+  quickstartSteps,
   artifactUrl,
   errorBody,
+  parseTitleFrom,
+  titleInFile,
+  capabilitiesProblem,
+  declaredCapabilities,
+  FRAME_BACKED_CAPABILITIES,
+  FRAME_STUBBED_CAPABILITIES,
   typeIdOf,
   typeUrl,
   type ArtifactArgs,
@@ -32,17 +41,26 @@ import {
   type ReservedAction,
   type SessionRef,
   type ShareRequest,
+  type SessionMay,
   type ShareView,
+  type QuickstartArtifact,
   type ToolCallResult,
   type ToolDefinition,
   type TypeSummary,
+  RESERVED_TYPE_IDS,
+  PAGE_CONTENT_NOTICE,
+  restrictedTypeNotice,
 } from '@open-artifact/protocol';
 import type { HarnessHub } from './harness.ts';
+import { harnessProfile } from './harness-profiles.ts';
+import { commentRouteOf, harnessSkillOptions, runtimeCli } from './harness-skill.ts';
 import type { Inbox } from './inbox.ts';
-import { inside } from './paths.ts';
+import type { Ownership } from './ownership.ts';
+import { inside, scriptRunner, shellWord } from './paths.ts';
 import { ACTION_NAME, type TypeAction } from './servers.ts';
 import { changedFiles, sessionKeyOf, slugify, type ArtifactStore } from './store.ts';
-import { skillBody, type ListedType, type TypeInfo, type TypeRegistry } from './types.ts';
+import { markerSourceOf, typeSourceOf } from './type-packages.ts';
+import { isPageType, siteRefusal, skillBody, typeLocation, type ListedType, type TypeInfo, type TypeRegistry } from './types.ts';
 
 /** Characters of one file a read returns. */
 const MAX_READ = 256 * 1024;
@@ -76,19 +94,51 @@ const NO_TYPE_FITS =
 const SHOW_IT = "open view_url in your app's built-in browser (its browser panel or tab) if you have one; only when you have none, Artifact {action: \"open\", url} opens it in the computer's browser";
 const AFTER_CREATE_CHECK = `Ask first whatever the instructions say to ask before a first build, then write the files they describe into root, run Artifact {action: "call", url, name: "check"}, then show it: ${SHOW_IT}.`;
 const AFTER_CREATE = `Ask first whatever the instructions say to ask before a first build, then write the files they describe into root, then show it: ${SHOW_IT}.`;
+const AFTER_CREATE_EARLY_CHECK = `Ask first whatever the instructions say to ask before a first build, write the first playable batch into root, then show it right away so the person watches progress live (${SHOW_IT}) before finishing the rest and running Artifact {action: "call", url, name: "check"}.`;
+const AFTER_CREATE_EARLY = `Ask first whatever the instructions say to ask before a first build, write the first playable batch into root, then show it right away so the person watches progress live (${SHOW_IT}) before finishing the rest.`;
 const AFTER_CREATE_OPENING_CHECK = 'Ask first whatever the instructions say to ask before a first build, then write the files they describe into root, then run Artifact {action: "call", url, name: "check"}. The page opens for the person after your first write.';
 const AFTER_CREATE_OPENING = 'Ask first whatever the instructions say to ask before a first build, then write the files they describe into root. The page opens for the person after your first write.';
 const AFTER_CREATE_OPEN_CHECK = 'Ask first whatever the instructions say to ask before a first build, then write the files they describe into root, then run Artifact {action: "call", url, name: "check"}. The page is open: it shows your writes as they land.';
 const OPEN_NOT_AVAILABLE = 'The app you run in cannot show pages, so nothing opens by itself: once the content is written, give the person view_url.';
 const OPEN_YOURSELF = `Nothing opens by itself here: once the content is written (never while it is empty), ${SHOW_IT}.`;
+const OPEN_EARLY_YOURSELF = `Nothing opens by itself here: show the page right after the first playable batch (never while it is empty, before writing the rest or running check) so the person watches changes arrive live — ${SHOW_IT}.`;
 const AFTER_CREATE_OPEN = 'Ask first whatever the instructions say to ask before a first build, then write the files they describe into root. The page is open: it shows your writes as they land.';
 
 /** The reminder when people changed files the agent has not read since (the paths go in `changed_files`, never here). */
+/** A cloud summary's `note` while the artifact's host cannot be reached (edits are queued on this computer). */
+function offlineOf(link: LinkTools | undefined, record: ArtifactRecord): { note?: string } {
+  const note = link?.offlineNote(record);
+  return note ? { note } : {};
+}
+
 const changedNote = (count: number): string =>
   `The person changed ${count === 1 ? 'a file' : `${count} files`} (changed_files) since you last read this artifact: read ${count === 1 ? 'it' : 'them'} before changing ${count === 1 ? 'it' : 'them'}.`;
 
+/** What each permission of a session lets it do, for the sentence a refusal says. */
+const MAY_WORDS: Record<keyof SessionMay, string> = {
+  create: 'create artifacts',
+  modify: 'change artifacts',
+  remove: 'delete artifacts or take them over',
+  reply: 'answer comment threads',
+};
+
+/** What to do instead, per refused permission. */
+const MAY_FIX: Record<keyof SessionMay, string> = {
+  create: 'Do not create it: give your result in your reply (or to the session that started you), and say what you would make.',
+  modify: 'Do not change it: say in your reply what you would change, for the person or the session that started you.',
+  remove: 'Leave it as it is: ask the person to delete it or take it over themselves.',
+  reply: 'Do not answer in the thread: give your answer in the conversation instead.',
+};
+
+/** Artifacts quickstart's `existing` lists, at most. */
+const EXISTING_MAX = 5;
+
 /** Words of a quickstart intent that say nothing about the type. */
-const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'about', 'make', 'want', 'need', 'some', 'our', 'your', 'new', 'can', 'its', 'are']);
+const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'about', 'make', 'want', 'need', 'some', 'our', 'your', 'new', 'can', 'its', 'are', 'other']);
+/** quickstart's `intent: "other"`: none of the kinds the intent list names, so it matches only a type listing it (page). */
+const OTHER_INTENT = 'other';
+/** Han script: such an intent is found anywhere in the request ("做个小游戏"), as Chinese has no spaces between words. */
+const CJK = /\p{Script=Han}/u;
 
 /** Lower case, words split by single spaces, padded: `" pitch deck "`. */
 const words = (text: string): string => ` ${text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()} `;
@@ -194,10 +244,87 @@ function argsShape(schema: Record<string, unknown> | undefined): string {
 /** A path under an artifact root as the agent gives it: forward slashes, no leading slash. */
 const cleanPath = (rel: unknown): string => String(rel).replace(/\\/g, '/').replace(/^\/+/, '');
 
+/**
+ * The first string in an action's arguments that names a file or folder on this computer, with where it is
+ * (`args.file`): an absolute path (or `file:` URL) under the home folder or the artifact's folder, or one that exists.
+ * A remote type's server is on another computer: such a path is refused rather than sent there (design 18.3). A path
+ * that only looks absolute (a JSON pointer such as `/blocks/0`) and names nothing here passes.
+ */
+export function localPathIn(value: unknown, at: string, root: string, depth = 0): { at: string; path: string } | null {
+  if (typeof value === 'string') {
+    if (value.length > 4096) return null;
+    let path = value;
+    if (/^file:/i.test(path)) {
+      try {
+        path = fileURLToPath(path);
+      } catch {
+        return null;
+      }
+    }
+    if (!isAbsolute(path) || resolve(path) === resolve('/')) return null;
+    const home = homedir();
+    const full = resolve(path);
+    const under = (dir: string): boolean => !!dir && (full === resolve(dir) || full.startsWith(resolve(dir) + sep));
+    return under(home) || under(root) || existsSync(full) ? { at, path: value } : null;
+  }
+  if (depth >= 8 || !value || typeof value !== 'object') return null;
+  const entries = Array.isArray(value) ? value.slice(0, 1000).map((item, i) => [String(i), item] as const) : Object.entries(value).slice(0, 1000);
+  for (const [key, item] of entries) {
+    const found = localPathIn(item, Array.isArray(value) ? `${at}[${key}]` : `${at}.${key}`, root, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Where an artifact's type is, as `read {url}` says it: `type_remote`, and `type_origin` when it is remote. */
+function typeLocationFields(type: TypeInfo): { type_remote: boolean; type_origin?: string } {
+  const where = typeLocation(type);
+  return { type_remote: where.remote, ...(where.origin ? { type_origin: where.origin } : {}) };
+}
+
 /** Reading and changing an artifact's LAN sharing through its type server. */
 export interface ShareAccess {
   view(): Promise<ShareView>;
   update(change: Omit<ShareRequest, 'id'>): Promise<ShareView>;
+}
+
+/** What the tools need of Link (`link.ts`) for artifacts published to a cloud host. */
+export interface LinkTools {
+  /** Whether an action on this artifact runs on its host instead of the local type server. */
+  forwards(record: ArtifactRecord, type: TypeInfo | null, action: string): boolean;
+  /** Whether an action on a published artifact renders its working copy here (`snapshot`, Docs `export`). */
+  renders(record: ArtifactRecord, type: TypeInfo | null, action: string): boolean;
+  /**
+   * Syncs a published artifact before a render here. `note`: null when current, else that it may be behind.
+   * `reload`: its store is its server's, kept in memory by the local type server, which must read the pull anew.
+   */
+  freshen(record: ArtifactRecord, type: TypeInfo | null): Promise<{ note: string | null; reload: boolean }>;
+  /** Runs an action on the artifact's host; a `write` brings its result home before it answers. */
+  call(record: ArtifactRecord, action: string, args: Record<string, unknown>, effect?: 'read' | 'write'): Promise<unknown>;
+  /** Whether the person lets the agent publish to this remote. */
+  agentMayPublish(name: string): boolean;
+  /** Publishes an artifact to a remote. */
+  publish(record: ArtifactRecord, name: string): Promise<ArtifactRecord>;
+  /** A tool wrote files into the artifact's folder. */
+  wrote(record: ArtifactRecord): void;
+  /** While the artifact's host cannot be reached: a note saying its edits are queued on this computer. */
+  offlineNote(record: ArtifactRecord): string | null;
+  /**
+   * A new artifact was made (create, adopt of a folder): with automatic publishing on, it is published in the
+   * background (never waited for, never failing the tool); `true` then.
+   */
+  created?(record: ArtifactRecord): boolean;
+  /** The artifact waits to be published by itself (its `view_url` is still the local address). */
+  autoPending?(record: ArtifactRecord): boolean;
+  /** Where automatic publishing sends artifacts (the default remote's host), or `null` when there is none. */
+  autoTarget?(): string | null;
+  /** One-time notes for the agent's next tool result, whatever its session (a site waiting for the person's approval). */
+  notices?(): string[];
+}
+
+/** The note on a tool result while the artifact is being published by itself. */
+function autoNote(host: string | null): string {
+  return `This artifact is being published to ${host ?? 'the default site'} by itself, in the background: view_url is this computer's address until that finishes, then its web address (a later result's view_url, or Artifact {action: "read"}). Nothing for you to do.`;
 }
 
 /** Options of {@link Tools}. */
@@ -211,6 +338,13 @@ export interface ToolsOptions {
   viewUrl: (id: string) => string;
   /** Opens (resolves) the artifact's page, starting its type server when needed. */
   openPage: (record: ArtifactRecord) => Promise<unknown>;
+  /** Closes the artifact in its type server and opens it again, so it reads its folder anew. */
+  reopenPage?: (record: ArtifactRecord) => Promise<unknown>;
+  /**
+   * Checks that a remote type's address answers before an artifact of it is created (`TypeServers.reach`); throws
+   * saying which address and what happened. Not given: not checked.
+   */
+  reach?: (type: TypeInfo) => Promise<void>;
   /** Calls `POST /__open-artifact/actions/<name>` on the type's server. */
   typeAction: (type: TypeInfo, record: ArtifactRecord, name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** The type's actions (`GET /__open-artifact/actions`, kept); `start: false` does not start a stopped server. `null`: not known. */
@@ -228,13 +362,17 @@ export interface ToolsOptions {
    */
   agentActing?: (artifactId: string, phase: 'start' | 'end') => void;
   /**
-   * `open: "after_first_write"`: opens the page for the person once the agent
-   * first writes its content. `false`: the caller's app cannot show pages, so
+   * `open: "after_first_write"` (the default on create): opens the page for the
+   * person once the agent first writes its content. `false`: the caller's app cannot show pages, so
    * nothing was set up.
    */
   openAfterFirstWrite?: (record: ArtifactRecord, caller: SessionRef) => boolean;
   /** Drops a pending {@link openAfterFirstWrite} (the page was opened another way). */
   cancelOpenAfterFirstWrite?: (id: string) => void;
+  /** Cloud publishing (off when there is no remote: no artifact has a `remote`). */
+  link?: LinkTools;
+  /** Moves ownership when another session writes an artifact (`ownership.ts`). */
+  ownership?: Pick<Ownership, 'afterTool' | 'wrote'>;
 }
 
 /** One file in a listing. */
@@ -250,6 +388,68 @@ const now = (): string => new Date().toISOString();
 /** How the page of a new artifact opens: `open` as granted. */
 type Opening = 'after_first_write' | 'now';
 
+
+/**
+ * A `capabilities` argument, checked: only a page artifact takes one (any other type's page declares its own, in its
+ * type's index.html), and it is an object of `{name: true | {options}}`. Throws `invalid_argument` otherwise.
+ */
+export function capabilitiesOf(value: unknown, type: Pick<TypeInfo, 'id' | 'openArtifact'> | null | undefined): Record<string, unknown> {
+  if (!isPageType(type)) {
+    throw new OpenArtifactError('invalid_argument', `capabilities is for page artifacts only; ${type ? `the ${type.id} type` : 'this type'} decides what its page may use.`, {
+      fix: 'Leave capabilities out.',
+    });
+  }
+  const problem = capabilitiesProblem(value);
+  if (problem) throw new OpenArtifactError('invalid_argument', problem);
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+/** The type uid (and where that type came from) a folder's `.artifact.json` records, when it records one. */
+export function markerTypeUid(root: string): { typeUid: string | null; typeSource: string | null } {
+  try {
+    const marker = JSON.parse(readFileSync(join(root, '.artifact.json'), 'utf8')) as { typeUid?: unknown; typeSource?: unknown };
+    const typeUid = typeof marker.typeUid === 'string' && marker.typeUid ? marker.typeUid : null;
+    return { typeUid, typeSource: typeUid && typeof marker.typeSource === 'string' ? marker.typeSource : null };
+  } catch {
+    return { typeUid: null, typeSource: null };
+  }
+}
+
+/** The capabilities a folder's `.artifact.json` declares, when they are well formed and not empty. */
+function markerCapabilities(root: string): Record<string, unknown> | undefined {
+  try {
+    const value = (JSON.parse(readFileSync(join(root, '.artifact.json'), 'utf8')) as { capabilities?: unknown }).capabilities;
+    return value !== undefined && !capabilitiesProblem(value) && Object.keys(value as object).length ? (value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What publish says of a page's declared capabilities that do nothing here, or only answer with an error. */
+export function capabilityNotes(capabilities: Record<string, unknown> | null | undefined): string[] {
+  const names = Object.keys(declaredCapabilities(capabilities));
+  const stubbed = names.filter((n) => FRAME_STUBBED_CAPABILITIES[n]);
+  const unknown = names.filter((n) => !FRAME_STUBBED_CAPABILITIES[n] && !FRAME_BACKED_CAPABILITIES.includes(n));
+  return [
+    ...(stubbed.length ? [`${stubbed.join(', ')}: declared, but on this computer ${stubbed.length === 1 ? 'it answers' : 'they answer'} only with an error (${stubbed.map((n) => `${n}: ${FRAME_STUBBED_CAPABILITIES[n]}`).join(', ')}); the page should handle that.`] : []),
+    ...(unknown.length ? [`${unknown.join(', ')}: no such capability here; use() gives the page null for ${unknown.length === 1 ? 'it' : 'them'}.`] : []),
+  ];
+}
+
+/**
+ * The title an artifact's own files declare at its type's `titleFrom` (`<file>#<JSON pointer>`), at most 200
+ * characters, or undefined (no `titleFrom`, no such file, no string there).
+ */
+export function contentTitle(root: string, titleFrom: string | null): string | undefined {
+  const parsed = titleFrom ? parseTitleFrom(titleFrom) : null;
+  if (!parsed) return undefined;
+  try {
+    return titleInFile(parsed.file, readFileSync(join(root, parsed.file), 'utf8'), parsed.pointer)?.slice(0, 200);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The tools. */
 export class Tools {
   private readonly o: ToolsOptions;
@@ -258,19 +458,60 @@ export class Tools {
     this.o = options;
   }
 
-  /** The tool definitions (MCP `tools/list`, `tools.list`). */
-  definitions(): ToolDefinition[] {
-    return TOOL_DEFINITIONS;
+  /**
+   * The tool definitions (MCP `tools/list`, `tools.list`). Each lists the actions that leave this computer for a
+   * remote type (`remoteActions`); `openWorldHint` is true while an enabled remote type is installed (visible from
+   * `workspace`, when given).
+   */
+  definitions(workspace?: string | null): ToolDefinition[] {
+    let any = false;
+    let actions = false;
+    try {
+      for (const t of this.o.types.list(workspace ?? undefined)) {
+        if (!t.enabled || !t.runnable || !typeLocation(t).remote) continue;
+        any = true;
+        if (t.entry && t.entry.kind !== 'static' && t.entry.actions) actions = true;
+      }
+    } catch {
+      /* the type roots cannot be read now: as when every type is local */
+    }
+    return toolDefinitions({ any, actions });
   }
 
-  /** The always-on prompt (MCP instructions, `/api/open-artifact.tools`): {@link agentPrompt} with this workspace's types. */
-  instructions(workspace?: string | null): string {
+  /**
+   * The always-on prompt (MCP instructions, `/api/open-artifact.tools`): {@link agentPrompt} with this workspace's types.
+   * Given the harness, its tool names, and no offers when its `policy.offer` is `asked`.
+   */
+  instructions(workspace?: string | null, harness?: string | null): string {
     const offers = new Set(this.o.settings().offers ?? []);
     const types: TypeSummary[] = this.o.types
       .list(workspace)
       .filter((t) => t.enabled && t.runnable)
       .map((t) => ({ id: t.id, title: t.title, when: t.when, description: t.description, exports: t.exports, offer: offers.has(t.id) ? t.offer : null }));
-    return agentPrompt({ types });
+    if (!harness) return agentPrompt({ types });
+    const profile = harnessProfile(harness);
+    return agentPrompt({ types, toolNames: profile.toolNames, offer: profile.policy?.offer !== 'asked' });
+  }
+
+  /** The installed types and the ones the person lets agents offer: what `skill.get` and `commands.list` list. */
+  skillCatalog(workspace: string | null): { types: ListedType[]; offers: string[] } {
+    return { types: this.o.types.list(workspace), offers: [...(this.o.settings().offers ?? [])] };
+  }
+
+  /**
+   * Refuses a call the calling session may not make (design 6.2): what `session.attach` said (`may`), over its role's
+   * defaults in the harness's `policy.roles`. A session the daemon did not see attach may do everything; reads are
+   * never refused.
+   */
+  private allow(caller: SessionRef, need: keyof SessionMay, what: string): void {
+    const key = sessionKeyOf(caller);
+    const live = key ? this.o.harnesses().sessions.get(key) : undefined;
+    if (!live || (!live.may && !live.role)) return;
+    const byRole = live.role ? harnessProfile(caller.harness).policy?.roles?.[live.role] : undefined;
+    const may: SessionMay = { ...(byRole ?? {}), ...(live.may ?? {}) };
+    if (may[need] !== false) return;
+    const who = live.role ? `A ${live.role} session` : 'This session';
+    throw new OpenArtifactError('not_granted', `${who} may not ${MAY_WORDS[need]} here (${what}).`, { fix: MAY_FIX[need] });
   }
 
   /** Runs a tool. Failures come back as `{error}`; what waited in the caller's inbox comes along as `messages`. */
@@ -282,17 +523,19 @@ export class Tools {
       if (name === 'Artifact') result = await this.artifact(input as ArtifactArgs, who);
       else if (name === 'ArtifactData') result = await this.data(input as unknown as ArtifactDataArgs, who);
       else if (name === 'ArtifactComments') result = await this.comments(input as unknown as ArtifactCommentsArgs, who);
+      else if (name === 'ShowArtifact') result = await this.show(input as ArtifactArgs);
       else throw new OpenArtifactError('unknown_tool', `No tool ${name}.`);
     } catch (error) {
       // A conflict's `current` is data, so it sits beside the error, never inside its words.
       const { current, ...body } = errorBody(error);
       result = { error: body, ...(current !== undefined ? { current } : {}) };
     }
+    if (this.o.ownership) result = this.o.ownership.afterTool(name, input, who, result);
     // What waited for this session goes along, except to a wait, which returns it itself.
     if (!(name === 'ArtifactComments' && input.action === 'wait')) {
       const key = sessionKeyOf(who);
-      const pending = key ? this.o.inbox.take(key) : [];
-      if (pending.length) result = { ...result, messages: pending.map((m) => m.text) };
+      const pending = [...(key ? this.o.inbox.take(key).map((m) => m.text) : []), ...(this.o.link?.notices?.() ?? [])];
+      if (pending.length) result = { ...result, messages: pending };
     }
     return result;
   }
@@ -307,7 +550,12 @@ export class Tools {
       case 'list':
         return this.list(args, caller);
       case 'publish':
-        return args.url ? this.write(args) : this.create(args, caller);
+        if (args.url) {
+          this.allow(caller, 'modify', 'Artifact publish with url');
+          return this.write(args);
+        }
+        this.allow(caller, 'create', 'Artifact publish with type_url');
+        return this.create(args, caller);
       case 'read':
         return this.read(args, caller);
       case 'open':
@@ -320,6 +568,7 @@ export class Tools {
         return this.share(args);
       case 'delete': {
         const record = this.o.store.require(args.url);
+        this.allow(caller, 'remove', 'Artifact delete');
         this.o.store.remove(record.id);
         return { deleted: artifactUrl(record.id), note: `The record is gone; the folder ${record.root} stays.` };
       }
@@ -341,20 +590,78 @@ export class Tools {
       scope: t.scope,
       runnable: t.runnable,
       ...(t.problems.length ? { problems: t.problems } : {}),
+      // Where its page is: a remote type's artifacts send their content to `origin`.
+      ...typeLocation(t),
+      ...this.sourceFields(t),
     };
   }
 
+  /**
+   * `source` (builtin, local or installed), `installed_from`, and for a restricted type (an installed one, or one in
+   * a project not trusted yet) the fixed `third_party_notice`: its title, description and instructions are its
+   * publisher's (feature `types.source`).
+   */
+  private sourceFields(t: TypeInfo): { source: string; installed_from?: string; third_party_notice?: string } {
+    const { source, installedFrom } = typeSourceOf(t);
+    return { source, ...(installedFrom ? { installed_from: installedFrom } : {}), ...this.noticeFields(t) };
+  }
+
+  /**
+   * `third_party_notice` on what is read back from an artifact of a restricted type (its files, comments and
+   * documents): {@link PAGE_CONTENT_NOTICE}, since the type's page, its publisher's code, may have written them.
+   */
+  private pageContentFields(record: ArtifactRecord): { third_party_notice?: string } {
+    const type = this.o.types.get(record.type, record.owner?.workspace ?? undefined);
+    return type && !type.trusted ? { third_party_notice: PAGE_CONTENT_NOTICE } : {};
+  }
+
+  /** The notice beside a restricted type's instructions (create, adopt, read), or nothing. */
+  private noticeFields(t: TypeInfo): { third_party_notice?: string } {
+    const notice = restrictedTypeNotice(t);
+    return notice ? { third_party_notice: notice } : {};
+  }
+
   private quickstart(args: ArtifactArgs, caller: SessionRef): ToolCallResult {
+    // The type already chosen: no matching, its create call and steps.
+    if (args.type !== undefined && args.type !== null && args.type !== '') {
+      const typeId = typeIdOf(String(args.type));
+      if (!typeId) throw new OpenArtifactError('invalid_argument', 'type: a type id (slides) or open-artifact://type/<id>.');
+      const type = this.o.types.get(typeId, caller.workspace);
+      if (!type && RESERVED_TYPE_IDS.includes(typeId)) {
+        // `/open-artifact new-type`: making a type, not an artifact.
+        throw new OpenArtifactError('type_missing', 'new-type is not a type: it asks you to make a new artifact type.', {
+          fix: 'Read reference/new-type.md in the open-artifact skill folder when it is there; then run `open-artifact types new <id> --template page|data` and `open-artifact types check <id>`.',
+        });
+      }
+      if (!type) throw new OpenArtifactError('type_missing', `No type ${typeId} is installed.`, { fix: 'Artifact {action: "list", scope: "types"} lists what is; or leave type out and quickstart recommends one.' });
+      if (!type.enabled) throw new OpenArtifactError('unsupported', `The type ${typeId} is turned off in settings.`);
+      if (!type.runnable) throw new OpenArtifactError('type_not_runnable', type.problems.join(' ') || `${typeId} cannot run.`);
+      const related = args.related !== false ? this.relatedTo(type, caller) : [];
+      const harness = this.forHarness(type, args, caller);
+      return {
+        recommended: this.typeSummary(type),
+        alternatives: [],
+        create: { action: 'publish', type_url: typeUrl(type.id), title: '<name>', open: 'after_first_write' },
+        ...(related.length ? { related } : {}),
+        types: [this.typeSummary(type)],
+        next: this.quickstartNext(type, related.length > 0, harness),
+        note: TYPE_TEXT_NOTE,
+        ...harness,
+      };
+    }
     const types = this.o.types.list(caller.workspace).filter((t) => t.enabled);
     const want = String(args.intent ?? args.query ?? '').trim().toLowerCase();
     const wanted = words(want);
     const terms = wanted.trim().split(' ').filter((w) => w.length > 2 && !STOP_WORDS.has(w));
     const score = (t: ListedType): number => {
       if (!want) return 0;
-      let s = 0;
       const intents = t.intents.map((i) => i.toLowerCase());
+      // "other" is in many types' descriptions ("for other work", "other writing"): it picks only a type that lists it
+      // as an intent (the free page), never one whose text merely says it.
+      if (want === OTHER_INTENT) return intents.includes(OTHER_INTENT) ? 10 : 0;
+      let s = 0;
       if (intents.includes(want)) s += 10;
-      else if (intents.some((i) => i.length > 2 && wanted.includes(words(i)))) s += 6;
+      else if (intents.some((i) => (CJK.test(i) ? i.length > 1 && want.includes(i) : i.length > 2 && wanted.includes(words(i))))) s += 6;
       const id = t.id.toLowerCase();
       if (id.includes(want) || wanted.includes(words(id))) s += 5;
       const text = `${t.title} ${t.description} ${t.when ?? ''}`.toLowerCase();
@@ -365,6 +672,7 @@ export class Tools {
     const fit = ranked.filter(({ t, s }) => s > 0 && t.runnable);
     const top = fit[0]?.t;
     const related = top && args.related !== false ? this.relatedTo(top, caller) : [];
+    const harness = top ? this.forHarness(top, args, caller) : this.rulesOf(caller);
     return {
       recommended: top ? this.typeSummary(top) : null,
       alternatives: fit.slice(1, 6).map(({ t }) => this.typeSummary(t)),
@@ -372,14 +680,90 @@ export class Tools {
       ...(related.length ? { related } : {}),
       types: ranked.map(({ t }) => this.typeSummary(t)),
       next: top
-        ? related.length
-          ? `Create it with the create call above, then follow the instructions it returns. related lists the person's artifacts of the types ${top.id} builds on (${top.uses.join(', ')}): when one fits the request, read it with Artifact {action: "read", url} and use it.`
-          : 'Create it with the create call above, then follow the instructions it returns.'
+        ? this.quickstartNext(top, related.length > 0, harness)
         : want
           ? NO_TYPE_FITS
           : 'Pick a type and create it with Artifact {action: "publish", type_url, title, open: "after_first_write"}, then follow the instructions it returns.',
       note: TYPE_TEXT_NOTE,
+      ...harness,
     };
+  }
+
+  /** quickstart's `next` once a type is chosen. */
+  private quickstartNext(top: TypeInfo, related: boolean, harness: { existing?: QuickstartArtifact[]; steps?: string; rules?: string }): string {
+    const parts = [
+      harness.rules ? 'rules are your app\'s own: they win over everything else here.' : null,
+      harness.existing?.length
+        ? 'existing lists artifacts of this type with a similar title: if the person may mean one of them, ask whether to change it (find it again with Artifact {action: "list"}) instead of making another.'
+        : null,
+      related
+        ? `Create it with the create call above, then follow the instructions it returns. related lists the person's artifacts of the types ${top.id} builds on (${top.uses.join(', ')}): when one fits the request, read it with Artifact {action: "read", url} and use it.`
+        : 'Create it with the create call above, then follow the instructions it returns.',
+      harness.steps ? 'steps says what to do from there, in this app.' : null,
+    ];
+    return parts.filter(Boolean).join(' ');
+  }
+
+  /** The harness's rules for quickstart, labelled as winning. */
+  private rulesOf(caller: SessionRef): { rules?: string } {
+    const profile = harnessProfile(caller.harness);
+    const rules = String(profile.rules ?? '').trim();
+    if (!rules) return {};
+    return { rules: `The rules of ${profile.title || caller.harness}, the app you work in. They win over everything else you were told here, these steps and the type's instructions included:\n\n${rules}` };
+  }
+
+  /**
+   * What quickstart says for the calling harness once a type is chosen: the steps written for it (who opens the page,
+   * how comments come back, what it asks the person first), the artifacts that may already be the one meant (within
+   * its `policy.reuse`), its rules, and the calls this answer stands in for.
+   */
+  private forHarness(top: TypeInfo, args: ArtifactArgs, caller: SessionRef): { steps: string; existing?: QuickstartArtifact[]; rules?: string; replaces: string[] } {
+    const hub = this.o.harnesses();
+    const conn = hub.connectionFor(caller);
+    const options = harnessSkillOptions(caller.harness, conn?.caps);
+    if (hub.canOpen(caller)) options.opens = 'host';
+    const where = typeLocation(top);
+    const steps = quickstartSteps({
+      ...options,
+      cli: runtimeCli(),
+      comments: commentRouteOf(caller.harness, conn?.caps, !!conn?.caps.wake),
+      ...(where.remote && where.origin ? { remote: where.origin } : {}),
+    });
+    const reuse = harnessProfile(caller.harness).policy?.reuse ?? 'workspace';
+    const existing = reuse === 'none' ? null : this.similarTo(top, `${args.title ?? ''} ${args.intent ?? args.query ?? ''}`, caller, reuse);
+    return {
+      steps,
+      ...(existing?.length ? { existing } : {}),
+      ...this.rulesOf(caller),
+      replaces: [
+        'Artifact {action: "list", scope: "types"}',
+        ...top.uses.map((use) => `Artifact {action: "list", type: "${use}", scope: "all"}`),
+        `Artifact {action: "read", type_url: "${typeUrl(top.id)}"} (the create result carries the instructions)`,
+        ...(existing ? [`Artifact {action: "list", type: "${top.id}", query} (existing has already looked)`] : []),
+      ],
+    };
+  }
+
+  /**
+   * Artifacts of `type` whose title shares a meaningful word with `text`, in the caller's reach: its own (`session`),
+   * or its own and its workspace's (`workspace`). Most words in common first, then newest.
+   */
+  private similarTo(type: TypeInfo, text: string, caller: SessionRef, reuse: 'workspace' | 'session'): QuickstartArtifact[] {
+    const generic = new Set([...words(`${type.id} ${type.title} ${type.intents.join(' ')}`).trim().split(' ')]);
+    const significant = (t: string): Set<string> => new Set(words(t).trim().split(' ').filter((w) => w.length > 2 && !STOP_WORDS.has(w) && !generic.has(w)));
+    const wanted = significant(text);
+    if (!wanted.size) return [];
+    const me = sessionKeyOf(caller);
+    const workspace = caller.workspace ? resolve(caller.workspace) + sep : null;
+    const mine = (a: ArtifactRecord): boolean => !!a.owner && sessionKeyOf(a.owner) === me;
+    return this.o.store
+      .list()
+      .filter((a) => a.type === type.id && (mine(a) || (reuse === 'workspace' && !!workspace && a.root.startsWith(workspace))))
+      .map((a) => ({ a, score: [...significant(a.title)].filter((w) => wanted.has(w)).length }))
+      .filter(({ score }) => score > 0)
+      .sort((x, y) => y.score - x.score || String(y.a.updatedAt).localeCompare(String(x.a.updatedAt)))
+      .slice(0, EXISTING_MAX)
+      .map(({ a }) => ({ url: artifactUrl(a.id), title: a.title, type: a.type, updatedAt: a.updatedAt, root: a.root, mine: mine(a) }));
   }
 
   /** The caller's artifacts (theirs, or under their workspace) of the types `type` builds on (`openArtifact.uses`), newest first. */
@@ -461,21 +845,31 @@ export class Tools {
   /** The type's actions, or `null` when they are not known; never fails. */
   private async knownActions(type: TypeInfo, start: boolean): Promise<TypeAction[] | null> {
     try {
-      return await this.o.typeActions(type, { start });
+      // Each with its effect (left out means write, as running it treats it), wherever the list is shown, and whether
+      // running it sends its arguments to another computer: decided by where the type is, never by its `effect`.
+      const remote = typeLocation(type).remote;
+      return (await this.o.typeActions(type, { start }))?.map((a) => ({ ...a, effect: a.effect ?? 'write', remote })) ?? null;
     } catch {
       return null;
     }
   }
 
-  /** Whether the type has a `check` action (assumed, while its list is not known, when it declares actions). */
+  /**
+   * Whether the type has a `check` action (assumed, while its list is not known, when it declares actions). A type
+   * frame-host serves (a page-kind type) has none: its actions are `info` and `snapshot`.
+   */
   private hasCheck(type: TypeInfo, actions: TypeAction[] | null): boolean {
     if (actions) return actions.some((a) => a.name === 'check');
+    if (type.runtime === 'frame') return false;
     return !!(type.entry && type.entry.kind !== 'static' && type.entry.actions);
   }
 
   /** The note put before the type's own instructions: this artifact, and how the type's commands map to the tools. */
   private hostNote(type: TypeInfo, record: ArtifactRecord, actions: TypeAction[] | null, opening?: Opening): string {
-    const script = ['cli.mjs', 'artifact.mjs'].map((name) => join(type.dir, 'scripts', name)).find((file) => existsSync(file));
+    // A restricted type's files (an installed package's, or an untrusted project's): nothing of it is run outside its
+    // page, by Open Artifact or by the agent.
+    const restricted = !type.trusted;
+    const script = restricted ? undefined : ['cli.mjs', 'artifact.mjs'].map((name) => join(type.dir, 'scripts', name)).find((file) => existsSync(file));
     const declares = !!(type.entry && type.entry.kind !== 'static' && type.entry.actions);
     const check = this.hasCheck(type, actions);
     const lines = [
@@ -485,25 +879,34 @@ export class Tools {
       `- view it: ${this.o.viewUrl(record.id)}`,
       '',
       "# Running the type's commands here",
-      `The instructions below were written for the type's own script. Its folder is ${type.dir}: "scripts/..." means ${join(type.dir, 'scripts')}/....`,
+      restricted
+        ? `${type.scope === 'installed' ? 'This type was installed from a package' : 'This type is in a project folder the person has not trusted yet'} (its folder is ${type.dir}). Do not run any of its files, its scripts included, with node or a shell: its page runs in the browser, and its actions run with Artifact call.`
+        : `The instructions below were written for the type's own script. Its folder is ${type.dir}: "scripts/..." means ${join(type.dir, 'scripts')}/....`,
       actions?.length ? "- The type's actions, run with Artifact call:" : null,
-      ...(actions ?? []).map((a) => `  - ${a.name}: ${a.title} — Artifact {action: "call", url, name: "${a.name}"${argsShape(a.schema)}}`),
+      ...(actions ?? []).map((a) => `  - ${a.name}: ${a.title} — Artifact {action: "call", url, name: "${a.name}"${argsShape(a.schema)}} (${a.effect ?? 'write'})`),
       !actions && declares
-        ? '- The type\'s actions (such as check) run with Artifact {action: "call", url, name, args?}; Artifact {action: "read", url} lists them once its page has opened.'
+        ? `- The type's actions (such as ${type.runtime === 'frame' ? 'snapshot, a picture of the page' : 'check'}) run with Artifact {action: "call", url, name, args?}; Artifact {action: "read", url} lists them once its page has opened.`
         : null,
-      script && check ? `- Running \`node ${script} check ${record.root}\` as written works too.` : null,
+      script && check ? `- Running \`${scriptRunner()} ${shellWord(script)} check ${shellWord(record.root)}\` as written works too.` : null,
+      !restricted && scriptRunner() !== 'node' ? `- Where they say \`node\`, run \`${scriptRunner()}\` instead: Open Artifact runs here with that program, and there may be no \`node\`.` : null,
       "- Do not run the script's open, serve, share or wait commands: Open Artifact serves the page. The person shares it from the page's Share panel (Artifact {action: \"open\", url, panel: \"share\"}).",
       `- Comments and requests sent from the page come to you as "${COMMENT_HEADER}" / "${REQUEST_HEADER}" messages; read them with ArtifactComments {action: "read", url} and answer with {action: "reply", url, thread_id, text}.`,
       type.store === 'db' ? `- The document store: ArtifactData (${DATA_ACTIONS.join(', ')}).` : null,
       type.store === 'doc' ? '- The doc is written through its actions (create, read, update, batch, delete, export, import with Artifact call), never with Artifact publish files.' : null,
       '- The person may edit the files from the page: read them again before changing them.',
+      ((where) =>
+        where.remote
+          ? `- This type runs on another computer (${where.origin}): its page, actions, documents and comments are there. Pass content, not paths on this computer: a call with one is refused.`
+          : null)(typeLocation(type)),
       opening === 'after_first_write'
         ? `- Write the content first${check ? ', then run check' : ''}. The page opens for the person after your first write.`
         : opening === 'now'
           ? `- The page is open for the person and shows your writes as they land${check ? '; run check once the content is written' : ''}.`
-          : check
-            ? `- Write the content first, then run check, then show it: ${SHOW_IT}.`
-            : `- Write the content first, then show it: ${SHOW_IT}.`,
+          : type.openArtifact?.openEarly === true
+            ? `- Show the page right after your first playable batch (never while empty), before finishing the rest so the person watches changes arrive live: ${SHOW_IT}${check ? '; run check once everything is written' : ''}.`
+            : check
+              ? `- Write the content first, then run check, then show it: ${SHOW_IT}.`
+              : `- Write the content first, then show it: ${SHOW_IT}.`,
     ].filter((line): line is string => line !== null);
     return lines.join('\n');
   }
@@ -524,9 +927,12 @@ export class Tools {
     if (!type) throw new OpenArtifactError('type_missing', `No type ${typeId} is installed.`, { fix: 'Artifact {action: "list", scope: "types"} lists what is.' });
     if (!type.enabled) throw new OpenArtifactError('unsupported', `The type ${typeId} is turned off in settings.`);
     if (!type.runnable) throw new OpenArtifactError('type_not_runnable', type.problems.join(' ') || `${typeId} cannot run.`);
-    if (args.open !== undefined && args.open !== 'after_first_write' && args.open !== 'now') {
-      throw new OpenArtifactError('invalid_argument', 'open: "after_first_write" (the page opens once you write its content) or "now".');
+    if (args.open !== undefined && args.open !== 'after_first_write' && args.open !== 'now' && args.open !== 'never') {
+      throw new OpenArtifactError('invalid_argument', 'open: "after_first_write" (the default: the page opens once you write its content), "now" or "never".');
     }
+    const capabilities = args.capabilities === undefined ? undefined : capabilitiesOf(args.capabilities, type);
+    // A type on another computer that cannot be reached now: nothing is created, and the error says where and why.
+    if (typeLocation(type).remote) await this.o.reach?.(type);
     const title = String(args.title ?? '').trim() || type.artifactTitle || type.title;
     const root = this.resolveFolder(args.folder, caller, title);
     if (existsSync(join(root, '.artifact.json'))) {
@@ -534,29 +940,34 @@ export class Tools {
       if (known) throw new OpenArtifactError('conflict', `${root} is already the artifact ${artifactUrl(known.id)}.`, { fix: 'Use that url, or give another folder.' });
     }
     const owner = caller.session || caller.workspace ? caller : null;
-    const record = this.o.store.create({ root, type: typeId, typeSource: type.scope, typeRelease: type.version, owner, title });
+    const record = this.o.store.create({ root, type: typeId, typeSource: type.scope, typeRelease: type.version, typeUid: type.uid, typeFrom: markerSourceOf(type), owner, title, capabilities });
     this.o.log(`created ${record.id} (${typeId}) at ${root} for ${sessionKeyOf(caller) ?? 'nobody'}`);
+    const auto = this.o.link?.created?.(record) === true;
     const actions = await this.knownActions(type, false);
     const check = this.hasCheck(type, actions);
-    // open: "now" shows the page at once; "after_first_write" once the content lands. Only in the caller's own app
-    // (`host.open`): where only the computer's browser could show it, the agent opens it, in its app's built-in browser
-    // when it has one.
+    // open: "after_first_write" (the default) shows the page once the content lands; "now" at once; "never" not at
+    // all. Only in the caller's own app (`host.open`): where only the computer's browser could show it, the agent
+    // opens it, in its app's built-in browser when it has one.
     let opening: Opening | undefined;
+    const wanted = args.open ?? 'after_first_write';
     const inApp = this.o.harnesses().canOpen(caller);
-    if (args.open === 'now' && inApp) {
+    if (wanted === 'now' && inApp) {
       if ((await this.open({ action: 'open', url: artifactUrl(record.id) }, caller)).opened) opening = 'now';
-    } else if (args.open === 'after_first_write' && inApp && this.o.openAfterFirstWrite?.(record, caller)) {
+    } else if (wanted === 'after_first_write' && inApp && this.o.openAfterFirstWrite?.(record, caller)) {
       opening = 'after_first_write';
     }
+    const openEarly = type.openArtifact?.openEarly === true;
     return {
       url: artifactUrl(record.id),
       root,
       file_path: root,
       view_url: this.o.viewUrl(record.id),
       type_url: typeUrl(typeId),
-      ...(opening ? { open: opening } : args.open ? { note: this.o.harnesses().canShow(caller) ? OPEN_YOURSELF : OPEN_NOT_AVAILABLE } : {}),
+      ...(opening ? { open: opening } : args.open && args.open !== 'never' ? { note: this.o.harnesses().canShow(caller) ? (openEarly ? OPEN_EARLY_YOURSELF : OPEN_YOURSELF) : OPEN_NOT_AVAILABLE } : {}),
       ...(actions?.length ? { actions } : {}),
       instructions: this.instructionsFor(type, record, actions, opening),
+      ...this.noticeFields(type),
+      source: typeSourceOf(type).source,
       next:
         opening === 'after_first_write'
           ? check
@@ -566,9 +977,17 @@ export class Tools {
             ? check
               ? AFTER_CREATE_OPEN_CHECK
               : AFTER_CREATE_OPEN
-            : check
-              ? AFTER_CREATE_CHECK
-              : AFTER_CREATE,
+            : openEarly
+              ? check
+                ? AFTER_CREATE_EARLY_CHECK
+                : AFTER_CREATE_EARLY
+              : check
+                ? AFTER_CREATE_CHECK
+                : AFTER_CREATE,
+      ...(isPageType(type) ? { capabilities: record.capabilities ?? {} } : {}),
+      ...(auto || capabilityNotes(record.capabilities).length
+        ? { notes: [...(auto ? [autoNote(this.o.link?.autoTarget?.() ?? null)] : []), ...capabilityNotes(record.capabilities)] }
+        : {}),
     };
   }
 
@@ -582,8 +1001,12 @@ export class Tools {
   }
 
   private async write(args: ArtifactArgs): Promise<ToolCallResult> {
-    const record = this.o.store.require(args.url);
-    const given = args.files as unknown;
+    let record = this.o.store.require(args.url);
+    // The type matters to a write only for a page (its capabilities, its title); a registry may be left out in tests.
+    const type = this.o.types?.get(record.type, record.owner?.workspace ?? undefined) ?? null;
+    const capabilities = args.capabilities === undefined ? undefined : capabilitiesOf(args.capabilities, type);
+    // A page's capabilities may change alone, with no files.
+    const given = (args.files === undefined && capabilities !== undefined ? {} : args.files) as unknown;
     if (!given || typeof given !== 'object') {
       throw new OpenArtifactError('invalid_argument', 'publish with url needs files: {"rel/path": "text" | {content, encoding} | null}.');
     }
@@ -638,14 +1061,25 @@ export class Tools {
       writeFileSync(file, bytes);
       written.push({ path: clean, bytes: bytes.length, sha256: sha256(bytes) });
     }
+    // Capabilities go after the files, so a page that reloads for them already finds its new index.html.
+    if (capabilities !== undefined) record = this.o.store.setCapabilities(record.id, Object.keys(capabilities).length ? capabilities : null);
     const changed = changedFiles(record);
-    this.o.store.update(record.id, { agentSeenAt: now() });
+    // A page's title is its index.html's <title> (the type's titleFrom): an agent's write of it renames the artifact.
+    const titled = type?.titleFrom && isPageType(type) && plan.some(({ clean }) => clean === parseTitleFrom(type.titleFrom!)?.file) ? contentTitle(record.root, type.titleFrom) : undefined;
+    this.o.store.update(record.id, { agentSeenAt: now(), ...(titled && titled !== record.title ? { title: titled } : {}) });
+    if (record.remote || record.autoPublish === 'pending') this.o.link?.wrote(record);
+    const offline = this.o.link?.offlineNote(record) ?? null;
+    const auto = this.o.link?.autoPending?.(record) === true ? autoNote(this.o.link?.autoTarget?.() ?? null) : null;
+    const notes = [...(changed.length ? [changedNote(changed.length)] : []), ...(offline ? [offline] : []), ...(auto ? [auto] : [])];
     const result: ToolCallResult = {
       url: artifactUrl(record.id),
       written,
       view_url: this.o.viewUrl(record.id),
-      ...(changed.length ? { changed_files: changed, notes: [changedNote(changed.length)] } : {}),
+      ...(changed.length ? { changed_files: changed } : {}),
+      ...(capabilities !== undefined ? { capabilities: record.capabilities ?? {} } : {}),
+      ...(notes.length || capabilities !== undefined ? { notes: [...notes, ...(capabilities !== undefined ? capabilityNotes(record.capabilities) : [])] } : {}),
     };
+    if (!(result.notes as string[] | undefined)?.length) delete result.notes;
     if (args.check) result.check = await this.runCheck(record);
     return result;
   }
@@ -742,10 +1176,10 @@ export class Tools {
           return { path, error: errorBody(error) };
         }
       });
-      return { url: artifactUrl(record.id), files, ...seen };
+      return { url: artifactUrl(record.id), files, ...seen, ...this.pageContentFields(record) };
     }
-    if (args.path) return { ...this.readOne(record, args.path, MAX_READ), ...seen };
-    const { owner, userEdits: _edits, ...shown } = record;
+    if (args.path) return { ...this.readOne(record, args.path, MAX_READ), ...seen, ...this.pageContentFields(record) };
+    const { owner, userEdits: _edits, remote, ...shown } = record;
     const type = this.o.types.get(record.type, owner?.workspace ?? undefined);
     const actions = type ? await this.knownActions(type, false) : null;
     return {
@@ -753,8 +1187,12 @@ export class Tools {
       url: artifactUrl(record.id),
       owner: owner ? sessionKeyOf(owner) : null,
       view_url: this.o.viewUrl(record.id),
+      ...(remote ? { cloud: { remote: remote.name, host: remote.host, view_url: remote.url, syncedAt: remote.syncedAt, ...offlineOf(this.o.link, record) } } : {}),
       type_url: typeUrl(record.type),
-      ...(type ? { type_title: type.title } : {}),
+      // Where the type comes from; a restricted one's title is its publisher's, and so may be what its page wrote (the
+      // notice: the type's, then the page content's, in the one field).
+      ...(type ? { type_title: type.title, ...typeLocationFields(type), ...this.sourceFields(type) } : {}),
+      ...(type && !type.trusted ? { third_party_notice: `${restrictedTypeNotice(type)} ${PAGE_CONTENT_NOTICE}` } : {}),
       files: this.listFiles(record.root, true),
       ...(actions ? { actions } : {}),
       ...seen,
@@ -799,15 +1237,61 @@ export class Tools {
   }
 
   /**
+   * `ShowArtifact` (MCP Apps clients): what the view shows. It starts the page, so the frame opens at once, and opens
+   * nothing else: the page shows in the conversation.
+   */
+  private async show(args: ArtifactArgs): Promise<ToolCallResult> {
+    const record = this.o.store.require(args.url);
+    try {
+      await this.o.openPage(record);
+    } catch (error) {
+      // The Shell says what is wrong with the page; the view still shows it.
+      this.o.log(`ShowArtifact ${record.id}: ${(error as Error)?.message ?? error}`);
+    }
+    return {
+      url: artifactUrl(record.id),
+      title: record.title,
+      type: record.type,
+      view_url: this.o.viewUrl(record.id),
+      note: 'Always include view_url in your final reply too. ShowArtifact does not open a browser tab by itself; if your app does not render MCP Apps cards inline, call Artifact {action: "open", url}.',
+    };
+  }
+
+  /**
    * LAN sharing, as it is: the person changes it in the Shell's Share panel,
    * never the agent (`lan` and `links` are refused).
    */
   private async share(args: ArtifactArgs): Promise<ToolCallResult> {
-    const record = this.o.store.require(args.url);
+    let record = this.o.store.require(args.url);
     if (args.lan !== undefined || args.links !== undefined) {
       throw new OpenArtifactError('not_granted', "Only the person changes how an artifact is shared, in the Share panel of its page.", {
         fix: 'Artifact {action: "open", url, panel: "share"} opens the panel for them.',
       });
+    }
+    if (args.cloud !== undefined && !(record.remote && record.remote.name === args.cloud)) {
+      // A type no site runs (a custom one): say so first, rather than that only the person may publish it. A page
+      // goes to a site that runs pages; the publish asks the site.
+      const refusal = siteRefusal(this.o.types?.get(record.type, record.owner?.workspace ?? undefined));
+      if (refusal) throw new OpenArtifactError('unsupported', refusal, { fix: 'Keep it on this computer for now.' });
+      const name = String(args.cloud);
+      if (!this.o.link || !this.o.link.agentMayPublish(name)) {
+        throw new OpenArtifactError('not_granted', `Only the person publishes an artifact to the cloud${this.o.link ? ` (the remote ${name} does not let agents publish)` : ''}.`, {
+          fix: `Ask the person to publish it from the Share panel (Artifact {action: "open", url, panel: "share"}) or with \`open-artifact publish ${record.id} --remote ${name}\`.`,
+        });
+      }
+      record = await this.o.link.publish(record, name);
+      this.o.log(`audit: published ${record.id} to ${name}, asked by the agent's Artifact share (remotes.${name}.agentMayPublish is on)`);
+    }
+    if (record.remote) {
+      return {
+        url: artifactUrl(record.id),
+        view_url: record.remote.url,
+        cloud: { remote: record.remote.name, host: record.remote.host, view_url: record.remote.url, syncedAt: record.remote.syncedAt },
+        note: `Published to ${record.remote.host}: people open it at view_url, as its owner shares it there. Keep writing files in the folder: they sync to the host, and what people change there comes back. The person changes sharing in the Share panel.${(() => {
+          const offline = this.o.link?.offlineNote(record);
+          return offline ? ` ${offline}` : '';
+        })()}`,
+      };
     }
     const access = await this.o.shareOf(record);
     const view = await access.view();
@@ -833,7 +1317,26 @@ export class Tools {
     const type = this.o.types.get(record.type, record.owner?.workspace ?? undefined);
     if (!type) throw new OpenArtifactError('type_missing', `The type ${record.type} is not installed.`);
     if (!type.entry || type.entry.kind === 'static' || !type.entry.actions) throw missing ?? new OpenArtifactError('unsupported', `${type.id} has no actions.`);
-    await this.o.openPage(record);
+    // A published artifact's comments, db, Docs and Sheets live on its host: those actions run there.
+    const forward = !!this.o.link?.forwards(record, type, name);
+    // A remote type's server is another computer: a path on this one is never sent there (checked before the page
+    // opens there, so a refused call reaches it not at all).
+    const location = typeLocation(type);
+    if (location.remote && !forward) {
+      const local = localPathIn(args, 'args', record.root);
+      if (local) {
+        throw new OpenArtifactError(
+          'unsupported',
+          `${type.title || type.id} runs on another computer (${location.origin}): ${name} cannot take ${local.at}, a path on this computer (${local.path}). Paths here are not sent to other computers.`,
+          { fix: 'Pass the content itself (as data or text in the arguments) instead of a file path. To bring a file in, use a type that runs on this computer.' },
+        );
+      }
+    }
+    // A render (snapshot, Docs export) runs here on the working copy, brought up to date with the host first.
+    const fresh = !forward && this.o.link?.renders(record, type, name) ? await this.o.link.freshen(record, type) : null;
+    const behind = fresh?.note ?? null;
+    if (fresh?.reload && this.o.reopenPage) await this.o.reopenPage(record);
+    else if (!forward) await this.o.openPage(record);
     // The type's own actions are checked against its list; the reserved open-artifact.* ones are not listed.
     const own = !name.startsWith('open-artifact.');
     const actions = own ? await this.knownActions(type, true) : null;
@@ -851,15 +1354,18 @@ export class Tools {
       if (problem) throw new OpenArtifactError('invalid_argument', problem, { fix: 'Artifact {action: "read", url} lists the actions with their arguments.' });
       effect = found.effect ?? 'write';
     }
+    if (own && caller && effect === 'write') this.allow(caller, 'modify', `Artifact call ${name}, which writes`);
     // While a write action runs, page writes it causes are the agent's, not the person's.
     const acting = effect === 'write' && this.o.agentActing ? this.o.agentActing : null;
     acting?.(record.id, 'start');
     try {
-      const out = await this.o.typeAction(type, record, name, args);
+      const out = forward ? await this.o.link!.call(record, name, args, effect) : await this.o.typeAction(type, record, name, args);
       const result: ToolCallResult = out && typeof out === 'object' && !Array.isArray(out) ? (out as ToolCallResult) : { result: out };
+      if (behind) result.notes = [...(Array.isArray(result.notes) ? (result.notes as string[]) : []), behind];
       if (own && caller && typeof result.task === 'string' && result.pending === true) {
         this.o.taskStarted?.({ record, type, task: result.task, action: name, effect, caller });
       }
+      if (own && caller && effect === 'write') this.o.ownership?.wrote(record.id, caller);
       return result;
     } catch (error) {
       if ((error as OpenArtifactError)?.code === 'unknown_action') {
@@ -885,6 +1391,10 @@ export class Tools {
   private async adopt(args: ArtifactArgs, caller: SessionRef): Promise<ToolCallResult> {
     if (args.url) {
       const record = this.o.store.require(args.url);
+      // Taking over another session's artifact removes it from that session; one of nobody's (or already the caller's) is a change.
+      const owner = record.owner ? sessionKeyOf(record.owner) : null;
+      if (owner && owner !== sessionKeyOf(caller)) this.allow(caller, 'remove', "Artifact adopt of another session's artifact");
+      else this.allow(caller, 'modify', 'Artifact adopt');
       const next = this.o.store.update(record.id, { owner: caller, agentSeenAt: now() });
       // Taking over one made elsewhere (the home page, another session): the type's instructions come along.
       const type = this.o.types.get(next.type, caller.workspace ?? undefined);
@@ -895,7 +1405,7 @@ export class Tools {
         owner: sessionKeyOf(caller),
         view_url: this.o.viewUrl(next.id),
         ...(actions?.length ? { actions } : {}),
-        ...(type ? { instructions: this.instructionsFor(type, next, actions) } : {}),
+        ...(type ? { instructions: this.instructionsFor(type, next, actions), ...this.noticeFields(type) } : {}),
       };
     }
     if (!args.folder) throw new OpenArtifactError('invalid_argument', 'adopt takes url (an artifact) or folder (one to add).');
@@ -903,6 +1413,7 @@ export class Tools {
     if (!existsSync(root)) throw new OpenArtifactError('not_found', `No folder ${root}.`);
     const known = this.o.store.byRoot(root);
     if (known) return this.adopt({ url: artifactUrl(known.id) }, caller);
+    this.allow(caller, 'create', 'Artifact adopt of a folder');
     let typeId = typeIdOf(args.type_url);
     if (!typeId) {
       try {
@@ -914,14 +1425,33 @@ export class Tools {
     }
     if (!typeId) throw new OpenArtifactError('invalid_argument', `Which type is ${root}? Give type_url.`);
     const type = this.o.types.get(typeId, caller.workspace);
-    const record = this.o.store.create({ root, type: typeId, typeSource: type?.scope ?? null, typeRelease: type?.version ?? null, owner: caller, title: args.title || basename(root) });
+    // The title its content declares (the type's `titleFrom`, e.g. a doc's name), else the folder's name.
+    const title = args.title || contentTitle(root, type?.titleFrom ?? null) || basename(root);
+    // A page folder keeps the capabilities its marker declares (the record is new, the declaration is the folder's).
+    const capabilities = isPageType(type) ? markerCapabilities(root) : undefined;
+    // The uid the folder's marker recorded is kept as it is (none recorded: none is added); the type here is checked
+    // against it when the artifact is opened or written.
+    const marked = markerTypeUid(root);
+    const record = this.o.store.create({
+      root,
+      type: typeId,
+      typeSource: type?.scope ?? null,
+      typeRelease: type?.version ?? null,
+      typeUid: marked.typeUid,
+      typeFrom: marked.typeSource,
+      owner: caller,
+      title,
+      capabilities,
+    });
+    const auto = this.o.link?.created?.(record) === true;
     const actions = type ? await this.knownActions(type, false) : null;
     return {
       url: artifactUrl(record.id),
       root,
       view_url: this.o.viewUrl(record.id),
       ...(actions?.length ? { actions } : {}),
-      ...(type ? { instructions: this.instructionsFor(type, record, actions) } : {}),
+      ...(type ? { instructions: this.instructionsFor(type, record, actions), ...this.noticeFields(type) } : {}),
+      ...(auto ? { notes: [autoNote(this.o.link?.autoTarget?.() ?? null)] } : {}),
     };
   }
 
@@ -929,6 +1459,7 @@ export class Tools {
 
   private async data(args: ArtifactDataArgs, caller: SessionRef): Promise<ToolCallResult> {
     const record = this.o.store.require(args.url);
+    if (actionKindOf('ArtifactData', typeof args.action === 'string' ? args.action : undefined) !== 'read') this.allow(caller, 'modify', `ArtifactData ${String(args.action)}`);
     const noStore = new OpenArtifactError('unsupported', `${record.type} keeps no document store: write its files with Artifact publish.`);
     const db = (name: ReservedAction, a: Record<string, unknown>): Promise<ToolCallResult> => this.action(record, name, a, noStore);
     const docPath = args.path ?? (args.collection && args.doc_id ? `${args.collection}/${args.doc_id}` : args.collection);
@@ -966,7 +1497,7 @@ export class Tools {
         const docs = Array.isArray(out.docs) ? (out.docs as Record<string, unknown>[]) : null;
         if (args.action === 'query' && docs && out.query !== true) notes.push(DATA_QUERY_IGNORED_NOTE);
         if ((docs && docs.some((d) => typeof d.sha256 !== 'string')) || (out.exists === true && typeof out.sha256 !== 'string')) notes.push(DATA_NO_SHA_NOTE);
-        const result: ToolCallResult = { url: artifactUrl(record.id), ...out, ...(notes.length ? { notes } : {}) };
+        const result: ToolCallResult = { url: artifactUrl(record.id), ...out, ...(notes.length ? { notes } : {}), ...this.pageContentFields(record) };
         return args.out_file ? this.dataToFile(record, result, args.out_file, base) : result;
       }
       case 'set':
@@ -990,7 +1521,7 @@ export class Tools {
     const file = resolve(base, outFile);
     if (file === record.root || file.startsWith(record.root + sep)) throw new OpenArtifactError('bad_path', 'out_file goes outside the artifact folder: a file there would become part of the artifact.');
     mkdirSync(dirname(file), { recursive: true });
-    const { notes, url: _url, ...data } = result;
+    const { notes, url: _url, third_party_notice: notice, ...data } = result;
     const text = `${JSON.stringify(data, null, 2)}\n`;
     writeFileSync(file, text);
     const count = Array.isArray(data.docs) ? data.docs.length : Array.isArray(data.documents) ? data.documents.length : data.exists === true ? 1 : 0;
@@ -1002,6 +1533,7 @@ export class Tools {
       ...(typeof data.total === 'number' ? { total: data.total } : {}),
       ...(typeof data.next_cursor === 'string' ? { next_cursor: data.next_cursor } : {}),
       ...(notes ? { notes } : {}),
+      ...(notice ? { third_party_notice: notice } : {}),
     };
   }
 
@@ -1015,6 +1547,7 @@ export class Tools {
       return messages.length ? { messages: messages.map((m) => m.text) } : { messages: [], timedOut: true };
     }
     const record = this.o.store.require(args.url);
+    if (args.action === 'reply' || args.action === 'resolve' || args.action === 'reopen') this.allow(caller, 'reply', `ArtifactComments ${args.action}`);
     const none = new OpenArtifactError('unsupported', `${record.type} has no comments.`);
     const comments = (name: ReservedAction, a: Record<string, unknown>): Promise<ToolCallResult> => this.action(record, name, a, none);
     const url = artifactUrl(record.id);
@@ -1031,10 +1564,12 @@ export class Tools {
     const notSent = (thread: AgentThread | null): boolean => !!thread && tracked && !thread.agent;
     switch (args.action) {
       case 'read': {
+        // A restricted type's page may have written the threads (its publisher's code): the notice says so.
+        const labelled = async (p: Promise<ToolCallResult>): Promise<ToolCallResult> => ({ ...(await p), ...this.pageContentFields(record) });
         const since = args.since !== undefined && args.since !== '' ? sinceOf(args.since) : null;
-        if (!args.thread_id && since === null) return comments('open-artifact.comments.read', { all: !!args.all });
+        if (!args.thread_id && since === null) return labelled(comments('open-artifact.comments.read', { all: !!args.all }));
         const all = await allThreads();
-        if (!all) return comments('open-artifact.comments.read', { all: !!args.all });
+        if (!all) return labelled(comments('open-artifact.comments.read', { all: !!args.all }));
         let threads = all;
         if (args.thread_id) {
           threads = threads.filter((t) => t.id === args.thread_id);
@@ -1043,7 +1578,7 @@ export class Tools {
           threads = threads.filter((t) => (t as { status?: unknown }).status !== 'resolved');
         }
         if (since !== null) threads = threads.filter((t) => lastActivity(t) >= since);
-        return { url, threads };
+        return { url, threads, ...this.pageContentFields(record) };
       }
       case 'reply': {
         if (!args.thread_id || !args.text) throw new OpenArtifactError('invalid_argument', 'reply needs thread_id and text.');
@@ -1084,6 +1619,8 @@ export class Tools {
       if (record && !touched.has(record.id)) {
         touched.add(record.id);
         this.o.store.update(record.id, { agentSeenAt: now() });
+        if (record.remote || record.autoPublish === 'pending') this.o.link?.wrote(record);
+        this.o.ownership?.wrote(record.id, caller);
       }
     }
     return { artifacts: [...touched].map(artifactUrl) };

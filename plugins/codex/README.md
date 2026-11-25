@@ -1,7 +1,7 @@
 # Open Artifact for Codex and ChatGPT desktop
 
-Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs and design systems as folders of files that open in one local page where you view, edit
-and comment. Ask for `/open-artifact slides …`, `design …`, `whiteboard …`, `sheets …`, `data …` or `docs …` (the skill is `open-artifact:open-artifact`).
+Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs, animated films and design systems as folders of files that open in one local page where you view, edit
+and comment. Ask for `/open-artifact slides …`, `design …`, `whiteboard …`, `sheets …`, `data …`, `docs …`, `motion …` or `page …` (the skill is `open-artifact:open-artifact`).
 
 ## Install
 
@@ -37,6 +37,13 @@ folder, so the daemon looks the thread's folder up: from its hook, or from the t
 - `skills/open-artifact/`: the skill, carrying the daemon;
 - `hooks/hooks.json`: SessionStart, UserPromptSubmit and Stop.
 
+## Publish to a server
+
+Codex gives a plugin's MCP server only a few variables of its own (`HOME`, `PATH`, `USER`, …), so `OPEN_ARTIFACT_*`
+variables in your shell do not reach Open Artifact. Put them in `~/.agents/open-artifact/preset.json` instead
+(`{ "OPEN_ARTIFACT_REMOTE": "https://artifacts.example.com" }`), or link a site yourself with
+`open-artifact remote add <name> <https://host>`. See [the plugins README](../README.md#use-a-server-instead-of-this-computer).
+
 ## Send to agent
 
 Comments sent from the page reach the thread that made the artifact at session start, with your next message, or,
@@ -49,3 +56,10 @@ command line (`codex exec`) gets it the next time it is resumed.
 
 The page opens in the app's built-in browser, which the agent opens with the page's `view_url`, not in the
 computer's browser.
+
+## The card in the conversation
+
+Codex shows MCP Apps, so the agent also gets `ShowArtifact`. Codex frames only https pages inside these cards, and the
+daemon serves the page over http on this computer, so the card cannot show the page itself: it says so at once and
+offers Open in browser (Codex opens the address where its *Local URL open destination* setting says) and the page's
+address to copy. The agent's reply still carries `view_url`.

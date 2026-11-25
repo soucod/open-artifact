@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { scrollToShowSelection } from '../selection/model.ts';
 import { cellEndCornerOnScreen, hitTestGrid } from '../grid/geometry.ts';
 import { layoutOfView } from '../grid/layout.ts';
@@ -8,9 +7,19 @@ import { selectionAtPointer, pressOnGrid } from '../selection/pointer.ts';
 import { isPointerTargetSelected, withoutOtherRanges } from '../selection/several-ranges.ts';
 import { sortColumnsPointedAtOf } from './sort-menu.ts';
 import { dropdownSelectionSummary } from '../chips/dropdown-editor.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { Menu, PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function openContextBarMenu(state: PageState, workbook: ReadsWithTextMeasurer, point: Dynamic, { height: height, isByKey: isByKey }: Dynamic) {
+import type { PageTransition } from '../state/transitions.ts';
+import type { PagePoint } from '../comments/page-comments.ts';
+import type { GridHit } from '../grid/geometry.ts';
+/** How the context bar asks for its menu: the bar's height, and whether a key asked. */
+export interface ContextBarMenuAsk {
+  height: number;
+  isByKey: boolean;
+}
+/** A menu to open: what it holds, and any other parts to set on it. */
+export type MenuToOpen = Pick<Menu, 'holds'> & Partial<Menu>;
+export function openContextBarMenu(state: PageState, workbook: ReadsWithTextMeasurer, point: PagePoint, { height, isByKey }: ContextBarMenuAsk): PageState {
   if (state.mode.kind === 'editing') return state;
   let activeCellPosition = workbook.positionOfCell(state.activeCell);
   let shownState = activeCellPosition === null ? state : scrollToShowSelection(state, workbook);
@@ -36,7 +45,7 @@ export function openContextBarMenu(state: PageState, workbook: ReadsWithTextMeas
     },
   };
 }
-export function openMenuAtActiveCell(state: PageState, workbook: ReadsWithTextMeasurer, menu?: Dynamic) {
+export function openMenuAtActiveCell(state: PageState, workbook: ReadsWithTextMeasurer, menu: MenuToOpen): PageState {
   let activeCellPosition = workbook.positionOfCell(state.activeCell);
   if (activeCellPosition === null) return state;
   let shownState = scrollToShowSelection(state, workbook);
@@ -53,25 +62,25 @@ export function openMenuAtActiveCell(state: PageState, workbook: ReadsWithTextMe
     },
   };
 }
-export function openContextMenu(state: PageState, point: Dynamic, workbook: ReadsWithTextMeasurer, isToSearch: Dynamic = false) {
+export function openContextMenu(state: PageState, point: PagePoint | null, workbook: ReadsWithTextMeasurer, isToSearch: boolean = false): PageTransition {
   let isEditing = state.mode.kind === 'editing';
   let stateWithoutDragging = {
     ...state,
     dragging: null,
   };
   if (point === null) {
-    let value = workbook.positionOfCell(state.activeCell);
-    if (value === null || isEditing) return withNoEffects(state);
+    let activeCellPosition = workbook.positionOfCell(state.activeCell);
+    if (activeCellPosition === null || isEditing) return withNoEffects(state);
     let shownState = scrollToShowSelection(stateWithoutDragging, workbook);
     return withNoEffects({
       ...shownState,
       menu: {
-        at: cellEndCornerOnScreen(value, shownState, layoutOfView(shownState, workbook), shownState),
+        at: cellEndCornerOnScreen(activeCellPosition, shownState, layoutOfView(shownState, workbook), shownState),
         side: null,
         isAskedByKey: !isToSearch,
         holds: 'all',
         ...(isToSearch && {
-          isToSearch: isToSearch,
+          isToSearch,
         }),
       },
     });
@@ -79,23 +88,23 @@ export function openContextMenu(state: PageState, point: Dynamic, workbook: Read
   let pointedAt = hitTestGrid(point, state, layoutOfView(state, workbook));
   if (pointedAt === null) return withNoEffects(state);
   if (isEditing) return endEntryOnPointerPress(state, workbook, selectionAtPointer(state, workbook, point));
-  let menu = {
+  let menu: Menu = {
     at: point,
     side: null,
     isAskedByKey: false,
     holds: 'all',
   };
   if (isPointerTargetSelected(state, pointedAt, workbook)) {
-    let value = sortColumnsPointedAtOf(state, workbook, pointedAt);
+    let sortColumnsPointedAt = sortColumnsPointedAtOf(state, workbook, pointedAt);
     return withNoEffects({
       ...stateWithoutDragging,
       menu: {
         ...menu,
-        sortColumnsPointedAt: value,
+        sortColumnsPointedAt,
       },
     });
   }
-  let { state: pressedState, effects: effects } = pressOnGrid(
+  let { state: pressedState, effects } = pressOnGrid(
     withoutOtherRanges(state),
     {
       ...point,
@@ -107,12 +116,12 @@ export function openContextMenu(state: PageState, point: Dynamic, workbook: Read
     state: {
       ...pressedState,
       dragging: null,
-      menu: menu,
+      menu,
     },
-    effects: effects,
+    effects,
   };
 }
-export const menuPlaceNear = ({ gridHeight: gridHeight }: Dynamic, point?: Dynamic, height?: Dynamic) =>
+export const menuPlaceNear = ({ gridHeight }: Pick<PageState, 'gridHeight'>, point: PagePoint, height: number): Pick<Menu, 'at' | 'side'> =>
   point.y > gridHeight / 2
     ? {
         at: point,
@@ -125,7 +134,7 @@ export const menuPlaceNear = ({ gridHeight: gridHeight }: Dynamic, point?: Dynam
         },
         side: 'bottom',
       };
-export const withSetMeetsInMenu = (state: PageState, workbook: ReadsWithTextMeasurer) =>
+export const withSetMeetsInMenu = (state: PageState, workbook: ReadsWithTextMeasurer): PageState =>
   state.menu?.holds !== 'all' || state.menu.setMeets !== undefined
     ? state
     : {
@@ -136,7 +145,7 @@ export const withSetMeetsInMenu = (state: PageState, workbook: ReadsWithTextMeas
         },
       };
 export const MENU_POINTER_GAP = 6;
-export const openMenuWith = (state: PageState, workbook: ReadsWithTextMeasurer, menu?: Dynamic, menuChange?: Dynamic) =>
+export const openMenuWith = (state: PageState, workbook: ReadsWithTextMeasurer, menu: Menu | null, menuChange: MenuToOpen): PageState =>
   menu === null
     ? openMenuAtActiveCell(state, workbook, menuChange)
     : {

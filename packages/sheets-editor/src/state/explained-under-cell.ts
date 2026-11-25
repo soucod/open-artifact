@@ -23,24 +23,24 @@ import { errorCodeOfCell } from '../formulas/error-tells.ts';
 import { isModalOpen } from '../ui/find.ts';
 import { cardBeingShown } from './list-cards.ts';
 import type { ReadsWithTextMeasurer } from './controller.ts';
-export function cellLinkShown({ areFormulasShown: areFormulasShown }: Pick<PageState, 'areFormulasShown'>, reads: WorkbookReads, cellId: CellId) {
+export function cellLinkShown({ areFormulasShown }: Pick<PageState, 'areFormulasShown'>, reads: WorkbookReads, cellId: CellId) {
   let [cell, format] = [reads.cellOf(cellId), reads.formatOf(cellId)];
   return readCellLink(areFormulasShown ? cellWithFormulaShown(cell, format) : cell, format);
 }
 export function linkPlacementKey(state: PageState, reads: ReadsWithTextMeasurer, cellId: CellId): string {
   let area = mergedAreaOrCellOf(reads, cellId);
   if (area === null) return '';
-  let { across: across, down: down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
-  let { text: text } = shownCellText(reads.cellOf(cellId), 1 / 0, reads.decimalSign);
+  let { across, down } = rangeSpansOnScreen(area, state, layoutOfView(state, reads), state);
+  let { text } = shownCellText(reads.cellOf(cellId), 1 / 0, reads.decimalSign);
   return JSON.stringify([across, down, text, reads.formatOf(cellId)]);
 }
 export function cellExplained(state: PageState, reads: WorkbookReads): CellExplained | null {
   if (isExplainingBlocked(state)) return null;
   let {
-    pointedAt: pointedAt,
-    isHiddenForSelection: isHiddenForSelection,
-    isSelectionByMouse: isSelectionByMouse,
-    markedLink: markedLink,
+    pointedAt,
+    isHiddenForSelection,
+    isSelectionByMouse,
+    markedLink,
   } = state.explainedUnderCell;
   if (pointedAt !== null && hasCellSomethingToExplain(state, reads, pointedAt.cellId))
     return {
@@ -79,7 +79,7 @@ export function explainCellUnderPointer(
 ): PageState {
   let cellUnderPointer = point === null ? null : cellUnderPoint(state, reads, point);
   let cellId = hit === null ? cellUnderPointer : reads.cellIdAt(state.sheetId, hit.inCell.rowIndex, hit.inCell.columnIndex);
-  let { hiddenUnderPointer: hiddenUnderPointer } = state.explainedUnderCell;
+  let { hiddenUnderPointer } = state.explainedUnderCell;
   let isHiddenUnderPointer = cellId !== null && hiddenUnderPointer !== null && isSameCell(hiddenUnderPointer, cellId);
   let link =
     cellId !== null &&
@@ -105,10 +105,10 @@ export function explainCellUnderPointer(
         point !== null && isExplained
           ? {
               cellId: cellId!,
-              point: point,
-              link: link,
+              point,
+              link,
               wordsPlacedBy: link === null ? '' : linkPlacementKey(state, reads, cellId!),
-              isByPress: isByPress,
+              isByPress,
             }
           : null,
       hiddenUnderPointer: isHiddenUnderPointer ? hiddenUnderPointer : null,
@@ -123,9 +123,9 @@ export function isCellInSight(state: PageState, reads: ReadsWithTextMeasurer, ce
 }
 export function putAwayErrorCard(state: PageState, reads: WorkbookReads, key: string): PageState {
   let {
-    pointedAt: pointedAt,
-    isHiddenForSelection: isHiddenForSelection,
-    hiddenUnderPointer: hiddenUnderPointer,
+    pointedAt,
+    isHiddenForSelection,
+    hiddenUnderPointer,
   } = state.explainedUnderCell;
   let isSameKey = (cellId: CellId | null) => cellId !== null && cellKeyText(cellId) === key;
   return {
@@ -140,10 +140,10 @@ export function putAwayErrorCard(state: PageState, reads: WorkbookReads, key: st
 }
 export function leaveLinkCard(state: PageState, reads: WorkbookReads, key: string | null, isLeaving: boolean): PageState {
   let {
-    pointedAt: pointedAt,
-    isHiddenForSelection: isHiddenForSelection,
-    hiddenUnderPointer: hiddenUnderPointer,
-    markedLink: markedLink,
+    pointedAt,
+    isHiddenForSelection,
+    hiddenUnderPointer,
+    markedLink,
   } = state.explainedUnderCell;
   let hasLinks = (cellId: CellId | null) => cellId !== null && linkAddressesAt(state, reads, cellId).length > 0;
   let isCardLeft = (markedLink === null || isLeaving) && cellKeyText(activeAnchorCell(state, reads)) === key;
@@ -168,7 +168,7 @@ export function askLinkCard(state: PageState, reads: ReadsWithTextMeasurer, poin
           dragging: null,
         };
   if (!canExplainUnderCell(stateAsked)) return state;
-  let { explainedUnderCell: explainedUnderCell } = state;
+  let { explainedUnderCell } = state;
   if (point !== null)
     return explainCellUnderPointer(
       {
@@ -183,7 +183,7 @@ export function askLinkCard(state: PageState, reads: ReadsWithTextMeasurer, poin
       link,
       link !== null,
     );
-  let { pointedAt: pointedAt, hiddenUnderPointer: hiddenUnderPointer } = explainedUnderCell;
+  let { pointedAt, hiddenUnderPointer } = explainedUnderCell;
   let anchorCell: CellId = activeAnchorCell(state, reads);
   let url = cellLinkShown(state, reads, anchorCell)?.url;
   let hasLinksInText = hasLinksInTextOnly(state, reads, anchorCell);
@@ -194,7 +194,7 @@ export function askLinkCard(state: PageState, reads: ReadsWithTextMeasurer, poin
       ...(url !== undefined && {
         lastDone: {
           what: 'linkAddressShown',
-          url: url,
+          url,
         },
       }),
       explainedUnderCell: {
@@ -211,9 +211,9 @@ export function askLinkCard(state: PageState, reads: ReadsWithTextMeasurer, poin
 }
 export function hideExplainedCard(state: PageState, reads: WorkbookReads): PageState {
   let {
-    pointedAt: pointedAt,
-    isHiddenForSelection: isHiddenForSelection,
-    hiddenUnderPointer: hiddenUnderPointer,
+    pointedAt,
+    isHiddenForSelection,
+    hiddenUnderPointer,
   } = state.explainedUnderCell;
   return {
     ...state,
@@ -228,7 +228,7 @@ export function hideExplainedCard(state: PageState, reads: WorkbookReads): PageS
   };
 }
 export function moveMarkedLink(state: PageState, reads: WorkbookReads, key: string, isComposing: boolean): PageState | null {
-  let { markedLink: markedLink } = state.explainedUnderCell;
+  let { markedLink } = state.explainedUnderCell;
   if (markedLink === null) return null;
   if (LINK_KEEPING_MODIFIER_KEYS.has(key)) return state;
   if (isComposing) return null;
@@ -253,10 +253,10 @@ export function updateExplainedUnderCell(
   pointerKind: 'mouse' | 'fingerOrPen' | null,
 ): PageState {
   let {
-    pointedAt: pointedAt,
-    isHiddenForSelection: isHiddenForSelection,
-    hiddenUnderPointer: hiddenUnderPointer,
-    markedLink: markedLink,
+    pointedAt,
+    isHiddenForSelection,
+    hiddenUnderPointer,
+    markedLink,
   } = state.explainedUnderCell;
   let cellPointedAt = pointedAt === null ? null : pointedAt.link === null ? cellUnderPoint(state, reads, pointedAt.point) : pointedAt.cellId;
   let isSelectionMoved =
@@ -299,7 +299,7 @@ export function updateExplainedUnderCell(
     explainedUnderCell: {
       pointedAt: isPointedAtGone ? null : pointedAt,
       isHiddenForSelection: isHiddenForSelection && !isHidingOver,
-      isSelectionByMouse: isSelectionByMouse,
+      isSelectionByMouse,
       hiddenUnderPointer:
         pointerKind === 'mouse' ? null : pointedAt !== null && isStillPointedAt && isSelectionMoved ? pointedAt.cellId : hiddenUnderPointer,
       markedLink: isMarkedLinkGone ? null : markedLink,
@@ -350,7 +350,7 @@ export const withoutLinkPointedAt = (state: PageState): PageState =>
           pointedAt: null,
         },
       };
-export const cellKeyText = ({ rowId: rowId, columnId: columnId }: Pick<CellId, 'rowId' | 'columnId'>): string => `${rowId}/${columnId}`;
+export const cellKeyText = ({ rowId, columnId }: Pick<CellId, 'rowId' | 'columnId'>): string => `${rowId}/${columnId}`;
 export const LINK_KEEPING_MODIFIER_KEYS = new Set<string>(['Alt', 'Control', 'Meta', 'Shift']);
 export const withoutMarkedLink = (state: PageState): PageState =>
   state.explainedUnderCell.markedLink === null

@@ -1,12 +1,27 @@
-import type { Dynamic } from '../dynamic.ts';
+import type * as React from 'react';
+import type { CellAt } from '@open-artifact/sheets-core';
+import type { SheetController } from '../state/controller.ts';
 import { isPaneMenuOfContextBar } from '../state/context-bar.ts';
+export interface ContextBarMenuNoting {
+  store: SheetController;
+  /** The context bar menu last seen open, or null. */
+  noted: React.RefObject<string | null>;
+  /** Says whether a context bar menu is still noted open, and the event that closed one, if any. */
+  note: (isMenuNoted: boolean, closedBy: Event | null) => void;
+  onCardAsked: () => void;
+}
+export interface ContextBarMenuHandlers {
+  onOpenChange(menu: string, isOpen: boolean, event: Event | null, filterBarOf?: string | CellAt): void;
+  onRulesAskedByRow(rowKind: 'cells' | 'toolbar', isFromPane: boolean): void;
+  onNoMenuInState: () => void;
+}
 export function contextBarMenuHandlers({
-  store: store,
-  noted: noted,
-  note: note,
-  onCardAsked: onCardAsked,
-}: Dynamic) {
-  let afterEventsSettle = (then?: Dynamic) => {
+  store,
+  noted,
+  note,
+  onCardAsked,
+}: ContextBarMenuNoting): ContextBarMenuHandlers {
+  let afterEventsSettle = (then: () => void) => {
     let notedMenu = noted.current;
     if (notedMenu === null) return;
     store.lookOnceEventsAreFinished(() => {
@@ -17,24 +32,24 @@ export function contextBarMenuHandlers({
       then();
     });
   };
-  let handlers = {
-    onOpenChange(menu?: Dynamic, isOpen?: Dynamic, finalFocus?: Dynamic, filterBarOf?: Dynamic) {
+  let handlers: ContextBarMenuHandlers = {
+    onOpenChange(menu, isOpen, event, filterBarOf) {
       if (isOpen) noted.current = menu;
       else if (noted.current === menu) noted.current = null;
       store.dispatch({
         kind: 'contextBarMenuChanged',
-        menu: menu,
-        isOpen: isOpen,
+        menu,
+        isOpen,
         ...(filterBarOf !== undefined && {
           ofFilterBarFor: filterBarOf,
         }),
       });
-      note(noted.current !== null, isOpen ? null : finalFocus);
+      note(noted.current !== null, isOpen ? null : event);
       if (!isOpen) return;
       let opensInPane = menu === 'conditionalFormatting' && !store.getView().doRulesOpenInCard;
       if (isPaneMenuOfContextBar(menu) && !opensInPane) onCardAsked();
     },
-    onRulesAskedByRow(_rowKind?: Dynamic, isFromPane?: Dynamic) {
+    onRulesAskedByRow(_rowKind, isFromPane) {
       if (!isFromPane && store.getView().conditionalFormats?.drawnAs !== 'pane') return handlers.onOpenChange('conditionalFormatting', true, null);
       store.dispatch({
         kind: 'conditionalFormatsAsked',

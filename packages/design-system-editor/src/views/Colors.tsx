@@ -35,6 +35,7 @@ import { CommentBadge } from '../components/Comments.tsx';
 import { askToFixContrast, type ContrastIssue } from '../services/agent.ts';
 import { editTokens } from '../services/edit.ts';
 import { AddTokenButton, InlineText, PageHeader, TokenMenu, TokenNotes, useEditable, useFocusProps } from './common.tsx';
+import { titleWhenCut } from '../lib/cut-title.ts';
 
 /** A checkerboard behind swatches, so translucent colors read as such. */
 const CHECKER = 'repeating-conic-gradient(#d9d9d9 0% 25%, #ffffff 0% 50%) 50% / 10px 10px';
@@ -153,7 +154,7 @@ function ColorRow({ token, themes, editable }: { token: ThemedToken; themes: { i
     >
       <div className="min-w-0 pt-0.5">
         <div className="flex items-center gap-1">
-          <span className="truncate font-mono text-[13px] text-fg">--{token.name}</span>
+          <span onPointerEnter={(event) => titleWhenCut(event.currentTarget)} className="truncate font-mono text-[13px] text-fg">--{token.name}</span>
           <CommentBadge focus={{ kind: 'token', family: 'color', name: token.name }} />
         </div>
         <InlineText

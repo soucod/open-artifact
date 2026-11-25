@@ -71,7 +71,7 @@ export function nearestArea(target: CellArea, areas: readonly CellArea[]): CellA
 export function boundsOfTableToSort(
   reads: WorkbookReads,
   sheetId: SheetId,
-  { firstRowOfHeader: firstRowOfHeader, firstRecord: firstRecord, lastRecord: lastRecord, firstColumn: firstColumn, lastColumn: lastColumn }: RowsAndColumnsOfTableToSort,
+  { firstRowOfHeader, firstRecord, lastRecord, firstColumn, lastColumn }: RowsAndColumnsOfTableToSort,
 ): BoundsOfTableToSort | null {
   let topRowIndex = reads.rowIndexOf(sheetId, firstRowOfHeader);
   let firstRecordIndex = reads.rowIndexOf(sheetId, firstRecord);
@@ -82,12 +82,12 @@ export function boundsOfTableToSort(
     return null;
   if (topRowIndex >= firstRecordIndex || firstRecordIndex > lastRecordIndex || leftColumnIndex > rightColumnIndex) return null;
   let columnSpan = {
-    leftColumnIndex: leftColumnIndex,
+    leftColumnIndex,
     columnCount: rightColumnIndex - leftColumnIndex + 1,
   };
   return {
     table: {
-      topRowIndex: topRowIndex,
+      topRowIndex,
       rowCount: lastRecordIndex - topRowIndex + 1,
       ...columnSpan,
     },
@@ -103,7 +103,7 @@ export function selectableTablesInSight(state: PageState, reads: ReadsWithTextMe
   if (tablesReadState(state, state.sheetId) !== 'behind') return tables;
   let hasCellsOnShowInRow = (rowIndex: number, first: number, last: number = first): boolean =>
     reads.columnIndexesOnShowIn(state.sheetId, rowIndex).some((columnIndex) => columnIndex >= first && columnIndex <= last);
-  return tables.filter(({ header: header, columns: { first: first, last: last }, area: area }: PartsOfPlacedTable) => {
+  return tables.filter(({ header, columns: { first, last }, area }: PartsOfPlacedTable) => {
     let rowAfter = area.topRowIndex + area.rowCount;
     return (
       hasCellsOnShowInRow(header.first, first, last) &&
@@ -119,7 +119,7 @@ export function tableHoldingSelection(state: PageState, reads: ReadsWithTextMeas
   if (rangeAreas.length === 0 || selectedLines(state, reads) !== null) return null;
   return (
     selectableTablesInSight(state, reads).find(
-      ({ area: area }) => rangeAreas.every((rangeArea) => isAreaWithin(rangeArea, area)),
+      ({ area }) => rangeAreas.every((rangeArea) => isAreaWithin(rangeArea, area)),
     ) ?? null
   );
 }
@@ -240,15 +240,15 @@ export function selectAreaFromSeenCorner(state: PageState, reads: ReadsWithTextM
         }),
       ),
   );
-  let isCornerSeen = ({ active: active }: CornersOfArea): boolean => {
-    let { rowIndex: rowIndex, columnIndex: columnIndex } = active;
+  let isCornerSeen = ({ active }: CornersOfArea): boolean => {
+    let { rowIndex, columnIndex } = active;
     let cellArea = {
       topRowIndex: rowIndex,
       leftColumnIndex: columnIndex,
       rowCount: 1,
       columnCount: 1,
     };
-    let { left: left, top: top, right: right, bottom: bottom } = boxOfCellRange(cellArea, layout);
+    let { left, top, right, bottom } = boxOfCellRange(cellArea, layout);
     return right > left && bottom > top;
   };
   let corner = corners.find(isCornerSeen) ?? corners[0];
@@ -271,7 +271,7 @@ export function selectTableOrAll(state: PageState, reads: ReadsWithTextMeasurer)
 }
 export const distanceOutsideIndexRun = (index: number, start: number, count: number): number =>
   index < start ? start - index : Math.max(0, index - (start + count - 1));
-export const fullAreaOfTable = ({ header: header, body: body, columns: columns }: Pick<PartsOfPlacedTable, 'header' | 'body' | 'columns'>): CellArea =>
+export const fullAreaOfTable = ({ header, body, columns }: Pick<PartsOfPlacedTable, 'header' | 'body' | 'columns'>): CellArea =>
   areaOfRowsAndColumns(
     {
       first: header.first,
@@ -279,4 +279,4 @@ export const fullAreaOfTable = ({ header: header, body: body, columns: columns }
     },
     columns,
   );
-export const isTinyArea = ({ rowCount: rowCount, columnCount: columnCount }: Pick<CellArea, 'rowCount' | 'columnCount'>): boolean => rowCount * columnCount < 3;
+export const isTinyArea = ({ rowCount, columnCount }: Pick<CellArea, 'rowCount' | 'columnCount'>): boolean => rowCount * columnCount < 3;

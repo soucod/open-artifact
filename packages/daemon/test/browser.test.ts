@@ -56,3 +56,15 @@ test('browser: a page never opens in the computer\'s browser by itself; the agen
   assert.equal(browsed.length, count);
   assert.equal(browsed.filter((u) => u.startsWith(boardView)).length, 1);
 });
+
+test('browser: an openEarly type (motion) tells the agent to show the page right after the first playable batch', async () => {
+  const made = (await daemon.tools.call(
+    'Artifact',
+    { action: 'publish', type_url: 'open-artifact://type/motion', title: 'Early preview', open: 'after_first_write' },
+    plugin,
+  )) as Record<string, any>;
+  assert.equal(made.open, undefined);
+  assert.match(String(made.note), /right after the first playable batch.*built-in browser/);
+  assert.match(String(made.instructions), /Show the page right after your first playable batch.*built-in browser/);
+  assert.match(String(made.next), /write the first playable batch into root, then show it right away.*built-in browser/);
+});

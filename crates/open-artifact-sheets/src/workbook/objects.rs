@@ -5,12 +5,15 @@
 use hashbrown::HashSet;
 
 use serde::{Deserialize, Serialize};
+mod named_views;
+pub use named_views::{NamedView, NamedViewToSet};
+pub(crate) use named_views::MOST_VIEWS as MOST_NAMED_VIEWS;
 use serde_json::{json, Value};
 
 use super::formats::read_color;
 use super::layout::{id_key, live_ends, written, CellIds, RangeIds};
 use super::load::{Lines, Op, Refusal};
-use super::{Sheet, Workbook};
+use super::{Input, Sheet, Workbook};
 use crate::ids::{Axis, Bases, LineId};
 
 /// An option of a dropdown.
@@ -347,6 +350,72 @@ pub struct View {
 pub enum ViewElement {
     #[serde(rename_all = "camelCase")]
     Widget { element_id: String, embed: Embed, inputs: Vec<InputOfAWidget> },
+    #[serde(rename_all = "camelCase")]
+    Interactive { element_id: String, embed: Embed, inputs: Vec<InputOfAWidget>, writes: Vec<InteractiveWrite> },
+}
+
+impl ViewElement {
+    pub fn parts(&self) -> (&str, &Embed, &[InputOfAWidget]) {
+        match self {
+            Self::Widget { element_id, embed, inputs } | Self::Interactive { element_id, embed, inputs, .. } => {
+                (element_id, embed, inputs)
+            }
+        }
+    }
+
+    pub fn parts_mut(&mut self) -> (&mut String, &mut Embed, &mut Vec<InputOfAWidget>) {
+        match self {
+            Self::Widget { element_id, embed, inputs } | Self::Interactive { element_id, embed, inputs, .. } => {
+                (element_id, embed, inputs)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveWrite {
+    pub input: String,
+    pub saved: Vec<InteractiveCell>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveCell {
+    pub r: String,
+    pub c: String,
+    #[serde(deserialize_with = "written::maybe_null")]
+    pub value: Option<InteractiveValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum InteractiveValue {
+    Number { value: f64 },
+    Text { value: String },
+    Boolean { value: bool },
+}
+
+impl InteractiveValue {
+    pub fn from_input(input: Option<&Input>) -> Result<Option<Self>, ()> {
+        Ok(match input {
+            None => None,
+            Some(Input::Text { value }) if value.is_empty() => None,
+            Some(Input::Number { value }) => Some(Self::Number { value: *value }),
+            Some(Input::Text { value }) => Some(Self::Text { value: value.clone() }),
+            Some(Input::Boolean { value }) => Some(Self::Boolean { value: *value }),
+            Some(_) => return Err(()),
+        })
+    }
+
+    pub fn into_input(self) -> Option<Input> {
+        match self {
+            Self::Number { value } => Some(Input::Number { value }),
+            Self::Text { value } if value.is_empty() => None,
+            Self::Text { value } => Some(Input::Text { value }),
+            Self::Boolean { value } => Some(Input::Boolean { value }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -373,6 +442,10 @@ pub struct RangeOnASheet {
 }
 
 impl View {
+    pub fn is_interactive(&self) -> bool {
+        self.elements.iter().any(|element| matches!(element, ViewElement::Interactive { .. }))
+    }
+
     /// Whether the view reads: refs `node/` and 1 to 128 of `A-Z a-z 0-9 _ -`; input names a letter or `_`
     /// and then letters, digits and `_`, 128 at most, none twice in a widget; no element id twice in the view.
     fn is_readable(&self) -> bool {
@@ -382,11 +455,17 @@ impl View {
                 && s.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || (i > 0 && b.is_ascii_digit()))
         };
         let mut element_ids = HashSet::new();
-        self.elements.iter().all(|ViewElement::Widget { element_id, embed, inputs }| {
+        self.elements.iter().all(|element| {
+            let (element_id, embed, inputs) = element.parts();
             let mut names = HashSet::new();
-            element_ids.insert(element_id.as_str())
+            let base_is_readable = element_ids.insert(element_id)
                 && embed.reference.strip_prefix("node/").is_some_and(is_node_id)
-                && inputs.iter().all(|i| is_name(&i.name) && names.insert(i.name.as_str()))
+                && inputs.iter().all(|i| is_name(&i.name) && names.insert(i.name.as_str()));
+            if let ViewElement::Interactive { writes, .. } = element {
+                base_is_readable && writes.iter().all(|write| names.remove(write.input.as_str()))
+            } else {
+                base_is_readable
+            }
         })
     }
 }
@@ -472,6 +551,9 @@ impl Op {
                     })
             }
             Op::SetCellTables { cell_tables, .. } => !cell_tables.is_empty(),
+            Op::SetNamedViews { named_views, .. } => {
+                !named_views.is_empty() && named_views.iter().all(|entry| entry.named_view.as_ref().is_none_or(NamedView::is_readable))
+            }
             Op::SetViews { views } => !views.is_empty() && views.iter().all(|v| v.view.as_ref().is_none_or(View::is_readable)),
             // An offset of nothing is written by leaving it out.
             Op::SetPlacements { placements, .. } => {
@@ -634,6 +716,7 @@ impl Workbook {
                 }
                 Ok(Op::SetCellTables { sheet_id: sheet_id.clone(), cell_tables: reverse })
             }
+            Op::SetNamedViews { sheet_id, named_views } => self.apply_named_views(sheet_id, named_views),
             Op::SetViews { views } => {
                 let mut seen = HashSet::new();
                 if !views.iter().all(|v| seen.insert(&v.view_id)) {
@@ -643,10 +726,7 @@ impl Workbook {
                     .sheets
                     .iter()
                     .chain(&self.deleted_sheets)
-                    .flat_map(|s| s.placements.values())
-                    .map(|(_, p)| match &p.shows {
-                        ShownByAPlacement::View { view_id } => view_id.as_str(),
-                    })
+                    .flat_map(Sheet::shown_views)
                     .collect();
                 if views.iter().any(|v| v.view.is_none() && shown.contains(v.view_id.as_str())) {
                     return Err(Refusal::ViewInUse);
@@ -655,7 +735,22 @@ impl Workbook {
                 for v in views {
                     let key = id_key(&v.view_id);
                     let old = match &v.view {
-                        Some(view) => self.views.insert(key, (v.view_id.clone(), view.clone())),
+                        Some(view) => {
+                            let mut view = view.clone();
+                            for element in &mut view.elements {
+                                let ViewElement::Interactive { inputs, writes, .. } = element else { continue };
+                                for write in writes {
+                                    let sheet = inputs.iter().find(|input| input.name == write.input)
+                                        .and_then(|input| self.sheets.iter().chain(&self.deleted_sheets)
+                                            .find(|sheet| sheet.id == input.range.sheet_id));
+                                    write.saved.retain(|cell| sheet.is_some_and(|sheet| {
+                                        self.known_line(sheet, Lines::Rows, &cell.r).is_ok()
+                                            && self.known_line(sheet, Lines::Columns, &cell.c).is_ok()
+                                    }));
+                                }
+                            }
+                            self.views.insert(key, (v.view_id.clone(), view))
+                        }
                         None => self.views.remove(&key),
                     };
                     reverse.push(ViewToSet { view_id: v.view_id.clone(), view: old.map(|(_, v)| v) });

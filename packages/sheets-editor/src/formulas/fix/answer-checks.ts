@@ -1,4 +1,4 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { DecimalSignName, SheetId } from '@open-artifact/sheets-core';
 import { readsAsStored } from '../../model/workbook.ts';
 import { lineRunsOfSheet } from '../../format/conditional/ask-agent.ts';
 import { isSameJsonValue } from '../../model/same-json.ts';
@@ -17,21 +17,35 @@ import { areaOfPosition, isSameCell } from '../../selection/model.ts';
 import { tableAreaWithHeaderAt, isFormulaWrittenInWords } from '../fix-prompt.ts';
 import { findFormulaReferences, resolveFormulaReference } from '../references.ts';
 import { isAddressWordInSheet } from '../column-headings.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
+import type { CellId, WorkbookReads } from '../../model/workbook.ts';
+import type { CellArea, CellPosition } from '../../selection/model.ts';
+import type { FixAwaited, FixFound, FixOfCopyAwaited } from '../../state/initial-state.ts';
+import type { CellsHangingBySheet } from '../dependents.ts';
+import type { ResolvedReference, WrittenLineSpan, WrittenReference } from '../references.ts';
+/** An area a formula reads, with its sheet. */
+export interface AreaRead {
+  sheetId: SheetId;
+  area: CellArea;
+}
+/** A block of filled cells that touch one another: the keys of their positions, and the area around them. */
+export interface FilledBlock {
+  cells: Set<string>;
+  hull: CellArea;
+}
 export function checkFixAnswer(
-  workbookSeen: Dynamic,
+  workbookSeen: WorkbookReads,
   {
-    cellId: cellId,
-    broken: broken,
-    linesAsTold: linesAsTold,
-    fewestCellsToRead: fewestCellsToRead,
-    formulaBeforeASortOrMove: formulaBeforeASortOrMove,
-    cameToBeforeASort: cameToBeforeASort,
-    callsForNoNewCell: callsForNoNewCell,
-    isLabelOrHeadingTold: isLabelOrHeadingTold,
-  }: Dynamic,
-  answer?: Dynamic,
-) {
+    cellId,
+    broken,
+    linesAsTold,
+    fewestCellsToRead,
+    formulaBeforeASortOrMove,
+    cameToBeforeASort,
+    callsForNoNewCell,
+    isLabelOrHeadingTold,
+  }: FixOfCopyAwaited & Pick<FixAwaited, 'linesAsTold'>,
+  answer: unknown,
+): Pick<FixFound, 'formula' | 'shown'> | null {
   let workbook = readsAsStored(workbookSeen);
   let position = workbook.positionOfCell(cellId);
   let linesNow = lineRunsOfSheet(workbook, cellId.sheetId);
@@ -40,59 +54,60 @@ export function checkFixAnswer(
   if (formula === null || isFixNoBetter(workbook, cellId, formula, broken, formulaBeforeASortOrMove, callsForNoNewCell, isLabelOrHeadingTold))
     return null;
   if ((countCellsRead(formula, workbook.decimalSign) ?? 1 / 0) < fewestCellsToRead) return null;
-  let result = checkFormulaResult(workbook, cellId, formula);
-  if (typeof result === 'string' || fillsOtherCells(result)) return null;
-  if (differsFromResult(result, cameToBeforeASort)) return null;
-  let isPlainNumberShown = PLAIN_NUMBER_SHOWN_PATTERN.test(result.shown) && !TWO_CURRENCY_SIGNS_PATTERN.test(result.shown);
-  let isShownAsIs = result.shown === '' || (result.text === null && (result.isTrueOrFalse === true || isPlainNumberShown));
+  let comesTo = checkFormulaResult(workbook, cellId, formula);
+  if (typeof comesTo === 'string' || fillsOtherCells(comesTo)) return null;
+  if (differsFromResult(comesTo, cameToBeforeASort)) return null;
+  let isPlainNumberShown = PLAIN_NUMBER_SHOWN_PATTERN.test(comesTo.shown) && !TWO_CURRENCY_SIGNS_PATTERN.test(comesTo.shown);
+  let isShownAsIs = comesTo.shown === '' || (comesTo.text === null && (comesTo.isTrueOrFalse === true || isPlainNumberShown));
   return {
-    formula: formula,
-    shown: isShownAsIs ? result.shown : quoteShownText(result.shown),
+    formula,
+    shown: isShownAsIs ? comesTo.shown : quoteShownText(comesTo.shown),
   };
 }
-export function cellsHangingOnVolatiles(workbook: WorkbookReads) {
+export function cellsHangingOnVolatiles(workbook: WorkbookReads): CellsHangingBySheet | null {
   let cached = volatileDependentsCache.get(workbook);
   if (cached !== undefined) return cached;
   let hanging = cellsHangingOnFormulasWhere(workbook, callsVolatileFunction);
   volatileDependentsCache.set(workbook, hanging);
   return hanging;
 }
-export function areasReadOnlyBy(workbook: WorkbookReads, cellId?: Dynamic, formula?: Dynamic, otherFormulas?: Dynamic) {
-  let readByOthers = otherFormulas.flatMap((formula2?: Dynamic) => referencedAreasOf(workbook, cellId, formula2));
-  return referencedAreasOf(workbook, cellId, formula).flatMap((referenced?: Dynamic) => {
+/** The areas the formula reads that none of the other formulas read, `null` for a reference it cannot resolve. */
+export function areasReadOnlyBy(workbook: WorkbookReads, cellId: CellId, formula: string, otherFormulas: string[]): (AreaRead | null)[] {
+  let readByOthers = otherFormulas.flatMap((otherFormula) => referencedAreasOf(workbook, cellId, otherFormula));
+  return referencedAreasOf(workbook, cellId, formula).flatMap((referenced): (AreaRead | null)[] => {
     if (referenced === null) return [null];
-    let { sheetId: sheetId } = referenced.sheet;
-    let areas: Dynamic = [referenced.area];
-    for (let readByOther of readByOthers as Dynamic)
-      if (readByOther?.sheet.sheetId === sheetId) areas = areas.flatMap((area?: Dynamic) => splitAreaAround(area, readByOther.area, 'rows'));
+    let { sheetId } = referenced.sheet;
+    let areas = [referenced.area];
+    for (const readByOther of readByOthers)
+      if (readByOther?.sheet.sheetId === sheetId) areas = areas.flatMap((area) => splitAreaAround(area, readByOther.area, 'rows'));
     return areas.map(
-      (area?: Dynamic) => ({
-        sheetId: sheetId,
-        area: area,
+      (area) => ({
+        sheetId,
+        area,
       }),
     );
   });
 }
-export function mayNameARange(workbook: WorkbookReads, cellId?: Dynamic, formula?: Dynamic) {
+export function mayNameARange(workbook: WorkbookReads, cellId: CellId, formula: string): boolean {
   let bounded = referencesNotNamingHeadings(workbook, cellId, formula).filter(isBoundedReference);
-  return bounded.length > 1 || bounded.some(({ rows: rows, columns: columns }: Dynamic) => rows.count !== 1 || columns.count !== 1);
+  return bounded.length > 1 || bounded.some(({ rows, columns }) => rows.count !== 1 || columns.count !== 1);
 }
 export function readsBeyondTables(
   workbook: WorkbookReads,
-  cellId?: Dynamic,
-  fixedFormula?: Dynamic,
-  brokenFormula?: Dynamic,
-  formulaBefore?: Dynamic,
-) {
+  cellId: CellId,
+  fixedFormula: string,
+  brokenFormula: string,
+  formulaBefore: string | null,
+): boolean {
   let otherFormulas = [brokenFormula, ...(formulaBefore === null ? [] : [formulaBefore])];
   let newlyRead = areasReadOnlyBy(workbook, cellId, fixedFormula, otherFormulas);
-  if (newlyRead.some((read?: Dynamic) => read?.sheetId !== cellId.sheetId)) return true;
-  let areasLeft: Dynamic = newlyRead.flatMap((read?: Dynamic) => read?.area ?? []);
+  if (newlyRead.some((read) => read?.sheetId !== cellId.sheetId)) return true;
+  let areasLeft = newlyRead.flatMap((read) => read?.area ?? []);
   let position = workbook.positionOfCell(cellId);
   let cornersRead = referencedAreasOf(workbook, cellId, brokenFormula)
-    .flatMap((referenced?: Dynamic) => (referenced?.sheet.sheetId === cellId.sheetId ? [referenced.area] : []))
+    .flatMap((referenced) => (referenced?.sheet.sheetId === cellId.sheetId ? [referenced.area] : []))
     .flatMap(
-      ({ topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount }: Dynamic) => [
+      ({ topRowIndex, leftColumnIndex, rowCount, columnCount }) => [
         {
           rowIndex: topRowIndex,
           columnIndex: leftColumnIndex,
@@ -106,61 +121,61 @@ export function readsBeyondTables(
   let spots = [...(position === null ? [] : [position]), ...cornersRead];
   let spotsToCheck = spots
     .filter(
-      (spot?: Dynamic, index?: Dynamic) =>
-        spots.findIndex((other?: Dynamic) => other.rowIndex === spot.rowIndex && other.columnIndex === spot.columnIndex) === index,
+      (spot, index) =>
+        spots.findIndex((other) => other.rowIndex === spot.rowIndex && other.columnIndex === spot.columnIndex) === index,
     )
     .slice(0, MOST_BLOCKS_CHECKED);
-  let tables: Dynamic = [];
-  for (let spot of spotsToCheck as Dynamic) {
+  let tables: CellArea[] = [];
+  for (let spot of spotsToCheck) {
     if (areasLeft.length === 0) break;
-    if (tables.some((table2?: Dynamic) => isAreaWithin(areaOfPosition(spot), table2))) continue;
+    if (tables.some((tableFound) => isAreaWithin(areaOfPosition(spot), tableFound))) continue;
     let table = tableAreaWithHeaderAt(workbook, cellId.sheetId, spot);
     if (table === null) continue;
     tables.push(table);
-    areasLeft = areasLeft.flatMap((area?: Dynamic) => splitAreaAround(area, table, 'rows'));
+    areasLeft = areasLeft.flatMap((area) => splitAreaAround(area, table, 'rows'));
   }
   return areasLeft.length > 0;
 }
-export function blockOfFilledCellsAt(filledKeys?: Dynamic, start?: Dynamic) {
+export function blockOfFilledCellsAt(filledKeys: Set<string>, start: CellPosition): FilledBlock | null {
   if (!filledKeys.has(positionKey(start))) return null;
-  let block = new (Set as Dynamic)([positionKey(start)]);
-  let [topRowIndex, bottomRowIndex, leftColumnIndex, rightColumnIndex]: Dynamic = [
+  let block = new Set<string>([positionKey(start)]);
+  let [topRowIndex, bottomRowIndex, leftColumnIndex, rightColumnIndex] = [
     start.rowIndex,
     start.rowIndex,
     start.columnIndex,
     start.columnIndex,
   ];
   let toVisit = [start];
-  for (let position: Dynamic = toVisit.pop(); position !== undefined; position = toVisit.pop()) {
-    let { rowIndex: rowIndex, columnIndex: columnIndex } = position;
+  for (let position = toVisit.pop(); position !== undefined; position = toVisit.pop()) {
+    let { rowIndex, columnIndex } = position;
     [topRowIndex, bottomRowIndex] = [Math.min(topRowIndex, rowIndex), Math.max(bottomRowIndex, rowIndex)];
     [leftColumnIndex, rightColumnIndex] = [Math.min(leftColumnIndex, columnIndex), Math.max(rightColumnIndex, columnIndex)];
     for (let neighbour of [
       {
         rowIndex: rowIndex - 1,
-        columnIndex: columnIndex,
+        columnIndex,
       },
       {
         rowIndex: rowIndex + 1,
-        columnIndex: columnIndex,
+        columnIndex,
       },
       {
-        rowIndex: rowIndex,
+        rowIndex,
         columnIndex: columnIndex - 1,
       },
       {
-        rowIndex: rowIndex,
+        rowIndex,
         columnIndex: columnIndex + 1,
       },
-    ] as Dynamic) {
+    ]) {
       if (!filledKeys.has(positionKey(neighbour)) || block.has(positionKey(neighbour))) continue;
       block.add(positionKey(neighbour));
       toVisit.push(neighbour);
     }
   }
   let hull = {
-    topRowIndex: topRowIndex,
-    leftColumnIndex: leftColumnIndex,
+    topRowIndex,
+    leftColumnIndex,
     rowCount: bottomRowIndex - topRowIndex + 1,
     columnCount: rightColumnIndex - leftColumnIndex + 1,
   };
@@ -168,153 +183,153 @@ export function blockOfFilledCellsAt(filledKeys?: Dynamic, start?: Dynamic) {
     ? null
     : {
         cells: block,
-        hull: hull,
+        hull,
       };
 }
 export function readsBeyondBlocks(
   workbook: WorkbookReads,
-  cellId?: Dynamic,
-  fixedFormula?: Dynamic,
-  brokenFormula?: Dynamic,
-  formulaBefore?: Dynamic,
-) {
+  cellId: CellId,
+  fixedFormula: string,
+  brokenFormula: string,
+  formulaBefore: string | null,
+): boolean {
   let brokenReferences = referencesNotNamingHeadings(workbook, cellId, brokenFormula);
   let boundedReferences = brokenReferences.filter(isBoundedReference);
-  let formulaOfSpan = ({ start: start, end: end }: Dynamic) => `=${brokenFormula.slice(start, end)}`;
+  let formulaOfSpan = ({ start, end }: Pick<WrittenReference, 'start' | 'end'>) => `=${brokenFormula.slice(start, end)}`;
   let newlyRead = areasReadOnlyBy(workbook, cellId, fixedFormula, [
     ...brokenReferences.map(formulaOfSpan),
     ...(formulaBefore === null ? [] : [formulaBefore]),
     ...referencesSpanningWholeRanges(workbook, boundedReferences, fixedFormula).map(
-      ({ start: start, end: end }: Dynamic) => `=${fixedFormula.slice(start, end)}`,
+      ({ start, end }) => `=${fixedFormula.slice(start, end)}`,
     ),
   ]);
-  if (newlyRead.some((read?: Dynamic) => read?.sheetId !== cellId.sheetId)) return true;
-  let areas = newlyRead.flatMap((read?: Dynamic) => read?.area ?? []);
-  let sheet = workbook.listSheets().find(({ sheetId: sheetId }: Dynamic) => sheetId === cellId.sheetId);
+  if (newlyRead.some((read) => read?.sheetId !== cellId.sheetId)) return true;
+  let areas = newlyRead.flatMap((read) => read?.area ?? []);
+  let sheet = workbook.listSheets().find(({ sheetId }) => sheetId === cellId.sheetId);
   if (areas.length === 0 || sheet === undefined) return areas.length > 0;
-  let filledPositionsIn = (area?: Dynamic) => {
+  let filledPositionsIn = (area: CellArea) => {
     let positions = workbook
       .filledCellsIn(cellId.sheetId, area)
-      .flatMap((filledCellId?: Dynamic) => (isSameCell(filledCellId, cellId) ? [] : (workbook.positionOfCell(filledCellId) ?? [])));
+      .flatMap((filledCellId) => (isSameCell(filledCellId, cellId) ? [] : (workbook.positionOfCell(filledCellId) ?? [])));
     positions.sort(
-      (position?: Dynamic, otherPosition?: Dynamic) =>
+      (position, otherPosition) =>
         position.rowIndex === otherPosition.rowIndex ? position.columnIndex - otherPosition.columnIndex : position.rowIndex - otherPosition.rowIndex,
     );
     return positions;
   };
-  let { rowCount: rowCount, columnCount: columnCount } = sheet;
-  let filledKeys = new (Set as Dynamic)(
+  let { rowCount, columnCount } = sheet;
+  let filledKeys = new Set<string>(
     filledPositionsIn({
       topRowIndex: 0,
       leftColumnIndex: 0,
-      rowCount: rowCount,
-      columnCount: columnCount,
+      rowCount,
+      columnCount,
     }).map(positionKey),
   );
   let starts = findFormulaReferences(brokenFormula, workbook.decimalSign).references.some(
-    (reference?: Dynamic) =>
+    (reference) =>
       reference.sheetName === null &&
       !referencedAreasOf(workbook, cellId, formulaOfSpan(reference)).includes(null) &&
-      boundedLocalReferences(workbook, fixedFormula).some((span?: Dynamic) => spansOverlap(span, reference)),
+      boundedLocalReferences(workbook, fixedFormula).some((span) => spansOverlap(span, reference)),
   )
     ? brokenReferences
-        .flatMap((reference?: Dynamic) => referencedAreasOf(workbook, cellId, formulaOfSpan(reference)))
-        .flatMap((referenced?: Dynamic) => (referenced === null ? [] : filledPositionsIn(referenced.area)))
+        .flatMap((reference) => referencedAreasOf(workbook, cellId, formulaOfSpan(reference)))
+        .flatMap((referenced) => (referenced === null ? [] : filledPositionsIn(referenced.area)))
     : areas.flatMap(filledPositionsIn).slice(0, 1);
-  let blocks: Dynamic = [];
-  for (let start of starts as Dynamic) {
+  let blocks: FilledBlock[] = [];
+  for (let start of starts) {
     if (blocks.length === MOST_BLOCKS_CHECKED) break;
-    if (blocks.some(({ cells: cells }: Dynamic) => cells.has(positionKey(start)))) continue;
+    if (blocks.some(({ cells }) => cells.has(positionKey(start)))) continue;
     let block = blockOfFilledCellsAt(filledKeys, start);
     if (block !== null) blocks.push(block);
   }
-  return areas.some((area?: Dynamic) => {
+  return areas.some((area) => {
     let positions = filledPositionsIn(area);
     return !blocks.some(
-      ({ cells: cells, hull: hull }: Dynamic) =>
-        isAreaWithin(area, hull) && positions.every((position?: Dynamic) => cells.has(positionKey(position))),
+      ({ cells, hull }) =>
+        isAreaWithin(area, hull) && positions.every((position) => cells.has(positionKey(position))),
     );
   });
 }
-export function readsCellsHangingOnVolatiles(workbook: WorkbookReads, cellId?: Dynamic, fixedFormula?: Dynamic, brokenFormula?: Dynamic) {
+export function readsCellsHangingOnVolatiles(workbook: WorkbookReads, cellId: CellId, fixedFormula: string, brokenFormula: string): boolean {
   let newlyRead = areasReadOnlyBy(workbook, cellId, fixedFormula, [brokenFormula]);
   if (newlyRead.length === 0) return false;
   let hangingOnVolatiles = cellsHangingOnVolatiles(workbook);
   if (hangingOnVolatiles === null || hangingOnVolatiles.size === 0) return hangingOnVolatiles === null;
-  return newlyRead.some((read?: Dynamic) => read === null || areaTouchesHangingCells(hangingOnVolatiles, read.sheetId, read.area));
+  return newlyRead.some((read) => read === null || areaTouchesHangingCells(hangingOnVolatiles, read.sheetId, read.area));
 }
-export function onlyDropsRefErrors(fixedFormula?: Dynamic, brokenFormula?: Dynamic, isLabelOrHeadingTold?: Dynamic) {
+export function onlyDropsRefErrors(fixedFormula: string, brokenFormula: string, isLabelOrHeadingTold: boolean): boolean {
   let [broken = '', fixed = ''] = [brokenFormula, fixedFormula].map(
-    (formula?: Dynamic) => formula.replaceAll(REFERENCE_NOISE_PATTERN, '').toUpperCase(),
+    (formula) => formula.replaceAll(REFERENCE_NOISE_PATTERN, '').toUpperCase(),
   );
   let brokenWithoutRefErrors = broken.replaceAll(isLabelOrHeadingTold ? /\/#REF!/g : /[*/]#REF!|#REF!\*/g, '');
   return brokenWithoutRefErrors !== broken && brokenWithoutRefErrors === fixed;
 }
-export function countCellsRead(formula?: Dynamic, decimalSign?: Dynamic) {
-  let cellKeys = new (Set as Dynamic)();
-  for (let { rows: rows, columns: columns, sheetName: sheetName } of findFormulaReferences(formula, decimalSign).references as Dynamic) {
+export function countCellsRead(formula: string, decimalSign: DecimalSignName): number | null {
+  let cellKeys = new Set<string>();
+  for (let { rows, columns, sheetName } of findFormulaReferences(formula, decimalSign).references) {
     if (sheetName !== null) continue;
     if (rows.count === null || columns.count === null) return null;
     if (cellKeys.size + rows.count * columns.count > MOST_CELLS_COUNTED_AS_READ) return null;
-    for (let rowOffset: Dynamic = 0; rowOffset < rows.count; rowOffset += 1)
-      for (let columnOffset: Dynamic = 0; columnOffset < columns.count; columnOffset += 1)
+    for (let rowOffset = 0; rowOffset < rows.count; rowOffset += 1)
+      for (let columnOffset = 0; columnOffset < columns.count; columnOffset += 1)
         cellKeys.add(`${rows.first + rowOffset}/${columns.first + columnOffset}`);
   }
   return cellKeys.size;
 }
-export const volatileDependentsCache = new (WeakMap as Dynamic)();
-export const referencedAreasOf = (workbook: WorkbookReads, cellId?: Dynamic, formula?: Dynamic) =>
+export const volatileDependentsCache = new WeakMap<WorkbookReads, CellsHangingBySheet | null>();
+export const referencedAreasOf = (workbook: WorkbookReads, cellId: CellId, formula: string): (ResolvedReference | null)[] =>
   findFormulaReferences(formula, workbook.decimalSign).references.map(
-    (reference?: Dynamic) => resolveFormulaReference(reference, cellId.sheetId, workbook.listSheets()),
+    (reference) => resolveFormulaReference(reference, cellId.sheetId, workbook.listSheets()),
   );
-export const lastOfSpan = ({ first: first, count: count }: Dynamic) => (count === null ? 1 / 0 : first + count - 1);
-export const spansStartTogether = (span?: Dynamic, otherSpan?: Dynamic) =>
+export const lastOfSpan = ({ first, count }: WrittenLineSpan): number => (count === null ? 1 / 0 : first + count - 1);
+export const spansStartTogether = (span: WrittenReference, otherSpan: WrittenReference): boolean =>
   span.rows.first === otherSpan.rows.first && span.columns.first === otherSpan.columns.first;
-export const spansEndTogether = (span?: Dynamic, otherSpan?: Dynamic) =>
+export const spansEndTogether = (span: WrittenReference, otherSpan: WrittenReference): boolean =>
   lastOfSpan(span.rows) === lastOfSpan(otherSpan.rows) && lastOfSpan(span.columns) === lastOfSpan(otherSpan.columns);
-export const spansOverlap = (span?: Dynamic, otherSpan?: Dynamic) =>
+export const spansOverlap = (span: WrittenReference, otherSpan: WrittenReference): boolean =>
   span.rows.first <= lastOfSpan(otherSpan.rows) &&
   otherSpan.rows.first <= lastOfSpan(span.rows) &&
   span.columns.first <= lastOfSpan(otherSpan.columns) &&
   otherSpan.columns.first <= lastOfSpan(span.columns);
-export const spanHolds = (span?: Dynamic, otherSpan?: Dynamic) =>
+export const spanHolds = (span: WrittenReference, otherSpan: WrittenReference): boolean =>
   span.rows.first <= otherSpan.rows.first &&
   span.columns.first <= otherSpan.columns.first &&
   lastOfSpan(otherSpan.rows) <= lastOfSpan(span.rows) &&
   lastOfSpan(otherSpan.columns) <= lastOfSpan(span.columns);
-export const isBoundedReference = ({ rows: rows, columns: columns }: Dynamic) => rows.count !== null && columns.count !== null;
-export const boundedLocalReferences = (workbook: WorkbookReads, formula?: Dynamic) =>
+export const isBoundedReference = ({ rows, columns }: WrittenReference): boolean => rows.count !== null && columns.count !== null;
+export const boundedLocalReferences = (workbook: WorkbookReads, formula: string): WrittenReference[] =>
   findFormulaReferences(formula, workbook.decimalSign).references.filter(
-    (reference?: Dynamic) => reference.sheetName === null && isBoundedReference(reference),
+    (reference) => reference.sheetName === null && isBoundedReference(reference),
   );
-export const referencesNotNamingHeadings = (workbook: WorkbookReads, cellId?: Dynamic, formula?: Dynamic) =>
+export const referencesNotNamingHeadings = (workbook: WorkbookReads, cellId: CellId, formula: string): WrittenReference[] =>
   findFormulaReferences(formula, workbook.decimalSign).references.filter(
-    ({ sheetName: sheetName, ends: ends }: Dynamic) =>
+    ({ sheetName, ends }) =>
       sheetName === null &&
-      !ends.some(({ start: start, end: end }: Dynamic) => isAddressWordInSheet(formula.slice(start, end), cellId.sheetId, workbook)),
+      !ends.some(({ start, end }) => isAddressWordInSheet(formula.slice(start, end), cellId.sheetId, workbook)),
   );
-export const referencesSpanningWholeRanges = (workbook: WorkbookReads, bounded?: Dynamic, formula?: Dynamic) =>
+export const referencesSpanningWholeRanges = (workbook: WorkbookReads, bounded: WrittenReference[], formula: string): WrittenReference[] =>
   boundedLocalReferences(workbook, formula).filter(
-    (reference?: Dynamic) =>
+    (reference) =>
       bounded.some(
-        (boundedReference?: Dynamic) => spanHolds(reference, boundedReference) && spansStartTogether(reference, boundedReference),
+        (boundedReference) => spanHolds(reference, boundedReference) && spansStartTogether(reference, boundedReference),
       ) &&
-      bounded.some((boundedReference?: Dynamic) => spanHolds(reference, boundedReference) && spansEndTogether(reference, boundedReference)),
+      bounded.some((boundedReference) => spanHolds(reference, boundedReference) && spansEndTogether(reference, boundedReference)),
   );
 export const MOST_BLOCKS_CHECKED = 12;
-export const positionKey = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) => `${rowIndex}/${columnIndex}`;
-export const withoutSpaces = (formula?: Dynamic) => formula.replaceAll(' ', '');
+export const positionKey = ({ rowIndex, columnIndex }: CellPosition): string => `${rowIndex}/${columnIndex}`;
+export const withoutSpaces = (formula: string): string => formula.replaceAll(' ', '');
 export const REFERENCE_NOISE_PATTERN = /[\s$()]/g;
 export const isFixNoBetter = (
   workbook: WorkbookReads,
-  cellId?: Dynamic,
-  fixedFormula?: Dynamic,
-  brokenFormula?: Dynamic,
-  formulaBefore?: Dynamic,
-  callsForNoNewCell?: Dynamic,
-  isLabelOrHeadingTold?: Dynamic,
-  areOwnWords: Dynamic = false,
-) =>
+  cellId: CellId,
+  fixedFormula: string,
+  brokenFormula: string,
+  formulaBefore: string | null,
+  callsForNoNewCell: boolean,
+  isLabelOrHeadingTold: boolean,
+  areOwnWords = false,
+): boolean =>
   withoutSpaces(fixedFormula) === withoutSpaces(brokenFormula) ||
   (workbook.decimalSign === 'comma' && bringsNewCommaNumbers(fixedFormula, [brokenFormula])) ||
   onlyDropsRefErrors(fixedFormula, brokenFormula, isLabelOrHeadingTold) ||

@@ -2,10 +2,16 @@
  * The type registry: the Artifact Types in the type roots.
  *
  * Roots, highest precedence first: the workspace's project root (runs code
- * only when trusted), the user root, the extra roots from settings, and the
+ * only when trusted), the user root, the extra roots from settings, the
+ * installed root (`types install`: never trusted, never a built-in id), and the
  * built-in root (the repository's `artifact-types/`, limited to
  * {@link BUILTIN_TYPE_IDS}). A type id found in a higher root shadows the
  * same id below it.
+ *
+ * Trust decides one thing: whether a type's own program (a manifest's
+ * `entry.start`) may run. A type of an untrusted root (installed, or a project
+ * not trusted yet) is still served, as static files or by frame-host (the
+ * daemon's own program), whose declaration is read as literal data.
  */
 
 import { EventEmitter } from 'node:events';
@@ -13,22 +19,83 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, s
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DECLARATION_LINE,
   TYPE_ID,
+  entryLocation,
+  isLoopbackHost,
   isServerEntry,
   isUrlEntry,
+  networkOrigins,
   type ArtifactTypeManifest,
   type ManifestHostHints,
   type ManifestI18n,
   type ManifestTemplate,
   type OpenArtifactSettings,
   type ResolvedEntry,
+  type TypeLocation,
   type TypeRuntime,
   type TypeScope,
+  BUILTIN_TYPE_IDS,
 } from '@open-artifact/protocol';
-import { readJson } from './paths.ts';
+import { files, readJson } from './paths.ts';
 
-/** Type ids the built-in root may provide in this release. */
-export const BUILTIN_TYPE_IDS: readonly string[] = ['design', 'design-system', 'whiteboard', 'slides', 'data', 'sheets', 'docs'];
+/** Type ids the built-in root may provide in this release (kept in the protocol: a site refuses them too). */
+export { BUILTIN_TYPE_IDS };
+
+/**
+ * Why a page artifact is not published to this site: the site does not run pages (its Link `hello` has no
+ * `features.pages`: an older site, or one in single-origin mode).
+ */
+export const PAGE_NO_SITE = 'This site does not run page artifacts (it is older than this Open Artifact, or it serves everything on one origin): a page artifact stays on this computer for now.';
+
+/** True for a page type (`openArtifact.style: "page"`): its artifacts are free pages run by frame-host in page mode. */
+export const isPageType = (type: Pick<TypeInfo, 'openArtifact'> | null | undefined): boolean => type?.openArtifact?.style === 'page';
+
+/**
+ * Why an artifact of a custom type no site runs is not published to one: a site runs only the custom types whose
+ * pages frame-host runs as they are ({@link isSiteKindType}), once the type is published there.
+ */
+export const CUSTOM_NO_SITE = 'A site runs only the custom types whose pages are served as they are (an index.html with a // artifact.json declaration, no entry of its own, not a page type): an artifact of this type stays on this computer.';
+
+/** True for the built-in `page` type: a site whose Link `hello` says `features.pages` runs its artifacts. */
+export const isBuiltinPage = (type: Pick<TypeInfo, 'id' | 'openArtifact' | 'scope'> | null | undefined): boolean => !!type && type.scope === 'builtin' && type.id === 'page' && isPageType(type);
+
+/**
+ * True for a custom type a site can run once it is published there (`open-artifact types publish`): frame-host runs
+ * its own `index.html` (runtime `frame`, so no manifest `entry`), and it is not a page type.
+ */
+export const isSiteKindType = (type: Pick<TypeInfo, 'openArtifact' | 'runtime' | 'scope'> | null | undefined): boolean =>
+  !!type && type.scope !== 'builtin' && type.runtime === 'frame' && !isPageType(type);
+
+/**
+ * Why Link keeps the artifact of this type on this computer whatever the site, or `null`. The built-in types go (the
+ * `page` type to a site that runs pages: the publish asks the site's `hello`); a custom type a site can run
+ * ({@link isSiteKindType}) goes to a site that has it in its catalog (the publish asks the site); a custom page or
+ * static type stays.
+ */
+export function siteRefusal(type: Pick<TypeInfo, 'id' | 'openArtifact' | 'runtime' | 'scope'> | null | undefined): string | null {
+  if (!type || type.scope === 'builtin' || isSiteKindType(type)) return null;
+  // A page type and a static one: their pages are not ones a site serves. (A type with an entry of its own is the
+  // site's to answer: one it runs under the same id, or a refusal.)
+  if (isPageType(type) || type.runtime === 'static') return CUSTOM_NO_SITE;
+  return null;
+}
+
+/**
+ * Why this type may not be published to a site's catalog (`open-artifact types publish`), or `null`. Only a type of
+ * this computer's own: a user type, one of an extra root, or one of a trusted project. An installed type is someone
+ * else's package (its uid is theirs): its author publishes it, and a site that has it already runs its artifacts.
+ */
+export function typePublishRefusal(type: TypeInfo): string | null {
+  if (type.scope === 'builtin') return `${type.id} is built in: every site has it already.`;
+  if (type.scope === 'installed') {
+    return `${type.id} is an installed type (someone else's package, uid ${type.uid ?? 'none'}): only its author publishes it to a site. Once a site has it (the same uid), artifacts of it publish there as they are.`;
+  }
+  if (type.scope === 'project' && !type.trusted) return `${type.id} is a type of a project this computer does not trust yet: trust the project first (open-artifact types trust <its folder>).`;
+  if (!isSiteKindType(type)) return `${type.id}: ${CUSTOM_NO_SITE.replace(': an artifact of this type stays on this computer.', '.')}`;
+  if (!type.uid) return `${type.id} has no uid in its artifact-type.json: a site tells types apart by it.`;
+  return null;
+}
 
 /**
  * The built-in type root: `$OPEN_ARTIFACT_BUILTIN_TYPES`, else the repository's
@@ -42,10 +109,12 @@ export function defaultBuiltinTypesDir(): string {
 export interface TypeRoot {
   root: string;
   scope: TypeScope;
-  /** Its types may run code (start servers). */
+  /** Its types may run their own code (a manifest's `entry.start`). */
   trusted: boolean;
   /** When set, only these ids are read from the root. */
   allow?: readonly string[];
+  /** Ids never read from the root (the installed root: the built-in ids). */
+  deny?: readonly string[];
 }
 
 /** A type folder as the registry read it. */
@@ -56,13 +125,23 @@ export interface TypeInfo {
   /** The root it was found in. */
   root: string;
   scope: TypeScope;
+  /** Its root is trusted: {@link ownCode} may run. */
   trusted: boolean;
+  /**
+   * The type runs a program of its own: a manifest `entry.start` (runtime `server`). Only such a type needs a trusted
+   * root; frame-host (runtime `frame`) and static files are the daemon's own, and run for any root.
+   */
+  ownCode: boolean;
+  /** The `https://` origins its page may reach (`openArtifact.network`); enforced for installed types only. */
+  network: string[];
   name: string;
   title: string;
   description: string;
   summary: string | null;
   category: string | null;
   version: string | null;
+  /** The manifest's `uid`, when it has one. */
+  uid: string | null;
   command: string;
   intents: string[];
   when: string | null;
@@ -124,17 +203,26 @@ export function readFrontmatter(text: string): Record<string, string> {
 
 const stripFrontmatter = (text: string): string => text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
 
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
-
 /** True for a loopback http(s) URL (templates allowed): only those may carry `{root}` or be a server's address. */
 export function isLoopbackUrl(value: string): boolean {
   try {
     const url = new URL(value.replace(/\{[a-z]+\}/g, 'x'));
-    return (url.protocol === 'http:' || url.protocol === 'https:') && (LOOPBACK.has(url.hostname) || url.hostname.endsWith('.localhost'));
+    return (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHost(url.hostname);
   } catch {
     return false;
   }
 }
+
+/**
+ * Whether a type lives on another computer, and where: a URL entry that is not loopback (`entryLocation`). What is
+ * sent to such a type leaves this computer, whatever `effect` its actions declare.
+ */
+export function typeLocation(type: Pick<TypeInfo, 'entry'> | null | undefined): TypeLocation {
+  return entryLocation(type?.entry);
+}
+
+/** True when the type lives on another computer ({@link typeLocation}). */
+export const isRemoteType = (type: Pick<TypeInfo, 'entry'> | null | undefined): boolean => typeLocation(type).remote;
 
 /** Resolves a manifest's `entry`: static, url or server. */
 export function entryOf(
@@ -180,10 +268,12 @@ export function entryOf(
     problems.push('entry needs a url or start.');
     return { entry: null, runtime: 'url' };
   }
-  if (hasIndex && hasInlineDeclaration(dir)) {
+  // A page type (`openArtifact.style: "page"`): no index.html of its own; frame-host runs each artifact's own one.
+  const page = manifest.openArtifact?.style === 'page';
+  if (page || (hasIndex && hasInlineDeclaration(dir))) {
     const bin = frameHostBin();
     if (!bin) {
-      problems.push('An original artifact type: frame-host is not there (build it with node scripts/build.mjs --only frame).');
+      problems.push(`${page ? 'A page type' : 'An original artifact type'}: frame-host is not there (build it with node scripts/build.mjs --only frame).`);
       return { entry: null, runtime: 'frame' };
     }
     return { entry: { kind: 'server', start: { command: 'node', args: [bin], env: {} }, url: null, open: true, share: false, actions: true }, runtime: 'frame' };
@@ -192,9 +282,6 @@ export function entryOf(
   problems.push('No entry: add "entry" to artifact-type.json or an index.html.');
   return { entry: null, runtime: 'static' };
 }
-
-/** The line that opens an original type's inline declaration (as frame-host reads it). */
-const DECLARATION_LINE = /(^|\n)[ \t]*\/\/ artifact\.json[ \t]*\r?\n/;
 
 /** True when the folder's index.html declares an original artifact type; only its first 64 KB are read. */
 export function hasInlineDeclaration(dir: string): boolean {
@@ -264,7 +351,8 @@ export function readTypeFolder(dir: string, where: TypeRoot): TypeInfo | null {
     }
   }
   const fm = skillText ? readFrontmatter(skillText) : {};
-  const { entry, runtime } = entryOf(m, dir, hasIndex, problems);
+  const { entry, runtime } =
+    !where.trusted && untrustedEntryRefused(m, where.scope, problems) ? { entry: null, runtime: 'static' as const } : entryOf(m, dir, hasIndex, problems);
   const iconFile = m.icon?.file;
   const icon =
     typeof iconFile === 'string' && !iconFile.includes('..') && existsSync(join(dir, iconFile)) ? iconFile : existsSync(join(dir, 'icon.svg')) ? 'icon.svg' : null;
@@ -275,12 +363,15 @@ export function readTypeFolder(dir: string, where: TypeRoot): TypeInfo | null {
     root: where.root,
     scope: where.scope,
     trusted: where.trusted,
+    ownCode: entry?.kind === 'server' && runtime === 'server',
+    network: networkOrigins(m),
     name,
     title: str(m.title) ?? str(m.name) ?? str(fm.name) ?? id,
     description: String(m.description ?? fm.description ?? '').trim(),
     summary: str(m.summary),
     category: str(m.category),
     version: str(m.version),
+    uid: str(m.uid),
     command: str(m.command) ?? id,
     intents: Array.isArray(m.intents) ? m.intents.map(String) : [],
     when: str(m.when),
@@ -306,6 +397,30 @@ export function readTypeFolder(dir: string, where: TypeRoot): TypeInfo | null {
   };
 }
 
+/**
+ * An installed type's manifest asks for what no installed type may have: a program of its own (`entry.start`) or a
+ * page elsewhere (`entry.url`, or an address as `entry`). `types install` refuses such a package; this is the same
+ * rule again for a folder changed after it was installed, with no fall back to frame-host or to its index.html.
+ */
+/**
+ * A type of an untrusted root never points at another address, so its page is always the one served here, with the
+ * restricted policy. An installed type is refused any `entry` that is not a file of its own; a type of a project not
+ * trusted yet keeps an `entry.start` (it is refused when it would start, with a message to trust the project) but not
+ * an address.
+ */
+function untrustedEntryRefused(m: ArtifactTypeManifest, scope: TypeScope, problems: string[]): boolean {
+  const raw = m.entry as unknown;
+  if (raw === undefined) return false;
+  if (typeof raw === 'string' && !/^[a-z][a-z0-9+.-]*:/i.test(raw)) return false;
+  if (scope === 'installed') {
+    problems.push('An installed type cannot start a program or point at an address ("entry" in artifact-type.json): it is not run.');
+    return true;
+  }
+  if (raw && typeof raw === 'object' && (raw as { start?: unknown }).start !== undefined) return false;
+  problems.push('A type of a project that is not trusted yet cannot point at an address ("entry" in artifact-type.json): its page is served as files until the project is trusted.');
+  return true;
+}
+
 /** The type's `SKILL.md` without its frontmatter, or `null`. */
 export function skillBody(type: TypeInfo | null | undefined): string | null {
   if (!type?.skillFile) return null;
@@ -320,12 +435,15 @@ export function skillBody(type: TypeInfo | null | undefined): string | null {
 export interface TypeRegistryOptions {
   /** The built-in root; `null` turns it off. Default {@link defaultBuiltinTypesDir}. */
   builtinDir?: string | null;
+  /** The installed root; `null` turns it off. Default `files.installedTypes()` (`$OPEN_ARTIFACT_INSTALLED_TYPES`). */
+  installedDir?: string | null;
 }
 
 /** Reads the type roots and watches them. Emits `changed` (debounced) when a root changes. */
 export class TypeRegistry extends EventEmitter<{ changed: [] }> {
   private readonly settings: () => OpenArtifactSettings;
   private readonly builtinDir: string | null;
+  private readonly installedDir: (() => string) | null;
   private readonly watchers = new Map<string, FSWatcher>();
   private timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -333,6 +451,8 @@ export class TypeRegistry extends EventEmitter<{ changed: [] }> {
     super();
     this.settings = settings;
     this.builtinDir = options.builtinDir === undefined ? defaultBuiltinTypesDir() : options.builtinDir;
+    const installed = options.installedDir;
+    this.installedDir = installed === null ? null : installed === undefined ? files.installedTypes : () => installed;
   }
 
   /** The roots for a workspace, highest precedence first. */
@@ -346,6 +466,7 @@ export class TypeRegistry extends EventEmitter<{ changed: [] }> {
     }
     roots.push({ root: resolve(s.typeRoots.user), scope: 'user', trusted: true });
     for (const extra of s.typeRoots.extra ?? []) roots.push({ root: resolve(extra), scope: 'extra', trusted: true });
+    if (this.installedDir) roots.push({ root: resolve(this.installedDir()), scope: 'installed', trusted: false, deny: BUILTIN_TYPE_IDS });
     if (this.builtinDir) roots.push({ root: resolve(this.builtinDir), scope: 'builtin', trusted: true, allow: BUILTIN_TYPE_IDS });
     return roots;
   }
@@ -363,6 +484,7 @@ export class TypeRegistry extends EventEmitter<{ changed: [] }> {
     for (const name of names.sort()) {
       if (name.startsWith('.')) continue;
       if (where.allow && !where.allow.includes(name)) continue;
+      if (where.deny?.includes(name)) continue;
       const dir = join(where.root, name);
       try {
         if (!statSync(dir).isDirectory()) continue;

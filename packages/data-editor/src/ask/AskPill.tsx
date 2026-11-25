@@ -2,7 +2,8 @@
  * The selection pill: over selected text (or a picked piece), "Ask the
  * agent", Edit (when the text is one editable run of words) and "See where
  * this comes from" (when the text shows source data). Escape dismisses it for
- * that selection; Tab walks its buttons from where focus was and back.
+ * that selection; Tab walks its buttons from where focus was and back, and
+ * the arrow keys, Home and End move between them.
  * Touch and pen selections get no pill.
  */
 
@@ -14,6 +15,7 @@ import { ASK_AGENT_LABEL } from '../drafts/words.ts';
 import { intersectsVertically, type Box } from '../edit/geometry.ts';
 import { EDIT_PILL_LABEL, EDIT_PILL_TITLE, SELECTION_ACTIONS, SOURCE_INSPECT_LABEL } from '../edit/labels.ts';
 import { hasOpenOverlay } from '../edit/marks.tsx';
+import { getToolbarKeyTarget } from '@open-artifact/editor-kit';
 import { findWordsRange, getScrollContainer, getViewportRoom } from '../edit/pieces.ts';
 import {
   describeElementPoint,
@@ -279,6 +281,20 @@ export function AskPill({ root, off, picked = null, picks = 0, pickedAt = noPick
     pill.style.top = `${place.top}px`;
     setPlaced(place.placed);
   }, [visible, canAsk]);
+
+  // Arrow keys, Home and End move focus among the pill's buttons once one of them has it.
+  useEffect(() => {
+    const moveFocus = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      const pillButtons = [...(pillRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled)') ?? [])];
+      const to = getToolbarKeyTarget(event.key, pillButtons.indexOf(document.activeElement as HTMLElement), pillButtons.length);
+      if (to === null) return;
+      event.preventDefault();
+      pillButtons[to]?.focus();
+    };
+    if (shown) window.addEventListener('keydown', moveFocus, true);
+    return () => window.removeEventListener('keydown', moveFocus, true);
+  }, [shown]);
 
   if (visible === null || off) return null;
   const data = visible.data;

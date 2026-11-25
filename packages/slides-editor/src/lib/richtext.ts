@@ -33,7 +33,8 @@ export function runsToHtml(runs: readonly Run[]): string {
     if (m?.u) inner = `<u>${inner}</u>`;
     if (m?.i) inner = `<i>${inner}</i>`;
     if (m?.b) inner = `<b>${inner}</b>`;
-    if (m?.color) inner = `<span style="color:${escape(m.color)}">${inner}</span>`;
+    const span = [m?.color ? `color:${escape(m.color)}` : '', m?.regular && !m.b ? 'font-weight:400' : ''].filter(Boolean);
+    if (span.length) inner = `<span style="${span.join(';')}">${inner}</span>`;
     if (m?.href) inner = `<a href="${escape(m.href)}">${inner}</a>`;
     html += inner;
   }
@@ -96,6 +97,7 @@ function marksOf(el: HTMLElement, marks: Marks): Marks {
     case 'B':
     case 'STRONG':
       next.b = true;
+      delete next.regular;
       break;
     case 'I':
     case 'EM':
@@ -122,8 +124,13 @@ function marksOf(el: HTMLElement, marks: Marks): Marks {
       if (color) next.color = color;
     }
     const weight = style.fontWeight;
-    if (weight === 'bold' || Number(weight) >= 600) next.b = true;
-    else if (weight === 'normal' || (weight && Number(weight) < 600)) delete next.b;
+    if (weight === 'bold' || Number(weight) >= 600) {
+      next.b = true;
+      delete next.regular;
+    } else if (weight === 'normal' || Number(weight) === 400) {
+      next.regular = true;
+      delete next.b;
+    } else if (weight && Number(weight) < 600) delete next.b;
     if (style.fontStyle === 'italic') next.i = true;
     else if (style.fontStyle === 'normal') delete next.i;
     if (/underline/.test(style.textDecoration || style.textDecorationLine || '')) next.u = true;
@@ -226,9 +233,11 @@ export function readBlocks(el: HTMLElement, previous: readonly TextBlock[]): Tex
     loose.push(child);
   });
   flushLoose();
-  // Keep the style of blocks that are still in their place.
+  // Keep the style of blocks that are still in their place, and a list's markers while its kind stays.
   return blocks.map((block, i) => {
     const before = previous[i];
-    return before && before.kind === block.kind ? ({ ...block, style: before.style } as TextBlock) : block;
+    if (!before || before.kind !== block.kind) return block;
+    if (before.kind === 'list' && block.kind === 'list' && before.tag === block.tag) return { ...before, items: block.items };
+    return { ...block, style: before.style } as TextBlock;
   });
 }

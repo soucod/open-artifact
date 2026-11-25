@@ -51,6 +51,7 @@ use crate::session::edits::objects::{is_well_formed, LONGEST_DROPDOWN_OPTION, MO
 use crate::session::place;
 use crate::shown::shown;
 use crate::value::Value;
+use crate::workbook::grid::CellForm;
 use crate::workbook::formats::{blocks, id_order, sorted_runs, Leaf};
 use crate::workbook::load::{CellToSet, CellsToFormat, Op};
 use crate::workbook::objects::{DropdownOption, DropdownToSet};
@@ -403,38 +404,47 @@ pub fn plan(workbook: &Workbook, table: &TableIntoSheet, code: &str) -> Result<P
                             .clone()
                             .find(|o| o.label.to_lowercase() == lower)
                             .or_else(|| all.clone().find(|o| o.label.to_lowercase() == raw));
-                        let option = match found {
-                            Some(o) => o.clone(),
-                            None => {
-                                // A new option's label is checked as it is made, and then how many the dropdown
-                                // holds.
-                                if trimmed.chars().count() > LONGEST_DROPDOWN_OPTION {
-                                    return Err(Refused::Because("dropdownOptionTooLong"));
+                        // A text no option could be made of is left in a cell holding it already (case aside).
+                        let unfit = found.is_none()
+                            && (trimmed.chars().count() > LONGEST_DROPDOWN_OPTION || trimmed.chars().any(char::is_control));
+                        let holds = matches!(old, Some(Input::Text { value })
+                            if value.to_lowercase() == lower || value.to_lowercase() == raw);
+                        if unfit && holds {
+                            old.cloned()
+                        } else {
+                            let option = match found {
+                                Some(o) => o.clone(),
+                                None => {
+                                    // A new option's label is checked as it is made, and then how many the dropdown
+                                    // holds.
+                                    if trimmed.chars().count() > LONGEST_DROPDOWN_OPTION {
+                                        return Err(Refused::Because("dropdownOptionTooLong"));
+                                    }
+                                    if trimmed.chars().any(char::is_control) {
+                                        return Err(Refused::Because("dropdownOptionHoldsControlCharacter"));
+                                    }
+                                    if options.len() + added.map_or(0, |o| o.options.len()) >= MOST_OPTIONS_IN_A_DROPDOWN {
+                                        return Err(Refused::Because("tooManyDropdownOptions"));
+                                    }
+                                    let o = DropdownOption {
+                                        option_id: format!("opt_{code}.{option_count}"),
+                                        label: trimmed.to_owned(),
+                                        color: json!({"kind": "none"}),
+                                    };
+                                    option_count += 1;
+                                    match new_options.iter_mut().find(|x| x.dropdown_id == *dropdown_id) {
+                                        Some(x) => x.options.push(o.clone()),
+                                        None => new_options.push(NewOptions {
+                                            dropdown_id: dropdown_id.clone(),
+                                            column: j,
+                                            options: vec![o.clone()],
+                                        }),
+                                    }
+                                    o
                                 }
-                                if trimmed.chars().any(char::is_control) {
-                                    return Err(Refused::Because("dropdownOptionHoldsControlCharacter"));
-                                }
-                                if options.len() + added.map_or(0, |o| o.options.len()) >= MOST_OPTIONS_IN_A_DROPDOWN {
-                                    return Err(Refused::Because("tooManyDropdownOptions"));
-                                }
-                                let o = DropdownOption {
-                                    option_id: format!("opt_{code}.{option_count}"),
-                                    label: trimmed.to_owned(),
-                                    color: json!({"kind": "none"}),
-                                };
-                                option_count += 1;
-                                match new_options.iter_mut().find(|x| x.dropdown_id == *dropdown_id) {
-                                    Some(x) => x.options.push(o.clone()),
-                                    None => new_options.push(NewOptions {
-                                        dropdown_id: dropdown_id.clone(),
-                                        column: j,
-                                        options: vec![o.clone()],
-                                    }),
-                                }
-                                o
-                            }
-                        };
-                        Some(Input::DropdownOption { option_id: option.option_id, label: option.label })
+                            };
+                            Some(Input::DropdownOption { option_id: option.option_id, label: option.label })
+                        }
                     }
                 }
                 None => match &values[i][j] {
@@ -543,14 +553,14 @@ pub fn plan(workbook: &Workbook, table: &TableIntoSheet, code: &str) -> Result<P
     let taking: Vec<&Setting> = settings.iter().filter(|x| !x.grows && x.takes_new_option).collect();
     let grow: Vec<&Setting> = settings.iter().filter(|x| x.grows).collect();
     if !shrink.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&shrink), listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&shrink), form: CellForm::Auto });
     }
     // The rows that go, and first what they take with them (as deleting them does).
     if !rows_that_go.is_empty() {
         let going: HashSet<LineId> = rows_that_go.iter().copied().collect();
         ops.extend(follow::of_delete(workbook, sheet, Lines::Rows, &going));
         let mut going = rows_that_go.clone();
-        ops.push(Op::DeleteRows { sheet_id: sheet.id.clone(), rows: sorted_runs(&workbook.bases, &mut going) });
+        ops.push(Op::DeleteRows { sheet_id: sheet.id.clone(), rows: crate::ids::listed_runs::RowRuns::written(sorted_runs(&workbook.bases, &mut going)) });
     }
     for new in &new_options {
         let (_, old) = sheet.dropdowns.get(new.dropdown_id.as_str()).expect("a dropdown of the sheet");
@@ -559,10 +569,10 @@ pub fn plan(workbook: &Workbook, table: &TableIntoSheet, code: &str) -> Result<P
         ops.push(Op::SetDropdowns { sheet_id: sheet.id.clone(), dropdowns });
     }
     if !taking.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&taking), listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&taking), form: CellForm::Auto });
     }
     if !grow.is_empty() {
-        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&grow), listed: false });
+        ops.push(Op::SetCells { sheet_id: sheet.id.clone(), cells: cells_of(&grow), form: CellForm::Auto });
     }
     Ok(Plan { rows, rows_that_go, rows_not_in_the_table, new_options, ops, too_long })
 }

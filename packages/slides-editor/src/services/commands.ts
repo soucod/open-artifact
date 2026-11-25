@@ -82,6 +82,7 @@ import {
   type ZMove,
 } from '@open-artifact/slides-core';
 import { toast } from '@open-artifact/ui';
+import { targetTable, type TableTarget } from '../lib/table-target.ts';
 import { deckOrder, useDeck, type SlideEntry } from '../state/deck.ts';
 import { useView } from '../state/view.ts';
 
@@ -795,20 +796,26 @@ export function tableRemoveRefusal(table: TableNode, what: 'row' | 'column'): st
 /**
  * Adds or removes a row or column of the table at `path`. `at` is the row or
  * column it happens at (adding inserts before it; the end when omitted;
- * removing takes the last when omitted). Says what happened, or why not.
+ * removing takes the last when omitted). With `opened`, the table the menu
+ * offering the command was opened on, nothing happens if the table is no
+ * longer that one. Says what happened, or why not.
  */
-export function editTable(path: NodePath, change: 'addRow' | 'addColumn' | 'removeRow' | 'removeColumn', at?: number): void {
+export function editTable(path: NodePath, change: 'addRow' | 'addColumn' | 'removeRow' | 'removeColumn', at?: number, opened?: TableTarget): void {
   // Typing in a cell of this table ends first, and the change waits until
   // the editor has saved, so its text stays in the cell it was typed in.
   const edit = useView.getState().textEdit;
   if (edit?.cell && samePath(edit.path, path)) {
     useView.getState().endTextEdit();
-    setTimeout(() => changeTable(path, change, at), 0);
-  } else changeTable(path, change, at);
+    setTimeout(() => changeTable(path, change, at, opened), 0);
+  } else changeTable(path, change, at, opened);
 }
 
-function changeTable(path: NodePath, change: 'addRow' | 'addColumn' | 'removeRow' | 'removeColumn', at?: number): boolean {
+function changeTable(path: NodePath, change: 'addRow' | 'addColumn' | 'removeRow' | 'removeColumn', at?: number, opened?: TableTarget): boolean {
   const slide = currentSlide();
+  if (opened && !targetTable(useView.getState().current, slide, opened)) {
+    toast.add({ title: 'The table changed while the menu was open, so it was left as it is' });
+    return false;
+  }
   const node = slide ? nodeAt(slide, path) : undefined;
   if (!node || node.kind !== 'table') return false;
   const what = change === 'addRow' || change === 'removeRow' ? 'row' : 'column';

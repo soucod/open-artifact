@@ -100,6 +100,24 @@ describe('comments adapter hooks', () => {
     assert.equal(await comments.sendToAgent('gone'), false);
   });
 
+  it('sends every open thread at once, with one notice', async () => {
+    const notices: string[] = [];
+    const comments = createComments(adapter({ notify: (m) => void notices.push(m.title) }));
+    const fake = fakeCapability([thread('t1', 'A'), thread('t2', 'B'), thread('t3', 'C')]);
+    // Each send stays pending until all three have started: one after another, this would never finish.
+    const started: Array<() => void> = [];
+    const send = fake.capability.sendToAgent;
+    fake.capability.sendToAgent = (id) =>
+      new Promise<void>((go) => {
+        started.push(go);
+        if (started.length === 3) for (const next of started) next();
+      }).then(() => send(id));
+    await comments.start(fake.capability);
+    await comments.sendAllToAgent();
+    assert.deepEqual(fake.calls, ['send t1', 'send t2', 'send t3']);
+    assert.equal(notices.length, 1, 'one "Sent to" notice for all of them');
+  });
+
   it('tells the adapter of every thread it hears of, until stopped', async () => {
     const heard: string[] = [];
     const comments = createComments(adapter({ heard: (threads) => void heard.push(threads.map((t) => t.id).join(',')) }));

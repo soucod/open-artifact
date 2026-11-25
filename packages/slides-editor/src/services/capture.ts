@@ -78,6 +78,8 @@ export interface CaptureContext {
   onFallback?: () => void;
   /** Called for each picture that could not be read. */
   onMissingPicture?: (src: string) => void;
+  /** Called with the font families still loading when a slide had to be drawn without them. */
+  onLateFonts?: (families: string[]) => void;
 }
 
 /** A slide rendered offscreen. */
@@ -109,7 +111,7 @@ function refit(root: HTMLElement, slide: Slide): void {
 }
 
 /** Renders a slide offscreen and waits until it is fully drawn. */
-export async function mountSlide(slide: Slide, context: Pick<CaptureContext, 'resolveSrc' | 'faces' | 'onMissingEmbed'>, captureEmbeds = true): Promise<MountedSlide> {
+export async function mountSlide(slide: Slide, context: Pick<CaptureContext, 'resolveSrc' | 'faces' | 'onMissingEmbed' | 'onLateFonts'>, captureEmbeds = true): Promise<MountedSlide> {
   installSlideStyles();
   syncDeckFonts(context.faces, context.resolveSrc);
   const host = document.createElement('div');
@@ -144,7 +146,8 @@ export async function mountSlide(slide: Slide, context: Pick<CaptureContext, 're
     if ((await embedStillsReady(root)).includes(false)) context.onMissingEmbed?.();
   }
   await picturesReady(root, IMAGE_TIMEOUT);
-  await fontsReady(document, FONT_TIMEOUT);
+  const late = await fontsReady(document, FONT_TIMEOUT);
+  if (late.length) context.onLateFonts?.(late);
   // Fonts and pictures change sizes: settle, refit, settle.
   await wait(20);
   refit(root, slide);

@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/slides-editor",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The Slides artifact editor: slide rail, stage, grid and canvas views, properties, speaker notes, presenting and exports.",
@@ -9,14 +9,14 @@
     "dev": "vite"
   },
   "dependencies": {
-    "@open-artifact/canvas-engine": "0.9.2",
-    "@open-artifact/design-system-core": "0.9.2",
-    "@open-artifact/editor-kit": "0.9.2",
-    "@open-artifact/export-kit": "0.9.2",
-    "@open-artifact/runtime": "0.9.2",
-    "@open-artifact/slides-core": "0.9.2",
-    "@open-artifact/ui": "0.9.2",
-    "@open-artifact/wasm-export": "0.9.2",
+    "@open-artifact/canvas-engine": "0.14.6",
+    "@open-artifact/design-system-core": "0.14.6",
+    "@open-artifact/editor-kit": "0.14.6",
+    "@open-artifact/export-kit": "0.14.6",
+    "@open-artifact/runtime": "0.14.6",
+    "@open-artifact/slides-core": "0.14.6",
+    "@open-artifact/ui": "0.14.6",
+    "@open-artifact/wasm-export": "0.14.6",
     "dom-to-svg": "^0.12.2"
   },
   "license": "Apache-2.0"

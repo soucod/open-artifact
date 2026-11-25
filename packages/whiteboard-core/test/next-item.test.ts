@@ -8,7 +8,9 @@ import {
   isArrowEndOfferCurrent,
   isCenteredInside,
   placeBoxAtAnchor,
+  placeNextItemAtSide,
   placeNextItemBeside,
+  sideDotHasRoom,
 } from '../src/next-item.ts';
 import type { ArrowElement, BoardElement, ShapeElement } from '../src/schema.ts';
 
@@ -113,5 +115,41 @@ describe('next-item offer', () => {
     assert.equal(isArrowEndOfferCurrent(offer, [source, moved]), false);
     assert.equal(isArrowEndOfferCurrent(offer, [source]), false);
     assert.equal(isArrowEndOfferCurrent(offer, [...elements, shape('n', 470, 0)]), false);
+  });
+});
+
+describe('side dot next item', () => {
+  it('goes beside the item when the spot is clear', () => {
+    const from = shape('s', 0, 0);
+    const placed = placeNextItemAtSide(from, shape('n', 0, 0), 'right', [from]);
+    assert.deepEqual([placed?.x, placed?.y], [100 + 48, 0]);
+  });
+
+  it('goes below when the side is taken, and nowhere when both are', () => {
+    const from = shape('s', 0, 0);
+    const right = shape('r', 160, 0);
+    const below = placeNextItemAtSide(from, shape('n', 0, 0), 'right', [from, right]);
+    assert.deepEqual([below?.x, below?.y], [0, 60 + 48]);
+    const under = shape('u', 0, 120);
+    assert.equal(placeNextItemAtSide(from, shape('n', 0, 0), 'right', [from, right, under]), undefined);
+  });
+
+  it('does not step past items in the way', () => {
+    const from = shape('s', 0, 0);
+    const under = shape('u', 0, 120);
+    assert.equal(placeNextItemAtSide(from, shape('n', 0, 0), 'bottom', [from, under]), undefined);
+  });
+
+  it('has room unless a note, shape, section edge or sticker is within reach of the dot', () => {
+    const from = shape('s', 0, 0);
+    const dot = { x: 112, y: 30 };
+    assert.equal(sideDotHasRoom(from, dot.x, dot.y, 10, [from]), true);
+    assert.equal(sideDotHasRoom(from, dot.x, dot.y, 10, [from, shape('b', 120, 0)]), false);
+    const text: BoardElement = { type: 'text', id: 't', x: 115, y: 20, text: 'hi', size: 'body', color: 'ink' };
+    assert.equal(sideDotHasRoom(from, dot.x, dot.y, 10, [from, text]), true);
+    const section: BoardElement = { type: 'container', id: 'c', x: -100, y: -100, w: 400, h: 300, color: 'white', text: '' };
+    assert.equal(sideDotHasRoom(from, dot.x, dot.y, 10, [section, from]), true);
+    const tight: BoardElement = { ...section, w: 220 };
+    assert.equal(sideDotHasRoom(from, dot.x, dot.y, 10, [tight, from]), false);
   });
 });

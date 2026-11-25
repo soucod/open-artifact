@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Team poll</title>
+<link rel="stylesheet" href="artifact-type/style.css">
+</head>
+<body data-version="1.0.0">
+<!-- A synthetic page-kind type for e2e/host-types.test.mjs: a poll with db rules (anyone who can view votes; only an
+     editor changes the question), a file beside it, and hooks the test calls from the page's own frame. -->
+<h1>Team poll <small id="version">1.0.0</small></h1>
+<p id="question"></p>
+<p id="status">Starting…</p>
+<ul id="votes"></ul>
+<output id="me"></output>
+<script>
+// artifact.json
+var key = "team-poll";
+var capabilities = { "db": { "rules": [{ "path": "votes", "write": "view" }] }, "comments": {}, "user": {} };
+var monitoring = {};
+// end of artifact.json
+
+  (async () => {
+    const status = document.getElementById('status');
+    const oa = window.openArtifact;
+    const db = await oa.use('db');
+    const user = await oa.use('user');
+    if (!db) {
+      status.textContent = 'no db';
+      return;
+    }
+    const votes = db.collection('votes');
+    votes.onSnapshot((snap) => {
+      document.getElementById('votes').innerHTML = snap.docs.map((d) => `<li data-vote="${d.id}">${d.data().choice}</li>`).join('');
+    });
+    db.collection('config').doc('main').onSnapshot((doc) => {
+      document.getElementById('question').textContent = doc.exists ? doc.data().question : '(no question)';
+    });
+    document.getElementById('me').textContent = JSON.stringify(user ? { owner: await user.isOwner(), canEdit: await user.canEdit() } : null);
+    const attempt = (run) => run().then(() => 'ok', (error) => error.code || String(error.message || error));
+    // What the test calls in this frame: each answers 'ok' or the error's code.
+    window.pageTest = {
+      vote: (id, choice) => attempt(() => votes.doc(id).set({ choice })),
+      ask: (question) => attempt(() => db.collection('config').doc('main').set({ question })),
+      comments: async () => (await oa.use('comments')) !== null,
+      style: () => getComputedStyle(document.body).fontFamily,
+      reach: (url) => fetch(url, { credentials: 'omit' }).then((r) => r.status, () => 'blocked'),
+    };
+    status.textContent = 'ready';
+  })().catch((err) => {
+    document.getElementById('status').textContent = `failed: ${err.code || err.message}`;
+  });
+</script>
+</body>
+</html>

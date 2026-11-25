@@ -1,5 +1,5 @@
 /**
- * Types shared by frame-host's server (index.ts), the inner shell
+ * Types shared by the frame core (core.ts, local.ts), the inner shell
  * (client/shell.ts) and the Frame Runtime injected into the page
  * (client/runtime.ts). Types only: the client scripts are plain scripts with
  * no imports at run time.
@@ -46,8 +46,11 @@ export interface FrameSession {
   /** The artifact files' manifest version (the `/_f/<ver>/` segment). */
   ver: string;
   contract: Contract;
+  /** The page's origin for this viewer (on a site, it carries the page's read-only token). */
   contentOrigin: string;
   shellOrigin: string;
+  /** The outer Shells besides a loopback one the inner shell may speak to (`FrameOrigins.outer`); absent: none. */
+  outerOrigins?: string[];
   /** The broker generation: calls stamped with another one are not run. */
   brokerGen: number;
   grants: string[];
@@ -59,10 +62,17 @@ export interface FrameSession {
   capabilities: Record<string, unknown>;
   flags: Record<string, boolean>;
   readyTimeoutS: number;
+  /** The page frame's `sandbox`, for a restricted type (installed, or a project not trusted yet); absent: none. */
+  sandbox?: string;
   me: LocalUser;
   comments: { available: boolean; count: number };
   /** wakesIdle false: an idle agent is not woken; what is sent waits for its next turn. */
   agent: { available: boolean; name: string | null; wakesIdle?: boolean };
+  /**
+   * The view of a `snapshot` on this computer (frame-host's headless Chrome): it reads only, shows no toast, and does
+   * not wait out the usual deadlines before it says what it shows is final. Absent: an ordinary view.
+   */
+  snapshot?: boolean;
 }
 
 export interface LocalUser {
@@ -98,7 +108,7 @@ export type CapReply = { result: unknown; error?: undefined } | { error: CapErro
 export type FrameEvent =
   | { t: 'hello'; ver: string; brokerGen: number; peers: Peer[]; count: number }
   | { t: 'db'; paths: string[] }
-  | { t: 'room'; topic: string; data: unknown; from: string; by: string }
+  | { t: 'room'; topic: string; data: unknown; from: string; by: string | null }
   | { t: 'peers'; peers: Peer[] }
   | { t: 'files'; ver: string; paths: string[]; from?: string }
   | { t: 'comments'; count: number }
@@ -107,7 +117,9 @@ export type FrameEvent =
 
 export interface Peer {
   peer: string;
-  by: string;
+  /** The viewer's id, when the declaration has `user`; else null. */
+  by: string | null;
+  /** The viewer's name under the `profile` scope; else ''. */
   name: string;
   presence: Record<string, unknown>;
   kind: 'user';

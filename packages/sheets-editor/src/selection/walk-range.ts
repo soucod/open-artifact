@@ -38,11 +38,11 @@ export function walkWithinSelection(state: PageState, reads: ReadsWithTextMeasur
   let activeArea = mergedAreaOrCellOf(reads, state.activeCell);
   if (area === null || position === null || activeArea === null) return null;
   if (isSameArea(area, activeArea)) return null;
-  let { from: from, to: to } = state.rangeWalked ?? {
+  let { from, to } = state.rangeWalked ?? {
     from: state.activeCell,
     to: state.selectionCorner,
   };
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(state, reads);
+  let { rowEdges, columnEdges } = layoutOfView(state, reads);
   let next: CellPosition = shownPositionInMerge(state, reads, position);
   for (let stepsLeft = area.rowCount * area.columnCount; stepsLeft > 0; stepsLeft -= 1) {
     next = nextPositionWithinArea(area, next, move);
@@ -64,22 +64,22 @@ export function walkWithinSelection(state: PageState, reads: ReadsWithTextMeasur
         : reads.cellIdAt(state.sheetId, target.rowIndex, target.columnIndex);
     if (cellId !== null)
       return {
-        from: from,
-        to: to,
+        from,
+        to,
         at: cellId,
       };
   }
   return null;
 }
-export function withRangeWalked(rangeWalked: RangeWalked, { state: state, effects: effects }: PageTransition): PageTransition | null {
-  let { at: at } = rangeWalked;
+export function withRangeWalked(rangeWalked: RangeWalked, { state, effects }: PageTransition): PageTransition | null {
+  let { at } = rangeWalked;
   if (isSameCell(state.activeCell, at))
     return {
       state: {
         ...state,
-        rangeWalked: rangeWalked,
+        rangeWalked,
       },
-      effects: effects,
+      effects,
     };
   let selectsAt = (effect: PageEffect): boolean => {
     let select = effect.kind === 'queueEdit' ? effect.ifQueued.select : null;
@@ -96,14 +96,14 @@ export function withRangeWalked(rangeWalked: RangeWalked, { state: state, effect
               ...effect.ifQueued,
               select: {
                 ...selectionAtCell(at),
-                rangeWalked: rangeWalked,
+                rangeWalked,
               },
             },
           }
         : effect,
   );
   return {
-    state: state,
+    state,
     effects: mapped,
   };
 }

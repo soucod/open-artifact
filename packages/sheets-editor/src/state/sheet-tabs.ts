@@ -6,7 +6,7 @@ import type { PageTransition } from './transitions.ts';
 import type { FormulasReadingSheet, Place } from './places.ts';
 import type { ChartNodeCopies } from './copy-paste.ts';
 import { selectedArea } from '../selection/model.ts';
-import { firstPlaceInSheet, formulasReadingSheet } from './places.ts';
+import { firstPlaceInSheet, formulasReadingSheet, interactiveOfSheet } from './places.ts';
 import { findSheetById, clampScrollOfView } from '../grid/layout.ts';
 import { clearPassingNotice, withNoEffects } from './transitions.ts';
 import { queueEdit, IF_QUEUED_PLACE_CHANGED, IF_QUEUED_DEFAULTS } from '../model/edit-effects.ts';
@@ -21,15 +21,15 @@ export function showSheet(state: PageState, workbook: ReadsWithTextMeasurer, she
   let place = placeLeft !== undefined && selectedArea(placeLeft, workbook) !== null ? placeLeft : firstPlaceInSheet(workbook, sheetId);
   let sheetName = findSheetById(workbook, sheetId)?.name;
   if (place === null || sheetName === undefined) return state;
-  let { activeCell: activeCell, selectionCorner: selectionCorner, scrollLeft: scrollLeft, scrollTop: scrollTop } = state;
+  let { activeCell, selectionCorner, scrollLeft, scrollTop } = state;
   let placeLeaving: Place = {
     sheetId: state.sheetId,
-    activeCell: activeCell,
-    selectionCorner: selectionCorner,
-    scrollLeft: scrollLeft,
-    scrollTop: scrollTop,
+    activeCell,
+    selectionCorner,
+    scrollLeft,
+    scrollTop,
   };
-  let shownState = {
+  let shownState: PageState = {
     ...clearPassingNotice(state),
     ...place,
     placesLeft: [...state.placesLeft.filter((placeKept: Place) => placeKept !== placeLeft && placeKept.sheetId !== state.sheetId), placeLeaving],
@@ -46,15 +46,21 @@ export function showSheetAtOffset(state: PageState, workbook: ReadsWithTextMeasu
   let sheet: SheetSummary | undefined = sheets[sheets.findIndex((listed: SheetSummary) => listed.sheetId === state.sheetId) + offset];
   return sheet === undefined ? state : showSheet(state, workbook, sheet.sheetId);
 }
-export function finishDuplicateSheet(state: PageState, { sheetId: sheetId, name: name }: DuplicateOfSheet, copiedNodes: ChartNodeCopies): PageTransition {
-  if (copiedNodes === 'notNow')
+export function finishDuplicateSheet(
+  state: PageState,
+  workbook: WorkbookReads,
+  { sheetId, name }: DuplicateOfSheet,
+  copiedNodes: ChartNodeCopies,
+): PageTransition {
+  let hasInteractive = interactiveOfSheet(workbook, sheetId) !== null;
+  if (copiedNodes === 'notNow' || (copiedNodes === 'never' && hasInteractive))
     return {
       state: {
         ...state,
         lastDone: null,
         notice: {
           kind: 'editRefused',
-          why: 'chartsNotCopied',
+          why: hasInteractive ? (copiedNodes === 'notNow' ? 'interactiveNotCopied' : 'interactiveNeverCopied') : 'chartsNotCopied',
           asked: 'duplicateOfSheet',
         },
       },
@@ -77,9 +83,9 @@ export function finishDuplicateSheet(state: PageState, { sheetId: sheetId, name:
     state,
     {
       kind: 'duplicateSheet',
-      sheetId: sheetId,
-      name: name,
-      placedViews: placedViews,
+      sheetId,
+      name,
+      placedViews,
     },
     {
       ...IF_QUEUED_PLACE_CHANGED,
@@ -102,27 +108,27 @@ export function duplicateSheet(
   state: PageState,
   workbook: WorkbookReads,
   sheetId: SheetId,
-  { beforeName: beforeName, afterName: afterName }: SheetDuplicateChosen['wordsAroundName'],
+  { beforeName, afterName }: SheetDuplicateChosen['wordsAroundName'],
 ): PageTransition {
   let sheetName = findSheetById(workbook, sheetId)?.name;
   if (sheetName === undefined) return withNoEffects(state);
   let mostCharacters =
     workbook.longestSheetNameInCharacters() - Array.from<string>(`${beforeName}${afterName}`).length - DUPLICATE_NAME_SLACK;
   let keptName: string = '';
-  for (let { segment: segment } of new Intl.Segmenter().segment(sheetName)) {
+  for (let { segment } of new Intl.Segmenter().segment(sheetName)) {
     if (Array.from<string>(`${keptName}${segment}`).length > mostCharacters) break;
     keptName += segment;
   }
   let duplicate: DuplicateOfSheet = {
     kind: 'duplicateOfSheet',
-    sheetId: sheetId,
+    sheetId,
     name: `${beforeName}${keptName.trimEnd()}${afterName}`,
   };
   return copyChartNodesThen(
     state,
     chartNodesOfSheet(workbook, sheetId),
     duplicate,
-    (copiedNodes: ChartNodeCopies) => finishDuplicateSheet(state, duplicate, copiedNodes),
+    (copiedNodes: ChartNodeCopies) => finishDuplicateSheet(state, workbook, duplicate, copiedNodes),
   );
 }
 export function deleteSheet(state: PageState, workbook: WorkbookReads, sheetId: SheetId): PageTransition {
@@ -134,20 +140,20 @@ export function deleteSheet(state: PageState, workbook: WorkbookReads, sheetId: 
     name: sheetName,
     isSaved: false,
     ...(readBy !== null && {
-      readBy: readBy,
+      readBy,
     }),
   };
   return queueEdit(
     state,
     {
       kind: 'deleteSheet',
-      sheetId: sheetId,
+      sheetId,
     },
     {
       ...IF_QUEUED_DEFAULTS,
       select: null,
       done: null,
-      undoOffer: undoOffer,
+      undoOffer,
     },
   );
 }
@@ -157,7 +163,7 @@ export function startRenamingSheet(state: PageState, workbook: WorkbookReads, sh
   return {
     ...state,
     sheetBeingRenamed: {
-      sheetId: sheetId,
+      sheetId,
       nameWhenOpened: name,
       typed: name,
       refused: null,
@@ -168,7 +174,7 @@ export function startRenamingSheet(state: PageState, workbook: WorkbookReads, sh
 }
 export function finishRenamingSheet(state: PageState, workbook: WorkbookReads, isLeaving: boolean): PageTransition {
   if (state.sheetBeingRenamed === null) return withNoEffects(state);
-  let { sheetId: sheetId, nameWhenOpened: nameWhenOpened, typed: typed, refused: refused } = state.sheetBeingRenamed;
+  let { sheetId, nameWhenOpened, typed, refused } = state.sheetBeingRenamed;
   let stateClosed: PageState = {
     ...state,
     sheetBeingRenamed: null,
@@ -187,7 +193,7 @@ export function finishRenamingSheet(state: PageState, workbook: WorkbookReads, i
     isLeaving ? stateClosed : state,
     {
       kind: 'renameSheet',
-      sheetId: sheetId,
+      sheetId,
       name: cleanName,
     },
     {
@@ -207,13 +213,15 @@ export const addSheetAfter = (state: PageState, nameStem: string): PageTransitio
     {
       kind: 'addSheet',
       afterSheet: state.sheetId,
-      nameStem: nameStem,
+      nameStem,
     },
     IF_QUEUED_PLACE_CHANGED,
   );
 export const DUPLICATE_NAME_SLACK = 4;
 export const chartNodesOfSheet = (workbook: WorkbookReads, sheetId: SheetId): string[] =>
-  workbook.placementsIn(sheetId).flatMap(({ viewId: viewId }: PlacementOnGrid) => embedRefsOfView(workbook.viewAsItStands(viewId)));
+  [...workbook.placementsIn(sheetId).map(({ viewId }: PlacementOnGrid) => viewId), ...[findSheetById(workbook, sheetId)?.interactive ?? []].flat()].flatMap(
+    (viewId: string) => embedRefsOfView(workbook.viewAsItStands(viewId)),
+  );
 export const hasOtherSheetWithCells = (workbook: WorkbookReads, sheetId: SheetId): boolean =>
   workbook.listSheets().some((sheet: SheetSummary) => sheet.sheetId !== sheetId && sheet.rowCount > 0 && sheet.columnCount > 0);
 export const markUndoOfferSaved = (undoOffer: UndoOffer | null, saving: SavingState): UndoOffer | null =>
@@ -243,7 +251,7 @@ export interface SheetShownDone {
 /** The notice that a sheet is not duplicated, for its charts could not be copied now. */
 export interface DuplicateRefusedNotice {
   kind: 'editRefused';
-  why: 'chartsNotCopied';
+  why: 'chartsNotCopied' | 'interactiveNotCopied' | 'interactiveNeverCopied';
   asked: 'duplicateOfSheet';
 }
 /** The offer to undo the deletion of a sheet, and the formulas that read it. */

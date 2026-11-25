@@ -1,8 +1,9 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { DecimalSignName, SheetId, StoredFormula } from '@open-artifact/sheets-core';
 import { isNonNullObject } from '../utils/objects.ts';
 import { upperCaseAsciiLetters, tokenizeFormulaWithReferences } from './tokenizer.ts';
 import { A1_CELL_PATTERN, normalizeA1Reference, parseA1AreaAsSeen, columnLetters } from '../model/a1-references.ts';
 import { splitConditionalFormatBrief, taggedJson } from '../format/conditional/agent-prompts.ts';
+import type { AgentPrompt } from '../format/conditional/agent-prompts.ts';
 import { isFunctionCallAt } from './agent-answer-checks.ts';
 import { areaOfReference } from '../model/reference-areas.ts';
 import { areaToA1AsStored } from './from-words/where.ts';
@@ -12,40 +13,116 @@ import { isOverByteLimit, isPromptDataTooLong, cleanTextForAgent } from '../agen
 import { findFormulaReferences, resolveFormulaReference } from './references.ts';
 import { FUNCTION_CATALOG } from './function-catalog.ts';
 import { ARRAY_FUNCTION_NAMES } from './agent-prompt-values.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function parseJsonObject(text?: Dynamic) {
+import type { CellId, CellOnShow, SheetSummary, WorkbookReads } from '../model/workbook.ts';
+import type { CellArea, CellPosition } from '../selection/model.ts';
+
+/** How many rows of a table's records to tell at each end, and the most bytes they may take. */
+export interface EndsToTell {
+  atEachEnd: number;
+  mostBytes: number;
+}
+/** What the agent is told of a formula: the first function it calls and the cells of its sheet it reads. */
+export interface FormulaToldToAgent {
+  calls: string | null;
+  reads: string[];
+  /** There, and true, when the formula reads more than `reads` lists. */
+  more?: true;
+}
+/** What the agent is told a cell holds. */
+export type HoldsToldToAgent = FormulaToldToAgent | string | number | boolean;
+/** A row as the agent is told it: its number, and what its cells hold by the letters of their columns. */
+export interface RowToldToAgent {
+  row: number;
+  holds: { [letters: string]: HoldsToldToAgent };
+}
+/** What the agent is told of a block of filled cells, as read from the sheet's `<sheet>` data. */
+export interface TableTold {
+  headerRow: number | null;
+  records: unknown;
+  /** The table's sections, from the top, when it stands in two or more of them. */
+  sections?: SectionTold[];
+  /** The table's rows of totals under its records. */
+  footer?: RowToldToAgent[];
+  columns: unknown[];
+  columnsLeftOut: unknown;
+}
+/** One section of a table that stands in sections under one another. */
+export interface SectionTold {
+  heading?: string;
+  headingRow?: number;
+  records: string;
+  lastRow: RowToldToAgent | null;
+}
+/** What rows among a table's records are, when they are no records. */
+export type NoRecordKind = 'blank' | 'sectionLabel' | 'subtotal';
+/** Rows among a table's records that are no records. */
+export interface NoRecordRows {
+  cells: CellArea;
+  are: NoRecordKind;
+}
+/** A run of a table's records between rows that are no records. */
+export interface SectionOfRecords {
+  records: CellArea;
+  /** The row of the section's label over it, if it has one. */
+  headingRowIndex: number | null;
+  endsInASubtotal: boolean;
+}
+/** A block of filled cells near the cell the agent writes for, and what it is told of the block. */
+export interface ToldBlock {
+  /** The block with its header row. */
+  area: CellArea;
+  /** The block's cells under its header row. */
+  records: CellArea;
+  /** The rows among the records that are no records. */
+  noRecords: NoRecordRows[];
+  /** The rows of totals under the records. */
+  footer: CellArea | null;
+  /** The letters of the columns the agent is told of. */
+  lettersTold: Set<string>;
+  told: TableTold;
+}
+/** The blocks found near a cell, and the day the sheet's data was read for. */
+export interface BlocksNear {
+  blocks: ToldBlock[];
+  today: unknown;
+}
+/** What the rules for writing a formula are told of where it goes. */
+export interface SheetNotes {
+  isBesideARecord: boolean;
+}
+export function parseJsonObject(text: string | undefined): Record<PropertyKey, unknown> | null {
   try {
-    let parsed = JSON.parse(text ?? '');
+    let parsed: unknown = JSON.parse(text ?? '');
     return isNonNullObject(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
-export function namesAddressesOutsideTables(formula?: Dynamic, told?: Dynamic) {
+export function namesAddressesOutsideTables(typed: string, told: string): boolean {
   let tables = asArray(
     parseJsonObject(
       told.split(`
 `)[1],
     )?.tables,
   ).filter(isNonNullObject);
-  let columns = tables.flatMap((input?: Dynamic) => asArray(input.columns)).filter(isNonNullObject);
-  let atTheEnds = tables.flatMap((input?: Dynamic) => asArray(input.atTheEnds)).filter(isNonNullObject);
+  let columns = tables.flatMap((table) => asArray(table.columns)).filter(isNonNullObject);
+  let atTheEnds = tables.flatMap((table) => asArray(table.atTheEnds).concat(asArray(table.footer))).filter(isNonNullObject);
   let toldTexts = [
-    columns.map((input?: Dynamic) => input.name),
-    columns.flatMap((input?: Dynamic) => asArray(input.commonest)),
-    atTheEnds.flatMap(({ holds: holds }: Dynamic) => (isNonNullObject(holds) ? Object.values(holds) : [])),
+    columns.map((column) => column.name),
+    columns.flatMap((column) => asArray(column.commonest)),
+    atTheEnds.flatMap(({ holds }) => (isNonNullObject(holds) ? Object.values(holds) : [])),
   ]
     .flat()
-    .filter((input?: Dynamic) => typeof input === 'string');
-  let toldWords = new (Set as Dynamic)(toldTexts.flatMap((input?: Dynamic) => upperCaseAsciiLetters(input).split(/[^A-Z0-9]+/)));
-  let addresses = formula
+    .filter((toldValue) => typeof toldValue === 'string');
+  let toldWords = new Set(toldTexts.flatMap((text) => upperCaseAsciiLetters(text).split(/[^A-Z0-9]+/)));
+  let addresses = typed
     .split(/[^A-Za-z0-9$]+/)
-    .filter((input?: Dynamic) => A1_CELL_PATTERN.test(input))
+    .filter((word) => A1_CELL_PATTERN.test(word))
     .map(normalizeA1Reference)
-    .filter((input?: Dynamic) => !toldWords.has(input));
-  return new (Set as Dynamic)(addresses).size > 1;
+    .filter((address) => !toldWords.has(address));
+  return new Set(addresses).size > 1;
 }
-export function isBesideARecord(formula?: Dynamic, told?: Dynamic) {
+export function isBesideARecord(cellAddress: string, told: string): boolean {
   let parsed = parseJsonObject(
     told.split(`
 `)[1],
@@ -55,38 +132,38 @@ export function isBesideARecord(formula?: Dynamic, told?: Dynamic) {
     columnCount: Number(parsed?.columnCount),
     ownRowOrder: null,
   };
-  let formulaArea = parseA1AreaAsSeen(formula, sheetSize);
+  let cellArea = parseA1AreaAsSeen(cellAddress, sheetSize);
   return asArray(parsed?.tables)
     .filter(isNonNullObject)
-    .some(({ records: records }: Dynamic) => {
+    .some(({ records }) => {
       let recordsArea = typeof records === 'string' ? parseA1AreaAsSeen(records, sheetSize) : null;
       return (
-        formulaArea !== null &&
+        cellArea !== null &&
         recordsArea !== null &&
         recordsArea.rowCount > 1 &&
-        formulaArea.topRowIndex >= recordsArea.topRowIndex &&
-        formulaArea.topRowIndex < recordsArea.topRowIndex + recordsArea.rowCount &&
-        formulaArea.leftColumnIndex >= recordsArea.leftColumnIndex - 1 &&
-        formulaArea.leftColumnIndex <= recordsArea.leftColumnIndex + recordsArea.columnCount
+        cellArea.topRowIndex >= recordsArea.topRowIndex &&
+        cellArea.topRowIndex < recordsArea.topRowIndex + recordsArea.rowCount &&
+        cellArea.leftColumnIndex >= recordsArea.leftColumnIndex - 1 &&
+        cellArea.leftColumnIndex <= recordsArea.leftColumnIndex + recordsArea.columnCount
       );
     });
 }
-export function readToldOfSheetAt(reads: WorkbookReads, activeCell?: Dynamic, selectionCorner: Dynamic = activeCell) {
-  let told = reads.conditionalFormatsAsAgentIsTold(activeCell, selectionCorner);
+export function readToldOfSheetAt(reads: WorkbookReads, cellId: CellId): Record<PropertyKey, unknown> | null {
+  let told = reads.conditionalFormatsAsAgentIsTold(cellId, cellId);
   let knownOfTheSheet = told === null ? null : (splitConditionalFormatBrief(told)?.knownOfTheSheet ?? null);
   return parseJsonObject(
     knownOfTheSheet?.split(`
 `)[1],
   );
 }
-export function describeFormulaForAgent(reads: WorkbookReads, sheetId?: Dynamic, formula?: Dynamic) {
-  let tokens2 = tokenizeFormulaWithReferences(formula);
-  let firstCall = tokens2.find((input?: Dynamic, options?: Dynamic) => isFunctionCallAt(tokens2, options));
+export function describeFormulaForAgent(reads: WorkbookReads, sheetId: SheetId, formula: StoredFormula): FormulaToldToAgent {
+  let tokens = tokenizeFormulaWithReferences(formula);
+  let firstCall = tokens.find((_, index) => isFunctionCallAt(tokens, index));
   let calls = firstCall?.kind === 'name' ? upperCaseAsciiLetters(firstCall.text) : null;
-  let sameSheetReferences = formula.references.filter((input?: Dynamic) => input.sheetId === sheetId);
-  let readAreas = new (Set as Dynamic)(
-    sameSheetReferences.flatMap((input?: Dynamic) => {
-      let area = areaOfReference(reads, input);
+  let sameSheetReferences = formula.references.filter((reference) => reference.sheetId === sheetId);
+  let readAreas = new Set(
+    sameSheetReferences.flatMap((reference) => {
+      let area = areaOfReference(reads, reference);
       return area === null ? [] : [areaToA1AsStored(area, null)];
     }),
   );
@@ -101,7 +178,7 @@ export function describeFormulaForAgent(reads: WorkbookReads, sheetId?: Dynamic,
       : {}),
   };
 }
-export function cellHoldsForAgent(reads: WorkbookReads, sheetId?: Dynamic, cell?: Dynamic) {
+export function cellHoldsForAgent(reads: WorkbookReads, sheetId: SheetId, cell: CellOnShow | null): HoldsToldToAgent | null {
   if (cell !== null && 'input' in cell) {
     if (cell.input.kind === 'formula') return describeFormulaForAgent(reads, sheetId, cell.input.formula);
     if (cell.input.kind === 'user' || cell.input.kind === 'users') return '(a person)';
@@ -112,7 +189,7 @@ export function cellHoldsForAgent(reads: WorkbookReads, sheetId?: Dynamic, cell?
   if (value.kind !== 'text') return value.value;
   return 'input' in cell ? cutToldText(value.value) : '(a text)';
 }
-export function shortTextOfCell(cell?: Dynamic) {
+export function shortTextOfCell(cell: CellOnShow | null): string | null {
   if (cell === null || !('input' in cell)) return null;
   if (cell.input.kind !== 'text' && cell.input.kind !== 'dropdownOption') return null;
   let value = cellValueOf(cell);
@@ -121,39 +198,39 @@ export function shortTextOfCell(cell?: Dynamic) {
 }
 export function rowsAtTheEnds(
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  { records: records, lettersTold: lettersTold }: Dynamic,
-  { atEachEnd: atEachEnd, mostBytes: mostBytes }: Dynamic,
-) {
-  let { topRowIndex: topRow, rowCount: rowCount, leftColumnIndex: leftColumn, columnCount: columnCount } = records;
+  sheetId: SheetId,
+  { records, lettersTold }: Pick<ToldBlock, 'records' | 'lettersTold'>,
+  { atEachEnd, mostBytes }: EndsToTell,
+): RowToldToAgent[] | null {
+  let { topRowIndex: topRow, rowCount, leftColumnIndex: leftColumn, columnCount } = records;
   let headCount = Math.min(atEachEnd, rowCount);
   let tailStart = Math.max(headCount, rowCount - headCount);
   let rowOffsets = [
-    ...Array.from<Dynamic, Dynamic>(
+    ...Array.from(
       {
         length: headCount,
       },
-      (input?: Dynamic, options?: Dynamic) => options,
+      (_, offset) => offset,
     ),
-    ...Array.from<Dynamic, Dynamic>(
+    ...Array.from(
       {
         length: rowCount - tailStart,
       },
-      (input?: Dynamic, options?: Dynamic) => tailStart + options,
+      (_, offset) => tailStart + offset,
     ),
   ];
-  let columnsTold = Array.from<Dynamic, Dynamic>(
+  let columnsTold = Array.from(
     {
       length: columnCount,
     },
-    (input?: Dynamic, options?: Dynamic) => leftColumn + options,
-  ).filter((input?: Dynamic) => lettersTold.has(columnLetters(input)));
-  let rows = rowOffsets.map((input?: Dynamic) => {
-    let rowIndex = topRow + input;
-    let holds = columnsTold.flatMap((columnIndex?: Dynamic) => {
+    (_, offset) => leftColumn + offset,
+  ).filter((columnIndex) => lettersTold.has(columnLetters(columnIndex)));
+  let rows = rowOffsets.map((rowOffset) => {
+    let rowIndex = topRow + rowOffset;
+    let holds = columnsTold.flatMap((columnIndex): [string, HoldsToldToAgent][] => {
       let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
-      let holds2 = cellId === null ? null : cellHoldsForAgent(reads, sheetId, reads.cellOnShowIn(cellId));
-      return holds2 === null ? [] : [[columnLetters(columnIndex), holds2]];
+      let cellHolds = cellId === null ? null : cellHoldsForAgent(reads, sheetId, reads.cellOnShowIn(cellId));
+      return cellHolds === null ? [] : [[columnLetters(columnIndex), cellHolds]];
     });
     return {
       row: rowIndex + 1,
@@ -164,21 +241,21 @@ export function rowsAtTheEnds(
 }
 export function withMoreCommonestTexts(
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  { topRowIndex: topRow, rowCount: rowCount, leftColumnIndex: leftColumn, columnCount: columnCount }: Dynamic,
-  column?: Dynamic,
-) {
-  let columnIndex = Array.from<Dynamic, Dynamic>(
+  sheetId: SheetId,
+  { topRowIndex: topRow, rowCount, leftColumnIndex: leftColumn, columnCount }: CellArea,
+  column: Record<PropertyKey, unknown>,
+): Record<PropertyKey, unknown> {
+  let columnIndex = Array.from(
     {
       length: columnCount,
     },
-    (input?: Dynamic, options?: Dynamic) => leftColumn + options,
-  ).find((input?: Dynamic) => columnLetters(input) === column.c);
+    (_, offset) => leftColumn + offset,
+  ).find((index) => columnLetters(index) === column.c);
   if (columnIndex === undefined) return column;
   let commonest = asArray(column.commonest);
-  let commonestKeys = new (Set as Dynamic)(commonest.map((input?: Dynamic) => lowerCaseText(String(input))));
-  let textCounts = new (Map as Dynamic)();
-  for (let rowIndex: Dynamic = topRow; rowIndex < topRow + rowCount; rowIndex += 1) {
+  let commonestKeys = new Set(commonest.map((text) => lowerCaseText(String(text))));
+  let textCounts = new Map<string, { text: string; times: number }>();
+  for (let rowIndex = topRow; rowIndex < topRow + rowCount; rowIndex += 1) {
     let cellId = reads.cellIdAt(sheetId, rowIndex, columnIndex);
     let text = cellId === null ? null : shortTextOfCell(reads.cellOnShowIn(cellId));
     let key = text === null ? null : lowerCaseText(text);
@@ -189,289 +266,234 @@ export function withMoreCommonestTexts(
     });
   }
   let counted = [...textCounts.values()];
-  counted.sort((input?: Dynamic, options?: Dynamic) => options.times - input.times);
-  let merged = [...commonest, ...counted.map(({ text: text }: Dynamic) => text)];
+  counted.sort((first, second) => second.times - first.times);
+  let merged = [...commonest, ...counted.map(({ text }) => text)];
   return {
     ...column,
     commonest: merged.slice(0, MAX_COMMONEST_TEXTS),
   };
 }
-export function rowBandsNearest(rowIndex?: Dynamic, rowCount?: Dynamic) {
+export function rowBandsNearest(rowIndex: number, rowCount: number): number[] {
   let bandCount = Math.ceil(rowCount / ROW_BAND_SIZE);
   let band = Math.min(Math.floor(rowIndex / ROW_BAND_SIZE), bandCount - 1);
-  return Array.from<Dynamic, Dynamic>(
+  return Array.from(
     {
       length: 2 * bandCount,
     },
-    (input?: Dynamic, step?: Dynamic) => band + (step % 2 === 0 ? step / 2 : -(step + 1) / 2),
+    (_, step) => band + (step % 2 === 0 ? step / 2 : -(step + 1) / 2),
   )
-    .filter((band2?: Dynamic) => band2 >= 0 && band2 < bandCount)
-    .map((band2?: Dynamic) => band2 * ROW_BAND_SIZE);
+    .filter((nearBand) => nearBand >= 0 && nearBand < bandCount)
+    .map((nearBand) => nearBand * ROW_BAND_SIZE);
 }
-export function blockOfTold(table?: Dynamic, sheet?: Dynamic) {
-  let { records: records, columns: columns, columnsLeftOut: columnsLeftOut } = table ?? {};
-  let [reference] = typeof records === 'string' ? findFormulaReferences(records, 'point').references : [];
-  let recordsArea = reference === undefined ? undefined : resolveFormulaReference(reference, sheet.sheetId, [sheet])?.area;
-  if (recordsArea === undefined || !Array.isArray(columns)) return null;
-  let hasColumnNames = columns.some((input?: Dynamic) => isNonNullObject(input) && input.name !== null);
-  let area = hasColumnNames
-    ? {
-        ...recordsArea,
-        topRowIndex: recordsArea.topRowIndex - 1,
-        rowCount: recordsArea.rowCount + 1,
-      }
-    : recordsArea;
-  let headerRow = hasColumnNames ? recordsArea.topRowIndex : null;
-  let lettersTold = new (Set as Dynamic)(
-    columns.flatMap((input?: Dynamic) => (isNonNullObject(input) && typeof input.c === 'string' ? [input.c] : [])),
+export function areaOfToldReference(text: unknown, sheet: SheetSummary): CellArea | null {
+  let [reference] = typeof text === 'string' ? findFormulaReferences(text, 'point').references : [];
+  return reference === undefined ? null : (resolveFormulaReference(reference, sheet.sheetId, [sheet])?.area ?? null);
+}
+export function blockOfTold(table: Record<PropertyKey, unknown> | null, sheet: SheetSummary): ToldBlock | null {
+  let { table: tableText, records, noRecords, footer, columns, columnsLeftOut }: Record<PropertyKey, unknown> = table ?? {};
+  let [area, recordsArea] = [areaOfToldReference(tableText, sheet), areaOfToldReference(records, sheet)];
+  if (area === null || recordsArea === null || !Array.isArray(columns)) return null;
+  let headerRow = area.topRowIndex < recordsArea.topRowIndex ? recordsArea.topRowIndex : null;
+  let lettersTold = new Set(
+    columns.flatMap((column: unknown) => (isNonNullObject(column) && typeof column.c === 'string' ? [column.c] : [])),
   );
   return {
-    area: area,
+    area,
     records: recordsArea,
-    lettersTold: lettersTold,
+    noRecords: asArray(noRecords)
+      .filter(isNonNullObject)
+      .flatMap((noRecord): NoRecordRows[] => {
+        let cells = areaOfToldReference(noRecord.cells, sheet);
+        let are = NO_RECORD_KINDS.find((kind) => kind === noRecord.are);
+        return cells === null || are === undefined
+          ? []
+          : [
+              {
+                cells,
+                are,
+              },
+            ];
+      }),
+    footer: areaOfToldReference(footer, sheet),
+    lettersTold,
     told: {
-      headerRow: headerRow,
-      records: records,
-      columns: columns,
-      columnsLeftOut: columnsLeftOut,
+      headerRow,
+      records,
+      columns,
+      columnsLeftOut,
     },
   };
 }
-export function rowHoldsAt(reads: WorkbookReads, sheetId?: Dynamic, block?: Dynamic, rowIndex?: Dynamic) {
-  let row = {
-    ...block.records,
-    topRowIndex: rowIndex,
-    rowCount: 1,
-  };
-  return (
-    rowsAtTheEnds(
-      reads,
-      sheetId,
-      {
-        ...block,
-        records: row,
-      },
-      LAST_ROW_ENDS,
-    )?.[0] ?? null
-  );
+export function blockAroundCell(reads: WorkbookReads, cellId: CellId): ToldBlock | null {
+  let sheet = reads.listSheets().find(({ sheetId }) => sheetId === cellId.sheetId);
+  return sheet === undefined ? null : blockOfTold(readToldOfSheetAt(reads, cellId), sheet);
 }
-export function describeSection(reads: WorkbookReads, sheetId?: Dynamic, block?: Dynamic, table?: Dynamic, blockAbove?: Dynamic) {
-  let { leftColumnIndex: leftColumn, columnCount: columnCount } = table.records;
-  let records = {
-    ...block.records,
-    leftColumnIndex: leftColumn,
-    columnCount: columnCount,
-  };
-  let lastRowHolds = rowHoldsAt(
-    reads,
-    sheetId,
-    {
-      ...table,
-      records: records,
-    },
-    lastRowOfArea(records),
-  );
-  let section = {
-    records: areaToA1AsStored(records, null),
-    lastRow: lastRowHolds,
-  };
-  if (blockAbove === undefined) return section;
-  let [columnName] = hasFewColumnNames(block) ? columnNamesOfBlock(block).values() : [];
-  if (typeof columnName === 'string')
-    return {
-      heading: cutToldText(columnName),
-      headingRow: block.told.headerRow,
-      ...section,
+export function sectionsOfRecords(block: ToldBlock): SectionOfRecords[] {
+  let sections: SectionOfRecords[] = [];
+  let [topRowIndex, headingRowIndex]: [number, number | null] = [block.records.topRowIndex, null];
+  let endSectionAt = (lastRowIndex: number, endsInASubtotal: boolean): void => {
+    if (lastRowIndex < topRowIndex) return;
+    let records = {
+      ...block.records,
+      topRowIndex,
+      rowCount: lastRowIndex - topRowIndex + 1,
     };
-  for (let rowIndex: Dynamic = block.area.topRowIndex - 1; rowIndex > lastRowOfArea(blockAbove.area); rowIndex -= 1) {
-    let [firstCell, ...otherCells] = reads.filledCellsIn(sheetId, {
-      topRowIndex: rowIndex,
-      leftColumnIndex: leftColumn,
-      rowCount: 1,
-      columnCount: columnCount,
+    sections.push({
+      records,
+      headingRowIndex,
+      endsInASubtotal,
     });
-    if (firstCell === undefined) continue;
-    let isInFirstColumn = reads.positionOfCell(firstCell)?.columnIndex === leftColumn;
-    let heading = otherCells.length === 0 && isInFirstColumn ? shortTextOfCell(reads.cellOnShowIn(firstCell)) : null;
-    return heading === null
-      ? section
-      : {
-          heading: heading,
-          headingRow: rowIndex + 1,
-          ...section,
-        };
+    headingRowIndex = null;
+  };
+  for (let { cells, are } of block.noRecords) {
+    endSectionAt(are === 'subtotal' ? lastRowOfArea(cells) : cells.topRowIndex - 1, are === 'subtotal');
+    if (are === 'sectionLabel') headingRowIndex = lastRowOfArea(cells);
+    topRowIndex = lastRowOfArea(cells) + 1;
   }
-  return section;
-}
-export function haveDifferentColumnNames(block?: Dynamic, other?: Dynamic) {
-  let otherNames = columnNamesOfBlock(other);
-  return !hasFewColumnNames(block) && [...columnNamesOfBlock(block)].some(([input, input2]: Dynamic) => otherNames.get(input) !== input2);
-}
-export function haveSameColumnKinds(block?: Dynamic, other?: Dynamic) {
-  let kindsOf = ({ told: told }: Dynamic) =>
-    new (Map as Dynamic)(
-      asArray(told.columns).flatMap(
-        (input?: Dynamic) =>
-          isNonNullObject(input) && typeof input.kind === 'string' && input.filled !== 0 ? [[input.c, KIND_FAMILIES[input.kind] ?? input.kind]] : [],
-      ),
-    );
-  let otherKinds = kindsOf(other);
-  let sharedColumns = [...kindsOf(block)].filter(([input]: Dynamic) => otherKinds.has(input));
-  return sharedColumns.filter(([input, input2]: Dynamic) => otherKinds.get(input) !== input2).length * 4 <= sharedColumns.length;
-}
-export function isMoreOfSameTable(reads: WorkbookReads, sheet?: Dynamic, first?: Dynamic, block?: Dynamic) {
-  let { sheetId: sheetId } = sheet;
-  let { topRowIndex: topRow, leftColumnIndex: leftColumn } = block.records;
-  if (block.told.headerRow !== null && !hasFewColumnNames(block)) return false;
-  let cellId = reads.cellIdAt(sheetId, topRow, leftColumn);
-  let table = cellId === null ? null : (reads.tableAtCell(cellId)?.table ?? null);
-  if (table === null || table.header === null) return false;
-  return (
-    reads.rowIndexOf(sheetId, table.firstRowOfBody) === first.records.topRowIndex &&
-    ![topRow, lastRowOfArea(block.records)].some(
-      (rowIndex?: Dynamic) => mayBeRowOfTotals(topRow, rowHoldsAt(reads, sheetId, first, rowIndex), first, sheet),
-    )
-  );
-}
-export function groupBlocksIntoSections(blocks?: Dynamic, allBlocks?: Dynamic, leftColumn?: Dynamic, canJoin?: Dynamic) {
-  let rightEdgeOf = ({ area: area }: Dynamic, maxRight?: Dynamic) =>
-    (Math.max as Dynamic)(
-      ...allBlocks
-        .filter(
-          ({ area: area2 }: Dynamic) =>
-            area2.topRowIndex >= area.topRowIndex && lastRowOfArea(area2) <= lastRowOfArea(area) && lastColumnOfArea(area2) <= maxRight,
-        )
-        .map(({ area: area2 }: Dynamic) => lastColumnOfArea(area2)),
-    );
-  let sections: Dynamic = [];
-  for (let block of blocks as Dynamic) {
-    let section = sections.at(-1) ?? [];
-    let [first, last] = [section[0], section.at(-1)];
-    let rightEdge = (Math.max as Dynamic)(
-      ...section.map(({ area: area }: Dynamic) => lastColumnOfArea(area)),
-      lastColumnOfArea(block.area),
-    );
-    let widths = [...section, block].map((input?: Dynamic) => rightEdgeOf(input, rightEdge) - leftColumn + 1);
-    if (
-      first !== undefined &&
-      last !== undefined &&
-      block.area.topRowIndex - lastRowOfArea(last.area) - 1 <= MAX_GAP_BETWEEN_SECTIONS &&
-      !haveDifferentColumnNames(block, first) &&
-      haveSameColumnKinds(block, first) &&
-      (Math.min as Dynamic)(...widths) * 3 >= (Math.max as Dynamic)(...widths) * 2 &&
-      ((Math.min as Dynamic)(...widths) >= MIN_SECTION_ROWS ||
-        [...section.slice(1), block].every((other?: Dynamic) => canJoin(first, other)))
-    )
-      section.push(block);
-    else sections.push([block]);
-  }
+  endSectionAt(lastRowOfArea(block.records), false);
   return sections;
 }
-export function joinSectionsIntoTables(area: Dynamic, blocks: Dynamic, reads: WorkbookReads, sheet?: Dynamic) {
-  if (blocks.length >= MAX_BLOCKS_FOUND) return blocks.slice();
-  let leftColumns = [...new (Set as Dynamic)(blocks.map(({ area: area2 }: Dynamic) => area2.leftColumnIndex))];
-  leftColumns.sort((first?: Dynamic, second?: Dynamic) => first - second);
-  return leftColumns.reduce((found?: Dynamic, leftColumn?: Dynamic) => {
-    let columnBlocks = found.filter(
-      ({ area: area2, told: told }: Dynamic) => area2.leftColumnIndex === leftColumn && area2.rowCount > 1 && !('sections' in told),
-    );
-    columnBlocks.sort((input?: Dynamic, options?: Dynamic) => input.area.topRowIndex - options.area.topRowIndex);
-    let canJoin = (first?: Dynamic, other?: Dynamic) => isMoreOfSameTable(reads, sheet, first, other);
-    return groupBlocksIntoSections(columnBlocks, blocks, leftColumn, canJoin).reduce((found2?: Dynamic, sections?: Dynamic) => {
-      let [first, last] = [sections[0], sections.at(-1)];
-      if (first === undefined || last === undefined || first === last) return found2;
-      if (sections.length < MIN_SECTIONS && !canJoin(first, last)) return found2;
-      let rightEdge = (Math.max as Dynamic)(...sections.map(({ area: area2 }: Dynamic) => lastColumnOfArea(area2)));
-      let topLeft = reads.cellIdAt(sheet.sheetId, first.area.topRowIndex, leftColumn);
-      let bottomRight = reads.cellIdAt(sheet.sheetId, lastRowOfArea(last.area), rightEdge);
-      let table = topLeft === null || bottomRight === null ? null : blockOfTold(readToldOfSheetAt(reads, topLeft, bottomRight), sheet);
-      if (table === null) return found2;
-      let areGapsEmpty = () =>
-        sections.every(({ records: records2 }: Dynamic, index?: Dynamic) => {
-          let next = sections[index + 1];
-          if (next === undefined) return true;
-          let gapTop = lastRowOfArea(records2) + 1;
-          let gap = {
-            ...table.area,
-            topRowIndex: gapTop,
-            rowCount: next.records.topRowIndex - gapTop,
-          };
-          return (
-            reads.filledCellsIn(sheet.sheetId, gap).length === 0 &&
-            !mayBeRowOfTotals(gapTop - 1, rowHoldsAt(reads, sheet.sheetId, table, gapTop - 1), table, sheet)
-          );
-        });
-      let isAtFoot = area.rowIndex >= lastRowOfArea(table.area);
-      if (
-        isPositionInArea(area, {
-          ...table.area,
-          rowCount: table.area.rowCount + 1,
-        }) &&
-        !(isAtFoot && areGapsEmpty())
-      )
-        return found2;
-      let isInside = ({ area: area2 }: Dynamic) =>
-        area2.leftColumnIndex >= table.area.leftColumnIndex &&
-        lastColumnOfArea(area2) <= lastColumnOfArea(table.area) &&
-        sections.some((input?: Dynamic) => area2.topRowIndex >= input.area.topRowIndex && lastRowOfArea(area2) <= lastRowOfArea(input.area));
-      let { headerRow: headerRow, records: records, ...restOfTold } = table.told;
-      let described = sections.map(
-        (input?: Dynamic, options?: Dynamic) => describeSection(reads, sheet.sheetId, input, table, sections[options - 1]),
-      );
-      let isTooLong = isOverByteLimit(taggedJson('sections', described), MAX_SECTIONS_BYTES);
-      let told = {
-        headerRow: headerRow,
-        records: records,
-        sections: isTooLong ? described.map(withoutLastRow) : described,
-        ...restOfTold,
-      };
-      if (isOverByteLimit(taggedJson('table', told), MAX_TABLE_BYTES)) return found2;
-      return [
-        ...found2.filter((input?: Dynamic) => !isInside(input)),
+export function sectionsTold(reads: WorkbookReads, sheetId: SheetId, block: ToldBlock): SectionTold[] | null {
+  let sections = sectionsOfRecords(block).map(({ records, headingRowIndex }): SectionTold => {
+    let [lastRow = null] =
+      rowsAtTheEnds(
+        reads,
+        sheetId,
         {
-          ...table,
-          told: told,
+          ...block,
+          records: {
+            ...records,
+            topRowIndex: lastRowOfArea(records),
+            rowCount: 1,
+          },
         },
-      ];
-    }, found);
-  }, blocks.slice());
+        LAST_ROW_ENDS,
+      ) ?? [];
+    let [headingCellId] =
+      headingRowIndex === null
+        ? []
+        : reads.filledCellsIn(sheetId, {
+            ...records,
+            topRowIndex: headingRowIndex,
+            rowCount: 1,
+          });
+    let heading = headingCellId === undefined ? null : shortTextOfCell(reads.cellOnShowIn(headingCellId));
+    let headingTold: Pick<SectionTold, 'heading' | 'headingRow'> =
+      heading === null || headingRowIndex === null
+        ? {}
+        : {
+            heading,
+            headingRow: headingRowIndex + 1,
+          };
+    return Object.assign(headingTold, {
+      records: areaToA1AsStored(records, null),
+      lastRow,
+    });
+  });
+  let fitting = isOverByteLimit(taggedJson('sections', sections), MAX_SECTIONS_BYTES)
+    ? sections.map((section) => ({
+        ...section,
+        lastRow: null,
+      }))
+    : sections;
+  return fitting.length < 2 || isOverByteLimit(taggedJson('sections', fitting), MAX_BARE_SECTIONS_BYTES) ? null : fitting;
 }
-export function findBlocksNear(position: Dynamic, reads: WorkbookReads, sheet?: Dynamic) {
-  let { sheetId: sheetId, rowCount: rowCount, columnCount: columnCount } = sheet;
-  let blocks: Dynamic = [];
-  let covered: Dynamic = [];
-  let today2: Dynamic = null;
-  let distanceTo = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+export function splitIntoTables(block: ToldBlock, position: CellPosition): ToldBlock[] {
+  let sections = sectionsOfRecords(block);
+  if (
+    !(sections.some(({ endsInASubtotal }) => endsInASubtotal) ? sections : sections.slice(0, -1)).some(({ records }) => {
+      let end = {
+        ...records,
+        topRowIndex: lastRowOfArea(records),
+        rowCount: 2,
+      };
+      return isPositionInArea(position, end) && (block.footer === null || !isPositionInArea(position, block.footer));
+    })
+  )
+    return [block];
+  let tableOfSection = ({ records }: SectionOfRecords, index: number): ToldBlock => ({
+    ...block,
+    area: records,
+    records,
+    noRecords: [],
+    footer: index === sections.length - 1 ? block.footer : null,
+    told: {
+      ...block.told,
+      records: areaToA1AsStored(records, null),
+    },
+  });
+  return sections.map((section, index) => tableOfSection(section, index));
+}
+export function toldWithSectionsAndFooter(reads: WorkbookReads, sheetId: SheetId, block: ToldBlock, isFull: boolean): ToldBlock {
+  let sections = isFull ? sectionsTold(reads, sheetId, block) : null;
+  let footer =
+    block.footer === null
+      ? null
+      : rowsAtTheEnds(
+          reads,
+          sheetId,
+          {
+            ...block,
+            records: block.footer,
+          },
+          SHEET_ENDS_BRIEF,
+        );
+  let { headerRow, records, ...restTold } = block.told;
+  return {
+    ...block,
+    told: {
+      headerRow,
+      records,
+      ...(sections === null
+        ? {}
+        : {
+            sections,
+          }),
+      ...(footer === null
+        ? {}
+        : {
+            footer,
+          }),
+      ...restTold,
+    },
+  };
+}
+export function findBlocksNear(position: CellPosition, reads: WorkbookReads, sheet: SheetSummary): BlocksNear | null {
+  let { sheetId, rowCount, columnCount } = sheet;
+  let blocks: ToldBlock[] = [];
+  let covered: CellArea[] = [];
+  let today: unknown = null;
+  let distanceTo = ({ rowIndex, columnIndex }: CellPosition) =>
     Math.abs(rowIndex - position.rowIndex) + Math.abs(columnIndex - position.columnIndex);
-  for (let bandTop of rowBandsNearest(position.rowIndex, rowCount) as Dynamic) {
+  for (let bandTop of rowBandsNearest(position.rowIndex, rowCount)) {
     if (blocks.length >= MAX_BLOCKS_FOUND) break;
     let band = {
       topRowIndex: bandTop,
       leftColumnIndex: 0,
       rowCount: Math.min(ROW_BAND_SIZE, rowCount - bandTop),
-      columnCount: columnCount,
+      columnCount,
     };
-    let filled = reads.filledCellsIn(sheetId, band).flatMap((cellId?: Dynamic) => {
-      let position2 = reads.positionOfCell(cellId);
-      return position2 === null
+    let filled = reads.filledCellsIn(sheetId, band).flatMap((cellId) => {
+      let filledPosition = reads.positionOfCell(cellId);
+      return filledPosition === null
         ? []
         : [
             {
-              cellId: cellId,
-              position: position2,
+              cellId,
+              position: filledPosition,
             },
           ];
     });
-    filled.sort((input?: Dynamic, options?: Dynamic) => distanceTo(input.position) - distanceTo(options.position));
-    for (let { cellId: cellId, position: cellPosition } of filled as Dynamic) {
+    filled.sort((first, second) => distanceTo(first.position) - distanceTo(second.position));
+    for (let { cellId, position: cellPosition } of filled) {
       if (blocks.length >= MAX_BLOCKS_FOUND) break;
-      if (covered.some((input?: Dynamic) => isPositionInArea(cellPosition, input))) continue;
+      if (covered.some((area) => isPositionInArea(cellPosition, area))) continue;
       let cell = reads.cellOnShowIn(cellId);
       if (cell !== null && !('spill' in cell) && cellValueOf(cell)?.value === '') continue;
       let told = readToldOfSheetAt(reads, cellId);
       let block = blockOfTold(told, sheet);
       if (told === null || block === null) return null;
-      let { area: area } = block;
+      let { area } = block;
       covered.push(area, {
         ...area,
         topRowIndex: cellPosition.rowIndex,
@@ -480,62 +502,62 @@ export function findBlocksNear(position: Dynamic, reads: WorkbookReads, sheet?: 
         columnCount: 1,
       });
       if (
-        !blocks.some((input?: Dynamic) => input.area.topRowIndex === area.topRowIndex && input.area.leftColumnIndex === area.leftColumnIndex)
+        !blocks.some((other) => other.area.topRowIndex === area.topRowIndex && other.area.leftColumnIndex === area.leftColumnIndex)
       )
         blocks.push(block);
-      ({ today: today2 } = told);
+      ({ today } = told);
     }
   }
   return {
-    blocks: blocks,
-    today: today2,
+    blocks,
+    today,
   };
 }
 export function describeSheetForAgent(
   reads: WorkbookReads,
-  sheetId?: Dynamic,
-  position?: Dynamic,
-  promptHead: Dynamic = '',
-  isFull: Dynamic = false,
-) {
-  let sheet = reads.listSheets().find((input?: Dynamic) => input.sheetId === sheetId);
+  sheetId: SheetId,
+  position: CellPosition,
+  promptHead = '',
+  isFull = false,
+): string | null {
+  let sheet = reads.listSheets().find((summary) => summary.sheetId === sheetId);
   let found = sheet === undefined ? null : findBlocksNear(position, reads, sheet);
   if (sheet === undefined || found === null) return null;
-  let nearby = isFull
-    ? {
-        ...found,
-        blocks: joinSectionsIntoTables(position, found.blocks, reads, sheet),
-      }
-    : found;
-  let endsByBlock = new (Map as Dynamic)();
-  let columnsByBlock = new (Map as Dynamic)();
-  let describe = (blocks?: Dynamic) =>
+  let nearby = {
+    ...found,
+    blocks: found.blocks
+      .flatMap((block) => (isFull ? splitIntoTables(block, position) : [block]))
+      .map((block) => toldWithSectionsAndFooter(reads, sheetId, block, isFull)),
+  };
+  let endsByBlock = new Map<ToldBlock, RowToldToAgent[]>();
+  let columnsByBlock = new Map<ToldBlock, unknown[]>();
+  let describe = (blocks: ToldBlock[]) =>
     taggedJson('sheet', {
       today: nearby.today,
       rowCount: sheet.rowCount,
       columnCount: sheet.columnCount,
       tables: blocks.map(
-        (input?: Dynamic) => ({
-          ...input.told,
-          columns: columnsByBlock.get(input) ?? input.told.columns,
-          atTheEnds: endsByBlock.get(input) ?? null,
+        (block) => ({
+          ...block.told,
+          columns: columnsByBlock.get(block) ?? block.told.columns,
+          atTheEnds: endsByBlock.get(block) ?? null,
         }),
       ),
     });
   let byDistance = nearby.blocks.slice();
-  byDistance.sort((first?: Dynamic, second?: Dynamic) => distanceToArea(first.area, position) - distanceToArea(second.area, position));
-  let chosen = new (Set as Dynamic)();
+  byDistance.sort((first, second) => distanceToArea(first.area, position) - distanceToArea(second.area, position));
+  let chosen = new Set<ToldBlock>();
   let roomLeft = {
     tables: MAX_TABLES_TOLD,
     labels: MAX_LABELS_TOLD,
   };
   let chosenInOrder = () => {
-    let chosen2 = [...chosen];
-    chosen2.sort(
-      ({ area: area }: Dynamic, { area: area2 }: Dynamic) =>
-        area.topRowIndex === area2.topRowIndex ? area.leftColumnIndex - area2.leftColumnIndex : area.topRowIndex - area2.topRowIndex,
+    let inOrder = [...chosen];
+    inOrder.sort(
+      ({ area: first }, { area: second }) =>
+        first.topRowIndex === second.topRowIndex ? first.leftColumnIndex - second.leftColumnIndex : first.topRowIndex - second.topRowIndex,
     );
-    return chosen2;
+    return inOrder;
   };
   let isTooLong = () =>
     isPromptDataTooLong({
@@ -543,15 +565,15 @@ export function describeSheetForAgent(
       data: `${promptHead}
 ${describe(chosenInOrder())}`,
     });
-  let kindOfBlock = ({ area: area }: Dynamic) => (area.rowCount * area.columnCount === 1 ? 'labels' : 'tables');
-  for (let block of byDistance as Dynamic) {
-    let value = kindOfBlock(block);
-    if (roomLeft[value] === 0) continue;
+  let kindOfBlock = ({ area }: Pick<ToldBlock, 'area'>): 'labels' | 'tables' => (area.rowCount * area.columnCount === 1 ? 'labels' : 'tables');
+  for (let block of byDistance) {
+    let kind = kindOfBlock(block);
+    if (roomLeft[kind] === 0) continue;
     chosen.add(block);
     if (isTooLong()) chosen.delete(block);
-    else roomLeft[value] -= 1;
+    else roomLeft[kind] -= 1;
   }
-  let addEnds = (block?: Dynamic, ends?: Dynamic) => {
+  let addEnds = (block: ToldBlock, ends: EndsToTell) => {
     let endsBefore = endsByBlock.get(block);
     let rows = rowsAtTheEnds(reads, sheetId, block, ends);
     if (rows === null) return;
@@ -560,19 +582,19 @@ ${describe(chosenInOrder())}`,
     if (endsBefore === undefined) endsByBlock.delete(block);
     else endsByBlock.set(block, endsBefore);
   };
-  let tables = byDistance.filter((input?: Dynamic) => chosen.has(input) && kindOfBlock(input) === 'tables');
-  for (let block of tables as Dynamic) addEnds(block, SHEET_ENDS_BRIEF);
-  let shortTables = tables.filter(({ records: records }: Dynamic) => records.rowCount <= 2 * SHEET_ENDS_FULL.atEachEnd);
-  if (isFull) for (let block of shortTables as Dynamic) addEnds(block, SHEET_ENDS_FULL);
-  let tablesNotAllTold = tables.filter((input?: Dynamic) => endsByBlock.get(input)?.length !== input.records.rowCount);
-  let rowsLeftToScan: Dynamic = MAX_ROWS_SCANNED_FOR_COMMONEST;
-  for (let block of (isFull ? tablesNotAllTold : []) as Dynamic)
-    for (let [value, column] of asArray(block.told.columns).entries() as Dynamic) {
+  let tables = byDistance.filter((block) => chosen.has(block) && kindOfBlock(block) === 'tables');
+  for (let block of tables) addEnds(block, SHEET_ENDS_BRIEF);
+  let shortTables = tables.filter(({ records }) => records.rowCount <= 2 * SHEET_ENDS_FULL.atEachEnd);
+  if (isFull) for (let block of shortTables) addEnds(block, SHEET_ENDS_FULL);
+  let tablesNotAllTold = tables.filter((block) => endsByBlock.get(block)?.length !== block.records.rowCount);
+  let rowsLeftToScan = MAX_ROWS_SCANNED_FOR_COMMONEST;
+  for (let block of isFull ? tablesNotAllTold : [])
+    for (let [index, column] of asArray(block.told.columns).entries()) {
       if (!isWorthMoreCommonest(column) || block.records.rowCount > rowsLeftToScan) continue;
       rowsLeftToScan -= block.records.rowCount;
       let columns = columnsByBlock.get(block) ?? asArray(block.told.columns);
       let grownColumn = withMoreCommonestTexts(reads, sheetId, block.records, column);
-      columnsByBlock.set(block, [...columns.slice(0, value), grownColumn, ...columns.slice(value + 1)]);
+      columnsByBlock.set(block, [...columns.slice(0, index), grownColumn, ...columns.slice(index + 1)]);
       if (!isTooLong()) continue;
       columnsByBlock.set(block, columns.slice());
       break;
@@ -580,38 +602,38 @@ ${describe(chosenInOrder())}`,
   return chosen.size === 0 && nearby.blocks.length > 0 ? null : describe(chosenInOrder());
 }
 export const MAX_FORMULA_FROM_WORDS_TEXT_LENGTH = 500;
-export const PLAIN_ARRAY_FUNCTIONS = new (Set as Dynamic)(
+export const PLAIN_ARRAY_FUNCTIONS = new Set<string>(
   [
     'FILTER SORT SORTN TRANSPOSE UNIQUE',
     'DATE TODAY YEAR MONTH DAY',
     'ROWS COLUMNS COUNT COUNTA SUM AVERAGE MEDIAN MIN MAX LARGE SMALL',
     'ROUND ROUNDUP ROUNDDOWN ABS INT',
-  ].flatMap((input?: Dynamic) => input.split(' ')),
+  ].flatMap((names) => names.split(' ')),
 );
-export const FUNCTIONS_AGENT_MAY_NOT_WRITE = new (Set as Dynamic)([
+export const FUNCTIONS_AGENT_MAY_NOT_WRITE = new Set<string>([
   'HYPERLINK',
   'ADDRESS',
   'ENCODEURL',
-  ...FUNCTION_CATALOG.filter(takesNameArgument).map(({ name: name }: Dynamic) => name),
-  ...ARRAY_FUNCTION_NAMES.filter((name?: Dynamic) => !PLAIN_ARRAY_FUNCTIONS.has(name)),
+  ...FUNCTION_CATALOG.filter(takesNameArgument).map(({ name }) => name),
+  ...ARRAY_FUNCTION_NAMES.filter((name) => !PLAIN_ARRAY_FUNCTIONS.has(name)),
 ]);
-export const FUNCTION_NAMES_FOR_AGENT = FUNCTION_CATALOG.map(({ name: name }: Dynamic) => name)
-  .filter((name?: Dynamic) => !FUNCTIONS_AGENT_MAY_NOT_WRITE.has(name))
+export const FUNCTION_NAMES_FOR_AGENT = FUNCTION_CATALOG.map(({ name }) => name)
+  .filter((name) => !FUNCTIONS_AGENT_MAY_NOT_WRITE.has(name))
   .join(' ');
-export const DECIMAL_SIGN_NOTES = {
+export const DECIMAL_SIGN_NOTES: Record<DecimalSignName, string> = {
   point: '',
   comma: `
 The person writes a comma before a number's decimals: their 1,5 is your 1.5. You still write a point, and commas between arguments: the app puts your formula into the person's signs. It leaves what stands in quotation marks as it is, so keep a number with decimals out of them, and join it to a condition's sign: ">"&1.5, never ">1.5".`,
 };
-export const SHEET_ENDS_BRIEF = {
+export const SHEET_ENDS_BRIEF: EndsToTell = {
   atEachEnd: 3,
   mostBytes: 4096,
 };
-export const SHEET_ENDS_FULL = {
+export const SHEET_ENDS_FULL: EndsToTell = {
   atEachEnd: 30,
   mostBytes: 24576,
 };
-export const LAST_ROW_ENDS = {
+export const LAST_ROW_ENDS: EndsToTell = {
   atEachEnd: 1,
   mostBytes: 1024,
 };
@@ -621,13 +643,13 @@ export const FEW_WORDS_COMMONEST_COUNT = 8;
 export const MAX_COMMONEST_TEXTS = 40;
 export const MAX_ROWS_SCANNED_FOR_COMMONEST = 60000;
 export const sheetDataDescription = (
-  endsTold?: Dynamic,
-  commonestCount?: Dynamic,
-) => `What is known of the sheet is in the data, on the one line between <sheet> and </sheet>, as JSON.
+  endsTold: string,
+  commonestCount: number,
+): string => `What is known of the sheet is in the data, on the one line between <sheet> and </sheet>, as JSON.
 today: date is the day, and number what a cell holds for that day.
 rowCount, columnCount: how large the sheet is. No address goes past them.
-tables: each block of filled cells in the sheet, from the top. A block of one cell is most often a title or a label.
-Of each table: headerRow is the row that holds its column names, null if it has none. records are its cells under that row. atTheEnds has ${endsTold}: row is the row's number, and holds has what its cells hold, by the letters of their columns. A number, a text, or true or false is there as it is, a text cut off after ${MAX_TOLD_TEXT_LENGTH} characters with … in the place of the rest. Of a formula it says what the formula does: calls is the first function that it calls, null if it calls none or one that is not listed below, reads has the first ${MAX_FORMULA_READS_TOLD} cells and ranges of this sheet that it reads, and more is there, and true, if it reads others too, in this sheet or another. (a person), (a text) and (an error) stand for a person's name, for a text that a formula in another cell comes to, and for an error. A cell that holds nothing is left out, and so is a column that is not listed. atTheEnds is null for a block of one cell, and where those rows hold too much to tell. Rows of totals may be among the records, at the top or at the foot: such a row shows in a formula that reads, as one range, most of the rows under or over it in its own column, as SUM(B2:B13) in B14 does, or in a label such as Total, which may be among its column's texts where atTheEnds is null. A formula that reads only cells of its own row or of the row next to it, as a running balance does, is a record's. columnsLeftOut is how many of its columns are not listed. columns says what was counted in the records of each column: c is its letters, and name what its header says, null if that is nothing. kind is a guess from what most of its cells hold: number, currency, percent, date, checkbox, fewWords or text. filled, blank and numbers count its cells that hold anything, that hold nothing, and that hold a number. commonest has its texts, the one that comes most often first, and no more than ${commonestCount} of them, so a text that the person names may be there though it is not listed. A column of the kind fewWords has no others. smallest, middle and largest are of its numbers, dates among them.`;
+tables: each table or other block of filled cells in the sheet, from the top. A block of one cell is most often a title or a label.
+Of each table: headerRow is the row that holds its column names, null if it has none. records are its cells under that row. footer, if it is there, has the table's rows of totals under the records, told as in atTheEnds. atTheEnds has ${endsTold}: row is the row's number, and holds has what its cells hold, by the letters of their columns. A number, a text, or true or false is there as it is, a text cut off after ${MAX_TOLD_TEXT_LENGTH} characters with … in the place of the rest. Of a formula it says what the formula does: calls is the first function that it calls, null if it calls none or one that is not listed below, reads has the first ${MAX_FORMULA_READS_TOLD} cells and ranges of this sheet that it reads, and more is there, and true, if it reads others too, in this sheet or another. (a person), (a text) and (an error) stand for a person's name, for a text that a formula in another cell comes to, and for an error. A cell that holds nothing is left out, and so is a column that is not listed. atTheEnds is null for a block of one cell, and where those rows hold too much to tell. Rows of totals may be among the records, at the top or at the foot: such a row shows in a formula that reads, as one range, most of the rows under or over it in its own column, as SUM(B2:B13) in B14 does, or in a label such as Total, which may be among its column's texts where atTheEnds is null. A formula that reads only cells of its own row or of the row next to it, as a running balance does, is a record's. columnsLeftOut is how many of its columns are not listed. columns says what was counted in the records of each column: c is its letters, and name what its header says, null if that is nothing. kind is a guess from what most of its cells hold: number, currency, percent, date, checkbox, fewWords or text. filled, blank and numbers count its cells that hold anything, that hold nothing, and that hold a number. commonest has its texts, the one that comes most often first, and no more than ${commonestCount} of them, so a text that the person names may be there though it is not listed. A column of the kind fewWords has no others. smallest, middle and largest are of its numbers, dates among them.`;
 export const SHEET_DATA_DESCRIPTION_BRIEF = sheetDataDescription(
   `the first ${SHEET_ENDS_BRIEF.atEachEnd} and the last ${SHEET_ENDS_BRIEF.atEachEnd} rows of the records, or all of them if they are no more`,
   FEW_WORDS_COMMONEST_COUNT,
@@ -641,9 +663,9 @@ export const TOTALS_ROWS_NOTE =
 export const RECORDS_ONLY_NOTE = `. A record is one more of the things that the table lists. A row that sums up other rows (a total, a subtotal, All regions, a team over its members), that is there to compare them with (a target, last year's total), or that says something about the table (a note, a source, a date, an answer key, an opening balance, a second row of headings) is no record, in whatever language; in doubt, a row is a record. No range takes in a row that is none: at an end of the records the range stops short of it, and among the records the formula names the ranges around it, as SUM(B2:B4,B6:B9), or has a condition that only records meet, as SUMIF(A2:A9,"<>All regions",B2:B9).`;
 export const COLUMN_MEANING_NOTES = `- Go by what a column's numbers are, not by its name alone. A number that only names a thing (an order, receipt or invoice number, an id, a year) is never added up, averaged or ranked: "average order" and "biggest receipt" mean the amounts. Only words that name the number itself, as "highest invoice number" does, go by it. A running total, a balance, or a count of what there is at each date (followers, headcount) isn't added up over the dates: its total is its latest value. "How many" of the goods or things that a column of quantities counts (eggs, boxes) is the sum of those quantities; how many of a status, a person or a group is the number of rows. Amounts kept as negative numbers are ranked and compared by their size.
 - Where a column writes the thing that the person names in more than one way (NYC and New York, Book and Books, Yes and Y, Sr. and Senior, & and and), they mean all of them: add up one condition for each way, as SUMIF(B2:B9,"NYC",D2:D9)+SUMIF(B2:B9,"New York",D2:D9), or use a wildcard that fits these and nothing else.`;
-export const ownRowFormulaNote = (cellAddress?: Dynamic) => `
+export const ownRowFormulaNote = (cellAddress: string): string => `
 - Where ${cellAddress} stands in the row of one of a table's records, and the words ask for no total, count, average or the like over the table, the formula is for that record alone and names cells of its own row, as D2-E2 in H2.`;
-export const formulaWritingRules = (cellAddress?: Dynamic, sheetNotes: Dynamic = null) => `How a formula is written here:
+export const formulaWritingRules = (cellAddress: string, sheetNotes: SheetNotes | null = null): string => `How a formula is written here:
 - It starts with "=". Arguments are set apart by commas, and texts stand in straight double quotation marks.
 - A range names both of its corners, such as B2:B13, and covers a table's records, no more and no less${sheetNotes === null ? TOTALS_ROWS_NOTE : RECORDS_ONLY_NOTE} Write no whole columns or rows (B:B, 2:2), no names, and no arrays in curly brackets.
 - A date is a number, the days since December 30, 1899. Write one with DATE(year, month, day), and today with TODAY().
@@ -659,19 +681,19 @@ ${
 - Of the formulas that give what the person means, prefer the plainest, one that they would have typed themselves.`
 }
 - Only these functions exist: ${FUNCTION_NAMES_FOR_AGENT}`;
-export const asArray = (value?: Dynamic) => (Array.isArray(value) ? value : []);
-export const namedAddressNote = (cellAddress?: Dynamic) => `
+export const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+export const namedAddressNote = (cellAddress: string): string => `
 A cell that they name by its address was chosen on purpose: keep every such address as it is written, as a range's corner too, even where the range then covers more or less than a table's records, and give a range that goes with it, such as the column that a condition looks in, the same rows. A text that they ask about, such as Won, is looked for in the column that holds such texts, never in named cells that hold numbers. Only where a range would go past the sheet's last row or column, or take in ${cellAddress}, cut it short there.`;
 export const SECTIONS_NOTE =
   "A table that has sections stands in two or more sections under one another, most often one for each month or group, with blank rows between them, and often with headings or subtotals of their own, which are no records. sections has, from the top, each one's records, what its last row holds, as in atTheEnds, or null if that is too much to tell, and over the records its heading with the row that holds it, if it has one. The table's records run from the first section to the last, and so do the ranges of a formula about the whole. But the last section may be no records at all: the foot of the list above it, whose rows are charges on it or deductions from it (freight, tax, a tip, a discount, a deposit), what was paid or is left, or rates and settings that it works with, in whatever language. Then the records end with the section above it, and so do the ranges of a formula about them; only a formula about the foot's own rows, or about what is due or owed in all, reads the foot. Still, rows that are filled in as the rows above them are, with a date, a person, a supplier or a category where those have one, are records, whatever they are called: in a list of expenses or bills a fee, a tax or a delivery is one more of them. A formula about one section, which the words name, has ranges within that section's records alone.\n\n";
-export const typedCellData = (text?: Dynamic) => taggedJson('typed', `=${cleanTextForAgent(text)}`);
+export const typedCellData = (text: string): string => taggedJson('typed', `=${cleanTextForAgent(text)}`);
 export const formulaFromWordsPrompt = (
-  words?: Dynamic,
-  cellAddress?: Dynamic,
-  told?: Dynamic,
-  decimalSign?: Dynamic,
-  isTyped: Dynamic = false,
-) => ({
+  words: string,
+  cellAddress: string,
+  told: string,
+  decimalSign: DecimalSignName,
+  isTyped = false,
+): AgentPrompt => ({
   words: `You write formulas in a spreadsheet app, for a person who is at work in a sheet. In cell ${cellAddress} they typed "=" and then, where a formula would go, said in their own words what they want. Write the one formula for ${cellAddress} that gives it.
 
 ${SHEET_DATA_DESCRIPTION_FULL}
@@ -693,54 +715,24 @@ export const MAX_TABLES_TOLD = 6;
 export const MAX_LABELS_TOLD = 12;
 export const MAX_BLOCKS_FOUND = 40;
 export const ROW_BAND_SIZE = 200;
-export const isPositionInArea = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic, area?: Dynamic) =>
+export const isPositionInArea = ({ rowIndex, columnIndex }: CellPosition, area: CellArea): boolean =>
   rowIndex >= area.topRowIndex &&
   rowIndex < area.topRowIndex + area.rowCount &&
   columnIndex >= area.leftColumnIndex &&
   columnIndex < area.leftColumnIndex + area.columnCount;
-export const distanceToArea = (area: Dynamic, { rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+export const distanceToArea = (area: CellArea, { rowIndex, columnIndex }: CellPosition): number =>
   Math.max(0, area.topRowIndex - rowIndex, rowIndex - (area.topRowIndex + area.rowCount - 1)) +
   Math.max(0, area.leftColumnIndex - columnIndex, columnIndex - (area.leftColumnIndex + area.columnCount - 1));
 export const LONE_HIGH_SURROGATE_PATTERN = /[\uD800-\uDBFF]$/;
-export const cutToldText = (text?: Dynamic) =>
+export const cutToldText = (text: string): string =>
   text.length > MAX_TOLD_TEXT_LENGTH ? `${text.slice(0, MAX_TOLD_TEXT_LENGTH).replace(LONE_HIGH_SURROGATE_PATTERN, '')}…` : text;
-export const lowerCaseText = (text?: Dynamic) =>
-  Array.from<Dynamic, Dynamic>(text, (char?: Dynamic) => char.toLowerCase()).join('');
-export const isWorthMoreCommonest = (column?: Dynamic) =>
+export const lowerCaseText = (text: string): string => Array.from(text, (char) => char.toLowerCase()).join('');
+/** Whether a column is worth looking through for more of its commonest texts. */
+export const isWorthMoreCommonest = (column: unknown): column is Record<PropertyKey, unknown> =>
   isNonNullObject(column) && column.kind !== 'fewWords' && asArray(column.commonest).length >= FEW_WORDS_COMMONEST_COUNT;
-export const lastRowOfArea = ({ topRowIndex: topRowIndex, rowCount: rowCount }: Dynamic) => topRowIndex + rowCount - 1;
-export const lastColumnOfArea = ({ leftColumnIndex: leftColumnIndex, columnCount: columnCount }: Dynamic) =>
-  leftColumnIndex + columnCount - 1;
-export const columnNamesOfBlock = ({ told: told }: Dynamic) =>
-  new (Map as Dynamic)(
-    asArray(told.columns).flatMap((column?: Dynamic) => (isNonNullObject(column) && column.name !== null ? [[column.c, column.name]] : [])),
-  );
-export const hasFewColumnNames = (block?: Dynamic) => columnNamesOfBlock(block).size * 2 < block.area.columnCount;
-export const mayBeRowOfTotals = (rowIndex: Dynamic, row: Dynamic, { lettersTold: lettersTold }: Dynamic, sheetSize?: Dynamic) =>
-  row === null ||
-  Object.values(row.holds).some((holds?: Dynamic) => {
-    let readAreas = (typeof holds === 'object' ? holds.reads : []).flatMap(
-      (input?: Dynamic) => parseA1AreaAsSeen(input, sheetSize) ?? [],
-    );
-    let readAbove = readAreas.filter((input?: Dynamic) => lastRowOfArea(input) < rowIndex);
-    let ownRow = row.row - 1;
-    return (
-      readAbove.some((input?: Dynamic) => input.rowCount > 1 && lettersTold.has(columnLetters(input.leftColumnIndex))) ||
-      (readAbove.length > 0 && !readAreas.some((input?: Dynamic) => input.topRowIndex <= ownRow && lastRowOfArea(input) >= ownRow))
-    );
-  });
-export const withoutLastRow = (section?: Dynamic) => ({
-  ...section,
-  lastRow: null,
-});
-export const MIN_SECTIONS = 3;
-export const MAX_GAP_BETWEEN_SECTIONS = 3;
+export const NO_RECORD_KINDS: readonly NoRecordKind[] = ['blank', 'sectionLabel', 'subtotal'];
+export const lastRowOfArea = ({ topRowIndex, rowCount }: Pick<CellArea, 'topRowIndex' | 'rowCount'>): number =>
+  topRowIndex + rowCount - 1;
 export const MAX_SECTIONS_BYTES = 8192;
-export const MAX_TABLE_BYTES = 16384;
-export const MIN_SECTION_ROWS = 3;
-export const KIND_FAMILIES = {
-  currency: 'number',
-  percent: 'number',
-  fewWords: 'text',
-};
+export const MAX_BARE_SECTIONS_BYTES = 16384;
 export { ARRAY_FUNCTION_NAMES } from './agent-prompt-values.ts';

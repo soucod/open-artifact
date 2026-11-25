@@ -165,11 +165,15 @@ fn in_runs(header: Option<HeaderRows>, first: usize, last: usize, from: usize, p
     let mut runs: Vec<Run> = Vec::new();
     for (i, &role) in parts.iter().enumerate() {
         let row = from + i;
-        match runs.last_mut() {
-            Some(run) if run.role == role => run.last = row,
-            _ => runs.push(Run { first: row, last: row, role }),
-        }
+        push_run(&mut runs, row, row, role);
     }
     let to = runs.last()?.last;
     Some(Table { header, first_column: first, last_column: last, from, to, runs })
+}
+
+pub(super) fn push_run(runs: &mut Vec<Run>, first: usize, last: usize, role: Role) {
+    match runs.last_mut() {
+        Some(run) if run.role == role && run.last.saturating_add(1) == first => run.last = last,
+        _ => runs.push(Run { first, last, role }),
+    }
 }

@@ -1,0 +1,1 @@
+{"kind":"js","text":"kit.score((S, T) => {\n  S.program('test', 'marimba');\n  S.note('test', 'C5', { t: 0, dur: 0.5, vel: 65 });\n  S.note('test', 'E5', { t: T.outro, dur: 0.5, vel: 60 });\n});"}

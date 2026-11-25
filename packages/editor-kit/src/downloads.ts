@@ -28,6 +28,16 @@ export function browserDownload(name: string, data: Blob, keepMs = OBJECT_URL_KE
   setTimeout(() => URL.revokeObjectURL(url), keepMs);
 }
 
+/**
+ * Resolves when the person may export here now, else rejects with the host's refusal (`not_writer` and its words): an
+ * export that is not a file (a print) asks this first, so it follows the same switch as the downloads. Always
+ * resolves on a host that keeps no such switch (this computer). A consistency rule for the product's own buttons, not
+ * a security boundary: a viewer can always use the browser's own print or take a screenshot.
+ */
+export async function assertMayExport(downloads: DownloadsCapability | null | undefined): Promise<void> {
+  if (downloads?.browser === true && downloads.check) await downloads.check();
+}
+
 /** Where {@link saveFile} put a file. */
 export type SavedFile = { to: 'host'; savedTo?: string } | { to: 'browser' };
 

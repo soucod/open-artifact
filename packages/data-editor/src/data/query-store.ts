@@ -58,6 +58,11 @@ export interface LiveDatasetStore {
   pending(): number;
   /** Resolves once no load is in flight. */
   settled(): Promise<void>;
+  /**
+   * Shows a new answer for a source that already loaded (saved rows that changed), without a loading state; one that
+   * is loading takes it once its load is done. A source never loaded, or loaded for another key, is left alone.
+   */
+  put(dataset: Dataset, result: LoadResult): void;
 }
 
 export function isFailedDatasetRun(run: DatasetRun): run is FailedRun {
@@ -124,6 +129,8 @@ export function getLiveDatasetConnector(dataset: Dataset): string {
 /** What makes a source load again when it changes; `""` for one that doesn't load (a calculation). */
 export function getDatasetLoadKey(dataset: Dataset): string {
   const source = dataset.source;
+  // Saved rows load again only when they move to another path; their changes arrive by themselves.
+  if (source.kind === 'store') return source.path && `store:${source.path}`;
   const loaderKey = dataset.loader === undefined ? [] : [dataset.loader.code];
   if (source.kind === 'query')
     return JSON.stringify([
@@ -149,15 +156,33 @@ export function attachDatasetLoaders(datasets: Dataset[], loaders: ReadonlyMap<s
   });
 }
 
-/** Orders sources by the page's `data-fetchpriority` lists: "high" first, "low" last. */
-export function applyFetchPriority(datasets: Dataset[], high: readonly string[] = [], low: readonly string[] = []): Dataset[] {
-  const rank = (dataset: Dataset): number => Number(low.includes(dataset.id)) - Number(high.includes(dataset.id));
+/** Orders sources by the page's `data-fetchpriority` lists: "high" first, "low" after the rest, and those marked only under `[hidden]` last. */
+export function applyFetchPriority(
+  datasets: Dataset[],
+  high: readonly string[] = [],
+  low: readonly string[] = [],
+  hidden: readonly string[] = [],
+): Dataset[] {
+  const rank = (dataset: Dataset): number =>
+    hidden.includes(dataset.id) && !high.includes(dataset.id) ? 2 : Number(low.includes(dataset.id)) - Number(high.includes(dataset.id));
   return [...datasets].sort((first, second) => rank(first) - rank(second));
 }
 
-/** Loads one source: its query, or its stored file. */
+/** Where saved rows are read: the source's path in, its rows out. */
+export interface SavedRowsEnvironment {
+  savedRows?: (path: string) => Promise<LoadResult>;
+}
+
+const NO_SAVED_ROWS: LoadResult = {
+  ok: false,
+  kind: 'failed',
+  message: 'This view has no store, so saved rows can’t be read here.',
+  wording: { code: 'savedRowsUnavailable' },
+};
+
+/** Loads one source: its query, its stored file, or its saved rows. */
 export function loadDataset(
-  env: QueryEnvironment & FileEnvironment,
+  env: QueryEnvironment & FileEnvironment & SavedRowsEnvironment,
   dataset: Dataset,
   isStale?: () => boolean,
   context?: DatasetLoadContext,
@@ -166,6 +191,7 @@ export function loadDataset(
   const loader = dataset.loader as DatasetLoader | undefined;
   if (source.kind === 'query') return executeDatasetQuery(env, source, isStale, loader, context);
   if (source.kind === 'file') return loadDatasetFile(source.url, source.format, loader, env);
+  if (source.kind === 'store') return env.savedRows === undefined ? Promise.resolve(NO_SAVED_ROWS) : env.savedRows(source.path);
   return Promise.resolve({ ok: false, kind: 'refused', message: 'Nothing to load.' });
 }
 
@@ -396,7 +422,7 @@ export function createLiveDatasetStore({
       datasets
         .filter((dataset) => {
           const run = runs.get(dataset.id) ?? IDLE_DATASET_RUN;
-          if (dataset.source.kind === 'query') return isRetryableDatasetFailure(run);
+          if (dataset.source.kind === 'query' || dataset.source.kind === 'store') return isRetryableDatasetFailure(run);
           return dataset.source.kind === 'file' && isPageCodeFailure(run);
         })
         .forEach(refreshDataset),
@@ -416,6 +442,16 @@ export function createLiveDatasetStore({
         targets.forEach(refreshDataset);
         if (targets.length > 0) nudgedConnectors.add(connector);
       }
+    },
+    put(dataset, result) {
+      const key = getDatasetLoadKey(dataset);
+      const show = (): void => {
+        if (key === '' || loadKeys.get(dataset.id) !== key || pendingLoads.has(dataset.id)) return;
+        setRun(dataset.id, toRunState(result, now(), null, false));
+      };
+      const pending = pendingLoads.get(dataset.id);
+      if (pending === undefined) show();
+      else void pending.then(show);
     },
     pending: () => pendingLoads.size,
     async settled() {

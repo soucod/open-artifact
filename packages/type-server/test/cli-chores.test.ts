@@ -181,6 +181,18 @@ describe('CLI chores', () => {
     assert.equal(JSON.parse((await run('delete-asset', deck, 'nope')).out[0]!).error, 'INVALID_ASSET');
   });
 
+  it('keeps an image upload that only a dashboard page shows', async () => {
+    const dashboard = join(dir, 'Dashboard');
+    const page = { text: `<main><img src="/_blob/${OTHER}" alt="Logo"></main>` };
+    await writeFiles(join(dashboard, 'db'), TYPES.data.scaffold('Dashboard', join(dashboard, 'db')));
+    await writeFiles(dashboard, { 'db/files/index.html.json': JSON.stringify(page), [`_blobs/${OTHER}.png`]: 'png' });
+    const used = await run('delete-asset', dashboard, `/_blob/${OTHER}`);
+    assert.equal(used.code, 1);
+    assert.equal(JSON.parse(used.out[0]!).error, 'IN_USE');
+    assert.ok(JSON.parse(used.out[0]!).message.includes('db/files/index.html.json'));
+    assert.ok(existsSync(join(dashboard, '_blobs', `${OTHER}.png`)));
+  });
+
   it('checks slide references against the folder', async () => {
     const present = await runCheck(deck, 'slides');
     assert.ok(!present.findings.some((f) => f.message.includes('does not exist')), JSON.stringify(present.findings));

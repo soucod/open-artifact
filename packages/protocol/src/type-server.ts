@@ -45,6 +45,14 @@ export interface TypeServerEnv {
   OPEN_ARTIFACT_TYPE_TOKEN: string;
   /** Folder the server may keep state in. */
   OPEN_ARTIFACT_STATE_DIR: string;
+  /** The scope the type was found in (`TypeScope`). */
+  OPEN_ARTIFACT_TYPE_SCOPE?: string;
+  /**
+   * `1` for a type whose root is not trusted (installed, or a project not trusted yet), else `0`. frame-host serves a
+   * restricted type's page with a Content-Security-Policy that keeps it to its own origin and the manifest's
+   * `openArtifact.network`, and frames it with a `sandbox` (no popups, no top navigation).
+   */
+  OPEN_ARTIFACT_TYPE_RESTRICTED?: string;
 }
 
 /** The line a type server prints to stdout once it listens. */
@@ -77,13 +85,23 @@ export interface TypeServerHealth {
 /** `POST /__open-artifact/open`: open (or find) the page of one artifact. */
 export interface OpenRequest {
   id: string;
-  /** Absolute path of the artifact folder. */
-  root: string;
+  /**
+   * Absolute path of the artifact folder. Left out for a type whose address is not loopback (a remote type, see
+   * `entryLocation`): a path on this computer is not sent to another one.
+   */
+  root?: string;
+  /** The artifact's title (also sent to a remote type: its page shows it). */
   title?: string;
   /** Preferred UI language, e.g. `en` or `zh-CN`. */
   lang?: string;
   /** Origin of the Shell that will frame the page. */
   shell?: string;
+  /**
+   * The Shell's own address for this artifact (absolute, on the `shell` origin), e.g. `http://127.0.0.1:4800/a/art_1`.
+   * A visit to the framed page as a top-level document (`Sec-Fetch-Dest: document`) is sent there instead of
+   * showing the page without its Shell.
+   */
+  viewer?: string;
 }
 
 /** `POST /__open-artifact/open` answer. */
@@ -110,10 +128,57 @@ export interface ShareRequest {
   reset?: ShareRole[];
   /** Guest id → a new role (its link must be on), or `null` to remove them. */
   guests?: Record<string, ShareRole | null>;
+  /** Cloud host: who may open the artifact without being named. */
+  access?: GeneralAccess;
+  /** Cloud host: {@link CloudMember.id} → a new role, or `null` to remove them. */
+  members?: Record<string, ShareRole | null>;
+  /** Cloud host: change some of the artifact's sharing settings. */
+  settings?: Partial<ShareCloudView['settings']>;
 }
 
 /** A role a share link grants. */
 export type ShareRole = 'editor' | 'commenter' | 'viewer';
+
+/** A role on an artifact: its owner's, or one sharing grants. */
+export type ArtifactRole = 'owner' | ShareRole;
+
+/**
+ * Who may open an artifact on a cloud host without being named: only its members (`restricted`), anyone with a share
+ * link (`link`), or anyone at all (`public`, as a viewer).
+ */
+export type GeneralAccess = 'restricted' | 'link' | 'public';
+
+/** Someone an artifact is shared with on a cloud host: a person, an invited address, a domain or a group. */
+export interface CloudMember {
+  /** `user:<id>`, `email:<address>`, `domain:<name>` or `group:<provider>:<name>`. */
+  id: string;
+  kind: 'user' | 'email' | 'domain' | 'group';
+  /** What the Share panel shows: a name, an address, a domain or a group name. */
+  label: string;
+  email?: string;
+  /** Picture URL. */
+  avatar?: string;
+  role: ShareRole;
+  /** An invited address nobody has signed in with yet. */
+  pending?: boolean;
+}
+
+/** {@link ShareView.cloud}: sharing on a cloud host. */
+export interface ShareCloudView {
+  /** The artifact's address on the host. */
+  url: string;
+  access: GeneralAccess;
+  owner: { id: string; name: string; email?: string; avatar?: string };
+  members: CloudMember[];
+  /** Whether this viewer may change sharing. */
+  canManage: boolean;
+  settings: {
+    /** People who may only view may still download or export it. */
+    viewersCanExport: boolean;
+    /** Editors may send requests to the owner's agent. */
+    editorsCanAskAgent: boolean;
+  };
+}
 
 /** Someone who joined through a share link. */
 export interface ShareGuest {
@@ -143,6 +208,8 @@ export interface ShareView {
   guests?: ShareGuest[];
   /** The same links at this computer's Tailscale address (the roles whose link is on), for people on the tailnet. */
   tailnet?: { address: string; links: Partial<Record<ShareRole, string>> };
+  /** Set by a cloud host, which has no local network sharing (`lan` is `false` there). */
+  cloud?: ShareCloudView;
 }
 
 /**
@@ -168,7 +235,8 @@ export type ReservedAction = (typeof RESERVED_ACTIONS)[number];
 /** `POST /__open-artifact/actions/<name>` body. */
 export interface ActionRequest {
   id: string;
-  root: string;
+  /** Absolute path of the artifact folder; left out for a remote type, as in {@link OpenRequest.root}. */
+  root?: string;
   args: Record<string, unknown>;
 }
 
@@ -187,6 +255,8 @@ export const TYPE_API_ROUTES = {
   events: 'events',
   touch: 'touch',
   task: 'task',
+  /** `POST { id, at }`: the owner's view context of the artifact changed (the daemon tells adapters, throttled). */
+  context: 'context',
 } as const;
 
 /** `GET /api/open-artifact.type.artifact?id=`. */
@@ -198,6 +268,13 @@ export interface TypeApiArtifact {
   owner: { label: string; harness: string } | null;
   agentName: string;
   view_url: string;
+  /**
+   * A newer release of the type wrote the artifact than the one installed here: its pages open it view-only (every
+   * role becomes `viewer`) until Open Artifact is updated. Left out by an older daemon (read as writable).
+   */
+  read_only?: boolean;
+  type_release?: string | null;
+  type_version?: string | null;
 }
 
 /** `POST /api/open-artifact.type.wake`. */
@@ -211,6 +288,11 @@ export interface TypeApiWakeRequest {
 export interface TypeApiWakeResult {
   status: WakeStatus;
   via: WakeVia;
+  /**
+   * With `status: "delivered"`: the harness put the message in the session's conversation for the person to send
+   * there (its adapter answered `drafted`). A page that does not know the field still shows a valid state.
+   */
+  drafted?: true;
 }
 
 /** Whether an agent is there to receive. `GET /api/open-artifact.type.presence?id=`. */

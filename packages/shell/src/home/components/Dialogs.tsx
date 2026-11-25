@@ -105,7 +105,7 @@ export function UndoBar() {
   if (!undo) return null;
   return (
     <div role="status" className="fixed bottom-5 left-1/2 z-[1100] flex max-w-[calc(100vw-32px)] -translate-x-1/2 items-center gap-3 rounded-lg bg-fg px-3.5 py-2 text-[13px] text-surface shadow-popup">
-      <span className="min-w-0 truncate">{t('deleted', { title: undo.title })}</span>
+      <span className="min-w-0 truncate">{t(undo.trash ? 'movedToTrash' : 'deleted', { title: undo.title })}</span>
       <button type="button" className="shrink-0 font-semibold text-surface underline-offset-2 hover:underline" onClick={() => void undoDelete()}>
         {t('undo')}
       </button>

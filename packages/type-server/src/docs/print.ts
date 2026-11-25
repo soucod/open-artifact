@@ -85,7 +85,7 @@ table { width: calc(100% - 1pt); margin: 0 0 10pt .5pt; border-collapse: collaps
 table.sized { table-layout: fixed; }
 thead { display: table-header-group; }
 tr { break-inside: avoid; }
-th, td { padding: 5pt 7pt; border: .75pt solid #e3e2dc; vertical-align: top; text-align: left; font-weight: 400; }
+th, td { padding: 5pt 7pt; border: .75pt solid #e3e2dc; vertical-align: top; text-align: left; font-weight: 400; overflow-wrap: anywhere; }
 th { background: #f5f4f0; }
 th > :last-child, td > :last-child { margin-bottom: 0; }
 hr { margin: 12pt 0; border: 0; border-top: .75pt solid #d9d8d2; }

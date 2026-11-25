@@ -216,9 +216,9 @@ async function saveBatch(): Promise<void> {
         const project = projectPath(path);
         if (!project || !sent[project]) continue;
         const { shown, disk } = sent[project];
-        // The working copy follows what we wrote unless the viewer typed since.
+        // The working copy follows what we wrote unless the viewer changed it since: then it is kept for the next save.
         const adopt = useFiles.getState().texts[project] === shown;
-        ack[project] = disk === null ? { hash: null, adopt } : { text: disk, hash: hash ?? '', adopt };
+        ack[project] = disk === null ? { hash: null, adopt, keep: !adopt } : { text: disk, hash: hash ?? '', adopt, keep: !adopt };
       }
       useFiles.getState().acknowledge(ack);
       offlineDelay = 2_000;
@@ -265,6 +265,11 @@ export async function applyRemote(changes: Record<string, string | null>, option
     held = { ...(held ?? {}), ...changes };
     return;
   }
+  // The news of our own save can come before the save's answer: the listing has the new hashes only once that answer
+  // is in, so wait for it. Otherwise our own write reads as made elsewhere and replaces an edit made since it went out
+  // (one that undid it back to the text before reads as no change at all). A conflict inside a save comes here with
+  // `force` and must not wait for itself.
+  if (!options.force) while (saving) await saving;
   for (const [path, hash] of Object.entries(changes)) {
     const project = projectPath(path);
     if (!project || project.startsWith('_blobs/')) continue;

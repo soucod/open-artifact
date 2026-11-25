@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { shownCellText } from '../format/shown-text.ts';
 import { formulaInPointNotation } from './point-notation.ts';
@@ -6,11 +5,40 @@ import { formulaReadsAsWords } from './word-tokens.ts';
 import { findFormulaReferences, resolveFormulaReference } from './references.ts';
 import { areaToA1AsStored } from './from-words/where.ts';
 import { taggedJson } from '../format/conditional/agent-prompts.ts';
-import { SHEET_DATA_DESCRIPTION_BRIEF, formulaWritingRules, namesAddressesOutsideTables } from './agent-prompt.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export let FIX_NEIGHBORS_IN_COLUMN: Dynamic;
-export let FIX_NEIGHBORS_IN_ROW: Dynamic;
-export function whatCellHolds(reads: WorkbookReads, sheetId?: Dynamic, position?: Dynamic) {
+import { SHEET_DATA_DESCRIPTION_BRIEF, blockAroundCell, formulaWritingRules, namesAddressesOutsideTables } from './agent-prompt.ts';
+import type { AgentPrompt } from '../format/conditional/agent-prompts.ts';
+import type { DecimalSignName, ErrorValue, SheetId } from '@open-artifact/sheets-core';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellArea, CellPosition } from '../selection/model.ts';
+import type { ErrorTell } from '../messages/formula-errors.ts';
+import type { FormulasLostToLastAct, LostFormula, OthersMayFitBecause } from '../state/initial-state.ts';
+/** What the agent is told a cell holds, in a word. */
+export type KindOfCellHolding = 'nothing' | 'error' | 'formula' | 'trueOrFalse' | 'option' | 'person' | 'text' | 'number';
+/** The records of the table around a cell, and the row of its header if there is one. */
+export interface TableAroundCell {
+  records: CellArea;
+  headerRowIndex: number | null;
+}
+/** What a request to fix a cell's formula is made from. */
+export interface FixRequest {
+  cellId: CellId;
+  error: ErrorValue;
+  tell: ErrorTell | null;
+  lastAct: Pick<FormulasLostToLastAct, 'act' | 'cells'> | null;
+  formulaBefore: LostFormula | null;
+}
+/** An answer of the agent that holds a formula. */
+export interface FormulaAnswer {
+  formula: string;
+}
+/** A cell that holds words where a formula goes, and whether the words may name a range. */
+export interface FormulaInWords {
+  typed: string;
+  mayNameARange: boolean;
+}
+export let FIX_NEIGHBORS_IN_COLUMN: number;
+export let FIX_NEIGHBORS_IN_ROW: number;
+export function whatCellHolds(reads: WorkbookReads, sheetId: SheetId, position: CellPosition): KindOfCellHolding {
   let cellId = reads.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
   let cell = cellId === null ? null : reads.cellOnShowIn(cellId);
   if (cell === null) return 'nothing';
@@ -32,7 +60,7 @@ export function whatCellHolds(reads: WorkbookReads, sheetId?: Dynamic, position?
       return cell.input.kind;
   }
 }
-export function whatCellShows(reads: WorkbookReads, sheetId?: Dynamic, position?: Dynamic, limit?: Dynamic) {
+export function whatCellShows(reads: WorkbookReads, sheetId: SheetId, position: CellPosition, limit: number): string {
   let holds = whatCellHolds(reads, sheetId, position);
   if (holds === 'person') return '(a person)';
   let cellId = reads.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
@@ -41,13 +69,13 @@ export function whatCellShows(reads: WorkbookReads, sheetId?: Dynamic, position?
   return cell === null ? '' : cutWithEllipsis(shownCellText(cell, 1 / 0, 'point').text, limit);
 }
 export function* positionsInArea({
-  topRowIndex: topRowIndex,
-  leftColumnIndex: leftColumnIndex,
-  rowCount: rowCount,
-  columnCount: columnCount,
-}: Dynamic): Generator<Dynamic, Dynamic, Dynamic> {
-  for (let row: Dynamic = 0; row < rowCount; row += 1)
-    for (let column: Dynamic = 0; column < columnCount; column += 1)
+  topRowIndex,
+  leftColumnIndex,
+  rowCount,
+  columnCount,
+}: CellArea): Generator<CellPosition, void, undefined> {
+  for (let row = 0; row < rowCount; row += 1)
+    for (let column = 0; column < columnCount; column += 1)
       yield {
         rowIndex: topRowIndex + row,
         columnIndex: leftColumnIndex + column,
@@ -55,13 +83,13 @@ export function* positionsInArea({
 }
 export function rowLabelOfCell(
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic,
-  firstColumnOfTable?: Dynamic,
-) {
-  for (let column: Dynamic = columnIndex - 1; column >= (firstColumnOfTable ?? 0); column -= 1) {
+  sheetId: SheetId,
+  { rowIndex, columnIndex }: CellPosition,
+  firstColumnOfTable: number | null,
+): string | null {
+  for (let column = columnIndex - 1; column >= (firstColumnOfTable ?? 0); column -= 1) {
     let holds = whatCellHolds(reads, sheetId, {
-      rowIndex: rowIndex,
+      rowIndex,
       columnIndex: column,
     });
     if (holds === 'nothing' && firstColumnOfTable === null) return null;
@@ -70,7 +98,7 @@ export function rowLabelOfCell(
         reads,
         sheetId,
         {
-          rowIndex: rowIndex,
+          rowIndex,
           columnIndex: column,
         },
         FIX_LABEL_TEXT_LIMIT,
@@ -78,60 +106,41 @@ export function rowLabelOfCell(
   }
   return null;
 }
-export function tableAroundCell(reads: WorkbookReads, cellId?: Dynamic, position?: Dynamic) {
-  let { sheetId: sheetId } = cellId;
-  let records = reads.conditionalFormatSuggestions(cellId, cellId)?.table.records;
-  if (records === undefined) return null;
-  let [topRow = null, bottomRow = null] = [records.topLeft.r, records.bottomRight.r].map(
-    (rowId?: Dynamic) => reads.rowIndexOf(sheetId, rowId),
-  );
-  let [leftColumn = null, rightColumn = null] = [records.topLeft.c, records.bottomRight.c].map(
-    (columnId?: Dynamic) => reads.columnIndexOf(sheetId, columnId),
-  );
-  if (topRow === null || bottomRow === null || leftColumn === null || rightColumn === null) return null;
+export function tableAroundCell(reads: WorkbookReads, cellId: CellId, position: CellPosition): TableAroundCell | null {
+  let block = blockAroundCell(reads, cellId);
+  if (block === null) return null;
+  let { records } = block;
+  let topRow = records.topRowIndex;
   let above = {
     rowIndex: topRow - 1,
     columnIndex: position.columnIndex,
   };
   return {
-    records: {
-      topRowIndex: topRow,
-      leftColumnIndex: leftColumn,
-      rowCount: bottomRow - topRow + 1,
-      columnCount: rightColumn - leftColumn + 1,
-    },
-    headerRowIndex: topRow > 0 && whatCellHolds(reads, sheetId, above) === 'text' ? topRow - 1 : null,
+    records,
+    headerRowIndex: topRow > 0 && whatCellHolds(reads, cellId.sheetId, above) === 'text' ? topRow - 1 : null,
   };
 }
-export function tableAreaWithHeaderAt(reads: WorkbookReads, sheetId?: Dynamic, position?: Dynamic) {
+export function tableAreaWithHeaderAt(reads: WorkbookReads, sheetId: SheetId, position: CellPosition): CellArea | null {
   let cellId = reads.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
-  let table = cellId === null ? null : tableAroundCell(reads, cellId, position);
-  if (table === null) return null;
-  let { records: records, headerRowIndex: headerRowIndex } = table;
-  let topRowIndex = headerRowIndex ?? records.topRowIndex;
-  return {
-    ...records,
-    topRowIndex: topRowIndex,
-    rowCount: records.topRowIndex + records.rowCount - topRowIndex,
-  };
+  return (cellId === null ? null : blockAroundCell(reads, cellId))?.area ?? null;
 }
 export function columnHeaderOfCell(
   reads: WorkbookReads,
-  sheetId: Dynamic,
-  { rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic,
-  table?: Dynamic,
-) {
-  let textAt = (rowIndex2?: Dynamic) =>
+  sheetId: SheetId,
+  { rowIndex, columnIndex }: CellPosition,
+  table: TableAroundCell | null,
+): string | null {
+  let textAt = (headerRowIndex: number) =>
     whatCellHolds(reads, sheetId, {
-      rowIndex: rowIndex2,
-      columnIndex: columnIndex,
+      rowIndex: headerRowIndex,
+      columnIndex,
     }) === 'text'
       ? whatCellShows(
           reads,
           sheetId,
           {
-            rowIndex: rowIndex2,
-            columnIndex: columnIndex,
+            rowIndex: headerRowIndex,
+            columnIndex,
           },
           FIX_LABEL_TEXT_LIMIT,
         )
@@ -142,11 +151,11 @@ export function columnHeaderOfCell(
     return row < rowIndex && textAt(row + 1) === null ? textAt(row) : null;
   }
   let stopRow = Math.max(0, rowIndex - 1 - MAX_ROWS_UP_TO_COLUMN_HEADER);
-  for (let row: Dynamic = rowIndex - 1; row >= stopRow; row -= 1) {
+  for (let row = rowIndex - 1; row >= stopRow; row -= 1) {
     if (
       whatCellHolds(reads, sheetId, {
         rowIndex: row,
-        columnIndex: columnIndex,
+        columnIndex,
       }) === 'nothing'
     )
       return null;
@@ -155,7 +164,12 @@ export function columnHeaderOfCell(
   }
   return null;
 }
-export function describeNeighborCell(reads: WorkbookReads, sheetId?: Dynamic, position?: Dynamic, firstColumnOfTable?: Dynamic) {
+export function describeNeighborCell(
+  reads: WorkbookReads,
+  sheetId: SheetId,
+  position: CellPosition,
+  firstColumnOfTable: number | null,
+) {
   let cellId = position.rowIndex < 0 || position.columnIndex < 0 ? null : reads.cellIdAt(sheetId, position.rowIndex, position.columnIndex);
   if (cellId === null) return null;
   let cell = reads.cellOf(cellId) ?? null;
@@ -167,12 +181,12 @@ export function describeNeighborCell(reads: WorkbookReads, sheetId?: Dynamic, po
       : rowLabelOfCell(reads, sheetId, position, firstColumnOfTable);
   let neighbor = {
     at: addressOfCellPosition(position),
-    label: label,
+    label,
   };
   if (cell === null || formulaText === undefined)
     return {
       ...neighbor,
-      holds: holds,
+      holds,
     };
   if (readsAnotherSheet(formulaText, reads.decimalSign))
     return {
@@ -183,7 +197,7 @@ export function describeNeighborCell(reads: WorkbookReads, sheetId?: Dynamic, po
   if (formula === null)
     return {
       ...neighbor,
-      holds: holds,
+      holds,
     };
   return formulaText.length > FIX_NEIGHBOR_FORMULA_LIMIT
     ? {
@@ -192,55 +206,55 @@ export function describeNeighborCell(reads: WorkbookReads, sheetId?: Dynamic, po
       }
     : {
         ...neighbor,
-        formula: formula,
+        formula,
       };
 }
-export function isFormulaWrittenInWords(reads: WorkbookReads, formulaText?: Dynamic) {
-  let sheetNames = reads.listSheets().map(({ name: name }: Dynamic) => name);
+export function isFormulaWrittenInWords(reads: WorkbookReads, formulaText: string): boolean {
+  let sheetNames = reads.listSheets().map(({ name }) => name);
   let namesASheet =
     sheetNames.length > 1 &&
     sheetNames.some(
-      (sheetName?: Dynamic) =>
+      (sheetName) =>
         simplifyForNameMatch(sheetName) !== '' && ` ${simplifyForNameMatch(formulaText)} `.includes(` ${simplifyForNameMatch(sheetName)} `),
     );
   return !readsAnotherSheet(formulaText, reads.decimalSign) && !namesASheet && formulaReadsAsWords(formulaText, sheetNames, reads.decimalSign);
 }
 export function fixRequestData(
   reads: WorkbookReads,
-  { cellId: cellId, error: error, tell: tell, lastAct: lastAct, formulaBefore: formulaBefore }: Dynamic,
-) {
-  let { sheetId: sheetId } = cellId;
+  { cellId, error, tell, lastAct, formulaBefore }: FixRequest,
+): string | null {
+  let { sheetId } = cellId;
   let position = reads.positionOfCell(cellId);
   let cell = reads.cellOf(cellId) ?? null;
   let formulaText = cell?.formulaText;
   if (position === null || cell === null || !isFormulaShortEnoughToFix(formulaText)) return null;
   let formula = formulaInPointNotation(cell, reads.decimalSign, reads.formulaAsTyped);
   if (formula === null) return null;
-  let { references: references, quoted: quoted } = findFormulaReferences(formulaText, reads.decimalSign);
+  let { references, quoted } = findFormulaReferences(formulaText, reads.decimalSign);
   if (readsAnotherSheet(formulaText, reads.decimalSign)) return null;
   if (formulaBefore !== null && !isFormulaBeforeFixable(formulaBefore, reads)) return null;
   let sheets = reads.listSheets();
   let areas = references
-    .flatMap((reference?: Dynamic) => resolveFormulaReference(reference, sheetId, sheets) ?? [])
+    .flatMap((reference) => resolveFormulaReference(reference, sheetId, sheets) ?? [])
     .slice(0, FIX_MAX_REFERENCES);
-  let isQuotedAt = (index?: Dynamic) =>
-    quoted.some(({ start: start, end: end }: Dynamic) => index >= start && index < end);
-  let goneCount = [...formulaText.matchAll(/#REF!/g)].filter(({ index: index }: Dynamic) => !isQuotedAt(index)).length;
-  let [cellsCounted, readCount]: Dynamic = [0, 0];
-  let cellsRead: Dynamic = [];
-  let referenceData = areas.map(({ area: area }: Dynamic) => {
-    let holds: Dynamic = {};
+  let isQuotedAt = (index: number) =>
+    quoted.some(({ start, end }) => index >= start && index < end);
+  let goneCount = [...formulaText.matchAll(/#REF!/g)].filter(({ index }) => !isQuotedAt(index)).length;
+  let [cellsCounted, readCount] = [0, 0];
+  let cellsRead: { at: string; shows: string }[] = [];
+  let referenceData = areas.map(({ area }) => {
+    let holds: Partial<Record<KindOfCellHolding, number>> = {};
     let countedBefore = cellsCounted;
-    for (let position2 of positionsInArea(area) as Dynamic) {
+    for (let cellPosition of positionsInArea(area)) {
       if (cellsCounted === FIX_MAX_CELLS_COUNTED) break;
       cellsCounted += 1;
-      let kind = whatCellHolds(reads, sheetId, position2);
+      let kind = whatCellHolds(reads, sheetId, cellPosition);
       holds[kind] = (holds[kind] ?? 0) + 1;
       if (readCount === FIX_MAX_CELLS_READ) continue;
       readCount += 1;
       cellsRead.push({
-        at: addressOfCellPosition(position2),
-        shows: whatCellShows(reads, sheetId, position2, FIX_CELL_TEXT_LIMIT),
+        at: addressOfCellPosition(cellPosition),
+        shows: whatCellShows(reads, sheetId, cellPosition, FIX_CELL_TEXT_LIMIT),
       });
     }
     let notCounted = area.rowCount * area.columnCount - (cellsCounted - countedBefore);
@@ -248,29 +262,29 @@ export function fixRequestData(
       at: areaToA1AsStored(area, null),
       rows: area.rowCount,
       columns: area.columnCount,
-      holds: holds,
+      holds,
       cellsNotCounted: notCounted,
     };
   });
   let table = tableAroundCell(reads, cellId, position);
   let firstColumnOfTable = table?.records.leftColumnIndex ?? null;
-  let { rowIndex: rowIndex, columnIndex: columnIndex } = position;
-  let walkUntilEmpty = (count?: Dynamic, positionAt?: Dynamic) => {
+  let { rowIndex, columnIndex } = position;
+  let walkUntilEmpty = (count: number, positionAt: (step: number) => CellPosition) => {
     let positions = countingNumbersTo(count).map(positionAt);
-    let emptyIndex = positions.findIndex((position2?: Dynamic) => whatCellHolds(reads, sheetId, position2) === 'nothing');
+    let emptyIndex = positions.findIndex((walked) => whatCellHolds(reads, sheetId, walked) === 'nothing');
     return emptyIndex === -1 ? positions : positions.slice(0, emptyIndex + 1);
   };
   let above = walkUntilEmpty(
     FIX_NEIGHBORS_IN_COLUMN,
-    (step?: Dynamic) => ({
+    (step) => ({
       rowIndex: rowIndex - step,
-      columnIndex: columnIndex,
+      columnIndex,
     }),
   );
   let left = walkUntilEmpty(
     FIX_NEIGHBORS_IN_ROW,
-    (step?: Dynamic) => ({
-      rowIndex: rowIndex,
+    (step) => ({
+      rowIndex,
       columnIndex: columnIndex - step,
     }),
   );
@@ -280,16 +294,16 @@ export function fixRequestData(
     ...above,
     ...walkUntilEmpty(
       FIX_NEIGHBORS_IN_COLUMN,
-      (step?: Dynamic) => ({
+      (step) => ({
         rowIndex: rowIndex + step,
-        columnIndex: columnIndex,
+        columnIndex,
       }),
     ),
     ...left,
     ...walkUntilEmpty(
       FIX_NEIGHBORS_IN_ROW,
-      (step?: Dynamic) => ({
-        rowIndex: rowIndex,
+      (step) => ({
+        rowIndex,
         columnIndex: columnIndex + step,
       }),
     ),
@@ -298,14 +312,14 @@ export function fixRequestData(
   let tableRowCount = table === null ? 0 : table.records.topRowIndex + table.records.rowCount - firstRowIndex;
   return taggedJson('fix', {
     cell: addressOfCellPosition(position),
-    error: error,
+    error,
     why: tell,
-    formula: formula,
+    formula,
     ...(isFormulaWrittenInWords(reads, formulaText) && {
       inWords: true,
     }),
     references: [
-      ...Array.from<Dynamic, Dynamic>(
+      ...Array.from(
         {
           length: goneCount,
         },
@@ -316,26 +330,26 @@ export function fixRequestData(
       ),
       ...referenceData,
     ],
-    cellsRead: cellsRead,
+    cellsRead,
     rowLabel: readsRowsAroundItsOwn(reads, sheetId, formulaText, rowIndex) ? null : rowLabelOfCell(reads, sheetId, position, firstColumnOfTable),
     columnHeader: columnHeaderOfCell(reads, sheetId, position, table),
-    neighbors: neighbors.flatMap((position2?: Dynamic) => describeNeighborCell(reads, sheetId, position2, firstColumnOfTable) ?? []),
+    neighbors: neighbors.flatMap((neighbor) => describeNeighborCell(reads, sheetId, neighbor, firstColumnOfTable) ?? []),
     firstColumn:
       table === null
         ? []
-        : countingNumbersTo(Math.min(tableRowCount, FIX_FIRST_COLUMN_ROWS)).map((row?: Dynamic) => {
-            let rowIndex2 = firstRowIndex + row - 1;
-            let position2 = {
-              rowIndex: rowIndex2,
+        : countingNumbersTo(Math.min(tableRowCount, FIX_FIRST_COLUMN_ROWS)).map((row) => {
+            let rowIndexInColumn = firstRowIndex + row - 1;
+            let cellPosition = {
+              rowIndex: rowIndexInColumn,
               columnIndex: table.records.leftColumnIndex,
             };
             return {
-              row: rowIndex2 + 1,
-              text: whatCellShows(reads, sheetId, position2, FIX_CELL_TEXT_LIMIT),
+              row: rowIndexInColumn + 1,
+              text: whatCellShows(reads, sheetId, cellPosition, FIX_CELL_TEXT_LIMIT),
             };
           }),
     rowsOfFirstColumnLeftOut: Math.max(0, tableRowCount - FIX_FIRST_COLUMN_ROWS),
-    lastAct: lastAct,
+    lastAct,
     formulaBefore:
       formulaBefore === null
         ? null
@@ -352,17 +366,17 @@ export function fixRequestData(
           },
   });
 }
-export function formulasInAnswer(answer?: Dynamic) {
+export function formulasInAnswer(answer: unknown): FormulaAnswer[] {
   if (!isFormulaAnswer(answer)) return [];
-  let others = 'others' in answer && Array.isArray(answer.others) ? answer.others : [];
+  let others: unknown[] = 'others' in answer && Array.isArray(answer.others) ? answer.others : [];
   return [answer, ...others].filter(isFormulaAnswer).map(
-    ({ formula: formula }: Dynamic) => ({
-      formula: formula,
+    ({ formula }) => ({
+      formula,
     }),
   );
 }
-export function fixDataTellsLabelOrHeading(fixData?: Dynamic) {
-  let data = JSON.parse(
+export function fixDataTellsLabelOrHeading(fixData: string): boolean {
+  let data: unknown = JSON.parse(
     fixData.split(`
 `)[1] ?? 'null',
   );
@@ -373,7 +387,8 @@ export function fixDataTellsLabelOrHeading(fixData?: Dynamic) {
   );
 }
 export const MAX_FIXABLE_FORMULA_LENGTH = 1000;
-export const isFormulaShortEnoughToFix = (formulaText?: Dynamic) =>
+/** Whether a cell holds a formula short enough to ask the agent to fix. */
+export const isFormulaShortEnoughToFix = (formulaText: string | undefined): formulaText is string =>
   formulaText !== undefined && formulaText.length <= MAX_FIXABLE_FORMULA_LENGTH;
 export const FIX_MAX_REFERENCES = 12;
 export const FIX_MAX_CELLS_COUNTED = 200;
@@ -383,15 +398,15 @@ export const FIX_LABEL_TEXT_LIMIT = 64;
 export const FIX_NEIGHBOR_FORMULA_LIMIT = 300;
 [FIX_NEIGHBORS_IN_COLUMN, FIX_NEIGHBORS_IN_ROW] = [3, 2];
 export const FIX_FIRST_COLUMN_ROWS = 60;
-export const countingNumbersTo = (count?: Dynamic) =>
-  Array.from<Dynamic, Dynamic>(
+export const countingNumbersTo = (count: number): number[] =>
+  Array.from(
     {
       length: count,
     },
-    (input?: Dynamic, index?: Dynamic) => index + 1,
+    (_, index) => index + 1,
   );
-export const cutWithEllipsis = (text?: Dynamic, limit?: Dynamic) => (text.length > limit ? `${text.slice(0, limit)}…` : text);
-export const addressOfCellPosition = ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) =>
+export const cutWithEllipsis = (text: string, limit: number): string => (text.length > limit ? `${text.slice(0, limit)}…` : text);
+export const addressOfCellPosition = ({ rowIndex, columnIndex }: CellPosition): string =>
   areaToA1AsStored(
     {
       topRowIndex: rowIndex,
@@ -402,30 +417,30 @@ export const addressOfCellPosition = ({ rowIndex: rowIndex, columnIndex: columnI
     null,
   );
 export const MAX_ROWS_UP_TO_COLUMN_HEADER = 200;
-export const readsAnotherSheet = (formulaText?: Dynamic, decimalSign?: Dynamic) =>
-  findFormulaReferences(formulaText, decimalSign).references.some(({ sheetName: sheetName }: Dynamic) => sheetName !== null);
+export const readsAnotherSheet = (formulaText: string, decimalSign: DecimalSignName): boolean =>
+  findFormulaReferences(formulaText, decimalSign).references.some(({ sheetName }) => sheetName !== null);
 export const isFormulaBeforeFixable = (
-  { text: text, input: input }: Dynamic,
-  { decimalSign: decimalSign, formulaAsTyped: formulaAsTyped }: Dynamic,
-) =>
+  { text, input }: Pick<LostFormula, 'text' | 'input'>,
+  { decimalSign, formulaAsTyped }: Pick<WorkbookReads, 'decimalSign' | 'formulaAsTyped'>,
+): boolean =>
   isFormulaShortEnoughToFix(text) &&
   !readsAnotherSheet(text, decimalSign) &&
   formulaInPointNotation(
     {
-      input: input,
+      input,
       formulaText: text,
     },
     decimalSign,
     formulaAsTyped,
   ) !== null;
-export const readsRowsAroundItsOwn = (reads: WorkbookReads, sheetId?: Dynamic, formulaText?: Dynamic, rowIndex?: Dynamic) =>
+export const readsRowsAroundItsOwn = (reads: WorkbookReads, sheetId: SheetId, formulaText: string, rowIndex: number): boolean =>
   findFormulaReferences(formulaText, reads.decimalSign)
-    .references.flatMap((reference?: Dynamic) => resolveFormulaReference(reference, sheetId, reads.listSheets()) ?? [])
+    .references.flatMap((reference) => resolveFormulaReference(reference, sheetId, reads.listSheets()) ?? [])
     .some(
-      ({ sheet: sheet, area: area }: Dynamic) =>
+      ({ sheet, area }) =>
         sheet.sheetId === sheetId && area.rowCount > 1 && area.topRowIndex <= rowIndex && rowIndex < area.topRowIndex + area.rowCount,
     );
-export const simplifyForNameMatch = (text?: Dynamic) =>
+export const simplifyForNameMatch = (text: string): string =>
   text
     .toLowerCase()
     .replaceAll(/[^\p{L}\p{N}]+/gu, ' ')
@@ -433,13 +448,13 @@ export const simplifyForNameMatch = (text?: Dynamic) =>
 export const DECIMAL_COMMA_FIX_NOTE = `
 This sheet writes a comma before a number's decimals. The formulas in the data have been converted to US English notation, with a decimal point and commas between arguments. Write yours the same way, 1.5 and never 1,5, and ten thousand as 10000, never 10.000 or 10,000, and the app converts it back for the sheet. Text in quotation marks is never converted: keep what the formula has there as it is, and put no new text that holds a digit, a point or a comma, such as a number or a date, in quotation marks. Write a new condition as ">"&1.5, never ">1.5". What a cell shows is given with a decimal point where the cell has no number format, and otherwise as the sheet writes it, with a decimal comma, and perhaps a point or a blank between thousands.
 `;
-export const SECOND_READINGS_OF_FIX = {
+export const SECOND_READINGS_OF_FIX: Record<OthersMayFitBecause, string> = {
   nameNotKnown:
     "the name that the app doesn't know is as near to another function that gives another result, or two functions of the app could each do its work and give different results",
   cellsDeleted: 'two columns could each take the place of the deleted one',
 };
 export const FIX_CANNOT_TELL_NOTE = 'If you cannot tell what the formula was meant to give, answer {"formula":null}.';
-export const fixAnswerNote = (secondReading?: Dynamic) =>
+export const fixAnswerNote = (secondReading: OthersMayFitBecause | null): string =>
   secondReading === null
     ? `Answer with this JSON alone: {"formula":"=…"}. ${FIX_CANNOT_TELL_NOTE}`
     : `Answer with this JSON alone: {"formula":"=…"}.
@@ -448,15 +463,15 @@ Before you answer, look for a second reading. One is open where ${SECOND_READING
 
 ${FIX_CANNOT_TELL_NOTE}`;
 export const fixFormulaPrompt = (
-  cellAddress?: Dynamic,
-  errorCode?: Dynamic,
-  fixData?: Dynamic,
-  sheetData?: Dynamic,
-  decimalSign?: Dynamic,
-  filledDownTo: Dynamic = null,
-  inWords: Dynamic = null,
-  secondReading: Dynamic = null,
-) => ({
+  cellAddress: string,
+  errorCode: ErrorValue,
+  fixData: string,
+  sheetData: string,
+  decimalSign: DecimalSignName,
+  filledDownTo: string | null = null,
+  inWords: FormulaInWords | null = null,
+  secondReading: OthersMayFitBecause | null = null,
+): AgentPrompt => ({
   words: `You mend formulas in a spreadsheet app, for a person who is at work in a sheet. The formula in cell ${cellAddress} shows the error ${errorCode}, and they pressed "Fix". Write the one formula for ${cellAddress} that gives what that formula was meant to give.
 
 What is known of the formula is in the data, on the one line between <fix> and </fix>, as JSON.
@@ -490,5 +505,5 @@ ${fixAnswerNote(secondReading)}`,
   data: `${fixData}
 ${sheetData}`,
 });
-export const isFormulaAnswer = (answer?: Dynamic) =>
+export const isFormulaAnswer = (answer: unknown): answer is FormulaAnswer =>
   typeof answer === 'object' && answer !== null && 'formula' in answer && typeof answer.formula === 'string';

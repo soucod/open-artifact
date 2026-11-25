@@ -47,7 +47,7 @@ import {
   type EmbedNode,
 } from '@open-artifact/slides-core';
 import { ImageIcon, Play, Video } from 'lucide-react';
-import { SECTION_LAYOUT, SLIDE_CLASS, toReactStyle, installSlideStyles } from './css.ts';
+import { SECTION_LAYOUT, SLIDE_CLASS, toReactStyle, installSlideStyles, withItemMargin } from './css.ts';
 import { embedDocument, mountEmbedStill } from './embed-still.ts';
 import { useTextFit } from './fit.ts';
 import { guardSmil } from '../services/motion.ts';
@@ -261,7 +261,7 @@ export function RunsView({ runs, linkable }: { runs: readonly Run[]; linkable: b
     const lines = run.text.split('\n');
     let content: ReactNode = lines.flatMap((line, j) => (j === 0 ? [line] : [<br key={`br${j}`} />, line]));
     const marks = run.marks;
-    if (marks?.color) content = <span style={{ color: marks.color }}>{content}</span>;
+    if (marks?.color || marks?.regular) content = <span style={{ color: marks.color, fontWeight: marks.regular && !marks.b ? 400 : undefined }}>{content}</span>;
     if (marks?.u) content = <u>{content}</u>;
     if (marks?.i) content = <i>{content}</i>;
     if (marks?.b) content = <b>{content}</b>;
@@ -317,11 +317,11 @@ function ListView({ node, path, inBox }: NodeProps<ListNode> & { inBox?: boolean
   const options = useRenderOptions();
   useTextFit(ref, inBox ? 'none' : node.fit, [node]);
   const Tag = node.tag;
-  const style = toReactStyle(node.style, { resolveUrl: options.resolveSrc });
+  const style = withItemMargin(toReactStyle(node.style, { resolveUrl: options.resolveSrc }), node.itemMargin);
   if (node.fit === 'grow') style.flexShrink = 0;
   return (
-    <Tag ref={ref as RefObject<never>} {...frameOf(node, path, 'open-artifact-list', options.builds?.get(path[0]!))} style={style}>
-      {listLevel(node.items, 0, 0, Tag, options.mode === 'present').nodes}
+    <Tag ref={ref as RefObject<never>} {...frameOf(node, path, 'open-artifact-list', options.builds?.get(path[0]!))} style={style} start={node.start} reversed={node.reversed}>
+      {listLevel(node.items, 0, 0, Tag, options.mode === 'present', node.levels).nodes}
     </Tag>
   );
 }
@@ -331,17 +331,18 @@ function ListView({ node, path, inBox }: NodeProps<ListNode> & { inBox?: boolean
  * deeper items nested in a list of the same tag. A skipped level is a
  * markerless item holding the deeper list.
  */
-function listLevel(items: ListNode['items'], start: number, level: number, Tag: 'ul' | 'ol', linkable: boolean): { nodes: ReactNode[]; next: number } {
+function listLevel(items: ListNode['items'], start: number, level: number, Tag: 'ul' | 'ol', linkable: boolean, levels?: ListNode['levels']): { nodes: ReactNode[]; next: number } {
+  const look = levels?.[level + 1] ? toReactStyle(levels[level + 1]!) : undefined;
   const nodes: ReactNode[] = [];
   let i = start;
   while (i < items.length) {
     const at = items[i]!.level ?? 0;
     if (at < level) break;
     if (at > level) {
-      const inner = listLevel(items, i, level + 1, Tag, linkable);
+      const inner = listLevel(items, i, level + 1, Tag, linkable, levels);
       nodes.push(
-        <li key={`skip-${i}`} style={{ listStyle: 'none' }}>
-          <Tag>{inner.nodes}</Tag>
+        <li key={`skip-${i}`} style={{ listStyleType: 'none', marginTop: 0, marginBottom: 0 }}>
+          <Tag style={look}>{inner.nodes}</Tag>
         </li>,
       );
       i = inner.next;
@@ -352,8 +353,8 @@ function listLevel(items: ListNode['items'], start: number, level: number, Tag: 
     i++;
     let nested: ReactNode = null;
     if (i < items.length && (items[i]!.level ?? 0) > level) {
-      const inner = listLevel(items, i, level + 1, Tag, linkable);
-      nested = <Tag>{inner.nodes}</Tag>;
+      const inner = listLevel(items, i, level + 1, Tag, linkable, levels);
+      nested = <Tag style={look}>{inner.nodes}</Tag>;
       i = inner.next;
     }
     nodes.push(

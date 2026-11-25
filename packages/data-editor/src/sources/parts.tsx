@@ -22,6 +22,7 @@ import { fitDatasetNotice, formatAttributedError } from '../data/status.ts';
 import { describeCalculationArguments, splitCalculationCodeArguments } from './calc-args.ts';
 import { CODE_BOX_CLASS, CollapsibleCodeBlock, CopyButton, HighlightedCode, HighlightedCodePieces, LabeledField, type PlaceRenderer } from './code.tsx';
 import { getQueryArgumentViews, type QueryArgumentView } from './args.ts';
+import { useFocusHandoff } from './focus.ts';
 import { hasRefreshAction, isDatasetLoading, type ConnectionStates, type SourceRowStatus } from './grouping.ts';
 import { parseDisplayedNumbers } from '../page/numbers.ts';
 import { getResultFreshness, type FocusedNumber } from './result.ts';
@@ -287,10 +288,13 @@ export interface SourceFailureNoticeProps {
   canAskAgent: boolean;
   onConnect: ConnectSource;
   onAskWhy?: (datasets: Dataset[]) => void;
+  /** The notice went away with focus inside it (its fix worked, the source loaded): put focus somewhere. */
+  onGone?: () => void;
 }
 
 /** Why a source failed, with the fix it needs (or Ask your agent), and what the error said. */
-export function SourceFailureNotice({ ds, notice, status, failedAt, editor, canAskAgent, onConnect, onAskWhy }: SourceFailureNoticeProps): ReactElement {
+export function SourceFailureNotice({ ds, notice, status, failedAt, editor, canAskAgent, onConnect, onAskWhy, onGone }: SourceFailureNoticeProps): ReactElement {
+  const handoff = useFocusHandoff<HTMLDivElement>(() => onGone?.());
   const { text, why, said, fix, retry, tool } = notice;
   const [busy, track] = useBusyTracker();
   const ask = (retry !== undefined || notice.ask === true) && onAskWhy !== undefined ? onAskWhy : undefined;
@@ -300,7 +304,7 @@ export function SourceFailureNotice({ ds, notice, status, failedAt, editor, canA
   }, [failedAt, heard]);
   const tone = status?.kind === 'problem' ? 'border-danger/40 bg-danger/10' : status?.kind === 'warn' ? 'border-warning/40 bg-warning/10' : 'border-line bg-surface-2';
   return (
-    <div className="flex flex-col gap-1.5">
+    <div ref={handoff} className="flex flex-col gap-1.5">
       <div role="none" className={cn('flex items-start gap-2 rounded-control border px-3 py-2 text-[13px] text-fg', tone)}>
         {status?.kind === 'problem' || status?.kind === 'warn' ? (
           <TriangleAlert className={cn('mt-0.5 size-4 shrink-0', status.kind === 'problem' ? 'text-danger' : 'text-warning')} aria-hidden />
@@ -312,7 +316,15 @@ export function SourceFailureNotice({ ds, notice, status, failedAt, editor, canA
         {fix === undefined && ask === undefined ? null : (
           <span className={cn('flex shrink-0 items-center gap-1', fix !== undefined && 'self-center')}>
             {fix === undefined ? null : (
-              <Button size="sm" disabled={busy} aria-label={connectionFixAriaLabel(fix.fix, fix.connector, canAskAgent)} onClick={() => track(onConnect(fix.connector, fix.fix))}>
+              <Button
+                size="sm"
+                disabled={busy}
+                aria-label={connectionFixAriaLabel(fix.fix, fix.connector, canAskAgent)}
+                onClick={(event) => {
+                  event.currentTarget.focus();
+                  track(onConnect(fix.connector, fix.fix));
+                }}
+              >
                 {connectionFixLabel(fix.fix, canAskAgent)}
               </Button>
             )}

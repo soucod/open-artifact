@@ -1,16 +1,68 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { groupCommandsByHeading } from '../search-menu/command-groups.ts';
 import { commandToRunForQuery } from '../search-menu/matching.ts';
-export function withCommandsOfNow(handyman?: Dynamic, commands?: Dynamic, whyNotOf?: Dynamic) {
+import type { CommandsUnderHeading } from '../search-menu/command-groups.ts';
+import type { MenuCommand } from '../search-menu/matching.ts';
+/** The rule the agent writes from the words typed, when the words ask for one. */
+export type HandymanRule = { is: 'awaited' } | { is: 'notWritten' } | { is: 'written'; landedAtMs: number };
+/** The agent's answer to the words typed in the menu: the commands it named, and those the words find. */
+export interface HandymanAnswered {
+  is: 'answered';
+  words: string;
+  commands: MenuCommand[];
+  makesRule: boolean;
+  foundByWords: MenuCommand[];
+  landedAtMs: number;
+  /** Whether the pointer may take rows yet; not until it moves, when the answer lands under it. */
+  heedsPointer: boolean;
+  /** Ids of the commands taken from the answer. */
+  taken: Set<string>;
+  rule: HandymanRule;
+}
+/** Where the agent stands on finding the tools for the words typed in the menu. */
+export type HandymanState =
+  | { is: 'resting' }
+  | { is: 'asking'; words: string; ask: number }
+  | HandymanAnswered
+  | { is: 'failed'; words: string };
+export type HandymanAction =
+  | { kind: 'asked'; words: string; ask: number }
+  | { kind: 'answered'; ask: number; atMs: number; isUnderMouse: boolean; commands: MenuCommand[]; makesRule: boolean; foundByWords: MenuCommand[] }
+  | { kind: 'gaveNoAnswer'; ask: number }
+  | { kind: 'stopped' }
+  | { kind: 'typed'; typed: string }
+  | { kind: 'pointerMoved' }
+  | { kind: 'ruleStands'; as: HandymanRule }
+  | { kind: 'ruleLetGo' }
+  | { kind: 'rowTaken'; id: string };
+/** What Enter does among the agent's answer. */
+export type HandymanEnterAction = { does: 'askAgain' | 'nothing' | 'keepRule' | 'finish' } | { does: 'take'; command: MenuCommand };
+/** A command entered from what was typed, to tell whether Enter is pressed on it again. */
+export interface EnteredCommand {
+  commandId: string;
+  label: string;
+  words: string;
+  isWeighty: boolean;
+  isItsLabelAlone: boolean;
+}
+export type CommandAskedAgain = Pick<EnteredCommand, 'commandId' | 'label' | 'words'>;
+/** What Enter means for the words typed: a command, an ask, or nothing. */
+export type EnterMeaningKind = 'none' | 'command' | 'ask';
+/** What Enter means now, since when, and what it meant before. */
+export interface EnterMeaning {
+  kind: EnterMeaningKind;
+  sinceMs: number;
+  inPlaceOf: EnterMeaningKind;
+}
+export function withCommandsOfNow(handyman: HandymanState, commands: readonly MenuCommand[], whyNotOf: (label: string) => string | null): HandymanState {
   if (handyman.is !== 'answered') return handyman;
-  let commandById = new (Map as Dynamic)(commands.map((input?: Dynamic) => [input.id, input]));
-  let withCurrent = (input?: Dynamic) =>
-    input.map(
-      (input2?: Dynamic) =>
-        commandById.get(input2.id) ?? {
-          ...input2,
-          whyNot: whyNotOf(input2.label),
-          ...(input2.isTicked !== undefined && {
+  const commandById = new Map(commands.map((command) => [command.id, command]));
+  const withCurrent = (answered: readonly MenuCommand[]) =>
+    answered.map(
+      (command): MenuCommand =>
+        commandById.get(command.id) ?? {
+          ...command,
+          whyNot: whyNotOf(command.label),
+          ...(command.isTicked !== undefined && {
             isTicked: false,
           }),
         },
@@ -21,7 +73,7 @@ export function withCommandsOfNow(handyman?: Dynamic, commands?: Dynamic, whyNot
     foundByWords: withCurrent(handyman.foundByWords),
   };
 }
-export function handymanReducer(state?: Dynamic, action?: Dynamic) {
+export function handymanReducer(state: HandymanState, action: HandymanAction): HandymanState {
   switch (action.kind) {
     case 'asked':
       return {
@@ -31,16 +83,16 @@ export function handymanReducer(state?: Dynamic, action?: Dynamic) {
       };
     case 'answered': {
       if (state.is !== 'asking' || state.ask !== action.ask) return state;
-      let { commands: value, makesRule: makesRule, foundByWords: foundByWords, atMs: atMs, isUnderMouse: isUnderMouse } = action;
+      const { commands, makesRule, foundByWords, atMs, isUnderMouse } = action;
       return {
         is: 'answered',
         words: state.words,
-        commands: value,
-        makesRule: makesRule,
-        foundByWords: foundByWords,
+        commands,
+        makesRule,
+        foundByWords,
         landedAtMs: atMs,
         heedsPointer: !isUnderMouse,
-        taken: new (Set as Dynamic)(),
+        taken: new Set<string>(),
         rule: {
           is: 'awaited',
         },
@@ -84,61 +136,65 @@ export function handymanReducer(state?: Dynamic, action?: Dynamic) {
           };
     case 'rowTaken': {
       if (state.is !== 'answered') return state;
-      let matches = [...state.taken].filter((input?: Dynamic) => commandFamilyId(input) !== commandFamilyId(action.id));
+      const takenOfOtherFamilies = [...state.taken].filter((id) => commandFamilyId(id) !== commandFamilyId(action.id));
       return {
         ...state,
-        taken: new (Set as Dynamic)([...matches, action.id]),
+        taken: new Set([...takenOfOtherFamilies, action.id]),
       };
     }
   }
 }
-export function handymanSections(handyman?: Dynamic, onRowTaken?: Dynamic) {
-  let sections = handymanCommandGroups(handyman, onRowTaken);
-  let enterAction = handymanEnterAction(handyman, sections, Number.POSITIVE_INFINITY);
+export function handymanSections(handyman: HandymanState, onRowTaken: (id: string) => void): CommandsUnderHeading<MenuCommand>[] {
+  const sections = handymanCommandGroups(handyman, onRowTaken);
+  const enterAction = handymanEnterAction(handyman, sections, Number.POSITIVE_INFINITY);
   if (enterAction.does !== 'take') return sections;
   return sections.map(
-    ({ heading: heading, commands: commands }: Dynamic) => ({
-      heading: heading,
+    ({ heading, commands }) => ({
+      heading,
       commands: commands.map(
-        (input?: Dynamic) =>
-          input === enterAction.command
-            ? Object.assign({}, input, {
+        (command) =>
+          command === enterAction.command
+            ? Object.assign({}, command, {
                 isUnderEnter: true,
               })
-            : input,
+            : command,
       ),
     }),
   );
 }
-export function handymanCommandGroups(handyman?: Dynamic, onRowTaken?: Dynamic) {
+export function handymanCommandGroups(handyman: HandymanState, onRowTaken: (id: string) => void): CommandsUnderHeading<MenuCommand>[] {
   if (handyman.is !== 'answered') return [];
   if (isHandymanEmptyHanded(handyman)) return groupCommandsByHeading(handyman.foundByWords);
   if (!doesHandymanAnswerSeveral(handyman)) return groupCommandsByHeading(handyman.commands);
   return groupCommandsByHeading(
     handyman.commands.map(
-      (input?: Dynamic) =>
-        KEEPS_MENU_OPEN_COMMAND_PATTERNS.some((input2?: Dynamic) => input2.test(input.id))
-          ? Object.assign({}, input, {
+      (command) =>
+        KEEPS_MENU_OPEN_COMMAND_PATTERNS.some((pattern) => pattern.test(command.id))
+          ? Object.assign({}, command, {
               keepsOpen: true,
-              ...(!DECIMAL_PLACES_COMMAND_PATTERN.test(input.id) && {
-                isTicked: isHandymanCommandTicked(handyman, input),
+              ...(!DECIMAL_PLACES_COMMAND_PATTERN.test(command.id) && {
+                isTicked: isHandymanCommandTicked(handyman, command),
               }),
               run() {
-                if (isHandymanCommandTicked(handyman, input)) return;
-                onRowTaken(input.id);
-                input.run();
+                if (isHandymanCommandTicked(handyman, command)) return;
+                onRowTaken(command.id);
+                command.run();
               },
             })
-          : input,
+          : command,
     ),
   );
 }
-export function handymanEnterAction(handyman?: Dynamic, sections?: Dynamic, nowMs2?: Dynamic) {
+export function handymanEnterAction(
+  handyman: HandymanState,
+  sections: readonly CommandsUnderHeading<MenuCommand>[],
+  nowMs: number,
+): HandymanEnterAction {
   if (handyman.is === 'failed')
     return {
       does: 'askAgain',
     };
-  if (handyman.is !== 'answered' || !hasAnswerSettled(handyman, nowMs2))
+  if (handyman.is !== 'answered' || !hasAnswerSettled(handyman, nowMs))
     return {
       does: 'nothing',
     };
@@ -146,11 +202,11 @@ export function handymanEnterAction(handyman?: Dynamic, sections?: Dynamic, nowM
     return {
       does: 'nothing',
     };
-  let commands = sections.flatMap(({ commands: commands2 }: Dynamic) => commands2);
-  let takenFamilies = new (Set as Dynamic)([...handyman.taken].map(commandFamilyId));
-  let isOfSeveral = doesHandymanAnswerSeveral(handyman);
-  let takeable = commands.filter(
-    ({ id: id, isTicked: isTicked, whyNot: whyNot }: Dynamic) =>
+  const commands = sections.flatMap(({ commands: commandsOfSection }) => commandsOfSection);
+  const takenFamilies = new Set([...handyman.taken].map(commandFamilyId));
+  const isOfSeveral = doesHandymanAnswerSeveral(handyman);
+  const takeable = commands.filter(
+    ({ id, isTicked, whyNot }) =>
       whyNot === null && !takenFamilies.has(commandFamilyId(id)) && !(isOfSeveral && isTicked === true),
   );
   if (takeable.length === 0 && shouldAskHandymanAgain(handyman))
@@ -159,29 +215,29 @@ export function handymanEnterAction(handyman?: Dynamic, sections?: Dynamic, nowM
     };
   if (takeable.length === 0 && handyman.makesRule)
     return {
-      does: hasRuleSettled(handyman, nowMs2) ? 'keepRule' : 'nothing',
+      does: hasRuleSettled(handyman, nowMs) ? 'keepRule' : 'nothing',
     };
   if (takeable.length === 0 && commands.length > 0)
     return {
       does: handyman.taken.size > 0 ? 'finish' : 'nothing',
     };
-  let command = commandToRunForQuery(takeable, null);
+  const command = commandToRunForQuery(takeable, null);
   return command === null
     ? {
         does: 'nothing',
       }
     : {
         does: 'take',
-        command: command,
+        command,
       };
 }
 export const ANSWER_SETTLE_MS = 540;
 export const ENTER_MEANING_GRACE_MS = 300;
-export const HANDYMAN_AT_REST = {
+export const HANDYMAN_AT_REST: HandymanState = {
   is: 'resting',
 };
-export const commandFamilyId = (id?: Dynamic) => {
-  let parts = id.split('.');
+export const commandFamilyId = (id: string) => {
+  const parts = id.split('.');
   return parts.length > 2 ? parts.slice(0, -1).join('.') : id;
 };
 export const KEEPS_MENU_OPEN_COMMAND_PATTERNS = [
@@ -191,40 +247,40 @@ export const KEEPS_MENU_OPEN_COMMAND_PATTERNS = [
   /^bar\.numberFormat\.(?!customFormat$)/,
 ];
 export const DECIMAL_PLACES_COMMAND_PATTERN = /^bar\.(more|fewer)DecimalPlaces$/;
-export const isHandymanCommandTicked = (handyman: Dynamic, { id: id, isTicked: isTicked }: Dynamic) =>
+export const isHandymanCommandTicked = (handyman: Pick<HandymanAnswered, 'taken'>, { id, isTicked }: Pick<MenuCommand, 'id' | 'isTicked'>) =>
   !DECIMAL_PLACES_COMMAND_PATTERN.test(id) && (isTicked === true || handyman.taken.has(id));
-export const isHandymanEmptyHanded = (input?: Dynamic) =>
-  input.is === 'failed' || (input.is === 'answered' && input.commands.length === 0 && !input.makesRule);
-export const doesHandymanAnswerSeveral = (input?: Dynamic) =>
-  input.is === 'answered' &&
-  new (Set as Dynamic)(input.commands.map(({ id: id }: Dynamic) => commandFamilyId(id))).size + (input.makesRule ? 1 : 0) > 1;
-export const hasAnswerSettled = (handyman?: Dynamic, nowMs2?: Dynamic) =>
-  handyman.is !== 'answered' || nowMs2 - handyman.landedAtMs >= ANSWER_SETTLE_MS;
-export const hasRuleSettled = (handyman?: Dynamic, nowMs2?: Dynamic) =>
-  handyman.is === 'answered' && handyman.rule.is === 'written' && nowMs2 - handyman.rule.landedAtMs >= ANSWER_SETTLE_MS;
-export const shouldAskHandymanAgain = (input?: Dynamic) =>
-  input.is === 'failed' || (input.is === 'answered' && input.makesRule && input.rule.is === 'notWritten');
-export const isCommandAskedAgain = (asked: Dynamic, { commandId: commandId, label: label, words: words }: Dynamic) =>
+export const isHandymanEmptyHanded = (handyman: HandymanState) =>
+  handyman.is === 'failed' || (handyman.is === 'answered' && handyman.commands.length === 0 && !handyman.makesRule);
+export const doesHandymanAnswerSeveral = (handyman: HandymanState) =>
+  handyman.is === 'answered' &&
+  new Set(handyman.commands.map(({ id }) => commandFamilyId(id))).size + (handyman.makesRule ? 1 : 0) > 1;
+export const hasAnswerSettled = (handyman: HandymanState, nowMs: number) =>
+  handyman.is !== 'answered' || nowMs - handyman.landedAtMs >= ANSWER_SETTLE_MS;
+export const hasRuleSettled = (handyman: HandymanState, nowMs: number) =>
+  handyman.is === 'answered' && handyman.rule.is === 'written' && nowMs - handyman.rule.landedAtMs >= ANSWER_SETTLE_MS;
+export const shouldAskHandymanAgain = (handyman: HandymanState) =>
+  handyman.is === 'failed' || (handyman.is === 'answered' && handyman.makesRule && handyman.rule.is === 'notWritten');
+export const isCommandAskedAgain = (asked: CommandAskedAgain | null, { commandId, label, words }: CommandAskedAgain) =>
   asked?.commandId === commandId && asked.label === label && asked.words === words;
-export const enterOnTypedCommand = (asked?: Dynamic, entered?: Dynamic, isMeaningSettled?: Dynamic) => {
+export const enterOnTypedCommand = (asked: CommandAskedAgain | null, entered: EnteredCommand, isMeaningSettled: boolean) => {
   if (entered.isWeighty && !entered.isItsLabelAlone && !isCommandAskedAgain(asked, entered)) return 'asks';
   return isMeaningSettled ? 'takes' : 'drops';
 };
-export const doesKeyDropAskedAgain = (key?: Dynamic, isRepeat?: Dynamic) =>
+export const doesKeyDropAskedAgain = (key: string, isRepeat: boolean) =>
   key !== 'Enter' && !isRepeat && !/^(Shift|Control|Alt|Meta)$/.test(key);
-export const NO_ENTER_MEANING = {
+export const NO_ENTER_MEANING: EnterMeaning = {
   kind: 'none',
   sinceMs: Number.NEGATIVE_INFINITY,
   inPlaceOf: 'none',
 };
-export const nextEnterMeaning = (meaning?: Dynamic, kind?: Dynamic, nowMs2?: Dynamic) => {
+export const nextEnterMeaning = (meaning: EnterMeaning, kind: EnterMeaningKind, nowMs: number): EnterMeaning => {
   if (meaning.kind === kind) return meaning;
-  let followsAsk = meaning.kind === 'none' && meaning.inPlaceOf === 'ask' && nowMs2 - meaning.sinceMs < ENTER_MEANING_GRACE_MS;
+  const followsAsk = meaning.kind === 'none' && meaning.inPlaceOf === 'ask' && nowMs - meaning.sinceMs < ENTER_MEANING_GRACE_MS;
   return {
-    kind: kind,
-    sinceMs: nowMs2,
+    kind,
+    sinceMs: nowMs,
     inPlaceOf: followsAsk ? 'ask' : meaning.kind,
   };
 };
-export const isEnterMeaningSettled = ({ kind: kind, sinceMs: sinceMs, inPlaceOf: inPlaceOf }: Dynamic, nowMs2?: Dynamic) =>
-  kind !== 'command' || inPlaceOf !== 'ask' || nowMs2 - sinceMs >= ENTER_MEANING_GRACE_MS;
+export const isEnterMeaningSettled = ({ kind, sinceMs, inPlaceOf }: EnterMeaning, nowMs: number) =>
+  kind !== 'command' || inPlaceOf !== 'ask' || nowMs - sinceMs >= ENTER_MEANING_GRACE_MS;

@@ -28,11 +28,16 @@ export function withInks(content: BoardContent, inks: readonly BoardInk[] | unde
  * {@link MAX_BOARD_INKS} (the oldest go first). An ink already there keeps
  * its place. Returns `inks` itself when nothing changes or the color is not
  * a hex color.
+ *
+ * Inks are kept in `at` order, so the new one is stamped after every ink
+ * there even when this device's clock runs behind the one that added them
+ * (otherwise it would sort first and be the one dropped).
  */
-export function addInk(inks: readonly BoardInk[], color: string, at: number = Date.now()): readonly BoardInk[] {
+export function addInk(inks: readonly BoardInk[], color: string, now: number = Date.now()): readonly BoardInk[] {
   if (!isCustomInkColor(color)) return inks;
   const hex = color.toLowerCase() as HexColor;
   if (inks.some((ink) => ink.color.toLowerCase() === hex)) return inks;
+  const at = inks.reduce((latest, ink) => Math.max(latest, ink.at + 1), now);
   return [...inks, { color: hex, at }].slice(-MAX_BOARD_INKS);
 }
 

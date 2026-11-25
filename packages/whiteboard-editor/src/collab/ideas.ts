@@ -155,6 +155,7 @@ export function startIdeas(): () => void {
   const transport: SyncTransport = {
     get: (path) => db.get(path),
     list: (collection) => db.list(collection),
+    listing: async (collection) => (db.listing ? db.listing(collection) : { documents: await db.list(collection) }),
     // The reader only deletes the person's own idea document.
     write: (writes) => db.write(writes as Parameters<typeof db.write>[0]),
     onChange: (listener) => db.onChange(listener),

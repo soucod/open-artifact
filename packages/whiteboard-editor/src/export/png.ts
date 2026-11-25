@@ -26,6 +26,8 @@ export interface BoardPngInput {
   maxPx?: number;
   /** How long pictures may take to load, ms. */
   timeoutMs?: number;
+  /** Painted looks of drawings (object URLs by element id); the others draw as written. */
+  looks?: ReadonlyMap<string, string>;
 }
 
 /** A board picture and what became of its pictures. */
@@ -38,7 +40,7 @@ export interface BoardPng {
 export async function exportBoardPng(input: BoardPngInput): Promise<BoardPng> {
   const frame = exportFrameFor(input.elements, input.measures, input.maxPx ?? EXPORT_MAX_PX);
   if (!frame) throw new Error('The board is empty.');
-  const assets = await loadPictureAssets(input.elements, drawnImagePen(input.scheme), input.timeoutMs ?? RASTER_IMAGE_LOAD_TIMEOUT_MS);
+  const assets = await loadPictureAssets(input.elements, drawnImagePen(input.scheme), input.timeoutMs ?? RASTER_IMAGE_LOAD_TIMEOUT_MS, input.looks);
   try {
     const canvas = drawBoardCanvas({
       elements: input.elements,

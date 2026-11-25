@@ -1,0 +1,18 @@
+{
+  "name": "open-artifact",
+  "owner": {
+    "name": "Jim Liu 宝玉"
+  },
+  "metadata": {
+    "description": "Open Artifact: decks, design canvases, whiteboards, spreadsheets, dashboards, docs, animated films and free pages you comment on, with comments sent back to the agent."
+  },
+  "plugins": [
+    {
+      "name": "open-artifact",
+      "source": ".",
+      "version": "0.14.6",
+      "description": "Decks, design canvases, whiteboards, spreadsheets, dashboards, docs, animated films and free pages you view, edit and comment on in one local page, with comments sent back to the agent.",
+      "icon": "https://raw.githubusercontent.com/JimLiu/open-artifact/main/plugins/zcode/assets/icon.png"
+    }
+  ]
+}

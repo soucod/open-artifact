@@ -43,8 +43,6 @@ export interface DocsState {
   shortcuts: boolean;
   /** The suggestion the person is looking at (its card is raised). */
   focusedSuggestion: string | null;
-  /** Edit with Agent's prompt is open over the selection. */
-  rewriting: boolean;
 }
 
 export const useDocs = create<DocsState>(() => ({
@@ -61,7 +59,6 @@ export const useDocs = create<DocsState>(() => ({
   find: 'closed',
   shortcuts: false,
   focusedSuggestion: null,
-  rewriting: false,
 }));
 
 export const setDocs = useDocs.setState;

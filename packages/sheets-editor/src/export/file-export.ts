@@ -5,7 +5,7 @@ import { isNonNullObject } from '../utils/objects.ts';
 
 export interface MadeFile {
   filename: string;
-  data: ArrayBuffer | Uint8Array;
+  data: ArrayBuffer | Uint8Array<ArrayBuffer>;
   onSaved?: () => void;
 }
 
@@ -38,7 +38,8 @@ export function createFileExport(format: ExportFormat, { shell, downloads, repor
         shell.declineExport(request);
         return;
       }
-      await saveFile(downloads(), made.filename, new Blob([made.data as BlobPart], { type: MEDIA_TYPES[format] }));
+      await saveFile(downloads(), made.filename, new Blob([made.data],
+ { type: MEDIA_TYPES[format] }));
       shell.exportIsDone(request);
       onSaved = made.onSaved;
     } catch (error) {

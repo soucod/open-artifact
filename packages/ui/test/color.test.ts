@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   colorName,
+  colorRevertMessage,
   contrastLevel,
   contrastRatio,
   contrastTarget,
@@ -11,6 +12,7 @@ import {
   formatLike,
   hslaToRgba,
   hsvaToRgba,
+  hueName,
   oklchInGamut,
   oklchToRgba,
   parseColor,
@@ -20,6 +22,7 @@ import {
   rgbaToOklch,
   sameColor,
   toRgba,
+  withHexHash,
   type Rgba,
 } from '../src/color.ts';
 
@@ -214,5 +217,41 @@ describe('contrast', () => {
     assert.ok(okl?.startsWith('oklch('));
     assert.ok(contrastRatio(okl!, '#ffffff')! >= 4.5);
     assert.equal(readableShade('#000', '#fff'), null);
+  });
+});
+
+describe('typed color text', () => {
+  it('adds the # to bare hex of a color length', () => {
+    assert.equal(withHexHash('abc'), '#abc');
+    assert.equal(withHexHash(' abcd '), '#abcd');
+    assert.equal(withHexHash('AABBCC'), '#AABBCC');
+    assert.equal(withHexHash('aabbcc80'), '#aabbcc80');
+    assert.equal(toRgba(withHexHash('f80'))?.g, 136);
+  });
+
+  it('leaves other text alone', () => {
+    assert.equal(withHexHash('#abc'), '#abc');
+    assert.equal(withHexHash('abcde'), 'abcde');
+    assert.equal(withHexHash('aabbccd'), 'aabbccd');
+    assert.equal(withHexHash('red'), 'red');
+    assert.equal(withHexHash('ggg'), 'ggg');
+  });
+
+  it('says where a refused value went back to', () => {
+    assert.equal(colorRevertMessage('#FF8800'), 'Not a color, so it went back to #FF8800.');
+    assert.equal(colorRevertMessage(' '), 'Not a color, so the field stayed empty.');
+  });
+});
+
+describe('hue names', () => {
+  it('names the nearest of twelve hues', () => {
+    assert.equal(hueName(0), 'red');
+    assert.equal(hueName(14), 'red');
+    assert.equal(hueName(16), 'orange');
+    assert.equal(hueName(120), 'green');
+    assert.equal(hueName(240), 'blue');
+    assert.equal(hueName(350), 'red');
+    assert.equal(hueName(-30), 'pink');
+    assert.equal(hueName(720), 'red');
   });
 });

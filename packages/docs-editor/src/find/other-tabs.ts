@@ -1,6 +1,7 @@
 /**
  * How many matches the doc's other tabs have, asked of the server one tab at a time (the tabs after the open one
- * first), and remembered per tab revision so a tab is asked again only when it changed.
+ * first), and remembered per tab revision so a tab is asked again only when it changed. A dropdown option, a tab or a
+ * person renamed changes what chips say without changing any tab's revision, so then every count is asked again.
  */
 
 export interface TabToCount {
@@ -10,8 +11,8 @@ export interface TabToCount {
   rev: number;
 }
 
-/** A tab's count: a number, still being asked, or not asked (too many tabs, or the server did not say). */
-export type TabCount = number | 'pending' | 'uncounted';
+/** A tab's count: a number, still being asked, not asked (past the limit), or asked without an answer. */
+export type TabCount = number | 'pending' | 'skipped' | 'failed';
 
 /** At most this many tabs are asked per search; the rest are "not searched". */
 export const MAX_TABS_SEARCHED = 50;
@@ -21,6 +22,19 @@ export function afterOpen<T extends { id: string }>(tabs: readonly T[], open: st
   const index = tabs.findIndex(tab => tab.id === open);
   if (index < 0) return [...tabs];
   return [...tabs.slice(index + 1), ...tabs.slice(0, index)];
+}
+
+/** What the doc's chips can show that is not in any tab's text: its dropdown options and tab names (and people's names). */
+export interface ChipNamesSource {
+  enums?: ReadonlyArray<{ id: string; options: ReadonlyArray<{ name: string }> }>;
+  files?: ReadonlyArray<{ id: string; name: string }>;
+}
+
+/** A key that changes whenever an option, a tab or a person (`people`: id → name) is renamed, added or removed. */
+export function chipNamesKey(project: ChipNamesSource | null | undefined, people: Readonly<Record<string, string>> = {}): string {
+  const named = Object.entries(people).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  if (!project && !named.length) return '';
+  return JSON.stringify([(project?.enums ?? []).map(list => [list.id, list.options.map(option => option.name)]), (project?.files ?? []).map(file => [file.id, file.name]), named]);
 }
 
 export class CountCache {
@@ -38,6 +52,11 @@ export class CountCache {
   set(tab: TabToCount, query: string, caseSensitive: boolean, hits: number): void {
     if (this.counts.size >= 256) this.counts.clear();
     this.counts.set(CountCache.key(tab.id, query, caseSensitive), { rev: tab.rev, hits });
+  }
+
+  /** Forgets every count. */
+  clear(): void {
+    this.counts.clear();
   }
 
   /** Forgets a tab's counts (it was open and edited). */
@@ -64,7 +83,7 @@ export function countTabs(job: CountJob): () => void {
   for (const tab of job.tabs) {
     const known = job.cache.get(tab, job.query, job.caseSensitive);
     if (known !== undefined) job.onCount(tab.id, known);
-    else if (queue.length >= MAX_TABS_SEARCHED) job.onCount(tab.id, 'uncounted');
+    else if (queue.length >= MAX_TABS_SEARCHED) job.onCount(tab.id, 'skipped');
     else {
       job.onCount(tab.id, 'pending');
       queue.push(tab);
@@ -78,11 +97,11 @@ export function countTabs(job: CountJob): () => void {
         hits = await job.count(tab);
       } catch {
         if (stopped) return;
-        for (const rest of queue.slice(index)) job.onCount(rest.id, 'uncounted');
+        for (const rest of queue.slice(index)) job.onCount(rest.id, 'failed');
         break;
       }
       if (stopped) return;
-      if (hits === null) job.onCount(tab.id, 'uncounted');
+      if (hits === null) job.onCount(tab.id, 'failed');
       else {
         job.cache.set(tab, job.query, job.caseSensitive, hits);
         job.onCount(tab.id, hits);

@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { phrasesMeaning } from './tokens.ts';
 export const TEXT_TEST_PHRASES = [
   ...phrasesMeaning('textContains', 'contains, contain, containing, includes, include, including'),

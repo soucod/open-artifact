@@ -1,11 +1,19 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellContents, EngineRun, Mark, Paragraph } from '@open-artifact/sheets-core';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { WholeCellFormat } from '../model/cell-format.ts';
+import type { LinkPart } from '../grid/grid-drawing.tsx';
 import { safeLinkUrl, MAX_LINK_URL_LENGTH, shortenUrlMiddle, MAX_SHOWN_LINK_LENGTH, encodedLinkUrl } from './cell-links.ts';
 import { richTextPlainText } from '../model/cell-values.ts';
 import { shownCellText } from '../format/shown-text.ts';
-export function trimUrlTrailingPunctuation(text?: Dynamic) {
-  let counts = new (Map as Dynamic)();
-  for (let character of text as Dynamic) counts.set(character, (counts.get(character) ?? 0) + 1);
-  let end: Dynamic = text.length;
+/** A text cut into the parts that link somewhere and the parts between them, and the addresses linked to. */
+export interface LinksInText {
+  parts: LinkPart[];
+  addresses: string[];
+}
+export function trimUrlTrailingPunctuation(text: string): string {
+  let counts = new Map<string, number>();
+  for (let character of text) counts.set(character, (counts.get(character) ?? 0) + 1);
+  let end = text.length;
   for (; end > 0; end -= 1) {
     let character = text.charAt(end - 1);
     if (URL_TRAILING_PUNCTUATION.includes(character)) continue;
@@ -15,21 +23,21 @@ export function trimUrlTrailingPunctuation(text?: Dynamic) {
   }
   return text.slice(0, end);
 }
-export function urlOfTextMatch(text?: Dynamic) {
+export function urlOfTextMatch(text: string): string | null {
   if (CONTROL_OR_BACKSLASH_PATTERN.test(text)) return null;
   let url = safeLinkUrl(text);
   if (url === null) return null;
   let withoutScheme = text.replace(/^https?:\/\//i, '');
   if (withoutScheme.split('/', 1)[0]?.includes('@') === true) return null;
   let [host = ''] = withoutScheme.split(/[/?#]/);
-  let hostname = host.replace(/:\d*$/, '').replaceAll(/[A-Z]/g, (input?: Dynamic) => input.toLowerCase());
-  return PLAIN_HOSTNAME_PATTERN.test(hostname) && hostname === new (URL as Dynamic)(url).hostname ? url : null;
+  let hostname = host.replace(/:\d*$/, '').replaceAll(/[A-Z]/g, (letter) => letter.toLowerCase());
+  return PLAIN_HOSTNAME_PATTERN.test(hostname) && hostname === new URL(url).hostname ? url : null;
 }
-export function findLinksInText(text?: Dynamic) {
-  let parts: Dynamic = [];
-  let addresses = new (Set as Dynamic)();
-  let [candidateCount, linkCount, end]: Dynamic = [0, 0, 0];
-  for (let { 0: match, index: index } of text.matchAll(URL_IN_TEXT_PATTERN) as Dynamic) {
+export function findLinksInText(text: string): LinksInText {
+  let parts: LinkPart[] = [];
+  let addresses = new Set<string>();
+  let [candidateCount, linkCount, end] = [0, 0, 0];
+  for (let { 0: match, index } of text.matchAll(URL_IN_TEXT_PATTERN)) {
     if (linkCount === MAX_LINKS_IN_TEXT || candidateCount === MAX_URL_CANDIDATES) break;
     candidateCount += 1;
     if (match.length > 2 * MAX_LINK_URL_LENGTH) continue;
@@ -49,7 +57,7 @@ export function findLinksInText(text?: Dynamic) {
     parts.push({
       text: trimmed,
       startsAt: index,
-      url: url,
+      url,
       ...PLAIN_LINK_PART_LOOK,
     });
     addresses.add(url);
@@ -66,30 +74,30 @@ export function findLinksInText(text?: Dynamic) {
   return linkCount === 0
     ? NO_TEXT_LINKS
     : {
-        parts: parts,
+        parts,
         addresses: [...addresses],
       };
 }
-export function acceptedLinkUrl(text?: Dynamic) {
+export function acceptedLinkUrl(text: string): string | null {
   let url = safeLinkUrl(text);
   return url !== null && shortenUrlMiddle(MAX_SHOWN_LINK_LENGTH, url) === url ? url : null;
 }
-export function acceptedEncodedLinkUrl(url?: Dynamic) {
+export function acceptedEncodedLinkUrl(url: string): string | null {
   let encoded = encodedLinkUrl(safeLinkUrl(url));
   return encoded === null ? null : acceptedLinkUrl(encoded);
 }
-export function runsWithoutAddressLinks(text?: Dynamic, runs?: Dynamic) {
-  if (runs.every(({ link: link }: Dynamic) => link === null) || !MAY_HOLD_URL_PATTERN.test(text)) return runs;
-  let partsByStart = new (Map as Dynamic)(findLinksInText(text).parts.map((part: Dynamic) => [part.startsAt, part]));
-  let kept: Dynamic = [];
-  let [first, end, startsAt, endsAt]: Dynamic = [0, 0, 0, 0];
+export function runsWithoutAddressLinks(text: string, runs: EngineRun[]): EngineRun[] {
+  if (runs.every(({ link }) => link === null) || !MAY_HOLD_URL_PATTERN.test(text)) return runs;
+  let partsByStart = new Map<number, LinkPart>(findLinksInText(text).parts.map((part) => [part.startsAt, part]));
+  let kept: EngineRun[] = [];
+  let [first, end, startsAt, endsAt] = [0, 0, 0, 0];
   for (; first < runs.length; [first, startsAt] = [end, endsAt]) {
     let link = runs[first]?.link ?? null;
     for (; end < runs.length && runs[end]?.link === link; end += 1) endsAt += runs[end]?.text.length ?? 0;
     let { text: partText = '', url: partUrl = null } = partsByStart.get(startsAt) ?? {};
     let isAddressLink =
       link !== null && partUrl !== null && partText.length === endsAt - startsAt && acceptedEncodedLinkUrl(partUrl) === link;
-    for (let run of runs.slice(first, end) as Dynamic)
+    for (let run of runs.slice(first, end))
       kept.push(
         isAddressLink
           ? {
@@ -101,16 +109,16 @@ export function runsWithoutAddressLinks(text?: Dynamic, runs?: Dynamic) {
   }
   return kept;
 }
-export function findLinksInRichText({ paragraphs: paragraphs }: Dynamic, text?: Dynamic) {
+export function findLinksInRichText({ paragraphs }: { paragraphs: Paragraph[] }, text: string): LinksInText {
   let foundLinks = MAY_HOLD_URL_PATTERN.test(text) ? findLinksInText(text).parts : [];
-  let addresses = new (Set as Dynamic)();
-  let keepAddress = (input?: Dynamic) => {
-    if (input === null || (!addresses.has(input) && addresses.size === MAX_LINKS_IN_TEXT)) return null;
-    addresses.add(input);
-    return input;
+  let addresses = new Set<string>();
+  let keepAddress = (address: string | null) => {
+    if (address === null || (!addresses.has(address) && addresses.size === MAX_LINKS_IN_TEXT)) return null;
+    addresses.add(address);
+    return address;
   };
   let runs = paragraphs.flatMap(
-    ({ runs: runs2 }: Dynamic, index?: Dynamic) => [
+    ({ runs: runsOfParagraph }, index) => [
       ...(index === 0
         ? []
         : [
@@ -121,42 +129,42 @@ export function findLinksInRichText({ paragraphs: paragraphs }: Dynamic, text?: 
               link: null,
             },
           ]),
-      ...runs2,
+      ...runsOfParagraph,
     ],
   );
-  let runStarts: Dynamic = [];
-  runs.reduce((start?: Dynamic, run?: Dynamic, index?: Dynamic) => ((runStarts[index] = start), start + run.text.length), 0);
-  let overlapsLink = (from?: Dynamic, to?: Dynamic) =>
+  let runStarts: number[] = [];
+  runs.reduce((start, run, index) => ((runStarts[index] = start), start + run.text.length), 0);
+  let overlapsLink = (from: number, to: number) =>
     runs.some(
-      ({ text: text2, link: link }: Dynamic, index?: Dynamic) =>
-        link !== null && (runStarts[index] ?? 0) < to && (runStarts[index] ?? 0) + text2.length > from,
+      ({ text: runText, link }, index) =>
+        link !== null && (runStarts[index] ?? 0) < to && (runStarts[index] ?? 0) + runText.length > from,
     );
   return {
-    parts: runs.flatMap(({ text: text2, marks: marks, link: link }: Dynamic, index?: Dynamic) => {
-      let [start, end] = [runStarts[index] ?? 0, (runStarts[index] ?? 0) + text2.length];
+    parts: runs.flatMap(({ text: runText, marks, link }, index): LinkPart[] => {
+      let [start, end] = [runStarts[index] ?? 0, (runStarts[index] ?? 0) + runText.length];
       if (link !== null || foundLinks.length === 0) {
         let url = link === null ? null : keepAddress(acceptedLinkUrl(link));
         return [
           {
-            text: text2,
+            text: runText,
             startsAt: start,
-            url: url,
+            url,
             isLinkOnWords: url !== null,
-            marks: marks,
+            marks,
           },
         ];
       }
-      return foundLinks.flatMap(({ text: text3, startsAt: startsAt, url: url }: Dynamic) => {
-        let [from, to] = [Math.max(start, startsAt), Math.min(end, startsAt + text3.length)];
+      return foundLinks.flatMap(({ text: foundText, startsAt, url }) => {
+        let [from, to] = [Math.max(start, startsAt), Math.min(end, startsAt + foundText.length)];
         if (from >= to) return [];
-        let isClear = !overlapsLink(startsAt, startsAt + text3.length);
+        let isClear = !overlapsLink(startsAt, startsAt + foundText.length);
         return [
           {
             text: text.slice(from, to),
             startsAt: from,
             url: isClear ? keepAddress(url) : null,
             isLinkOnWords: false,
-            marks: marks,
+            marks,
           },
         ];
       });
@@ -164,9 +172,9 @@ export function findLinksInRichText({ paragraphs: paragraphs }: Dynamic, text?: 
     addresses: [...addresses],
   };
 }
-export function runsWithLinksOnWords(text?: Dynamic, runs?: Dynamic) {
+export function runsWithLinksOnWords(text: string, runs: EngineRun[]): EngineRun[] {
   let kept = [...runsWithoutAddressLinks(text, runs)];
-  let { parts: parts } = findLinksInRichText(
+  let { parts } = findLinksInRichText(
     {
       paragraphs: [
         {
@@ -179,9 +187,9 @@ export function runsWithLinksOnWords(text?: Dynamic, runs?: Dynamic) {
     },
     text,
   );
-  let linkStarts = new (Set as Dynamic)(parts.flatMap((part: Dynamic) => (part.isLinkOnWords ? [part.startsAt] : [])));
-  let startsAt: Dynamic = 0;
-  for (let [index, run] of kept.entries() as Dynamic) {
+  let linkStarts = new Set(parts.flatMap((part) => (part.isLinkOnWords ? [part.startsAt] : [])));
+  let startsAt = 0;
+  for (let [index, run] of kept.entries()) {
     if (run.link !== null && !linkStarts.has(startsAt))
       kept[index] = {
         ...run,
@@ -191,9 +199,9 @@ export function runsWithLinksOnWords(text?: Dynamic, runs?: Dynamic) {
   }
   return kept;
 }
-export function groupLinkParts(parts?: Dynamic) {
-  let groups: Dynamic = [];
-  for (let part of parts as Dynamic) {
+export function groupLinkParts<Part extends LinkPart>(parts: readonly Part[]): Part[][] {
+  let groups: Part[][] = [];
+  for (let part of parts) {
     let previous = groups.at(-1)?.at(-1);
     if (
       previous !== undefined &&
@@ -208,7 +216,12 @@ export function groupLinkParts(parts?: Dynamic) {
   }
   return groups;
 }
-export function cellTextLinks(cell: Dynamic, { cellControl: cellControl }: Dynamic, text?: Dynamic, overrideLink?: Dynamic) {
+export function cellTextLinks(
+  cell: CellContents | null,
+  { cellControl }: Pick<WholeCellFormat, 'cellControl'>,
+  text: string,
+  overrideLink: string | null,
+): LinksInText {
   if (cell === null || cellControl.kind === 'dropdown' || overrideLink !== null) return NO_TEXT_LINKS;
   let { input: cellInput } = cell;
   let richText = cellInput.kind === 'richText' ? richTextPlainText(cell) : null;
@@ -218,34 +231,34 @@ export function cellTextLinks(cell: Dynamic, { cellControl: cellControl }: Dynam
   if (cached?.text === text) return cached.links;
   let links = cellInput.kind === 'richText' ? findLinksInRichText(cellInput, text) : findLinksInText(text);
   CELL_TEXT_LINKS_CACHE.set(cell, {
-    text: text,
-    links: links,
+    text,
+    links,
   });
   return links;
 }
-export function cellLinkAddresses(sheet?: Dynamic, cellId?: Dynamic) {
-  let [cell, format] = [sheet.cellOf(cellId), sheet.formatOf(cellId)];
-  let { text: text } = shownCellText(cell, 1 / 0, sheet.decimalSign);
+export function cellLinkAddresses(reads: WorkbookReads, cellId: CellId): string[] {
+  let [cell, format] = [reads.cellOf(cellId), reads.formatOf(cellId)];
+  let { text } = shownCellText(cell, 1 / 0, reads.decimalSign);
   return cellTextLinks(cell, format, text, null).addresses;
 }
-export function singleAddressList(addresses?: Dynamic, address?: Dynamic) {
+export function singleAddressList(addresses: string[], address: string): string[] {
   if (!addresses.includes(address)) return NO_TEXT_LINKS.addresses;
-  let byAddress = SINGLE_ADDRESS_CACHE.get(addresses) ?? new (Map as Dynamic)();
+  let byAddress = SINGLE_ADDRESS_CACHE.get(addresses) ?? new Map<string, string[]>();
   SINGLE_ADDRESS_CACHE.set(addresses, byAddress);
   let list = byAddress.get(address) ?? [address];
   byAddress.set(address, list);
   return list;
 }
-export function linkAddressesOfCell(sheet?: Dynamic, cellId?: Dynamic, chosenAddress?: Dynamic) {
-  let cell = sheet.cellOf(cellId);
-  if (chosenAddress === null || cell === null) return cellLinkAddresses(sheet, cellId);
+export function linkAddressesOfCell(reads: WorkbookReads, cellId: CellId, chosenAddress: string | null): string[] {
+  let cell = reads.cellOf(cellId);
+  if (chosenAddress === null || cell === null) return cellLinkAddresses(reads, cellId);
   let cached = CHOSEN_ADDRESS_CACHE.get(cell);
   if (cached?.[0] === chosenAddress) return cached;
   let list = [chosenAddress];
   CHOSEN_ADDRESS_CACHE.set(cell, list);
   return list;
 }
-export const NO_TEXT_MARKS: Dynamic = [];
+export const NO_TEXT_MARKS: Mark[] = [];
 export const PLAIN_LINK_PART_LOOK = {
   isLinkOnWords: false,
   marks: NO_TEXT_MARKS,
@@ -256,19 +269,19 @@ export const URL_IN_TEXT_PATTERN = /https?:\/\/[^\s<>"'`。，、；：！？]+|
 export const URL_GLUED_BEFORE_PATTERN = /[A-Za-z\d@.-]/;
 export const URL_PUNCTUATION_BEFORE_PATTERN = /[/:=?&#%]/;
 export const URL_TRAILING_PUNCTUATION = '.,;:!?\f\r\uFEFF*_';
-export const CLOSING_BRACKET_OPENERS = {
+export const CLOSING_BRACKET_OPENERS: Partial<Record<string, string>> = {
   ')': '(',
   ']': '[',
   '}': '{',
 };
 export const CONTROL_OR_BACKSLASH_PATTERN = /[\p{C}\\]/u;
 export const PLAIN_HOSTNAME_PATTERN = /^[a-z\d-]+(?:\.[a-z\d-]+)+$/;
-export const NO_TEXT_LINKS = {
+export const NO_TEXT_LINKS: LinksInText = {
   parts: [],
   addresses: [],
 };
 export const MAY_HOLD_URL_PATTERN = /https?:\/\/|www\./i;
-export const textHasLinks = (text?: Dynamic) => MAY_HOLD_URL_PATTERN.test(text) && findLinksInText(text).addresses.length > 0;
-export const CELL_TEXT_LINKS_CACHE = new (WeakMap as Dynamic)();
-export const SINGLE_ADDRESS_CACHE = new (WeakMap as Dynamic)();
-export const CHOSEN_ADDRESS_CACHE = new (WeakMap as Dynamic)();
+export const textHasLinks = (text: string): boolean => MAY_HOLD_URL_PATTERN.test(text) && findLinksInText(text).addresses.length > 0;
+export const CELL_TEXT_LINKS_CACHE = new WeakMap<CellContents, { text: string; links: LinksInText }>();
+export const SINGLE_ADDRESS_CACHE = new WeakMap<string[], Map<string, string[]>>();
+export const CHOSEN_ADDRESS_CACHE = new WeakMap<CellContents, string[]>();

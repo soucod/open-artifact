@@ -52,6 +52,12 @@ export interface TypeApiOptions {
 /** What {@link TypeApi.wake} hands to the owner's session. */
 export type TypeApiWakeBody = Omit<TypeApiWakeRequest, 'id'>;
 
+/**
+ * The part of the Type API a type server calls back: what an embedder (a cloud host running the type server in its
+ * own process) implements in place of a daemon.
+ */
+export type TypeApiLike = Pick<TypeApi, 'wake' | 'presence' | 'touch'>;
+
 /** The Type API client. */
 export class TypeApi {
   /** Base URL of the daemon without a trailing slash, or `null` when standalone. */
@@ -129,6 +135,11 @@ export class TypeApi {
   touch(id: string, { author, paths, title }: Omit<TypeApiTouch, 'id'>): Promise<unknown> {
     const body: TypeApiTouch = { id, author, paths, ...(title ? { title } : {}) };
     return this.call(TYPE_API_ROUTES.touch, { body });
+  }
+
+  /** Reports that the owner's view context of an artifact changed (`at`: when, ISO); the daemon tells adapters. */
+  context(id: string, at: string): Promise<unknown> {
+    return this.call(TYPE_API_ROUTES.context, { body: { id, at } });
   }
 
   /** Reports progress or the end of a long action. */

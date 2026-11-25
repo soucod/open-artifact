@@ -20,7 +20,7 @@ import { useBoard } from '../state/board.ts';
 import { useCamera } from '../state/camera.ts';
 import { currentMeasures } from '../state/measures.ts';
 import { useSelection } from '../state/selection.ts';
-import { fitTo, setCamera } from './viewport.ts';
+import { fitTo, glideCamera, setCamera } from './viewport.ts';
 
 /** Most a selection is zoomed to (a small sticker should not fill the screen). */
 const SELECTION_MAX_ZOOM = 2;
@@ -58,6 +58,12 @@ function viewGeometry() {
 export function revealBox(box: Box): void {
   const { camera, viewport, insets } = viewGeometry();
   setCamera(fitsInViewport(camera, box, viewport, insets) ? panCameraToReveal(camera, box, viewport, insets) : centerCameraOn(camera, box, viewport, insets));
+}
+
+/** Glides the view just far enough to show a board box (no centring, no zoom). */
+export function glideToReveal(box: Box): void {
+  const { camera, viewport, insets } = viewGeometry();
+  glideCamera(panCameraToReveal(camera, box, viewport, insets));
 }
 
 /** Brings elements into view. */

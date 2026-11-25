@@ -90,6 +90,16 @@ export function guardWhileClosing<
   };
 }
 
+/**
+ * A held Enter or Space on a menu row repeats its keydown; only the first press acts, so a row
+ * that closes the menu or toggles a check does not fire again on whatever the repeats land on.
+ */
+export function preventRepeatedActivation(event: React.KeyboardEvent<Element>): void {
+  if (!event.repeat || event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  (event as React.KeyboardEvent<Element> & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+}
+
 const KEY_GUARD_MAX_MS = 2000;
 
 /**

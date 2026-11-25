@@ -2,12 +2,12 @@
 import { provideAction } from '../app/actions.ts';
 import { fillSlot } from '../app/slots.ts';
 import { addEditorExtension } from '../editor/DocEditor.tsx';
-import { openFind, watchFind } from './controller.ts';
+import { chipWordsOnPage, openFind, watchFind } from './controller.ts';
 import { FindBar } from './FindBar.tsx';
 import { findChord, inPopup } from './keys.ts';
 import { findPlugin } from './plugin.ts';
 
-addEditorExtension({ plugins: () => [findPlugin()] });
+addEditorExtension({ plugins: () => [findPlugin(chipWordsOnPage)] });
 provideAction('find', mode => openFind(mode));
 fillSlot('float', 'find', FindBar);
 watchFind();

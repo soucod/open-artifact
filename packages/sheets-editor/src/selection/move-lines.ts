@@ -69,31 +69,31 @@ export function lineIndexOfCell(reads: WorkbookReads, what: LinesAxisName, cellI
 export function moveLinesEdit(
   state: PageState,
   reads: WorkbookReads,
-  { what: what, first: first, count: count }: Pick<SelectedLines, 'what' | 'first' | 'count'>,
+  { what, first, count }: Pick<SelectedLines, 'what' | 'first' | 'count'>,
   afterCell: CellId | null,
 ): MoveLinesEdit | null {
   let firstCell = cellOfLine(state, reads, what, first);
   let lastCell = cellOfLine(state, reads, what, first + count - 1);
   if (firstCell === null || lastCell === null) return null;
-  let { sheetId: sheetId } = state;
+  let { sheetId } = state;
   return what === 'rows'
     ? {
         kind: 'moveRows',
-        sheetId: sheetId,
+        sheetId,
         oneRow: firstCell.rowId,
         otherRow: lastCell.rowId,
         afterRow: afterCell?.rowId ?? null,
       }
     : {
         kind: 'moveColumns',
-        sheetId: sheetId,
+        sheetId,
         oneColumn: firstCell.columnId,
         otherColumn: lastCell.columnId,
         afterColumn: afterCell?.columnId ?? null,
       };
 }
 export function mergeBrokenByMove(reads: WorkbookReads, edit: MoveLinesEdit): CellArea | null {
-  let { sheetId: sheetId } = edit;
+  let { sheetId } = edit;
   let isRows = edit.kind === 'moveRows';
   let sheet = reads.listSheets().find((sheetSummary) => sheetSummary.sheetId === sheetId);
   let [oneIndex, otherIndex, afterIndex] = isRows
@@ -109,12 +109,12 @@ export function mergeBrokenByMove(reads: WorkbookReads, edit: MoveLinesEdit): Ce
       ];
   if (sheet === undefined || oneIndex === null || otherIndex === null || afterIndex === null) return null;
   let [lowIndex, highIndex] = [Math.min(oneIndex, otherIndex), Math.max(oneIndex, otherIndex)];
-  let { rowCount: rowCount, columnCount: columnCount } = sheet;
+  let { rowCount, columnCount } = sheet;
   let wholeSheet = {
     topRowIndex: 0,
     leftColumnIndex: 0,
-    rowCount: rowCount,
-    columnCount: columnCount,
+    rowCount,
+    columnCount,
   };
   return (
     reads.mergedAreasIn(sheetId, wholeSheet).find((mergedArea) => {
@@ -195,29 +195,29 @@ export function startMovingLines(
     menu: null,
     dragging: {
       kind: 'movingLines',
-      what: what,
+      what,
       pressed: pressedCell,
-      pressedAt: pressedAt,
+      pressedAt,
       landing: null,
     } satisfies MovingLinesDrag,
   };
 }
 export function dropRowClearOfStuckHeaders(
   dropIndex: number,
-  { first: first, count: count }: Pick<SelectedLines, 'first' | 'count'>,
+  { first, count }: Pick<SelectedLines, 'first' | 'count'>,
   view: PageState,
   reads: ReadsWithTextMeasurer,
   layout: GridLayout,
 ): number {
   if (dropIndex <= layout.frozenRowCount || (dropIndex >= first && dropIndex <= first + count)) return dropIndex;
-  let stuckHeadersBottom2 = bottomOfStuckHeadersInSheet(view, reads, 'rowNumbers', layout);
-  if (stuckHeadersBottom2 === null) return dropIndex;
-  let rowIndexAtBottom = layout.rowEdges.indexAt(stuckHeadersBottom2);
-  let firstRowClear = layout.rowEdges.startOf(rowIndexAtBottom) < stuckHeadersBottom2 ? rowIndexAtBottom + 1 : rowIndexAtBottom;
+  let headersBottom = bottomOfStuckHeadersInSheet(view, reads, 'rowNumbers', layout);
+  if (headersBottom === null) return dropIndex;
+  let rowIndexAtBottom = layout.rowEdges.indexAt(headersBottom);
+  let firstRowClear = layout.rowEdges.startOf(rowIndexAtBottom) < headersBottom ? rowIndexAtBottom + 1 : rowIndexAtBottom;
   return Math.max(dropIndex, dropIndex < first ? Math.min(firstRowClear, first) : firstRowClear);
 }
 export function dragMovingLines(state: PageState, drag: MovingLinesDrag, pointer: GridPoint, reads: ReadsWithTextMeasurer) {
-  let { what: what, pressedAt: pressedAt } = drag;
+  let { what, pressedAt } = drag;
   if (drag.landing === null && Math.hypot(pointer.x - pressedAt.x, pointer.y - pressedAt.y) < MOVE_LINES_DRAG_THRESHOLD) return state;
   let isRows = what === 'rows';
   let layout = layoutOfView(state, reads);
@@ -270,10 +270,10 @@ export function movingLinesDropIndex(state: PageState, reads: ReadsWithTextMeasu
   let dropIndex = afterIndex + 1;
   return isInSpan(dropIndex, lines.first, lines.count + 1) ? null : dropIndex;
 }
-export function selectPressedLine(state: PageState, reads: ReadsWithTextMeasurer, { what: what, pressed: pressed }: Pick<MovingLinesDrag, 'what' | 'pressed'>): PageState {
+export function selectPressedLine(state: PageState, reads: ReadsWithTextMeasurer, { what, pressed }: Pick<MovingLinesDrag, 'what' | 'pressed'>): PageState {
   let lineIndex = lineIndexOfCell(reads, what, pressed);
   if (lineIndex === null) return state;
-  let { rowCount: rowCount, columnCount: columnCount } = layoutOfView(state, reads);
+  let { rowCount, columnCount } = layoutOfView(state, reads);
   let selection =
     what === 'rows'
       ? selectionBetweenPositions(
@@ -308,7 +308,7 @@ export function selectPressedLine(state: PageState, reads: ReadsWithTextMeasurer
 export function finishMovingLines(
   state: PageState,
   drag: MovingLinesDrag,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
 ): PageTransition {
   let view = endLinesDrag(state);
   if (drag.landing === null) return withNoEffects(selectPressedLine(view, reads, drag));
@@ -328,7 +328,7 @@ export function finishMovingLines(
 }
 export const selectedWholeLines = (state: PageState, reads: ReadsWithTextMeasurer): SelectedLines | null =>
   selectionAreaAndKind(state, reads)?.kind === 'cells' ? null : selectedLines(state, reads);
-export const cellOfLine = ({ sheetId: sheetId }: Pick<PageState, 'sheetId'>, reads: WorkbookReads, what: LinesAxisName, lineIndex: number): CellId | null =>
+export const cellOfLine = ({ sheetId }: Pick<PageState, 'sheetId'>, reads: WorkbookReads, what: LinesAxisName, lineIndex: number): CellId | null =>
   what === 'rows' ? reads.cellIdAt(sheetId, lineIndex, 0) : reads.cellIdAt(sheetId, 0, lineIndex);
 export const MOVED_IF_QUEUED = {
   ...IF_QUEUED_DEFAULTS,

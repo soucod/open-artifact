@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react';
-import { Braces, CircleHelp, Database, FileText, Loader2 } from 'lucide-react';
+import { Braces, CircleHelp, Database, FileText, Loader2, NotebookPen } from 'lucide-react';
 import { Button, Tooltip, cn } from '@open-artifact/ui';
 import type { ConnectionFix, Dataset, DatasetRun, DatasetSource } from '@open-artifact/data-core';
 import { connectionFixAriaLabel, connectionFixLabel } from '../data/fixes.ts';
-import { isConsentFix, isRetryableDatasetFailure } from '../data/query-store.ts';
+import { isRetryableDatasetFailure } from '../data/query-store.ts';
 import {
   getRowStatusHeard,
   getRowStatusReason,
@@ -18,6 +18,7 @@ import {
   type ConnectionStates,
   type SourceRowStatus,
 } from './grouping.ts';
+import { useFocusHandoff } from './focus.ts';
 import { RETRY_LABEL, retrySourceLabel } from './words.ts';
 
 /** Fixes a connection (asks the agent, or tries again). */
@@ -26,6 +27,7 @@ export type ConnectSource = (connector: string, fix: ConnectionFix) => Promise<u
 const KIND_ICONS: Readonly<Record<DatasetSource['kind'], typeof Database>> = {
   query: Database,
   file: FileText,
+  store: NotebookPen,
   calc: Braces,
   unsupported: CircleHelp,
 };
@@ -209,19 +211,14 @@ export function SourceRow({ ds, run, now, unasked, down, canAskAgent, rowRef, on
         </Tooltip>
       )}
       {action !== null ? (
-        <Button
-          size="sm"
-          data-source-fix=""
-          className="absolute top-1 right-2"
-          disabled={busy}
-          aria-label={connectionFixAriaLabel(action.fix, action.connector, canAskAgent)}
-          onClick={() => {
-            if (isConsentFix(action.fix)) button.current?.focus();
-            track(onConnect(action.connector, action.fix));
-          }}
-        >
-          {connectionFixLabel(action.fix, canAskAgent)}
-        </Button>
+        <RowFixButton
+          fix={action.fix}
+          connector={action.connector}
+          busy={busy}
+          canAskAgent={canAskAgent}
+          onFix={() => track(onConnect(action.connector, action.fix))}
+          onGone={() => button.current?.focus()}
+        />
       ) : null}
       {retry ? (
         <Button
@@ -238,5 +235,36 @@ export function SourceRow({ ds, run, now, unasked, down, canAskAgent, rowRef, on
         </Button>
       ) : null}
     </li>
+  );
+}
+
+interface RowFixButtonProps {
+  fix: ConnectionFix;
+  connector: string;
+  busy: boolean;
+  canAskAgent: boolean;
+  onFix: () => void;
+  /** The button went away with focus on it (the fix worked): focus goes back to the row. */
+  onGone: () => void;
+}
+
+/** A row's connection fix. A click focuses it first, since some browsers don't, so that focus can follow it away. */
+function RowFixButton({ fix, connector, busy, canAskAgent, onFix, onGone }: RowFixButtonProps): ReactElement {
+  const handoff = useFocusHandoff<HTMLButtonElement>(onGone);
+  return (
+    <Button
+      ref={handoff}
+      size="sm"
+      data-source-fix=""
+      className="absolute top-1 right-2"
+      disabled={busy}
+      aria-label={connectionFixAriaLabel(fix, connector, canAskAgent)}
+      onClick={(event) => {
+        event.currentTarget.focus();
+        onFix();
+      }}
+    >
+      {connectionFixLabel(fix, canAskAgent)}
+    </Button>
   );
 }

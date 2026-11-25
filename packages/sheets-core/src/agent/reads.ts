@@ -1,6 +1,7 @@
 /**
- * The agent's reads: readSheets, readCells, readCellFormats, readConditionalFormats and readCharts, answered from the
- * workbook at a revision, by the same names and keys as the agent's skill describes.
+ * The agent's reads: readSheets, readCells, readCellFormats, readConditionalFormats, readCharts and readInteractive,
+ * answered from the workbook at a revision, by the same names and keys as the agent's skill describes. showGuide goes
+ * through the same command but is no read of the workbook: the host answers it (cell-links.ts checks it).
  */
 
 import { type Block, a1, blockA1, columnLetters, columnsText, overlap, rowsText } from './addresses.ts';
@@ -8,6 +9,7 @@ import { type CellReading, encodeCell, shownText, usFormulaText } from './cells.
 import { type EngineMessage, isObject } from './engine.ts';
 import { AgentError } from './errors.ts';
 import { sha256Hex } from './sha256.ts';
+import { linkFragmentOf } from './cell-links.ts';
 import { checkKeys, expand, pickSheet, type SheetContents, type SheetView, sheetsOf, type WorkbookContents } from './workbook.ts';
 
 /** The most cells one readCells answers. */
@@ -26,12 +28,17 @@ export interface ReadContext {
   calculationTookTooLong?: boolean;
   timeZone: string | null;
   charts?: (view: SheetView, sheets: SheetView[]) => EngineMessage[];
+  /** The interactive panel a tab shows, or null (charts.ts, ChartReader.interactiveOf). */
+  interactive?: (view: SheetView, sheets: SheetView[]) => EngineMessage | null;
 }
 
-const READ_KINDS = ['readSheets', 'readCells', 'readCellFormats', 'readConditionalFormats', 'readCharts'];
+export const READ_KINDS = ['readSheets', 'readCells', 'readCellFormats', 'readConditionalFormats', 'readCharts', 'readInteractive'];
+/** What the read command takes besides the reads: a walkthrough the host shows the person. */
+export const GUIDE_KIND = 'showGuide';
+const KINDS_TEXT = [...READ_KINDS, GUIDE_KIND].join(', ');
 
 export function readWorkbook(payload: unknown, context: ReadContext): EngineMessage {
-  if (!isObject(payload) || typeof payload.kind !== 'string') throw new AgentError('unknownReadKind', `A read's payload is {"kind": …}: ${READ_KINDS.join(', ')}.`);
+  if (!isObject(payload) || typeof payload.kind !== 'string') throw new AgentError('unknownReadKind', `A read's payload is {"kind": …}: ${KINDS_TEXT}.`);
   const sheets = sheetsOf(context.workbook);
   const revision = context.workbook.revision;
   const keys = (required: string[]) => {
@@ -66,8 +73,13 @@ export function readWorkbook(payload: unknown, context: ReadContext): EngineMess
       const view = pickSheet(sheets, payload.sheet);
       return { revision, sheet: view.name, charts: context.charts?.(view, sheets) ?? [] };
     }
+    case 'readInteractive': {
+      keys(['sheet']);
+      const view = pickSheet(sheets, payload.sheet);
+      return { revision, sheet: view.name, interactive: context.interactive?.(view, sheets) ?? null };
+    }
     default:
-      throw new AgentError('unknownReadKind', `"${payload.kind}" is not a read: ${READ_KINDS.join(', ')}.`);
+      throw new AgentError('unknownReadKind', `"${payload.kind}" is not a read: ${KINDS_TEXT}.`);
   }
 }
 
@@ -75,7 +87,8 @@ function readSheets(context: ReadContext, sheets: SheetView[]): EngineMessage {
   const out = sheets.map((view) => {
     const c = view.contents;
     const filled = view.filledBlock();
-    const sheet: EngineMessage = { name: view.name, rowCount: view.rowIds.length, columnCount: view.columnIds.length };
+    const sheet: EngineMessage = { name: view.name, linkFragment: linkFragmentOf(view.sheetId), rowCount: view.rowIds.length, columnCount: view.columnIds.length };
+    if (c.interactive) sheet.interactiveId = c.interactive;
     if (filled) sheet.filledRange = blockA1(filled);
     const frozenRow = c.lastFrozenRow ? view.rowIndex(c.lastFrozenRow) : undefined;
     if (frozenRow !== undefined) sheet.lastFrozenRow = frozenRow + 1;

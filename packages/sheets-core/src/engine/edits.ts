@@ -19,12 +19,14 @@ import type {
   Effect,
   Embed,
   InputOfAWidget,
+  InteractiveValue,
   ListLine,
   Mark,
+  NamedView,
   OffsetOfAPlacement,
   SheetSettings,
 } from './ops.ts';
-import type { ColumnReading } from './utility.ts';
+import type { ColumnReading, ErrorValue } from './utility.ts';
 
 // ---------------------------------------------------------------------------
 // Shapes edits share
@@ -401,6 +403,20 @@ export type TableEdit =
       thenBy?: FurtherKey[];
     } & RowsBetween)
   | { kind: 'sortCells'; cells: CellsBetween; byColumn: ColumnId; direction: SortDirection; thenBy?: FurtherKey[] }
+  /**
+   * The columns from `oneColumn` to `otherColumn` of the cells between two
+   * corners, moved after another column of those cells (`null`: first). The
+   * cells' formats, conditional formats, views and named views go with them,
+   * and their widths too where `widthsGoAlong`.
+   */
+  | {
+      kind: 'moveColumnsOfCells';
+      cells: CellsBetween;
+      oneColumn: ColumnId;
+      otherColumn: ColumnId;
+      afterColumn: ColumnId | null;
+      widthsGoAlong: boolean;
+    }
   /** `isAskedFor`: whether the person asked for the table, not the page guessing it. */
   | { kind: 'declareCellTable'; sheetId: SheetId; cellTable: CellTable; isAskedFor?: boolean }
   | { kind: 'changeCellTable'; sheetId: SheetId; cellTableId: string; cellTable: CellTable }
@@ -512,6 +528,118 @@ export type ObjectEdit =
     };
 
 // ---------------------------------------------------------------------------
+// Named views
+// ---------------------------------------------------------------------------
+
+export type NamedViewEdit =
+  /** A named view saved over the one of an id, or as a new one (`null`). */
+  | { kind: 'saveNamedView'; sheetId: SheetId; namedViewId: string | null; namedView: NamedView }
+  | { kind: 'removeNamedView'; sheetId: SheetId; namedViewId: string };
+
+// ---------------------------------------------------------------------------
+// Pivot tables
+// ---------------------------------------------------------------------------
+
+/** The table a pivot table reads: the sheet and the row of its header. */
+export interface PivotTableSource {
+  sheetId: SheetId;
+  headerRow: RowId;
+}
+
+/** A span of time dates are grouped by. */
+export type PivotPeriod = 'day' | 'month' | 'quarter' | 'year';
+
+export type PivotOrder = 'ascending' | 'descending';
+
+/** How the values of a column are totalled. `shareOfTotal` sums them as a share of the whole. */
+export type PivotTotal = 'sum' | 'count' | 'distinctCount' | 'average' | 'min' | 'max' | 'shareOfTotal';
+
+/** Whether a filter keeps the records whose value is listed, or the others. */
+export type PivotKeeps = 'oneOf' | 'noneOf';
+
+/** A value a filter lists. */
+export type PivotWrittenValue =
+  | { kind: 'number'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'error'; value: ErrorValue };
+
+/** A column of the source the rows (or columns) are grouped by, by date where `by` is a period. */
+export interface PivotAxis {
+  column: ColumnId;
+  by: PivotPeriod | null;
+  order: PivotOrder;
+  /** `null`: the column's header. */
+  name: string | null;
+}
+
+/** A column of the source totalled, and the order the groups take by its totals (`null`: by their axes alone). */
+export interface PivotMeasure {
+  column: ColumnId;
+  total: PivotTotal;
+  order: PivotOrder | null;
+  name: string | null;
+}
+
+/**
+ * The values a filter lists: written in the pivot table (`null`: blank), or
+ * the ones a cell holds.
+ */
+export type PivotListed =
+  | { kind: 'written'; values: (PivotWrittenValue | null)[] }
+  | { kind: 'inACell'; sheetId: SheetId; cell: CellAt };
+
+export interface PivotFilter {
+  column: ColumnId;
+  keeps: PivotKeeps;
+  listed: PivotListed;
+}
+
+/**
+ * What a pivot table shows. It takes at least one value; with `columns` it
+ * takes just one. A written filter lists at least one value.
+ */
+export interface PivotTable {
+  source: PivotTableSource;
+  rows: PivotAxis[];
+  columns: PivotAxis | null;
+  values: PivotMeasure[];
+  filters: PivotFilter[];
+}
+
+/** Where a new pivot table goes: a new sheet after one (`null` or left out: first), or a cell. */
+export type PlaceOfAPivotTable =
+  | { kind: 'newSheet'; afterSheet?: SheetId | null; name: string }
+  | { kind: 'cell'; sheetId: SheetId; cell: CellAt };
+
+export type PivotTableEdit =
+  | { kind: 'insertPivotTable'; place: PlaceOfAPivotTable; pivotTable: PivotTable }
+  /** The pivot table at a cell, changed to show something else. */
+  | { kind: 'changePivotTable'; sheetId: SheetId; cell: CellAt; pivotTable: PivotTable };
+
+// ---------------------------------------------------------------------------
+// Interactive views
+// ---------------------------------------------------------------------------
+
+/**
+ * A value an interactive view writes to a cell of one of its inputs, the cell
+ * by its row and column within the input's range (from 0). `null` empties it.
+ */
+export interface CellWrittenFromAnInteractive {
+  input: string;
+  row: number;
+  column: number;
+  value: InteractiveValue | null;
+}
+
+export type InteractiveEdit =
+  | { kind: 'writeFromInteractive'; viewId: string; cells: CellWrittenFromAnInteractive[] }
+  /** The cells of the view's inputs, written back with the values it keeps. */
+  | { kind: 'resetInteractive'; viewId: string }
+  /** The values of the view's inputs, kept as the ones a reset writes back. */
+  | { kind: 'saveDefaultsOfInteractive'; viewId: string };
+
+// ---------------------------------------------------------------------------
 // Every edit
 // ---------------------------------------------------------------------------
 
@@ -520,7 +648,17 @@ export type ObjectEdit =
  * never reads one: it adopts the browser's time zone itself
  * (`timeZoneOfTheBrowser`), so that kind is not an edit a page sends.
  */
-export type Edit = SheetEdit | CellEdit | ClipboardEdit | FormatEdit | LineEdit | TableEdit | ObjectEdit;
+export type Edit =
+  | SheetEdit
+  | CellEdit
+  | ClipboardEdit
+  | FormatEdit
+  | LineEdit
+  | TableEdit
+  | ObjectEdit
+  | NamedViewEdit
+  | PivotTableEdit
+  | InteractiveEdit;
 
 export type EditKind = Edit['kind'];
 

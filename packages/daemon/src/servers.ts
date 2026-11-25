@@ -11,7 +11,6 @@
  * is given up on after `MAX_RESTARTS` failed starts (with back-off between).
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -23,6 +22,7 @@ import {
   OpenArtifactError,
   READY_TIMEOUT_MS,
   TYPE_SERVER_ROUTES,
+  shellPath,
   type OpenRequest,
   type OpenResult,
   type ReadyLine,
@@ -30,11 +30,14 @@ import {
   type TypeServerEnv,
   type TypeServerStatus,
 } from '@open-artifact/protocol';
+import { nodeChildren, startChild, type NodeChild, type NodeChildrenMode } from './node-children.ts';
 import { ensureDir, files, readJson, writeJson } from './paths.ts';
-import { isLoopbackUrl, type TypeInfo } from './types.ts';
+import { isLoopbackUrl, typeLocation, type TypeInfo } from './types.ts';
 
 const KILL_MS = 5_000;
 const CALL_MS = 10_000;
+/** How long {@link TypeServers.reach} waits for a remote type's address. */
+const REACH_MS = 5_000;
 /** How long the agent's action calls may take (a check of a big project, an upload, a snapshot); long ones answer at once with a task. */
 export const ACTION_CALL_MS = 90_000;
 
@@ -88,8 +91,11 @@ export function parseActions(raw: unknown): TypeAction[] {
 /** What {@link serverFiles.actions} holds. */
 interface ActionCache {
   stamp: string;
-  /** The process that gave the list (`null`: a URL entry or a server the daemon did not start). */
-  pid: number | null;
+  /**
+   * The server that gave the list: its pid, or `<daemon pid>:<thread id>` for one in a worker thread (`null`: a URL
+   * entry or a server the daemon did not start).
+   */
+  pid: number | string | null;
   actions: TypeAction[];
 }
 
@@ -100,10 +106,82 @@ export function fillTemplate(template: string, values: { id: string; lang?: stri
   );
 }
 
+/** A route's address as an error names it: its path, and its origin too for a remote type (which computer failed). */
+const where = (type: TypeInfo, url: URL): string => (typeLocation(type).remote ? `${url.origin}${url.pathname}` : url.pathname);
+
 const withSlash = (url: string): string => (url.endsWith('/') ? url : `${url}/`);
 
-/** The base of a URL template: what comes before its first placeholder. */
-const templateBase = (template: string): string => withSlash(new URL(template.replace(/\{[a-z]+\}.*$/, '')).href);
+/** The base of a URL template: what comes before its first placeholder, ending with `/`. */
+export const templateBase = (template: string): string => withSlash(new URL(template.replace(/\{[a-z]+\}.*$/, '')).href);
+
+/**
+ * Why a fetch failed, in a few words: the network's code (`ECONNREFUSED`, `ENOTFOUND`), a timeout, or the message.
+ * `fetch` itself only says "fetch failed".
+ */
+export function failureOf(error: unknown, timeoutMs?: number): string {
+  const e = error as { name?: unknown; message?: unknown; cause?: { code?: unknown; message?: unknown } } | null;
+  if (e?.name === 'TimeoutError' || e?.name === 'AbortError') return timeoutMs ? `no answer within ${Math.round(timeoutMs / 1000)} s` : 'timed out';
+  const cause = e?.cause;
+  if (cause && typeof cause.code === 'string') return typeof cause.message === 'string' && cause.message ? `${cause.code}: ${cause.message}` : cause.code;
+  if (cause && typeof cause.message === 'string' && cause.message) return cause.message;
+  return typeof e?.message === 'string' ? e.message : String(error);
+}
+
+/**
+ * The body of a request to a remote type ({@link typeLocation}): without `root`, the artifact's folder on this
+ * computer. Every request the daemon sends a type goes through here.
+ */
+export function forRemote<T>(type: TypeInfo, body: T): T {
+  if (!typeLocation(type).remote || !body || typeof body !== 'object' || Array.isArray(body) || !('root' in body)) return body;
+  const { root: _root, ...rest } = body as Record<string, unknown>;
+  return rest as T;
+}
+
+/**
+ * The most a remote type's answer to a JSON route may be before the daemon parses it: 32 MiB, the size the daemon
+ * itself takes in one MCP request. The built-in types' answers (a page of documents, a read of a doc or a sheet, an
+ * export's text) stay well under it; a local type is not capped.
+ */
+export const REMOTE_ANSWER_MAX = 32 * 1024 * 1024;
+
+/**
+ * A redirect from a remote type is never followed: the daemon would send the request again, body and all, to an
+ * address the other computer picked (one on this computer or the person's network). The error names the address that
+ * answered with the redirect, not where it pointed.
+ */
+function refuseRedirect(type: TypeInfo, url: URL, response: Response): void {
+  if (response.status < 300 || response.status > 399) return;
+  void response.body?.cancel().catch(() => undefined);
+  throw new OpenArtifactError('server_failed', `${type.id}: ${where(type, url)} answered with a redirect (${response.status}); a type on another computer is never followed elsewhere.`, {
+    fix: "The type's address must answer its routes itself: ask its author, or use a type that runs on this computer.",
+  });
+}
+
+/** A remote type's answer as text, refused past {@link REMOTE_ANSWER_MAX} without reading the rest. */
+async function cappedText(type: TypeInfo, url: URL, response: Response, max = REMOTE_ANSWER_MAX): Promise<string> {
+  const tooLarge = (): OpenArtifactError =>
+    new OpenArtifactError('server_failed', `${type.id}: ${where(type, url)} answered more than ${Math.round(max / (1024 * 1024))} MiB; answers from a type on another computer are capped there.`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) {
+    void response.body?.cancel().catch(() => undefined);
+    throw tooLarge();
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 /** What, changed, means a running server is stale (the type folder was updated or reinstalled). */
 function stampOf(type: TypeInfo): string {
@@ -113,7 +191,8 @@ function stampOf(type: TypeInfo): string {
   } catch {
     /* no manifest */
   }
-  return JSON.stringify([type.dir, type.version, mtime, type.entry]);
+  // Trust is in it: trusting a project (or no longer) starts its frame-host again, with or without the restrictions.
+  return JSON.stringify([type.dir, type.version, mtime, type.entry, type.trusted]);
 }
 
 type ServerState = 'stopped' | 'starting' | 'ready';
@@ -121,7 +200,7 @@ type ServerState = 'stopped' | 'starting' | 'ready';
 interface Running {
   type: TypeInfo;
   stamp: string;
-  child: ChildProcess | null;
+  child: NodeChild | null;
   base: string | null;
   secret: string | null;
   state: ServerState;
@@ -139,6 +218,8 @@ export interface TypeServersOptions {
   /** The Type API token of a type (`OPEN_ARTIFACT_TYPE_TOKEN`). */
   tokenFor: (typeId: string) => string;
   log: (line: string) => void;
+  /** A server started or stopped (its address came or went). */
+  changed?: () => void;
 }
 
 /** A type's entry needs a server or URL to answer `/__open-artifact/*`. */
@@ -156,13 +237,16 @@ export class TypeServers {
   private readonly byType = new Map<string, Running>();
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly onExit: () => void;
+  /** Servers in threads asked to stop and not ended yet ({@link drained}). */
+  private readonly stopping = new Set<NodeChild>();
+  private saidThreads = false;
 
   constructor(options: TypeServersOptions) {
     this.options = options;
     this.timer = setInterval(() => void this.checkHealth(), HEALTH_INTERVAL_MS);
     this.timer.unref?.();
     // A daemon that exits without closeAll() (a crash) does not leave its servers behind.
-    this.onExit = () => this.killAll('SIGTERM');
+    this.onExit = () => this.killAll();
     process.on('exit', this.onExit);
   }
 
@@ -179,6 +263,11 @@ export class TypeServers {
       ...(s.error ? { error: s.error } : {}),
       restarts: s.failures,
     };
+  }
+
+  /** The servers that are up now: their type and address. */
+  running(): Array<{ type: string; base: string }> {
+    return [...this.byType.values()].filter((s) => s.state === 'ready' && s.base).map((s) => ({ type: s.type.id, base: s.base! }));
   }
 
   /** True when the type's server is up. */
@@ -199,7 +288,9 @@ export class TypeServers {
       const url = fillTemplate(entry.url!, { id: record.id, lang: context.lang, root: record.root });
       return { url, page_url: url };
     }
-    const request: OpenRequest = { id: record.id, root: record.root, title: record.title, lang: context.lang || 'en', shell: context.shell };
+    // The Shell's own address on the same origin: a top-level visit to the framed page goes there. A remote type gets
+    // no `root` (forRemote): the title, language and the Shell's address only, which its page sees anyway.
+    const request: OpenRequest = { id: record.id, root: record.root, title: record.title, lang: context.lang || 'en', shell: context.shell, viewer: context.shell + shellPath(record.id) };
     const out = await this.call<Partial<OpenResult>>(type, 'POST', TYPE_SERVER_ROUTES.open, request);
     if (!out || typeof out.url !== 'string') throw new OpenArtifactError('server_failed', `${type.id}: ${TYPE_SERVER_ROUTES.open} returned no url.`);
     const url = new URL(out.url, base).href;
@@ -213,18 +304,24 @@ export class TypeServers {
     const secret = this.byType.get(type.id)?.secret;
     const url = new URL(route.replace(/^\//, ''), base);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+    // Never a local path to another computer, whichever caller built the body.
+    const sent = forRemote(type, body);
+    const remote = typeLocation(type).remote;
     let response: Response;
     try {
       response = await fetch(url, {
         method,
-        headers: { ...(secret ? { Authorization: `Bearer ${secret}` } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        headers: { ...(secret ? { Authorization: `Bearer ${secret}` } : {}), ...(sent !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+        ...(sent !== undefined ? { body: JSON.stringify(sent) } : {}),
+        // A remote type's redirect is refused, never followed (refuseRedirect).
+        ...(remote ? { redirect: 'manual' as const } : {}),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      throw new OpenArtifactError('server_failed', `${type.id}: ${url.pathname} did not answer (${(error as Error)?.message ?? error}).`);
+      throw new OpenArtifactError('server_failed', `${type.id}: ${where(type, url)} did not answer (${failureOf(error, timeoutMs)}).`);
     }
-    const text = await response.text();
+    if (remote) refuseRedirect(type, url, response);
+    const text = remote ? await cappedText(type, url, response) : await response.text();
     let json: unknown = null;
     try {
       json = text ? JSON.parse(text) : null;
@@ -233,7 +330,7 @@ export class TypeServers {
     }
     if (!response.ok) {
       const e = (json ?? {}) as { code?: unknown; message?: unknown; fix?: unknown; current?: unknown };
-      throw new OpenArtifactError(typeof e.code === 'string' ? e.code : 'server_failed', typeof e.message === 'string' ? e.message : `${type.id}: ${url.pathname} answered ${response.status}.`, {
+      throw new OpenArtifactError(typeof e.code === 'string' ? e.code : 'server_failed', typeof e.message === 'string' ? e.message : `${type.id}: ${where(type, url)} answered ${response.status}.`, {
         status: response.status,
         ...(typeof e.fix === 'string' && e.fix.trim() ? { fix: e.fix.trim().slice(0, 1000) } : {}),
         // A conflict's current state is data the caller merges with: it travels in its own field.
@@ -255,13 +352,17 @@ export class TypeServers {
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(new Error('timed out')), timeoutMs);
+    const remote = typeLocation(type).remote;
+    let response: Response;
     try {
-      return await fetch(url, { method, headers: secret ? { Authorization: `Bearer ${secret}` } : {}, signal: abort.signal });
+      response = await fetch(url, { method, headers: secret ? { Authorization: `Bearer ${secret}` } : {}, ...(remote ? { redirect: 'manual' as const } : {}), signal: abort.signal });
     } catch (error) {
-      throw new OpenArtifactError('server_failed', `${type.id}: ${url.pathname} did not answer (${(error as Error)?.message ?? error}).`);
+      throw new OpenArtifactError('server_failed', `${type.id}: ${where(type, url)} did not answer (${failureOf(error, timeoutMs)}).`);
     } finally {
       clearTimeout(timer);
     }
+    if (remote) refuseRedirect(type, url, response);
+    return response;
   }
 
   /**
@@ -276,7 +377,7 @@ export class TypeServers {
     const stamp = stampOf(type);
     const kept = readJson<ActionCache | null>(serverFiles.actions(type.id), null);
     const cached = kept && kept.stamp === stamp && Array.isArray(kept.actions) ? kept : null;
-    const pid = (): number | null => this.byType.get(type.id)?.child?.pid ?? null;
+    const pid = (): number | string | null => this.byType.get(type.id)?.child?.instance ?? null;
     const ready = entry.kind === 'url' || this.isReady(type.id);
     if (cached && (!ready || cached.pid === pid())) return cached.actions;
     if (!ready && options.start === false) return null;
@@ -292,6 +393,26 @@ export class TypeServers {
     } catch (error) {
       this.options.log(`server ${type.id}: ${TYPE_SERVER_ROUTES.actions.slice(0, -1)} failed (${(error as Error)?.message ?? error})`);
       return cached?.actions ?? null;
+    }
+  }
+
+  /**
+   * Checks that a remote type's address answers at all (any HTTP status will do), so creating an artifact of one that
+   * cannot be reached fails at once and says why: which address, and what happened. Nothing about an artifact is
+   * sent. Local types are not checked.
+   */
+  async reach(type: TypeInfo, timeoutMs = REACH_MS): Promise<void> {
+    const location = typeLocation(type);
+    if (!location.remote || type.entry?.kind !== 'url') return;
+    const entry = type.entry;
+    const probe = entry.open || entry.actions || entry.share ? new URL(TYPE_SERVER_ROUTES.health.replace(/^\//, ''), templateBase(entry.url)) : new URL(templateBase(entry.url));
+    try {
+      const response = await fetch(probe, { method: 'GET', signal: AbortSignal.timeout(timeoutMs), redirect: 'manual' });
+      await response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      throw new OpenArtifactError('server_failed', `${type.title || type.id} lives at ${location.origin}, on another computer, and ${probe.href} could not be reached (${failureOf(error, timeoutMs)}).`, {
+        fix: 'Check the network connection and that the address is right, then try again; or pick a type that runs on this computer (Artifact {action: "list", scope: "types"}: remote is false).',
+      });
     }
   }
 
@@ -332,7 +453,15 @@ export class TypeServers {
 
   private async launch(s: Running): Promise<string> {
     const { type } = s;
-    if (!type.trusted) throw new OpenArtifactError('not_granted', `${type.id} is in a project folder that is not trusted yet; trust it to start its server.`);
+    // Trust is about the type's own program: frame-host (runtime `frame`) is the daemon's, and runs for any root.
+    if (type.ownCode && !type.trusted) {
+      throw new OpenArtifactError(
+        'not_granted',
+        type.scope === 'installed'
+          ? `${type.id} is an installed type, and an installed type never starts a program of its own ("entry.start").`
+          : `${type.id} is in a project folder that is not trusted yet; trust it to start its server.`,
+      );
+    }
     const entry = remoteEntry(type);
     // `url` with `start`: a server already running there (a developer's own) is used as it is.
     if (entry.url) {
@@ -357,20 +486,29 @@ export class TypeServers {
     }
   }
 
-  private spawn(s: Running): Promise<string> {
+  /** How a `node` server runs (`node-children.ts`); said once in the log when it is worker threads. */
+  private nodeMode(): NodeChildrenMode {
+    const choice = nodeChildren();
+    if (choice.mode === 'threads' && !this.saidThreads) {
+      this.saidThreads = true;
+      this.options.log(`type servers run in worker threads of the daemon (${choice.detail})`);
+    }
+    return choice.mode;
+  }
+
+  private async spawn(s: Running): Promise<string> {
     const { type } = s;
     const entry = type.entry;
-    if (entry?.kind !== 'server') return Promise.reject(new Error('not a server entry'));
+    if (entry?.kind !== 'server') throw new Error('not a server entry');
     const { start } = entry;
+    const isNode = start.command === 'node';
+    const mode = isNode ? this.nodeMode() : 'process';
     const last = readJson<{ port?: number } | null>(serverFiles.state(type.id), null);
     const secret = randomBytes(24).toString('base64url');
     ensureDir(dirname(serverFiles.log(type.id)));
     const stateDir = ensureDir(serverFiles.stateDir(type.id));
     const log = createWriteStream(serverFiles.log(type.id), { flags: 'a' });
     log.write(`\n--- ${new Date().toISOString()} start ${start.command} ${start.args.join(' ')}\n`);
-    // `node` is this process's own runtime (in an Electron host, the app run as Node), so no node is needed on PATH.
-    const isNode = start.command === 'node';
-    const command = isNode ? process.execPath : start.command;
     const openArtifactEnv: TypeServerEnv = {
       OPEN_ARTIFACT_PROTOCOL: String(OPEN_ARTIFACT_PROTOCOL),
       OPEN_ARTIFACT_TYPE: type.id,
@@ -380,13 +518,18 @@ export class TypeServers {
       OPEN_ARTIFACT_DAEMON_URL: this.options.daemonUrl(),
       OPEN_ARTIFACT_TYPE_TOKEN: this.options.tokenFor(type.id),
       OPEN_ARTIFACT_STATE_DIR: stateDir,
+      OPEN_ARTIFACT_TYPE_SCOPE: type.scope,
+      // Set by the daemon, after start.env (so neither the type nor the daemon's own environment decides it): frame-host
+      // limits the page of a type of an untrusted root (installed, or a project not trusted yet) to its declared origins.
+      OPEN_ARTIFACT_TYPE_RESTRICTED: type.trusted ? '0' : '1',
     };
-    const env: NodeJS.ProcessEnv = { ...process.env, ...(isNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}), ...start.env, ...openArtifactEnv };
+    // `node` is this process's own runtime (startChild): a child process, or a worker thread with its own copy of `env`.
+    const env: NodeJS.ProcessEnv = { ...process.env, ...start.env, ...openArtifactEnv };
     const readyMs = Number(process.env.OPEN_ARTIFACT_SERVER_READY_MS) || READY_TIMEOUT_MS;
     return new Promise((resolveReady, rejectReady) => {
-      let child: ChildProcess;
+      let child: NodeChild;
       try {
-        child = spawn(command, start.args, { cwd: type.dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        child = startChild({ command: start.command, args: start.args, cwd: type.dir, env, mode, name: `open-artifact type server ${type.id}` });
       } catch (error) {
         log.end();
         rejectReady(error);
@@ -401,7 +544,7 @@ export class TypeServers {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        this.kill(child, 'SIGTERM');
+        child.stop(KILL_MS);
         rejectReady(new Error(message));
       };
       const timer = setTimeout(() => fail(`no ready line within ${readyMs / 1000} s`), readyMs);
@@ -431,24 +574,27 @@ export class TypeServers {
           const base = withSlash(message.url);
           Object.assign(s, { base, state: 'ready', error: null, misses: 0 });
           try {
-            writeJson(serverFiles.state(type.id), { port: Number(new URL(base).port) || null, url: base, pid: child.pid, at: new Date().toISOString() });
+            writeJson(serverFiles.state(type.id), { port: Number(new URL(base).port) || null, url: base, ...(child.pid ? { pid: child.pid } : { thread: child.instance }), at: new Date().toISOString() });
           } catch {
             /* the port is a suggestion */
           }
-          this.options.log(`server ${type.id}: ready at ${base} (pid ${child.pid})`);
+          this.options.log(`server ${type.id}: ready at ${base} (${child.label})`);
+          this.options.changed?.();
           resolveReady(base);
           return;
         }
       });
-      child.on('error', (error) => fail(`could not run ${start.command}: ${error.message}`));
-      child.on('exit', (code, signal) => {
+      child.on('error', (error: Error) => fail(`could not run ${start.command}: ${error.message}`));
+      child.on('exit', (code: number | null, signal: string | null) => {
         log.write(`--- exit ${code ?? signal}\n`);
         log.end();
         if (s.child === child) {
           s.child = null;
-          if (s.state === 'ready') this.options.log(`server ${type.id}: exited (${code ?? signal})`);
+          const was = s.state === 'ready';
+          if (was) this.options.log(`server ${type.id}: exited (${code ?? signal})`);
           s.state = 'stopped';
           s.base = null;
+          if (was) this.options.changed?.();
         }
         fail(`it exited (${code ?? signal}) before it was ready`);
       });
@@ -501,26 +647,35 @@ export class TypeServers {
     const s = this.byType.get(typeId);
     if (!s) return;
     this.byType.delete(typeId);
-    if (s.child) this.kill(s.child, 'SIGTERM');
+    if (s.child) this.stopChild(s.child);
+    if (s.state === 'ready') this.options.changed?.();
   }
 
-  private kill(child: ChildProcess, signal: NodeJS.Signals): void {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    try {
-      child.kill(signal);
-    } catch {
-      return;
-    }
-    if (signal === 'SIGTERM') {
-      const timer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      }, KILL_MS);
-      timer.unref?.();
-    }
+  /** Asks a server to stop (SIGTERM, or the same delivered to its thread), forced after `KILL_MS`. */
+  private stopChild(child: NodeChild): void {
+    if (child.ended) return;
+    if (child.mode === 'threads') this.stopping.add(child);
+    child.once('exit', () => this.stopping.delete(child));
+    child.stop(KILL_MS);
   }
 
-  private killAll(signal: NodeJS.Signals): void {
-    for (const s of this.byType.values()) if (s.child) this.kill(s.child, signal);
+  /** This process is exiting: what still runs is asked to stop (a thread ends with the process anyway). */
+  private killAll(): void {
+    for (const s of this.byType.values()) if (s.child && !s.child.ended) s.child.stop(KILL_MS);
+  }
+
+  /**
+   * Resolves once the servers that run in this process's threads have ended (after {@link closeAll}), or after
+   * `timeoutMs`: the daemon waits for them before it exits, so each finishes its own clean-up as a process would. Child
+   * processes are not waited for: they finish by themselves.
+   */
+  async drained(timeoutMs = KILL_MS + 1000): Promise<void> {
+    const left = [...this.stopping].filter((child) => !child.ended);
+    if (!left.length) return;
+    await Promise.race([
+      Promise.all(left.map((child) => new Promise((done) => (child.ended ? done(null) : child.once('exit', done))))),
+      new Promise((done) => setTimeout(done, timeoutMs)),
+    ]);
   }
 
   /** Stops every server. */

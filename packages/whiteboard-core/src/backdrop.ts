@@ -8,7 +8,8 @@
 
 import { elementBounds, elementLayoutBox, rotatePointAround, type Box, type ElementMeasures } from './geometry.ts';
 import { elementTurn, type BoardElement, type ElementId, type NoteElement, type ShapeElement } from './schema.ts';
-import { blockColorHex, shapeFillColor } from './theme.ts';
+import { blockColorHex, shapeFillColor, type ColorScheme } from './theme.ts';
+import { drawingLookPaper, imageDrawingLook } from './drawn-svg/looks.ts';
 
 /** Slack (board units) when deciding that text sits inside or overlaps a backdrop. */
 export const TEXT_BACKDROP_TOLERANCE = 4;
@@ -50,9 +51,10 @@ export function isRotatedBoxInside(outer: BoardElement, outerBox: Box, inner: Bo
  * The fill color (hex) behind each text element that sits on a backdrop:
  * the topmost opaque element drawn before the text and overlapping it by
  * more than {@link TEXT_BACKDROP_TOLERANCE}, when that element is a
- * backdrop that holds the whole text.
+ * backdrop that holds the whole text. Given the board's `scheme`, a
+ * drawing whose look lays paper behind it is a backdrop in that paper's tone.
  */
-export function textBackdropColors(elements: readonly BoardElement[], measures?: ElementMeasures): Map<ElementId, string> {
+export function textBackdropColors(elements: readonly BoardElement[], measures?: ElementMeasures, scheme?: ColorScheme): Map<ElementId, string> {
   const backdrops: Array<{ el: BoardElement; seen: Box }> = [];
   const backdropColorByTextId = new Map<ElementId, string>();
   for (const element of elements) {
@@ -71,7 +73,11 @@ export function textBackdropColors(elements: readonly BoardElement[], measures?:
         continue;
       const backdropBox = elementLayoutBox(backdrop, measures);
       const textBox = elementLayoutBox(element, measures);
-      if (isTextBackdropElement(backdrop) && backdropBox !== undefined && textBox !== undefined && isRotatedBoxInside(backdrop, backdropBox, element, textBox))
+      const look = scheme !== undefined && backdrop.type === 'image' ? imageDrawingLook(backdrop) : undefined;
+      const paper = look !== undefined && scheme !== undefined ? drawingLookPaper(look, scheme) : undefined;
+      const inside = backdropBox !== undefined && textBox !== undefined && isRotatedBoxInside(backdrop, backdropBox, element, textBox);
+      if (inside && paper !== undefined) backdropColorByTextId.set(element.id, paper);
+      else if (inside && isTextBackdropElement(backdrop))
         backdropColorByTextId.set(element.id, backdrop.type === 'shape' ? shapeFillColor(backdrop) : blockColorHex(backdrop.color));
       break;
     }

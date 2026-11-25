@@ -8,5 +8,8 @@
   "wake": [
     "inbox"
   ],
-  "wakesIdle": false
+  "wakesIdle": false,
+  "caps": {
+    "tools": "mcp"
+  }
 }

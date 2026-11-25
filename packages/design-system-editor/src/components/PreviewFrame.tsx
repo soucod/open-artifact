@@ -25,6 +25,7 @@ import { useView } from '../state/view.ts';
 import { useFiles } from '../state/files.ts';
 import { useHostedFonts } from '../services/fonts.ts';
 import { liveScript } from '../lib/live-props.ts';
+import { PREVIEW_FOCUS_HOLD } from '../lib/preview-focus.ts';
 
 /** CDN builds (jsDelivr) for libraries a bundle expects as globals (UMD builds only exist up to React 18). */
 function libraryUrl(library: Library): string | null {
@@ -45,7 +46,7 @@ function previewDocument(component: string, preview: string, head: string, id: s
   const base = `<base href="${attr(projectUrl(`components/${component}/`))}">`;
   const report = `<script>(function(){var id=${JSON.stringify(id)};function send(m){try{parent.postMessage({openArtifactPreviewError:String(m).slice(0,600),id:id},'*')}catch(e){}}addEventListener('error',function(e){send(e.message||'Error')});addEventListener('unhandledrejection',function(e){send(e.reason&&e.reason.message||e.reason)});})();</script>`;
   const reset = '<style>html,body{margin:0}</style>';
-  const inject = `${base}${report}${reset}${head}`;
+  const inject = `${base}${report}${PREVIEW_FOCUS_HOLD}${reset}${head}`;
   const body = preview.replace(/^\s*<!--\s*@dsCard[\s\S]*?-->\s*/, '');
   const match = /<head(\s[^>]*)?>/i.exec(body);
   if (match) return `${body.slice(0, match.index + match[0].length)}${inject}${body.slice(match.index + match[0].length)}`;

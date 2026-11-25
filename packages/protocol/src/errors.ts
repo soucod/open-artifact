@@ -6,13 +6,17 @@
  * add `current`: what the thing is now, for the caller to merge with.
  */
 
-/** Error codes used across the protocol. Types may add their own. */
+/**
+ * Error codes used across the protocol: every code the daemon, the Harness API, the stdio bridge, the kit and the
+ * cloud host answer with. Types may add their own (their servers' codes pass through as they are).
+ */
 export type OpenArtifactErrorCode =
   | 'invalid_argument'
   | 'not_found'
   | 'unauthorized'
   | 'not_granted'
   | 'conflict'
+  | 'duplicate'
   | 'too_large'
   | 'bad_path'
   | 'rate_limited'
@@ -20,9 +24,23 @@ export type OpenArtifactErrorCode =
   | 'unknown_action'
   | 'unknown_tool'
   | 'method_not_found'
+  | 'parse_error'
+  | 'unsupported_protocol'
+  | 'unknown_session'
   | 'type_missing'
+  /** The artifact was made with another type of the same id (its `typeUid` differs from the type's `uid`). */
+  | 'type_mismatch'
   | 'type_not_runnable'
   | 'server_failed'
+  | 'unavailable'
+  /** An artifact was last written by a newer Open Artifact than this one (a write is refused, a read is noted). */
+  | 'newer_release'
+  /** A cloud host answered with a redirect: nothing is sent anywhere else. */
+  | 'redirected'
+  /** Runtime updates: the download failed, its sha512 did not match, or the package was not a sound archive. */
+  | 'download_failed'
+  | 'integrity_failed'
+  | 'bad_archive'
   | 'no_daemon'
   | 'daemon_failed'
   | 'connect_failed'

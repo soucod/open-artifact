@@ -8,7 +8,7 @@
   "category": "Design",
   "version": "0.1.0",
   "skill": "SKILL.md",
-  "intents": ["design", "mockup", "prototype", "ui"],
+  "intents": ["design", "mockup", "prototype", "ui", "landing page"],
   "when": "The person wants UI screens, a web or landing page design, app mockups, component explorations, diagrams, print pieces or a clickable prototype as an editable canvas they can view, rearrange and tweak.",
   "detect": ["project/canvas.json"],
   "titleFrom": "project/canvas.json#/title",

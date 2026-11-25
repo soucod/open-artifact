@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ColumnId, RowId, SheetId } from '@open-artifact/sheets-core';
 import {
   drawnOwnFiltersOfSheet,
   rowsOutOfViewByOwnFiltersOn,
@@ -8,68 +8,109 @@ import {
   isFilterTableEmpty,
 } from './own-filters.ts';
 import { columnsOfFilterItem } from './filter-model.ts';
+import { namedViewsOfFilterBar } from './named-view-model.ts';
+import type { NamedViewsOfTable } from './named-view-model.ts';
 import { areasToA1AsStored } from '../formulas/from-words/where.ts';
 import { areasOfRuleRanges } from '../format/conditional/descriptions.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
-export function ownFilterBar(state: PageState, reads: WorkbookReads) {
-  let drawn = drawnOwnFiltersOfSheet(state, state.sheetId);
+import type { OwnFilter, RecordCountsOfFilter, SaidOfFilterItem, SaidOfSortColumn } from './own-filters.ts';
+/** The sort the filter bar tells of: its table, its first column, how it is said, and whether it could be everyone's. */
+export interface OwnFilterBarSort {
+  tableKey: string;
+  c: ColumnId;
+  said: SaidOfSortColumn[];
+  canBeForEveryone: boolean;
+}
+/** A line of a filter on the bar, and the one column it tests, if it tests only one. */
+export interface OwnFilterBarLine {
+  tableKey: string;
+  lineIndex: number;
+  line: SaidOfFilterItem[];
+  c: ColumnId | null;
+}
+/** The bar over a sheet with filters of the viewer's own: what it filters and sorts by, and what it offers. */
+export interface OwnFilterBar {
+  sheetId: SheetId;
+  sort: OwnFilterBarSort | null;
+  namedViews: NamedViewsOfTable | null;
+  isNothingAsked: boolean;
+  /** `null` while the counts are not known or a refresh is offered. */
+  records: RecordCountsOfFilter | null;
+  lines: OwnFilterBarLine[];
+  /** The cells beside the tables the filters hide, in A1 notation; `''` when a refresh is offered. */
+  cellsBesideOutOfView: string;
+  isRefreshOffered: boolean;
+  behindAsOf: number | null;
+  dayAwaitedSinceTry: number | null;
+}
+/** A bar worked out, and what it was worked out from. */
+interface OwnFilterBarCached {
+  reads: WorkbookReads;
+  asOf: number;
+  outOfView: Set<RowId>;
+  ownRowOrders: PageState['ownRowOrders'];
+  bar: OwnFilterBar;
+}
+export function ownFilterBar(state: PageState, reads: WorkbookReads): OwnFilterBar | null {
+  const drawn = drawnOwnFiltersOfSheet(state, state.sheetId);
   if (drawn.length === 0) return null;
-  let cached = ownFilterBarCache.get(drawn);
-  let outOfView = rowsOutOfViewByOwnFiltersOn(state, state.sheetId);
-  let { ownRowOrders: ownRowOrders } = state;
+  const cached = ownFilterBarCache.get(drawn);
+  const outOfView = rowsOutOfViewByOwnFiltersOn(state, state.sheetId);
+  const { ownRowOrders } = state;
   if (cached?.reads === reads && cached.asOf === lookStampOfWorkbook(state) && cached.outOfView === outOfView && cached.ownRowOrders === ownRowOrders)
     return cached.bar;
-  let bar = buildOwnFilterBar(state, reads, drawn);
+  const bar = buildOwnFilterBar(state, reads, drawn);
   ownFilterBarCache.set(drawn, {
-    reads: reads,
+    reads,
     asOf: lookStampOfWorkbook(state),
-    outOfView: outOfView,
-    ownRowOrders: ownRowOrders,
-    bar: bar,
+    outOfView,
+    ownRowOrders,
+    bar,
   });
   return bar;
 }
-export function buildOwnFilterBar(state: PageState, reads: WorkbookReads, ownFilters?: Dynamic) {
-  let { sheetId: sheetId } = state;
-  let rowsOfFilters = ownFilters.flatMap(({ rows: rows }: Dynamic) => rows ?? []);
-  let isRefreshOffered =
-    ownFilters.some(({ unanswered: unanswered, sort: sort }: Dynamic) => unanswered !== null || sort?.isRefused === true) ||
+export function buildOwnFilterBar(state: PageState, reads: WorkbookReads, ownFilters: OwnFilter[]): OwnFilterBar {
+  const { sheetId } = state;
+  const rowsOfFilters = ownFilters.flatMap(({ rows }) => rows ?? []);
+  const isRefreshOffered =
+    ownFilters.some(({ unanswered, sort }) => unanswered !== null || sort?.isRefused === true) ||
     !areOwnFiltersInForce(state, reads, sheetId, ownFilters) ||
     !areSortedRowsInOrder(state, reads, sheetId, ownFilters);
-  let [sort = null] = ownFilters.flatMap((ownFilter?: Dynamic) => {
+  const [sort = null] = ownFilters.flatMap((ownFilter): OwnFilterBarSort | OwnFilterBarSort[] => {
     if (ownFilter.sort === null) return [];
-    let { by: by, said: said } = ownFilter.sort;
+    const { by, said } = ownFilter.sort;
     return {
       tableKey: ownFilter.key,
       c: by[0].c,
-      said: said,
+      said,
       canBeForEveryone: isFilterTableEmpty(ownFilter),
     };
   });
-  let dayTries = ownFilters.flatMap(
-    ({ unanswered: unanswered }: Dynamic) => (unanswered?.why === 'dayIsNotKnown' ? [unanswered.tries] : []),
+  const dayTries = ownFilters.flatMap(
+    ({ unanswered }) => (unanswered?.why === 'dayIsNotKnown' ? [unanswered.tries] : []),
   );
   return {
-    sheetId: sheetId,
-    sort: sort,
-    isNothingAsked: ownFilters.every(({ filter: filter }: Dynamic) => filter === null),
+    sheetId,
+    sort,
+    namedViews: namedViewsOfFilterBar(reads, ownFilters),
+    isNothingAsked: ownFilters.every(({ filter }) => filter === null),
     records:
       rowsOfFilters.length === 0 || isRefreshOffered
         ? null
         : {
-            inView: rowsOfFilters.reduce((input: Dynamic, { recordsInView: recordsInView }: Dynamic) => input + recordsInView, 0),
-            all: rowsOfFilters.reduce((input: Dynamic, { records: records }: Dynamic) => input + records, 0),
+            inView: rowsOfFilters.reduce((total, { recordsInView }) => total + recordsInView, 0),
+            all: rowsOfFilters.reduce((total, { records }) => total + records, 0),
           },
     lines: ownFilters.flatMap(
-      ({ key: key, lines: lines, filter: filter }: Dynamic) =>
-        lines.map((line?: Dynamic, lineIndex?: Dynamic) => {
-          let [onlyColumn, ...otherColumns] = [...new (Set as Dynamic)(filter?.allOf[lineIndex]?.anyOf.flatMap(columnsOfFilterItem) ?? [])];
+      ({ key, lines, filter }) =>
+        lines.map((line, lineIndex): OwnFilterBarLine => {
+          const [onlyColumn, ...otherColumns] = [...new Set(filter?.allOf[lineIndex]?.anyOf.flatMap(columnsOfFilterItem) ?? [])];
           return {
             tableKey: key,
-            lineIndex: lineIndex,
-            line: line,
+            lineIndex,
+            line,
             c: otherColumns.length > 0 ? null : (onlyColumn ?? null),
           };
         }),
@@ -80,15 +121,15 @@ export function buildOwnFilterBar(state: PageState, reads: WorkbookReads, ownFil
           areasOfRuleRanges(
             reads,
             sheetId,
-            rowsOfFilters.flatMap(({ cellsBesideTheTableOutOfView: cellsBesideTheTableOutOfView }: Dynamic) => cellsBesideTheTableOutOfView),
+            rowsOfFilters.flatMap(({ cellsBesideTheTableOutOfView }) => cellsBesideTheTableOutOfView),
           ),
           ownRowOrderOfSheet(reads, sheetId),
         ),
-    isRefreshOffered: isRefreshOffered,
-    behindAsOf: ownFilters.some(({ lookedAtAsOf: lookedAtAsOf }: Dynamic) => lookedAtAsOf !== lookStampOfWorkbook(state))
+    isRefreshOffered,
+    behindAsOf: ownFilters.some(({ lookedAtAsOf }) => lookedAtAsOf !== lookStampOfWorkbook(state))
       ? lookStampOfWorkbook(state)
       : null,
-    dayAwaitedSinceTry: dayTries.length === 0 ? null : (Math.max as Dynamic)(...dayTries),
+    dayAwaitedSinceTry: dayTries.length === 0 ? null : Math.max(...dayTries),
   };
 }
-export const ownFilterBarCache = new (WeakMap as Dynamic)();
+export const ownFilterBarCache = new WeakMap<OwnFilter[], OwnFilterBarCached>();

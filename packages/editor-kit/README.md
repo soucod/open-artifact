@@ -103,12 +103,24 @@ Token helpers for installed design systems (`styleDeclarations`, `styleTag`,
 - **Session**. `connectHost(['artifact', 'agent', …])` installs the page
   provider, then connects the user, the named capabilities and the Shell, and
   returns `{ viewer, abilities, shell, ...capabilities }`. Keep the result in
-  a `sessionSlot()`.
+  a `sessionSlot()`. A page that connected to the Shell before the session
+  (to report early) passes that connection as `connectHost(names, shell)`.
 - **Shell**. Use `chromeReporter(shell, build)` when the editor subscribes
   its own stores and handles commands itself (design, slides, design
   system). Use `createShellBridge(() => shell)` when several modules
   contribute parts of the report and register command handlers
   (whiteboard).
+- **Save state**. Report `saved: 'saving'` for edits that are on their way,
+  including edits still waiting out the write debounce (a live-store `dirty`
+  status); the Shell shows "Saving…" only once it lasts half a second.
+  `unsaved` is for edits the page could not save, and the Shell shows it as a
+  failure ("Couldn't save", with a retry when `save_now` is enabled).
+- **Opening**. A page that needs a moment after it connects to draw its first
+  view (the whiteboard, restoring its camera and loading its board) reports
+  `ready: false` as early as it can, and `ready: true` once that view is up.
+  The Shell keeps its loading cover over the page until then, for at most
+  `CHROME_READY_TIMEOUT_MS` (10 s), and ignores `ready: false` once the page
+  has been shown. A page that never sends `ready` shows on its first report.
 - **Downloads**. `saveFile(downloads, name, blob)` returns `{ to: 'host' }`
   or `{ to: 'browser' }`, so the editor can choose its toast.
 

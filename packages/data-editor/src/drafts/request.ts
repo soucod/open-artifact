@@ -50,7 +50,8 @@ export async function sendPageRequest({ title, request, selection }: PageRequest
       result = sendFailure(error);
     }
   }
-  if (result.status !== 'delivered') {
+  // A plain delivery shows itself on the page; one put in the conversation for the person to send is said.
+  if (result.status !== 'delivered' || result.drafted) {
     const { name, wakesIdle } = useAgentActivity.getState();
     toast.add(agentResultMessage(result, 'this dashboard', { name, wakesIdle }));
   }

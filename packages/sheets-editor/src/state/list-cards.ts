@@ -2,6 +2,7 @@ import type { PageState } from './initial-state.ts';
 import type { PageTransition } from './transitions.ts';
 import type { CellId, WorkbookReads } from '../model/workbook.ts';
 import type { CellFoundBy } from '../grid/geometry.ts';
+import type { KeyStep } from '../keys/key-acts.ts';
 import { optionIdOfMenuKey } from '../chips/dropdown-options.ts';
 import { formulaFromWordsPopup } from '../formulas/from-words/actions.ts';
 import { isCellTextUntouched, dropdownCard } from '../chips/dropdowns.ts';
@@ -26,7 +27,7 @@ export function cardBeingShown(state: PageState): CardShown | null {
 }
 export function popupOverEntry(state: PageState, reads: WorkbookReads): PopupOverEntry | null {
   let card = cardBeingShown(state);
-  let { mode: mode } = state;
+  let { mode } = state;
   if (card !== null || mode.kind !== 'editing' || mode.typingIn !== 'cell') return card;
   return mode.text === mode.textAtStart && doesCellTakeCalendar(reads, activeAnchorCell(state, reads)) ? 'calendar' : null;
 }
@@ -36,18 +37,18 @@ export function openListCardAtRow(state: PageState, reads: WorkbookReads, rowInd
   let card = openCardAtRow(rowIndex, list?.rowsAt(state, reads, rowIndex) ?? [], how);
   return list === null || card === null || isSameRow ? state : list.withCard(state, card);
 }
-export function moveInListCard(state: PageState, reads: WorkbookReads, step: number): PageState {
+export function moveInListCard(state: PageState, reads: WorkbookReads, step: KeyStep): PageState {
   let list = listOfCards(state);
   let card = list?.card(state) ?? null;
   let drawn = list?.drawn(state, reads) ?? null;
   if (list === null || card === null || drawn === null) return state;
   let highlightedRow = drawn.highlightedRow;
   let doKeysGoRound = list.doKeysGoRound(state);
-  let value = highlightedRow === null && !doKeysGoRound ? 0 : stepListIndex(highlightedRow, step, drawn.rows.length);
-  if (highlightedRow !== null && value !== highlightedRow + step && !doKeysGoRound) return state;
+  let rowToGoTo = highlightedRow === null && !doKeysGoRound ? 0 : stepListIndex(highlightedRow, step, drawn.rows.length);
+  if (highlightedRow !== null && rowToGoTo !== highlightedRow + step && !doKeysGoRound) return state;
   return list.withCard(state, {
     ofRow: card.ofRow,
-    wentTo: drawn.rows[value ?? -1]?.key ?? null,
+    wentTo: drawn.rows[rowToGoTo ?? -1]?.key ?? null,
   });
 }
 export function takeListCardRow(
@@ -62,8 +63,8 @@ export function takeListCardRow(
   if (list === null || drawn === null) return withNoEffects(state);
   if (rowIndex !== null) return list.take(state, reads, rowIndex, how, 'pointer', false);
   let isLast = isByKey && !list.doKeysGoRound(state);
-  let value = drawn.rows[drawn.highlightedRow ?? (isLast ? 0 : -1)];
-  return value === undefined ? withNoEffects(moveInListCard(state, reads, 1)) : list.take(state, reads, value.key, how, 'key', isByKey);
+  let rowToTake = drawn.rows[drawn.highlightedRow ?? (isLast ? 0 : -1)];
+  return rowToTake === undefined ? withNoEffects(moveInListCard(state, reads, 1)) : list.take(state, reads, rowToTake.key, how, 'key', isByKey);
 }
 export const listOfCards = (state: PageState) => {
   if (state.peopleList !== null) return peopleListCard;

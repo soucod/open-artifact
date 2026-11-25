@@ -17,8 +17,8 @@ export interface MentionWorld {
   enums: readonly DocEnum[];
   /** The day "today" is. */
   today?: Date;
-  /** Opens the ask card on the caret's line, when the agent can be asked from the text. */
-  askAgent?: (view: EditorView) => void;
+  /** Opens the ask prompt where the @ was typed; offered first, in place of the plain Agent mention. */
+  askAgent?: (view: EditorView, at: number) => void;
 }
 
 const DATE_WORDS = 'date calendar due day when pick specific today tomorrow';
@@ -37,6 +37,21 @@ export function mentionOptions(rawQuery: string, world: MentionWorld): MenuOptio
   const day = world.today ?? today();
   const found = (name: string) => !query || name.toLowerCase().startsWith(query) || wordsStart(name, query);
   const out: MenuOption[] = [];
+  const agentFound = !query || 'agent'.startsWith(query) || wordsStart('ask agent', query);
+  const askAgent = world.askAgent;
+
+  if (agentFound && askAgent)
+    out.push({
+      id: 'ask-agent',
+      label: 'Ask Agent',
+      detail: 'Write or edit here',
+      section: 'Agent',
+      icon: 'agent',
+      run: (view, range) => {
+        view.dispatch(view.state.tr.delete(range.from, range.to));
+        askAgent(view, range.from);
+      },
+    });
 
   for (const person of world.people.filter(person => found(person.name)).slice(0, MAX_PEOPLE))
     out.push({
@@ -47,28 +62,14 @@ export function mentionOptions(rawQuery: string, world: MentionWorld): MenuOptio
       run: (view, range) => insertMention(view, { principal: person.id, name: person.name }, range),
     });
 
-  if (!query || 'agent'.startsWith(query) || wordsStart('ask agent', query))
-    out.push(
-      world.askAgent
-        ? {
-            id: 'agent',
-            label: 'Ask Agent',
-            detail: 'Write or edit here',
-            section: 'Agent',
-            icon: 'agent',
-            run: (view, range) => {
-              view.dispatch(view.state.tr.delete(range.from, range.to));
-              world.askAgent!(view);
-            },
-          }
-        : {
-            id: 'agent',
-            label: 'Agent',
-            section: 'Agent',
-            icon: 'agent',
-            run: (view, range) => insertMention(view, { principal: 'agent', name: 'Agent' }, range),
-          },
-    );
+  if (agentFound && !askAgent)
+    out.push({
+      id: 'agent',
+      label: 'Agent',
+      section: 'Agent',
+      icon: 'agent',
+      run: (view, range) => insertMention(view, { principal: 'agent', name: 'Agent' }, range),
+    });
 
   const named = dateFromWords(query, day);
   const dates: MenuOption[] = [

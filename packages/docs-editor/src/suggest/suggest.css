@@ -16,26 +16,6 @@
   color: var(--doc-del);
 }
 
-/* Edit with Agent's words: marked while its prompt is open, pulsing while the agent works on them. */
-.doc-text .doc-suggest-target {
-  background: color-mix(in srgb, var(--doc-accent) 16%, transparent);
-  border-radius: 2px;
-}
-
-.doc-text .doc-suggest-working {
-  animation: doc-suggest-working 1.6s ease-in-out infinite;
-}
-
-@keyframes doc-suggest-working {
-  0%,
-  100% {
-    background: color-mix(in srgb, var(--doc-accent) 10%, transparent);
-  }
-  50% {
-    background: color-mix(in srgb, var(--doc-accent) 26%, transparent);
-  }
-}
-
 /* The looked-at suggestion's card stands out of the stack. */
 .doc-suggest-card-selected {
   box-shadow:
@@ -48,11 +28,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .doc-text .doc-suggest-working {
-    animation: none;
-    background: color-mix(in srgb, var(--doc-accent) 20%, transparent);
-  }
-
   .doc-suggest-card {
     transition: none !important;
   }

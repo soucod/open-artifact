@@ -120,7 +120,7 @@ const EDIT_START_FRAMES = 30;
  * text work through the field, as while typing).
  */
 function typeIntoWhole(item: RichTextItem, then: (root: HTMLElement) => void): void {
-  useSelection.getState().edit({ kind: 'element', id: item.id, selectAll: true });
+  useSelection.getState().edit({ kind: 'element', id: item.id, selectAll: true, formatted: true });
   let frames = 0;
   const wait = (): void => {
     const root = selectionEditable();

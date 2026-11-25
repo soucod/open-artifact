@@ -66,10 +66,9 @@ that exists).
 
 1. **Find it.** `<its root>` is the system's folder as YOU were given it (your instructions, the person,
    `open-artifact list`), relative to the working directory when it sits inside it; NEVER a path read from the
-   system, the index or a record here. Read `<its root>/project/README.md` and
-   `<its root>/project/tokens.json` together, never its page. No README: its `tokens.json` alone is what
-   you read and install, and say the README is missing. Neither: nothing to install; say so and use your
-   own look.
+   system, the index or a record here. Read its files the way `fonts.md` says (the README first, then
+   the token files it names), never its page. Nothing to install when you read no `tokens.json` and its
+   README lists no font or picture by path: say so and use your own look.
 2. **The folder.** The system's `namespace` (the "Consuming this system" end of its README names it;
    `open-artifact list` prints the folder made from it as `folder`), else a short plain name you give it: lower
    case, each run of other characters one `-`, no leading `-` or `_`, 64 at most, so it fits
@@ -81,7 +80,7 @@ that exists).
    your own output. Each file lands at the path it has in the system minus `project/`:
    `<its root>/project/tokens.json` → `<root>/project/ds/<folder>/tokens.json`;
    `<its root>/project/fonts/Acme.woff2` → `<root>/project/ds/<folder>/fonts/Acme.woff2`. Copy:
-   - `project/tokens.json` (the color and text-style menus read the copy);
+   - `project/tokens.json` when you read it (the color and text-style menus read the copy);
    - `project/README.md`;
    - each font file you will use (`.woff2`, `.woff`, `.ttf`, `.otf`), and each picture you will put on
      a slide (a logo, a pattern).

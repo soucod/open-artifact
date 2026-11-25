@@ -51,6 +51,7 @@ import {
 } from './schema.ts';
 import type { ArrowGeometry } from './arrows/layout.ts';
 import { shapeTextInsets } from './shape-paths.ts';
+import { PLACEHOLDER_HIT_MIN_PX, showsTextPlaceholder } from './text/placeholder.ts';
 
 /** How far (in board units) a pointer may miss: 16 screen px for touch, 6 for a mouse. */
 export function hitSlop(pointerType: string, zoom: number): number {
@@ -103,10 +104,22 @@ function pushBox(out: number[], box: Box | undefined): void {
   else out.push(1, box.x, box.y, box.w, box.h);
 }
 
+/**
+ * The box a press hits: the layout box, made at least
+ * {@link PLACEHOLDER_HIT_MIN_PX} tall on screen (about its middle) for a
+ * text showing its placeholder.
+ */
+function hitLayoutBox(element: BoardElement, measures: ElementMeasures | undefined, zoom: number | undefined): Box | undefined {
+  const box = elementLayoutBox(element, measures);
+  if (box === undefined || !showsTextPlaceholder(element)) return box;
+  const least = PLACEHOLDER_HIT_MIN_PX / (zoom !== undefined && zoom > 0 ? zoom : 1);
+  return box.h >= least ? box : { ...box, y: box.y - (least - box.h) / 2, h: least };
+}
+
 /** The record of an element: what testing a point against it needs. */
 function buildHitRecord(element: BoardElement, measures: ElementMeasures | undefined, byId: ElementsById | undefined, zoom: number | undefined): Float64Array {
   const out: number[] = [0, BODY_OTHER, elementTurn(element)];
-  pushBox(out, elementLayoutBox(element, measures));
+  pushBox(out, hitLayoutBox(element, measures, zoom));
   switch (element.type) {
     case 'arrow': {
       const line = byId === undefined ? undefined : measuredArrowGeometry(element, byId, measures);
@@ -174,7 +187,7 @@ function hitRecord(element: BoardElement, measures: ElementMeasures | undefined,
   const key = {
     measures,
     byId: element.type === 'arrow' ? byId : undefined,
-    zoom: element.type === 'container' ? zoom : undefined,
+    zoom: element.type === 'container' || showsTextPlaceholder(element) ? zoom : undefined,
     hooks: element.type === 'shape' ? geometryHooks() : undefined,
   };
   const cached = hitRecordCache.get(element);
@@ -411,7 +424,8 @@ export function arrowLabelBeneath(
 /**
  * The topmost element under the point. Section title text wins first, then
  * any non-section element (front to back), then section title chips, then
- * section edges.
+ * section edges. A text showing its placeholder is hit only where nothing
+ * else is.
  */
 export function topElementAt(
   elements: readonly BoardElement[],
@@ -422,6 +436,12 @@ export function topElementAt(
   byId?: ElementsById,
   zoom?: number,
 ): BoardElement | undefined {
-  const found = wbGeom().top_element_at(hitRecords(elements, measures, byIdOf(elements, byId), zoom), x, y, tolerance);
-  return found < 0 ? undefined : elements[found];
+  const lookup = byIdOf(elements, byId);
+  const found = wbGeom().top_element_at(hitRecords(elements, measures, lookup, zoom), x, y, tolerance);
+  const hit = found < 0 ? undefined : elements[found];
+  if (hit === undefined || !showsTextPlaceholder(hit)) return hit;
+  // An empty text's hint gives way to anything else under the point.
+  const others = elements.filter((element) => !showsTextPlaceholder(element));
+  const other = wbGeom().top_element_at(hitRecords(others, measures, lookup, zoom), x, y, tolerance);
+  return other < 0 ? hit : others[other];
 }

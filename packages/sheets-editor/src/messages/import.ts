@@ -1,8 +1,62 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ParagraphList } from '@open-artifact/sheets-core';
+import type { TableImportedIntoSheetOffer } from '../state/initial-state.ts';
+import type { DuplicateRefusedNotice } from '../state/sheet-tabs.ts';
 import { translateMessage, MESSAGE_LOCALE } from '../i18n/messages.ts';
 import { refusalMessageKey } from '../model/refusals.ts';
-export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
-  let { addedCount: addedCount, changedCount: changedCount, goneCount: goneCount } = plan;
+
+/** A column of a sheet as import notes name it: its letters, and its heading when it has one. */
+export interface ImportColumnLabel {
+  letters: string;
+  name: string | null;
+}
+
+/** New dropdown options an import adds to one column. */
+export interface DropdownOptionsAdded {
+  column: ImportColumnLabel;
+  labels: string[];
+}
+
+/** What importing a file into a sheet would change. */
+export interface ImportIntoSheetChanges {
+  isReplaced: boolean;
+  addedCount: number;
+  changedCount: number;
+  sameCount: number;
+  goneCount: number;
+  untouchedCount: number;
+  /** The rows previewed; only their number is read here. */
+  rows: readonly unknown[];
+  optionsAdded: DropdownOptionsAdded[];
+  columnsCleared: ImportColumnLabel[];
+  formulasWrittenOver: { count: number; columns: ImportColumnLabel[] };
+}
+
+/** The notes shown under an import's preview. */
+export interface ImportNotes {
+  words: string;
+  variant: 'neutral' | 'warning';
+}
+
+/** How a row of the sheet changes in an import. */
+export type ImportRowChange = 'added' | 'changed' | 'gone';
+
+/** A kind of list a cell's lines can be. */
+export type ParagraphListKind = Exclude<ParagraphList['kind'], 'none'>;
+
+/** Why an interactive sheet shows a problem in place of its panel. */
+export type InteractiveTroubleWhy = 'cantBeShown' | 'tooMuchData' | 'notLoaded' | 'tookKeyboard' | 'stoppedAnswering';
+
+/** The title and advice shown in place of an interactive sheet's panel. */
+export interface InteractiveTroubleWords {
+  title: string;
+  advice: string;
+}
+
+/** Why a sheet that shows an interactive was not duplicated. */
+export type InteractiveNotDuplicatedWhy = Exclude<DuplicateRefusedNotice['why'], 'chartsNotCopied'>;
+
+export function importPlanSummary(plan: ImportIntoSheetChanges, sheetName: string): string {
+  let { addedCount, changedCount, goneCount } = plan;
   if (isImportChangeless(plan))
     return translateMessage(
       {
@@ -10,7 +64,7 @@ export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
         id: 'Zykp65BlLS',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   let currentRowCount = changedCount + plan.sameCount + goneCount;
@@ -24,7 +78,7 @@ export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
       {
         writtenCount: addedCount + changedCount + plan.sameCount,
         currentRows: currentRowsWords(currentRowCount),
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (changedCount === 0)
@@ -34,8 +88,8 @@ export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
         id: 'QeyocxOjqi',
       },
       {
-        addedCount: addedCount,
-        sheetName: sheetName,
+        addedCount,
+        sheetName,
       },
     );
   if (addedCount === 0)
@@ -45,8 +99,8 @@ export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
         id: 'W8EMotcBE4',
       },
       {
-        changedCount: changedCount,
-        sheetName: sheetName,
+        changedCount,
+        sheetName,
       },
     );
   return translateMessage(
@@ -57,17 +111,17 @@ export function importPlanSummary(plan?: Dynamic, sheetName?: Dynamic) {
     {
       updatedRows: importRowCountWords(changedCount),
       addedRows: importRowCountWords(addedCount),
-      sheetName: sheetName,
+      sheetName,
     },
   );
 }
 export function importDoneWords({
-  sheetName: sheetName,
-  isReplaced: isReplaced,
-  addedCount: addedCount,
-  changedCount: changedCount,
-  isSaved: isSaved,
-}: Dynamic) {
+  sheetName,
+  isReplaced,
+  addedCount,
+  changedCount,
+  isSaved,
+}: TableImportedIntoSheetOffer): string {
   if (!isSaved)
     return translateMessage(
       {
@@ -75,7 +129,7 @@ export function importDoneWords({
         id: '+VtCAxqtib',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (isReplaced)
@@ -85,7 +139,7 @@ export function importDoneWords({
         id: 'YfGi8uLiM/',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (changedCount === 0)
@@ -95,8 +149,8 @@ export function importDoneWords({
         id: 'sh8j9Vt8uQ',
       },
       {
-        addedCount: addedCount,
-        sheetName: sheetName,
+        addedCount,
+        sheetName,
       },
     );
   if (addedCount === 0)
@@ -106,8 +160,8 @@ export function importDoneWords({
         id: 'fz9vWsInVJ',
       },
       {
-        changedCount: changedCount,
-        sheetName: sheetName,
+        changedCount,
+        sheetName,
       },
     );
   return translateMessage(
@@ -118,12 +172,12 @@ export function importDoneWords({
     {
       updatedRows: importRowCountWords(changedCount),
       addedRows: importRowCountWords(addedCount),
-      sheetName: sheetName,
+      sheetName,
     },
   );
 }
-export function moreRowsChangeWords(plan?: Dynamic) {
-  let { addedCount: addedCount, changedCount: changedCount, sameCount: sameCount, goneCount: goneCount, isReplaced: isReplaced } = plan;
+export function moreRowsChangeWords(plan: ImportIntoSheetChanges): string | null {
+  let { addedCount, changedCount, sameCount, goneCount, isReplaced } = plan;
   let moreCount = addedCount + changedCount + (isReplaced ? sameCount : goneCount) - plan.rows.length;
   return moreCount <= 0
     ? null
@@ -133,12 +187,12 @@ export function moreRowsChangeWords(plan?: Dynamic) {
           id: '7LbR+4lazF',
         },
         {
-          moreCount: moreCount,
+          moreCount,
         },
       );
 }
-export function rowsStayWords(plan?: Dynamic) {
-  let { sameCount: sameCount, untouchedCount: untouchedCount, isReplaced: isReplaced } = plan;
+export function rowsStayWords(plan: ImportIntoSheetChanges): string | null {
+  let { sameCount, untouchedCount, isReplaced } = plan;
   let stayCount = isReplaced ? 0 : sameCount + untouchedCount;
   return stayCount <= 0
     ? null
@@ -152,9 +206,9 @@ export function rowsStayWords(plan?: Dynamic) {
         },
       );
 }
-export function dropdownOptionsAddedWords(options?: Dynamic, column?: Dynamic, sheetName?: Dynamic) {
-  let shownOptions = options.slice(0, MAX_OPTIONS_NAMED_IN_IMPORT_NOTES).map(quotedOptionLabel);
-  let moreCount = options.length - shownOptions.length;
+export function dropdownOptionsAddedWords(optionLabels: readonly string[], column: ImportColumnLabel, sheetName: string): string {
+  let shownOptions = optionLabels.slice(0, MAX_OPTIONS_NAMED_IN_IMPORT_NOTES).map(quotedOptionLabel);
+  let moreCount = optionLabels.length - shownOptions.length;
   let [columnName = ''] = importColumnNames([column]);
   if (moreCount > 0)
     return translateMessage(
@@ -164,12 +218,12 @@ export function dropdownOptionsAddedWords(options?: Dynamic, column?: Dynamic, s
         id: 'zThKZeY9y5',
       },
       {
-        moreCount: moreCount,
-        labels: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE, {
+        moreCount,
+        labels: new Intl.ListFormat(MESSAGE_LOCALE, {
           type: 'unit',
         }).format(shownOptions),
-        columnName: columnName,
-        sheetName: sheetName,
+        columnName,
+        sheetName,
       },
     );
   return translateMessage(
@@ -180,15 +234,15 @@ export function dropdownOptionsAddedWords(options?: Dynamic, column?: Dynamic, s
     },
     {
       count: shownOptions.length,
-      labels: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(shownOptions),
-      columnName: columnName,
-      sheetName: sheetName,
+      labels: new Intl.ListFormat(MESSAGE_LOCALE).format(shownOptions),
+      columnName,
+      sheetName,
     },
   );
 }
-export function dropdownsOptionsAddedNotes(optionsByColumn?: Dynamic, sheetName?: Dynamic) {
+export function dropdownsOptionsAddedNotes(optionsByColumn: readonly DropdownOptionsAdded[], sheetName: string): string[] {
   if (optionsByColumn.length <= MAX_COLUMNS_NAMED_IN_IMPORT_NOTES)
-    return optionsByColumn.map(({ labels: labels, column: column }: Dynamic) => dropdownOptionsAddedWords(labels, column, sheetName));
+    return optionsByColumn.map(({ labels, column }) => dropdownOptionsAddedWords(labels, column, sheetName));
   return [
     translateMessage(
       {
@@ -197,14 +251,14 @@ export function dropdownsOptionsAddedNotes(optionsByColumn?: Dynamic, sheetName?
         id: 'SrZGHAG9MR',
       },
       {
-        count: optionsByColumn.reduce((total: Dynamic, { labels: labels }: Dynamic) => total + labels.length, 0),
+        count: optionsByColumn.reduce((total, { labels }) => total + labels.length, 0),
         columnCount: optionsByColumn.length,
-        sheetName: sheetName,
+        sheetName,
       },
     ),
   ];
 }
-export function columnsClearedWords(columns?: Dynamic, sheetName?: Dynamic) {
+export function columnsClearedWords(columns: readonly ImportColumnLabel[], sheetName: string): string {
   if (columns.length > MAX_COLUMNS_NAMED_IN_IMPORT_NOTES)
     return translateMessage(
       {
@@ -214,7 +268,7 @@ export function columnsClearedWords(columns?: Dynamic, sheetName?: Dynamic) {
       },
       {
         count: columns.length,
-        sheetName: sheetName,
+        sheetName,
       },
     );
   let columnNames = importColumnNames(columns);
@@ -226,11 +280,11 @@ export function columnsClearedWords(columns?: Dynamic, sheetName?: Dynamic) {
     },
     {
       count: columnNames.length,
-      names: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(columnNames),
+      names: new Intl.ListFormat(MESSAGE_LOCALE).format(columnNames),
     },
   );
 }
-export function formulasWrittenOverWords(count?: Dynamic, columns?: Dynamic, sheetName?: Dynamic) {
+export function formulasWrittenOverWords(count: number, columns: readonly ImportColumnLabel[], sheetName: string): string {
   if (columns.length > MAX_COLUMNS_NAMED_IN_IMPORT_NOTES)
     return translateMessage(
       {
@@ -239,9 +293,9 @@ export function formulasWrittenOverWords(count?: Dynamic, columns?: Dynamic, she
         id: 'vzEoKmohJ6',
       },
       {
-        count: count,
+        count,
         columnCount: columns.length,
-        sheetName: sheetName,
+        sheetName,
       },
     );
   return translateMessage(
@@ -251,23 +305,23 @@ export function formulasWrittenOverWords(count?: Dynamic, columns?: Dynamic, she
       id: 'Z2E4++736w',
     },
     {
-      count: count,
-      names: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(importColumnNames(columns)),
+      count,
+      names: new Intl.ListFormat(MESSAGE_LOCALE).format(importColumnNames(columns)),
     },
   );
 }
 export function importLossWarning(
-  { columnsCleared: columnsCleared, formulasWrittenOver: formulasWrittenOver2 }: Dynamic,
-  sheetName?: Dynamic,
-) {
-  let { count: count, columns: columns } = formulasWrittenOver2;
+  { columnsCleared, formulasWrittenOver }: Pick<ImportIntoSheetChanges, 'columnsCleared' | 'formulasWrittenOver'>,
+  sheetName: string,
+): string | null {
+  let { count, columns } = formulasWrittenOver;
   let lines = [
     ...(columnsCleared.length > 0 ? [columnsClearedWords(columnsCleared, sheetName)] : []),
     ...(count > 0 ? [formulasWrittenOverWords(count, columns, sheetName)] : []),
   ];
   return lines.length > 0 ? lines.join(' ') : null;
 }
-export function importNotes(plan?: Dynamic, sheetName?: Dynamic) {
+export function importNotes(plan: ImportIntoSheetChanges, sheetName: string): ImportNotes | null {
   let lossWarning = importLossWarning(plan, sheetName);
   let optionNotes = dropdownsOptionsAddedNotes(plan.optionsAdded, sheetName);
   if (lossWarning === null && optionNotes.length === 0) return null;
@@ -276,7 +330,7 @@ export function importNotes(plan?: Dynamic, sheetName?: Dynamic) {
     variant: lossWarning === null ? 'neutral' : 'warning',
   };
 }
-export function importRefusalWords(refusal?: Dynamic, sheetName?: Dynamic, keyName?: Dynamic) {
+export function importRefusalWords(refusal: string, sheetName: string, keyName: string | null): string {
   if (refusal === 'keyRepeats')
     return translateMessage(
       {
@@ -295,7 +349,7 @@ export function importRefusalWords(refusal?: Dynamic, sheetName?: Dynamic, keyNa
         id: 'qH/OCmFt5s',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (refusal === 'tooManyDropdownOptions')
@@ -306,7 +360,7 @@ export function importRefusalWords(refusal?: Dynamic, sheetName?: Dynamic, keyNa
         id: 'HC+4wWXfaj',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (refusal === 'dropdownOptionTooLong' || refusal === 'dropdownOptionHoldsControlCharacter')
@@ -317,7 +371,7 @@ export function importRefusalWords(refusal?: Dynamic, sheetName?: Dynamic, keyNa
         id: 'jhyC4NPZWS',
       },
       {
-        sheetName: sheetName,
+        sheetName,
       },
     );
   if (refusalMessageKey(refusal) === 'noRoomInWorkbook')
@@ -331,11 +385,11 @@ export function importRefusalWords(refusal?: Dynamic, sheetName?: Dynamic, keyNa
       id: '8q2XGzq7ck',
     },
     {
-      sheetName: sheetName,
+      sheetName,
     },
   );
 }
-export function listKindName(kind?: Dynamic) {
+export function listKindName(kind: ParagraphListKind): string {
   switch (kind) {
     case 'bullet':
       return translateMessage({
@@ -354,7 +408,7 @@ export function listKindName(kind?: Dynamic) {
       });
   }
 }
-export function listKindOnOffWords(kind?: Dynamic, isOn?: Dynamic) {
+export function listKindOnOffWords(kind: ParagraphListKind, isOn: boolean): string {
   switch (kind) {
     case 'bullet':
       return translateMessage(
@@ -388,6 +442,72 @@ export function listKindOnOffWords(kind?: Dynamic, isOn?: Dynamic) {
       );
   }
 }
+export function interactiveTroubleWords(why: InteractiveTroubleWhy): InteractiveTroubleWords {
+  switch (why) {
+    case 'cantBeShown':
+      return {
+        title: translateMessage({
+          defaultMessage: 'This interactive sheet can’t be shown',
+          id: 'gz3ZQBc11x',
+        }),
+        advice: translateMessage({
+          defaultMessage: 'Ask Agent to fix it.',
+          id: 'xpztOt0Is4',
+        }),
+      };
+    case 'tooMuchData':
+      return {
+        title: translateMessage({
+          defaultMessage: 'Too much data for this interactive sheet',
+          id: 'A7BmxDMlv9',
+        }),
+        advice: translateMessage({
+          defaultMessage: 'Ask Agent to use fewer rows.',
+          id: 'YpTBAsyZYz',
+        }),
+      };
+    case 'notLoaded':
+      return {
+        title: translateMessage({
+          defaultMessage: 'This interactive sheet didn’t load',
+          id: 'it7zGnN4UW',
+        }),
+        advice: translateMessage({
+          defaultMessage: 'Reload the page to try again.',
+          id: '81HAebivqR',
+        }),
+      };
+    case 'tookKeyboard':
+      return {
+        title: interactiveStoppedTitle(),
+        advice: translateMessage({
+          defaultMessage: 'It kept interrupting your typing.',
+          id: 'tbjGnRUhz6',
+        }),
+      };
+    case 'stoppedAnswering':
+      return {
+        title: interactiveStoppedTitle(),
+        advice: translateMessage({
+          defaultMessage: 'It stopped responding.',
+          id: 'YQLvLkdBw2',
+        }),
+      };
+  }
+}
+export function interactiveFixAsk(why: InteractiveTroubleWhy): string | null {
+  if (why === 'cantBeShown')
+    return translateMessage({
+      defaultMessage: 'Fix this interactive sheet. It can’t be shown.',
+      id: 'LcfPjmY4X7',
+    });
+  if (why === 'tooMuchData')
+    return translateMessage({
+      defaultMessage: 'Fix this interactive sheet. It has too much data.',
+      id: 'bLQwFxbtpn',
+    });
+  return null;
+}
 export const importMessages = {
   addRows: () =>
     translateMessage({
@@ -420,17 +540,17 @@ export const importMessages = {
       id: 'myL34/kyb3',
     }),
 };
-export const intoSheetLabel = (sheetName?: Dynamic) =>
+export const intoSheetLabel = (sheetName: string): string =>
   translateMessage(
     {
       defaultMessage: 'Into sheet: {sheetName}',
       id: 'sqHvAwPm2a',
     },
     {
-      sheetName: sheetName,
+      sheetName,
     },
   );
-export const importRowChangeLabel = (change?: Dynamic) => {
+export const importRowChangeLabel = (change: ImportRowChange): string => {
   switch (change) {
     case 'added':
       return translateMessage({
@@ -449,7 +569,7 @@ export const importRowChangeLabel = (change?: Dynamic) => {
       });
   }
 };
-export const importCellWasLabel = (before?: Dynamic) =>
+export const importCellWasLabel = (before: string): string =>
   before === ''
     ? translateMessage({
         defaultMessage: 'Was empty',
@@ -461,32 +581,32 @@ export const importCellWasLabel = (before?: Dynamic) =>
           id: '6poHQVBU3J',
         },
         {
-          before: before,
+          before,
         },
       );
-export const isImportChangeless = ({ addedCount: addedCount, changedCount: changedCount, goneCount: goneCount }: Dynamic) =>
+export const isImportChangeless = ({ addedCount, changedCount, goneCount }: Pick<ImportIntoSheetChanges, 'addedCount' | 'changedCount' | 'goneCount'>): boolean =>
   addedCount + changedCount + goneCount === 0;
-export const importRowCountWords = (count?: Dynamic) =>
+export const importRowCountWords = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {# row} other {{count, number} rows}}',
       id: 'Jc0XtqqN8o',
     },
     {
-      count: count,
+      count,
     },
   );
-export const currentRowsWords = (count?: Dynamic) =>
+export const currentRowsWords = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {the # current row} other {the {count, number} current rows}}',
       id: 'AA4pRpLMU7',
     },
     {
-      count: count,
+      count,
     },
   );
-export const columnsNotImportedWords = (columnNames?: Dynamic, sheetName?: Dynamic) =>
+export const columnsNotImportedWords = (columnNames: readonly string[], sheetName: string): string =>
   translateMessage(
     {
       defaultMessage:
@@ -495,14 +615,14 @@ export const columnsNotImportedWords = (columnNames?: Dynamic, sheetName?: Dynam
     },
     {
       count: columnNames.length,
-      names: new (Intl.ListFormat as Dynamic)(MESSAGE_LOCALE).format(columnNames),
-      sheetName: sheetName,
+      names: new Intl.ListFormat(MESSAGE_LOCALE).format(columnNames),
+      sheetName,
     },
   );
 export const MAX_COLUMNS_NAMED_IN_IMPORT_NOTES = 4;
-export const importColumnNames = (columns?: Dynamic) =>
+export const importColumnNames = (columns: readonly ImportColumnLabel[]): string[] =>
   columns.map(
-    ({ letters: letters, name: name }: Dynamic) =>
+    ({ letters, name }) =>
       name ??
       translateMessage(
         {
@@ -510,22 +630,22 @@ export const importColumnNames = (columns?: Dynamic) =>
           id: '2/57AGYjYs',
         },
         {
-          letters: letters,
+          letters,
         },
       ),
   );
 export const MAX_OPTIONS_NAMED_IN_IMPORT_NOTES = 4;
-export const quotedOptionLabel = (value?: Dynamic) =>
+export const quotedOptionLabel = (value: string): string =>
   translateMessage(
     {
       defaultMessage: '“{value}”',
       id: 'd1bsfuzx+j',
     },
     {
-      value: value,
+      value,
     },
   );
-export const checkedStateWords = (isChecked?: Dynamic) =>
+export const checkedStateWords = (isChecked: boolean): string =>
   translateMessage(
     {
       defaultMessage: '{isChecked, select, true {Checked} other {Not checked}}',
@@ -535,3 +655,70 @@ export const checkedStateWords = (isChecked?: Dynamic) =>
       isChecked: String(isChecked),
     },
   );
+export const interactiveSheetMessages = {
+  interactive: () =>
+    translateMessage({
+      defaultMessage: 'Interactive sheet',
+      id: 'cfhEhpJF/T',
+    }),
+  wayIn: () =>
+    translateMessage({
+      defaultMessage: 'Press Enter to use the interactive sheet, and Escape to leave it.',
+      id: 'GrIJEcXdBC',
+    }),
+  bar: () =>
+    translateMessage({
+      defaultMessage: 'Interactive sheet tools',
+      id: 'KIIscWluCD',
+    }),
+  reset: () =>
+    translateMessage({
+      defaultMessage: 'Reset',
+      id: 'zQu6oc8jCp',
+    }),
+  saveAsDefault: () =>
+    translateMessage({
+      defaultMessage: 'Save as default',
+      id: 'hznlpI0F/s',
+    }),
+  runAgain: () =>
+    translateMessage({
+      defaultMessage: 'Run again',
+      id: '4J21ZOpvFM',
+    }),
+};
+export const interactiveStoppedTitle = (): string =>
+  translateMessage({
+    defaultMessage: 'This interactive sheet was stopped',
+    id: 'mg5IfZPrNF',
+  });
+export const interactiveNotWritableText = (): string =>
+  translateMessage({
+    defaultMessage: 'This control can’t change its cell. Ask Agent to fix the interactive sheet.',
+    id: 'HeJ32Pn9qA',
+  });
+export const interactiveWritesTooLargeText = (): string =>
+  translateMessage({
+    defaultMessage: 'Nothing was saved, because this interactive sheet changes too much data. You can ask Agent to fix it.',
+    id: 'tQzhEyo3h+',
+  });
+export const interactiveNotDuplicatedText = (why: InteractiveNotDuplicatedWhy): string =>
+  why === 'interactiveNotCopied'
+    ? translateMessage({
+        defaultMessage: 'Nothing was duplicated, because that interactive sheet couldn’t be copied. Try again.',
+        id: '+UxE9FqS0t',
+      })
+    : translateMessage({
+        defaultMessage: 'Nothing was duplicated, because that interactive sheet can’t be copied. You can ask Agent to make a new one.',
+        id: '5ORD0glPds',
+      });
+export const interactiveDoneText = ({ what }: { what: 'interactiveReset' | 'interactiveDefaultsSaved' }): string =>
+  what === 'interactiveReset'
+    ? translateMessage({
+        defaultMessage: 'Interactive sheet reset',
+        id: 'aA2jRCp7YB',
+      })
+    : translateMessage({
+        defaultMessage: 'Saved as default',
+        id: 't46TGIzzNq',
+      });

@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/docs-core",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The Docs type's model, free of DOM and React: blocks and characters with stable ids, the edit ops and their guards, markdown in and out, link anchors, suggestions and their decisions, version history rows and the export source.",
@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@open-artifact/live-store": "0.9.2"
+    "@open-artifact/live-store": "0.14.6"
   },
   "license": "Apache-2.0"
 }

@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/shell",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The daemon's pages: the Shell that frames an artifact page under the shared top bar, and the home page with the artifact library and types.",
@@ -12,9 +12,9 @@
     "dev:home": "vite -c vite.home.config.ts"
   },
   "dependencies": {
-    "@open-artifact/protocol": "0.9.2",
-    "@open-artifact/runtime": "0.9.2",
-    "@open-artifact/ui": "0.9.2"
+    "@open-artifact/protocol": "0.14.6",
+    "@open-artifact/runtime": "0.14.6",
+    "@open-artifact/ui": "0.14.6"
   },
   "license": "Apache-2.0"
 }

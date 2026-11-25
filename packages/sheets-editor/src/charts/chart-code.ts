@@ -1,20 +1,46 @@
-import type { Dynamic } from '../dynamic.ts';
 import { widgetProjectionRequest, readCompiledWidget } from '../store/requests.ts';
+import type { StreamListener } from '../store/sheet-connection.ts';
 import { failureOf } from '../store/workbook-node.ts';
 import { syncRetryDelayMs } from '../store/workbook-sync.ts';
-export function createChartCodeStore(host?: Dynamic) {
-  let chartsById = new (Map as Dynamic)();
-  let stream: Dynamic = null;
-  let streamCount: Dynamic = 0;
-  let noAnswerCount: Dynamic = 0;
-  let caretChartId: Dynamic = null;
-  let codeTimedOut = new (Map as Dynamic)();
-  let entryOf = (chartId?: Dynamic) => {
-    let existing = chartsById.get(chartId);
+/** Why a chart has no code to draw with. */
+export type WhyNoChartCode = 'notPublished' | 'notCompiled' | 'notFetched' | 'tookCaret' | 'anotherTookCaret' | 'tookTooLong';
+/** The code a chart draws with, as far as the page knows it. */
+export type ChartCode = { kind: 'compiled'; artifact: string } | { kind: 'awaited' } | { kind: 'none'; why: WhyNoChartCode };
+/** What a drawn chart reads its code from and tells about it. */
+export interface ChartCodeSource {
+  of(chartId: string): ChartCode;
+  follow(chartId: string, listener: () => void): () => void;
+  tookCaret(chartId: string): void;
+  tookTooLong(chartId: string): void;
+}
+export interface ChartCodeStore extends ChartCodeSource, Required<StreamListener> {
+  isAsked(chartId: string): boolean;
+}
+export interface ChartCodeHost {
+  newOpId: () => string;
+  wait(ms: number): Promise<void>;
+}
+type OpenedStream = Parameters<Required<StreamListener>['streamOpened']>[0];
+interface ChartCodeEntry {
+  code: ChartCode;
+  listeners: Set<() => void>;
+  timesPublished: number | null;
+  answeredAt: 'never' | number | null;
+  isAsked: boolean;
+}
+export function createChartCodeStore(host: ChartCodeHost): ChartCodeStore {
+  const chartsById = new Map<string, ChartCodeEntry>();
+  let stream: OpenedStream | null = null;
+  let streamCount = 0;
+  let noAnswerCount = 0;
+  let caretChartId: string | null = null;
+  const codeTimedOut = new Map<string, string>();
+  const entryOf = (chartId: string): ChartCodeEntry => {
+    const existing = chartsById.get(chartId);
     if (existing !== undefined) return existing;
-    let entry = {
+    const entry: ChartCodeEntry = {
       code: CHART_CODE_AWAITED,
-      listeners: new (Set as Dynamic)(),
+      listeners: new Set(),
       timesPublished: null,
       answeredAt: 'never',
       isAsked: false,
@@ -22,19 +48,19 @@ export function createChartCodeStore(host?: Dynamic) {
     chartsById.set(chartId, entry);
     return entry;
   };
-  let setCode = (chartId?: Dynamic, entry?: Dynamic, code?: Dynamic) => {
-    let offCode = chartId === caretChartId ? CHART_CODE_OFF_TOOK_CARET : CHART_CODE_OFF_ANOTHER_TOOK_CARET;
+  const setCode = (chartId: string, entry: ChartCodeEntry, code: ChartCode) => {
+    const offCode = chartId === caretChartId ? CHART_CODE_OFF_TOOK_CARET : CHART_CODE_OFF_ANOTHER_TOOK_CARET;
     entry.code = code.kind === 'compiled' && caretChartId !== null ? offCode : code;
-    for (let listener of entry.listeners as Dynamic) listener();
+    for (const listener of entry.listeners) listener();
   };
-  let askForCode = async (chartId?: Dynamic, tryIndex: Dynamic = 0): Promise<Dynamic> => {
-    let isGivingUp = tryIndex >= MAX_CHART_CODE_TRIES || noAnswerCount >= MAX_CHART_CODE_NO_ANSWERS;
+  const askForCode = async (chartId: string, tryIndex = 0): Promise<ChartCode | 'notSent' | null> => {
+    const isGivingUp = tryIndex >= MAX_CHART_CODE_TRIES || noAnswerCount >= MAX_CHART_CODE_NO_ANSWERS;
     if (stream === null) return 'notSent';
     if (isGivingUp) return null;
-    let { call, noteFailure } = stream;
-    let sent = await call(widgetProjectionRequest(chartId));
-    let answer = readCompiledWidget(sent);
-    let failure = failureOf(sent, answer.kind !== 'refused');
+    const { call, noteFailure } = stream;
+    const sent = await call(widgetProjectionRequest(chartId));
+    const answer = readCompiledWidget(sent);
+    const failure = failureOf(sent, answer.kind !== 'refused');
     if (failure !== null)
       noteFailure({
         ...failure,
@@ -53,15 +79,15 @@ export function createChartCodeStore(host?: Dynamic) {
     await host.wait(syncRetryDelayMs(tryIndex));
     return askForCode(chartId, tryIndex + 1);
   };
-  let askIfStale = async (chartId?: Dynamic, entry?: Dynamic): Promise<Dynamic> => {
-    let isStale = entry.answeredAt === 'never' || entry.answeredAt !== entry.timesPublished;
+  const askIfStale = async (chartId: string, entry: ChartCodeEntry): Promise<void> => {
+    const isStale = entry.answeredAt === 'never' || entry.answeredAt !== entry.timesPublished;
     if (entry.isAsked || entry.listeners.size === 0 || !isStale) return;
     entry.isAsked = true;
-    let [timesPublished, streamCountBefore] = [entry.timesPublished, streamCount];
-    let code = await askForCode(chartId);
+    const [timesPublished, streamCountBefore] = [entry.timesPublished, streamCount];
+    const code = await askForCode(chartId);
     entry.isAsked = false;
     if (code === 'notSent' || code === null) {
-      let isOff = [CHART_CODE_OFF_TOOK_CARET, CHART_CODE_OFF_ANOTHER_TOOK_CARET, CHART_CODE_OFF_TOOK_TOO_LONG].includes(entry.code);
+      const isOff = [CHART_CODE_OFF_TOOK_CARET, CHART_CODE_OFF_ANOTHER_TOOK_CARET, CHART_CODE_OFF_TOOK_TOO_LONG].includes(entry.code);
       if (code === null && entry.code.kind !== 'compiled' && !isOff)
         setCode(chartId, entry, {
           kind: 'none',
@@ -74,48 +100,52 @@ export function createChartCodeStore(host?: Dynamic) {
     setCode(chartId, entry, code);
     askIfStale(chartId, entry);
   };
-  let forgiveNoAnswers = () => {
+  const forgiveNoAnswers = () => {
     noAnswerCount = Math.min(noAnswerCount, MAX_CHART_CODE_NO_ANSWERS - 1);
   };
   return {
-    of: (chartId?: Dynamic) => chartsById.get(chartId)?.code ?? CHART_CODE_AWAITED,
-    isAsked: (chartId?: Dynamic) => chartsById.get(chartId)?.isAsked ?? false,
-    follow(chartId?: Dynamic, listener?: Dynamic) {
-      let entry = entryOf(chartId);
+    of: (chartId) => chartsById.get(chartId)?.code ?? CHART_CODE_AWAITED,
+    isAsked: (chartId) => chartsById.get(chartId)?.isAsked ?? false,
+    follow(chartId, listener) {
+      const entry = entryOf(chartId);
       entry.listeners.add(listener);
       forgiveNoAnswers();
       askIfStale(chartId, entry);
       return () => void entry.listeners.delete(listener);
     },
-    tookCaret(chartId?: Dynamic) {
+    tookCaret(chartId) {
       caretChartId ??= chartId;
-      for (let [otherChartId, entry] of chartsById as Dynamic) if (entry.code.kind === 'compiled') setCode(otherChartId, entry, entry.code);
+      for (const [otherChartId, entry] of chartsById) if (entry.code.kind === 'compiled') setCode(otherChartId, entry, entry.code);
     },
-    tookTooLong(chartId?: Dynamic) {
-      let entry = chartsById.get(chartId);
+    tookTooLong(chartId) {
+      const entry = chartsById.get(chartId);
       if (entry?.code.kind !== 'compiled') return;
-      let { artifact: code } = entry.code;
+      const { artifact: code } = entry.code;
       if (codeTimedOut.get(chartId) === code) setCode(chartId, entry, CHART_CODE_OFF_TOOK_TOO_LONG);
       codeTimedOut.set(chartId, code);
     },
-    streamOpened(stream2?: Dynamic) {
-      stream = stream2;
+    streamOpened(openedStream) {
+      stream = openedStream;
       streamCount += 1;
-      for (let [chartId, entry] of chartsById as Dynamic) askIfStale(chartId, entry);
+      for (const [chartId, entry] of chartsById) askIfStale(chartId, entry);
     },
-    publishedTimes(chartId?: Dynamic, timesPublished?: Dynamic) {
-      let entry = entryOf(chartId);
+    publishedTimes(chartId, timesPublished) {
+      const entry = entryOf(chartId);
       if (entry.timesPublished !== timesPublished) forgiveNoAnswers();
       entry.timesPublished = timesPublished;
       askIfStale(chartId, entry);
     },
   };
 }
-export function waitForChartCode(chartCode?: Dynamic, chartId?: Dynamic, setTimer?: Dynamic) {
-  return new (Promise as Dynamic)((resolve?: Dynamic) => {
-    let stopFollowing: Dynamic = null;
-    let settle = (isTimedOut: Dynamic = false) => {
-      let code = chartCode.of(chartId);
+export function waitForChartCode(
+  chartCode: Pick<ChartCodeStore, 'of' | 'isAsked' | 'follow'>,
+  chartId: string,
+  setTimer: (ms: number, onTime: () => void) => void,
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    let stopFollowing: (() => void) | null = null;
+    const settle = (isTimedOut = false) => {
+      const code = chartCode.of(chartId);
       if ((code.kind === 'awaited' || chartCode.isAsked(chartId)) && !isTimedOut) return;
       stopFollowing?.();
       resolve(code.kind === 'compiled' ? code.artifact : null);
@@ -125,18 +155,18 @@ export function waitForChartCode(chartCode?: Dynamic, chartId?: Dynamic, setTime
     settle();
   });
 }
-export const CHART_CODE_AWAITED = {
+export const CHART_CODE_AWAITED: ChartCode = {
   kind: 'awaited',
 };
-export const CHART_CODE_OFF_TOOK_CARET = {
+export const CHART_CODE_OFF_TOOK_CARET: ChartCode = {
   kind: 'none',
   why: 'tookCaret',
 };
-export const CHART_CODE_OFF_ANOTHER_TOOK_CARET = {
+export const CHART_CODE_OFF_ANOTHER_TOOK_CARET: ChartCode = {
   kind: 'none',
   why: 'anotherTookCaret',
 };
-export const CHART_CODE_OFF_TOOK_TOO_LONG = {
+export const CHART_CODE_OFF_TOOK_TOO_LONG: ChartCode = {
   kind: 'none',
   why: 'tookTooLong',
 };

@@ -6,7 +6,7 @@
  */
 
 import type { ChromeReport, ShellConnection } from '@open-artifact/runtime';
-import { agentChrome, chromeReporter } from '@open-artifact/editor-kit';
+import { agentChrome, chromeReporter, mayExportHere } from '@open-artifact/editor-kit';
 import { exportFormats, exportJob, selectedArtboard, type ExportScene } from '../lib/export-formats.ts';
 import { useDocument, type SaveState } from '../state/document.ts';
 import { useView } from '../state/view.ts';
@@ -16,8 +16,8 @@ import { useComments, canComment } from './comments.ts';
 import { session } from './session.ts';
 import { collabChromeReport, handleCollabCommand, subscribeCollab } from './collab.ts';
 
-/** What the Export tab depends on now. */
-function exportScene(): ExportScene {
+/** What the Export tab (or, without a Shell, the focused view's Export menu) depends on now. */
+export function exportScene(): ExportScene {
   const view = useView.getState();
   const { boards } = useDocument.getState().canvas;
   const path = selectedArtboard(view, boards);
@@ -43,7 +43,9 @@ function savedOf(save: SaveState): NonNullable<ChromeReport['saved']> {
       return 'saved';
     case 'saving':
       return 'saving';
+    // Edits waiting out the save debounce: on their way, not failed (a failed save is `offline` or `error`).
     case 'dirty':
+      return 'saving';
     case 'error':
       return 'unsaved';
     case 'offline':
@@ -55,7 +57,7 @@ function savedOf(save: SaveState): NonNullable<ChromeReport['saved']> {
 
 /** Runs one `export_format` from the Shell and tells it what became of it. */
 async function runFormat(shell: ShellConnection, request: string, format: string, variant: string | undefined): Promise<void> {
-  if (session().viewer.role !== 'owner') return shell.exportState(request, 'unsupported');
+  if (!mayExportHere(session().viewer.role, session().downloads)) return shell.exportState(request, 'unsupported');
   if (exportBusy()) return shell.exportState(request, 'busy');
   const job = exportJob(exportScene(), format, variant);
   if (!job) return shell.exportState(request, 'unsupported');
@@ -77,7 +79,7 @@ export function startShellBridge(): void {
       actions: mode === 'canvas' && hasSelection && useComments.getState().available && canComment() ? [{ id: 'comment_selection' }] : [],
       agent: agentChrome(useAgent.getState().status),
       exports: false,
-      formats: session().viewer.role === 'owner' ? exportFormats(exportScene()) : [],
+      formats: mayExportHere(session().viewer.role, session().downloads) ? exportFormats(exportScene()) : [],
       hasContent: doc.status === 'ready' && Object.keys(doc.canvas.boards).length > 0,
       ...(doc.status === 'ready' ? { saved: savedOf(doc.save) } : {}),
       ...collabChromeReport(),

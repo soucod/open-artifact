@@ -1,50 +1,134 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellContents, EditOfAnother, PlaceChanged, SheetId } from '@open-artifact/sheets-core';
+import type { StockKind } from '@open-artifact/sheets-core/stock-charts';
 import { cachedSelectedArea } from '../presence/selections.ts';
-import { unionOfAreas, areaGrownOverMerges, selectedArea } from '../selection/model.ts';
+import { unionOfAreas, areaGrownOverMerges, selectedArea, type CellArea, type CellPosition } from '../selection/model.ts';
 import { reportErrorSoftly } from '../engine/loader.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function gapBetweenAreas(area?: Dynamic, other?: Dynamic) {
+import type { CellId, PlacementOnGrid, WorkbookReads } from '../model/workbook.ts';
+import type { LineIndex } from '../model/line-ids.ts';
+import type { ChangeByAgent, CellsChanged } from '../state/initial-state.ts';
+import type { ChangeArrivedFromAgent, PlaceAreaChanged } from '../state/event-reducer.ts';
+import type { ConnectionListeners } from '../store/sheet-connection.ts';
+import type { CaughtUpByLoad } from '../store/workbook-sync.ts';
+import type { AgentActivity } from './activity.ts';
+import type { ChartCardOpening } from '../selection/table-select.ts';
+/** A change, or a mark of one, by the cells it touched. */
+export interface CellsOfChange {
+  cells: CellsChanged;
+}
+/** A place an edit changed, and the cells in it that changed; `changed` is empty when all of them did. */
+export interface CellsChangedInPlace {
+  place: PlaceChanged | null;
+  changed: CellPosition[];
+}
+/** The cells an edit changed in one sheet, with how many rows of them are filled. */
+interface CellsChangedInSheetPlace extends CellsChangedInPlace {
+  place: PlaceChanged;
+  rowsFilled: number;
+}
+/** An edit of the agent streamed in, waiting to be matched to the place it changed. */
+interface EditStreamed {
+  isOfViewer: boolean;
+  isOfLayoutAlone: boolean;
+  streamedAtMs: number;
+}
+/** The last change of a run, marked without a fade until the agent stops working or the wait runs out. */
+interface ChangeHeld {
+  change: ChangeArrivedFromAgent;
+  onShowAtMs: number;
+}
+/** Follows the edits the agent streams in and turns them into changes to mark on the cells. */
+export interface ChangesByAgentTracker
+  extends Pick<ConnectionListeners, 'streamChanged' | 'editByAgentStreamed' | 'editsOfOthersMade' | 'caughtUpByLoad'> {
+  onChanged(listener: (changes: ChangeArrivedFromAgent[]) => void): () => void;
+}
+/** How the agent's making of a chart came out: the chart added, or why none was. */
+export type ChartOutcomeOfAgent =
+  | { nodeId: string }
+  | 'full'
+  | 'codeRefused'
+  | 'notMade'
+  | 'stopped'
+  | 'noAgent'
+  | 'tooLarge'
+  | 'forChat'
+  | 'notChanged';
+/** How an ask for a chart ended, as it is counted. */
+export type ChartEndWord =
+  | 'by_page'
+  | 'by_page_late'
+  | 'by_agent'
+  | 'cant_be_shown'
+  | 'refused'
+  | 'failed'
+  | 'stopped'
+  | 'left'
+  | 'busy'
+  | 'waiting'
+  | 'no_cells'
+  | 'filter'
+  | 'for_chat'
+  | 'to_chat'
+  | 'chat_no_agent'
+  | 'not_to_chat'
+  | 'no_agent'
+  | 'too_large'
+  | 'full';
+/** Who made the chart asked for: the page from a stock program, or the agent. */
+export type ChartLane = 'page' | 'agent';
+/** How a chart was asked for, as it is counted. */
+export type ChartAskKindWord = 'typed' | 'quick' | 'suggested' | 'plain_kind';
+/** A step of the chart card, as it is counted: opened, an ask pressed, and how the ask ended. */
+export type ChartCardCount =
+  | { step: 'open'; what: ChartCardOpening }
+  | { step: 'press'; what: ChartAskKindWord }
+  | { step: 'end'; what: ChartEndWord; lane: ChartLane };
+/** The health of an ask for a chart: whether it inserted or generated one, and how that went. */
+export type ChartEndHealth =
+  | [kind: 'insert' | 'generate', outcome: 'success']
+  | [kind: 'insert' | 'generate', outcome: 'failure', reason: 'invalid_content']
+  | [kind: 'insert' | 'generate', outcome: 'aborted'];
+export function gapBetweenAreas(area: CellArea, other: CellArea): number {
   let rowGap = gapBetweenSpans(area.topRowIndex, area.rowCount, other.topRowIndex, other.rowCount);
   let columnGap = gapBetweenSpans(area.leftColumnIndex, area.columnCount, other.leftColumnIndex, other.columnCount);
   return rowGap > 0 && columnGap > 0 ? 1 / 0 : rowGap + columnGap;
 }
-export function areaCoveringChanges(changes: Dynamic, workbook: WorkbookReads) {
-  return changes.reduce((covering: Dynamic, { cells: cells }: Dynamic) => {
+export function areaCoveringChanges(changes: readonly CellsOfChange[], workbook: WorkbookReads): CellArea | null {
+  return changes.reduce<CellArea | null>((covering, { cells }) => {
     let area = cachedSelectedArea(cells, workbook);
     return covering === null || area === null ? (covering ?? area) : unionOfAreas(covering, area);
   }, null);
 }
-export function changesSpanWholeLines(changes: Dynamic, workbook: WorkbookReads) {
+export function changesSpanWholeLines(changes: readonly CellsOfChange[], workbook: WorkbookReads): boolean {
   let area = areaCoveringChanges(changes, workbook);
   let sheetId = changes[0]?.cells.activeCell.sheetId;
-  let sheet = workbook.listSheets().find((input?: Dynamic) => input.sheetId === sheetId);
+  let sheet = workbook.listSheets().find((summary) => summary.sheetId === sheetId);
   return area !== null && sheet !== undefined && (area.rowCount === sheet.rowCount || area.columnCount === sheet.columnCount);
 }
-export function collectChangesNear(area?: Dynamic, candidates?: Dynamic, areaOf?: Dynamic, maxGap?: Dynamic) {
-  let grownArea: Dynamic = area;
-  let near = candidates.filter((candidate?: Dynamic) => {
+export function collectChangesNear<T>(area: CellArea, candidates: T[], areaOf: (candidate: T) => CellArea | null, maxGap: number): T[] {
+  let grownArea = area;
+  let near = candidates.filter((candidate) => {
     let candidateArea = areaOf(candidate);
     if (candidateArea === null || gapBetweenAreas(candidateArea, area) > maxGap) return false;
     grownArea = unionOfAreas(grownArea, candidateArea);
     return true;
   });
   if (near.length === 0) return near;
-  let rest = candidates.filter((input?: Dynamic) => !near.includes(input));
+  let rest = candidates.filter((candidate) => !near.includes(candidate));
   return [...near, ...collectChangesNear(grownArea, rest, areaOf, 0)];
 }
-export function clusterChangedCells(cells?: Dynamic, columnCount?: Dynamic, maxClusters?: Dynamic) {
-  let keyOf = (rowIndex?: Dynamic, columnIndex?: Dynamic) => rowIndex * (columnCount + CHANGED_CELL_CLUSTER_GAP) + columnIndex;
-  let cellsByKey = new (Map as Dynamic)(cells.map((cell?: Dynamic) => [keyOf(cell.rowIndex, cell.columnIndex), cell]));
-  let clusters: Dynamic = [];
-  for (let [key, cell] of cellsByKey as Dynamic) {
+export function clusterChangedCells(cells: CellPosition[], columnCount: number, maxClusters: number): CellArea[] | null {
+  let keyOf = (rowIndex: number, columnIndex: number) => rowIndex * (columnCount + CHANGED_CELL_CLUSTER_GAP) + columnIndex;
+  let cellsByKey = new Map(cells.map((cell) => [keyOf(cell.rowIndex, cell.columnIndex), cell]));
+  let clusters: CellArea[] = [];
+  for (let [key, cell] of cellsByKey) {
     if (clusters.length === maxClusters) return null;
     cellsByKey.delete(key);
     let cluster = [cell];
-    let [topRow, leftColumn, bottomRow, rightColumn]: Dynamic = [cell.rowIndex, cell.columnIndex, cell.rowIndex, cell.columnIndex];
-    for (let { rowIndex: rowIndex, columnIndex: columnIndex } of cluster as Dynamic) {
+    let [topRow, leftColumn, bottomRow, rightColumn] = [cell.rowIndex, cell.columnIndex, cell.rowIndex, cell.columnIndex];
+    for (let { rowIndex, columnIndex } of cluster) {
       [topRow, leftColumn] = [Math.min(topRow, rowIndex), Math.min(leftColumn, columnIndex)];
       [bottomRow, rightColumn] = [Math.max(bottomRow, rowIndex), Math.max(rightColumn, columnIndex)];
-      for (let [rowOffset, columnOffset] of CLUSTER_NEIGHBOUR_OFFSETS as Dynamic) {
+      for (let [rowOffset, columnOffset] of CLUSTER_NEIGHBOUR_OFFSETS) {
         let neighbourKey = keyOf(rowIndex + rowOffset, columnIndex + columnOffset);
         let neighbour = cellsByKey.get(neighbourKey);
         if (neighbour === undefined) continue;
@@ -61,59 +145,61 @@ export function clusterChangedCells(cells?: Dynamic, columnCount?: Dynamic, maxC
   }
   return clusters;
 }
-export function mergeChangedCellAreas(cells: Dynamic, sheetId: Dynamic, workbook: WorkbookReads) {
-  let sheet = workbook.listSheets().find((input?: Dynamic) => input.sheetId === sheetId);
-  let clusters = sheet === undefined ? null : clusterChangedCells(cells, sheet.columnCount, MAX_CHANGED_CELL_CLUSTERS);
-  if (clusters === null) return null;
-  let areas: Dynamic = [];
-  for (let cluster of clusters as Dynamic) {
-    let area: Dynamic = areaGrownOverMerges(workbook, sheetId, cluster);
+export function mergeClustersOfChangedCells(clusters: CellArea[], sheetId: SheetId, workbook: WorkbookReads): CellArea[] | null {
+  if (clusters.length > MAX_CHANGED_CELL_CLUSTERS) return null;
+  let areas: CellArea[] = [];
+  for (let cluster of clusters) {
+    let area = areaGrownOverMerges(workbook, sheetId, cluster);
     for (;;) {
-      let near = collectChangesNear(area, areas, (input?: Dynamic) => input, CHANGED_CELL_CLUSTER_GAP);
+      let near = collectChangesNear(area, areas, (areaNear) => areaNear, CHANGED_CELL_CLUSTER_GAP);
       if (near.length === 0) break;
-      areas = areas.filter((input?: Dynamic) => !near.includes(input));
+      areas = areas.filter((areaKept) => !near.includes(areaKept));
       area = areaGrownOverMerges(workbook, sheetId, near.reduce(unionOfAreas, area));
     }
     areas.push(area);
   }
   areas.sort(
-    (input?: Dynamic, options?: Dynamic) =>
-      input.topRowIndex === options.topRowIndex ? input.leftColumnIndex - options.leftColumnIndex : input.topRowIndex - options.topRowIndex,
+    (a, b) => (a.topRowIndex === b.topRowIndex ? a.leftColumnIndex - b.leftColumnIndex : a.topRowIndex - b.topRowIndex),
   );
   return areas;
 }
-export function selectionsApartForChangedCells(cells: Dynamic, sheetId: Dynamic, workbook: WorkbookReads) {
+export function mergeChangedCellAreas(cells: CellPosition[], sheetId: SheetId, workbook: WorkbookReads): CellArea[] | null {
+  let sheet = workbook.listSheets().find((summary) => summary.sheetId === sheetId);
+  let clusters = sheet === undefined ? null : clusterChangedCells(cells, sheet.columnCount, MAX_CHANGED_CELL_CLUSTERS);
+  return clusters === null ? null : mergeClustersOfChangedCells(clusters, sheetId, workbook);
+}
+export function selectionsApartForChangedCells(cells: CellPosition[], sheetId: SheetId, workbook: WorkbookReads): CellsChanged[] {
   let areas = mergeChangedCellAreas(cells, sheetId, workbook) ?? [];
   if (areas.length < 2 || areas.length > MAX_CHANGE_GROUPS_APART) return [];
   let selections = areas.flatMap(
-    ({ topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, rowCount: rowCount, columnCount: columnCount }: Dynamic) => {
+    ({ topRowIndex, leftColumnIndex, rowCount, columnCount }) => {
       let activeCell = workbook.cellIdAt(sheetId, topRowIndex, leftColumnIndex);
       let selectionCorner = workbook.cellIdAt(sheetId, topRowIndex + rowCount - 1, leftColumnIndex + columnCount - 1);
       return activeCell === null || selectionCorner === null
         ? []
         : [
             {
-              activeCell: activeCell,
-              selectionCorner: selectionCorner,
+              activeCell,
+              selectionCorner,
             },
           ];
     },
   );
   return selections.length === areas.length ? selections : [];
 }
-export function mergeChangesByAgent(marks: Dynamic, changes: Dynamic, workbook: WorkbookReads) {
-  let isRevisionJoined = (revision?: Dynamic) =>
-    marks.some(({ joinedWith: joinedWith }: Dynamic) => joinedWith.some((input?: Dynamic) => input.revision === revision));
+export function mergeChangesByAgent(marks: ChangeByAgent[], changes: ChangeArrivedFromAgent[], workbook: WorkbookReads): ChangeByAgent[] {
+  let isRevisionJoined = (revision: number) =>
+    marks.some(({ joinedWith }) => joinedWith.some((joined) => joined.revision === revision));
   let addChange = (
-    marks2: Dynamic,
-    { revision: revision, fadeBeginsAtMs: fadeBeginsAtMs, isOfLayoutAlone: isOfLayoutAlone, isOfViewer: isOfViewer }: Dynamic,
-    selections?: Dynamic,
-    groupBase?: Dynamic,
+    marksSoFar: ChangeByAgent[],
+    { revision, fadeBeginsAtMs, isOfLayoutAlone, isOfViewer }: ChangeArrivedFromAgent,
+    selections: CellsChanged[],
+    groupBase: number,
   ) => {
-    let merged2: Dynamic = [...marks2];
-    for (let [index, selection] of selections.entries() as Dynamic) {
-      let sameSheetMarks = merged2.filter(
-        (input?: Dynamic) => input.cells.activeCell.sheetId === selection.activeCell.sheetId && !input.isOfWholeLines,
+    let marksAfter = [...marksSoFar];
+    for (let [index, selection] of selections.entries()) {
+      let sameSheetMarks = marksAfter.filter(
+        (mark) => mark.cells.activeCell.sheetId === selection.activeCell.sheetId && !mark.isOfWholeLines,
       );
       let area = areaCoveringChanges(
         [
@@ -137,25 +223,25 @@ export function mergeChangesByAgent(marks: Dynamic, changes: Dynamic, workbook: 
           : collectChangesNear(
               area,
               sameSheetMarks,
-              (input?: Dynamic) => areaCoveringChanges([...input.joinedWith, input], workbook),
+              (mark) => areaCoveringChanges([...mark.joinedWith, mark], workbook),
               CHANGE_JOIN_GAP,
             );
       let joinedWith = near.flatMap(
-        (input?: Dynamic) => [
-          ...input.joinedWith,
+        (mark) => [
+          ...mark.joinedWith,
           {
-            revision: input.revision,
-            cells: input.cells,
+            revision: mark.revision,
+            cells: mark.cells,
           },
         ],
       );
-      merged2 = merged2.filter((input?: Dynamic) => !near.includes(input));
-      merged2.push({
-        revision: revision,
+      marksAfter = marksAfter.filter((mark) => !near.includes(mark));
+      marksAfter.push({
+        revision,
         cells: selection,
         group: groupBase + index,
-        fadeBeginsAtMs: fadeBeginsAtMs,
-        joinedWith: joinedWith,
+        fadeBeginsAtMs,
+        joinedWith,
         stoodAsOneMark: near.length === 1,
         isOfWholeLines: changesSpanWholeLines(
           [
@@ -167,32 +253,32 @@ export function mergeChangesByAgent(marks: Dynamic, changes: Dynamic, workbook: 
           workbook,
         ),
         ...(isOfLayoutAlone === true && {
-          isOfLayoutAlone: isOfLayoutAlone,
+          isOfLayoutAlone,
         }),
         ...(isOfViewer === true && {
-          isOfViewer: isOfViewer,
+          isOfViewer,
         }),
       });
     }
-    return merged2;
+    return marksAfter;
   };
-  let merged: Dynamic = [];
-  for (let change of changes as Dynamic) {
-    let { revision: revision, fadeBeginsAtMs: fadeBeginsAtMs } = change;
-    let sameRevision = marks.filter((input?: Dynamic) => input.revision === revision);
-    (merged.push as Dynamic)(
+  let merged: ChangeByAgent[] = [];
+  for (let change of changes) {
+    let { revision, fadeBeginsAtMs } = change;
+    let sameRevision = marks.filter((mark) => mark.revision === revision);
+    merged.push(
       ...sameRevision.map(
-        (input?: Dynamic) => ({
-          ...input,
-          fadeBeginsAtMs: fadeBeginsAtMs,
+        (mark) => ({
+          ...mark,
+          fadeBeginsAtMs,
         }),
       ),
     );
     if (sameRevision.length > 0 || isRevisionJoined(revision)) continue;
-    let groupIndex: Dynamic = 0;
-    for (let { cells: cells, groupsApart = [cells] } of [...(change.inOtherSheets ?? []), change] as Dynamic) {
+    let groupIndex = 0;
+    for (let { cells, groupsApart = [cells] } of [...(change.inOtherSheets ?? []), change]) {
       let mergedInto = addChange(merged, change, groupsApart, groupIndex);
-      merged = mergedInto.some((input?: Dynamic) => input.joinedWith.some((input2?: Dynamic) => input2.revision === revision))
+      merged = mergedInto.some((mark) => mark.joinedWith.some((joined) => joined.revision === revision))
         ? addChange(merged, change, [cells], groupIndex)
         : mergedInto;
       groupIndex += groupsApart.length;
@@ -200,14 +286,14 @@ export function mergeChangesByAgent(marks: Dynamic, changes: Dynamic, workbook: 
   }
   return merged;
 }
-export function linesKeepTheirOrder(before?: Dynamic, after?: Dynamic) {
-  let nextIndex: Dynamic = 0;
+export function linesKeepTheirOrder(before: LineIndex, after: LineIndex): boolean {
+  let nextIndex = 0;
   for (let run of before.runsIn({
     firstIndex: 0,
     count: before.count,
-  }) as Dynamic) {
-    let coveredCount: Dynamic = 0;
-    for (let { firstIndex: firstIndex, count: count } of after.stretchesOf(run) as Dynamic) {
+  })) {
+    let coveredCount = 0;
+    for (let { firstIndex, count } of after.stretchesOf(run)) {
       if (firstIndex < nextIndex) return false;
       nextIndex = firstIndex + count;
       coveredCount += count;
@@ -216,74 +302,74 @@ export function linesKeepTheirOrder(before?: Dynamic, after?: Dynamic) {
   }
   return true;
 }
-export function isSameCellInput(before?: Dynamic, after?: Dynamic) {
-  if (before === after) return true;
-  if (before === undefined || before.input.kind !== after.input.kind) return false;
+export function isSameCellInput(before: CellContents | undefined, after: CellContents | undefined): boolean {
+  if (before === undefined || before.input.kind !== after?.input.kind) return false;
   if ('value' in before.input && 'value' in after.input) return before.input.value === after.input.value;
   return JSON.stringify(before.input) === JSON.stringify(after.input) && before.dropdownOption?.label === after.dropdownOption?.label;
 }
-export function listCellsChangedBetween(before?: Dynamic, after?: Dynamic) {
-  let changed: Dynamic = [];
-  for (let { sheetId: sheetId } of before.listSheets() as Dynamic) {
+export function listCellsChangedBetween(before: WorkbookReads, after: WorkbookReads): CellId[] | null {
+  let changed: CellId[] = [];
+  for (let { sheetId } of before.listSheets()) {
     let [beforeLines, afterLines] = [before.linesOf(sheetId), after.linesOf(sheetId)];
     if (beforeLines === null || afterLines === null) return null;
     if (before.sheetAsItStands(sheetId) === after.sheetAsItStands(sheetId)) continue;
     if (!linesKeepTheirOrder(beforeLines.rows, afterLines.rows)) return null;
     if (!linesKeepTheirOrder(beforeLines.columns, afterLines.columns)) return null;
   }
-  for (let { sheetId: sheetId } of after.listSheets() as Dynamic) {
-    let beforeLines = before.cellsHeldByRow(sheetId);
-    let afterLines = after.cellsHeldByRow(sheetId);
-    if (beforeLines === afterLines) continue;
-    for (let [rowId, rowCells] of afterLines as Dynamic) {
-      let otherRowCells = beforeLines.get(rowId);
+  for (let { sheetId } of after.listSheets()) {
+    let rowsBefore = before.cellsHeldByRow(sheetId);
+    let rowsAfter = after.cellsHeldByRow(sheetId);
+    if (rowsBefore === rowsAfter) continue;
+    for (let [rowId, rowCells] of rowsAfter) {
+      let otherRowCells = rowsBefore.get(rowId);
       if (otherRowCells === rowCells) continue;
-      for (let [columnId, cellAfter] of rowCells as Dynamic)
-        if (!isSameCellInput(otherRowCells?.get(columnId), cellAfter))
+      let columnIds = otherRowCells === undefined ? rowCells.keys() : rowCells.columnsThatReadOtherwiseIn(otherRowCells);
+      for (let columnId of columnIds)
+        if (otherRowCells === undefined || !isSameCellInput(otherRowCells.get(columnId), rowCells.get(columnId)))
           changed.push({
-            sheetId: sheetId,
-            rowId: rowId,
-            columnId: columnId,
+            sheetId,
+            rowId,
+            columnId,
           });
     }
-    for (let [rowId, rowCells] of beforeLines as Dynamic) {
-      let otherRowCells = afterLines.get(rowId);
+    for (let [rowId, rowCells] of rowsBefore) {
+      let otherRowCells = rowsAfter.get(rowId);
       if (rowCells === otherRowCells) continue;
-      for (let columnId of rowCells.keys() as Dynamic)
+      for (let columnId of rowCells.keys())
         if (otherRowCells?.has(columnId) !== true)
           changed.push({
-            sheetId: sheetId,
-            rowId: rowId,
-            columnId: columnId,
+            sheetId,
+            rowId,
+            columnId,
           });
     }
   }
   return changed;
 }
-export function resolvePlaceArea(place: Dynamic, workbook: WorkbookReads) {
+export function resolvePlaceArea(place: PlaceChanged | null, workbook: WorkbookReads): PlaceAreaChanged | null {
   if (place === null) return null;
-  let { sheetId: sheetId, cells: cells, placementId: placementId } = place;
+  let { sheetId, cells, placementId } = place;
   let placement =
     placementId === undefined
       ? {}
       : {
-          placementId: placementId,
+          placementId,
         };
-  let positionOf = ({ r: r2, c: c }: Dynamic) =>
+  let positionOf = ({ r: rowId, c: columnId }: { r: CellId['rowId']; c: CellId['columnId'] }) =>
     workbook.positionOfCell({
-      sheetId: sheetId,
-      rowId: r2,
-      columnId: c,
+      sheetId,
+      rowId,
+      columnId,
     });
   let [topLeft, bottomRight] = cells === null ? [null, null] : [positionOf(cells.topLeft), positionOf(cells.bottomRight)];
   if (topLeft === null || bottomRight === null)
     return {
-      sheetId: sheetId,
+      sheetId,
       area: null,
       ...placement,
     };
   return {
-    sheetId: sheetId,
+    sheetId,
     ...placement,
     area: {
       topRowIndex: topLeft.rowIndex,
@@ -293,10 +379,14 @@ export function resolvePlaceArea(place: Dynamic, workbook: WorkbookReads) {
     },
   };
 }
-export function placeCoveringCells(sheetId: Dynamic, [first, ...rest]: Dynamic, workbook: WorkbookReads) {
+export function placeCoveringCells(
+  sheetId: SheetId,
+  [first, ...rest]: CellPosition[],
+  workbook: WorkbookReads,
+): { place: PlaceChanged; cellCount: number } | null {
   if (first === undefined) return null;
-  let [topRow, leftColumn, bottomRow, rightColumn]: Dynamic = [first.rowIndex, first.columnIndex, first.rowIndex, first.columnIndex];
-  for (let { rowIndex: rowIndex, columnIndex: columnIndex } of rest as Dynamic) {
+  let [topRow, leftColumn, bottomRow, rightColumn] = [first.rowIndex, first.columnIndex, first.rowIndex, first.columnIndex];
+  for (let { rowIndex, columnIndex } of rest) {
     [topRow, leftColumn] = [Math.min(topRow, rowIndex), Math.min(leftColumn, columnIndex)];
     [bottomRow, rightColumn] = [Math.max(bottomRow, rowIndex), Math.max(rightColumn, columnIndex)];
   }
@@ -304,7 +394,7 @@ export function placeCoveringCells(sheetId: Dynamic, [first, ...rest]: Dynamic, 
   if (topLeftCell === null || bottomRightCell === null) return null;
   return {
     place: {
-      sheetId: sheetId,
+      sheetId,
       cells: {
         topLeft: {
           r: topLeftCell.rowId,
@@ -319,46 +409,55 @@ export function placeCoveringCells(sheetId: Dynamic, [first, ...rest]: Dynamic, 
     cellCount: (bottomRow - topRow + 1) * (rightColumn - leftColumn + 1),
   };
 }
-export function findChangedPlacesBySheet(before?: Dynamic, after?: Dynamic, onlyNewSheets?: Dynamic) {
-  let sheetIdsBefore = new (Set as Dynamic)(before.listSheets().map(({ sheetId: sheetId }: Dynamic) => sheetId));
+export function findChangedPlacesBySheet(
+  before: WorkbookReads,
+  after: WorkbookReads,
+  onlyNewSheets: boolean,
+): CellsChangedInSheetPlace[] | null {
+  let sheetIdsBefore = new Set(before.listSheets().map(({ sheetId }) => sheetId));
   let isChanged = didCellInputChange(before, after);
   let changedCells = onlyNewSheets ? null : listCellsChangedBetween(before, after);
-  let sheetsToScan = after.listSheets().filter(({ sheetId: sheetId }: Dynamic) => !onlyNewSheets || !sheetIdsBefore.has(sheetId));
-  let isTooBigToScan = ({ sheetId: sheetId }: Dynamic) =>
+  let sheetsToScan = after.listSheets().filter(({ sheetId }) => !onlyNewSheets || !sheetIdsBefore.has(sheetId));
+  let isTooBigToScan = ({ sheetId }: { sheetId: SheetId }) =>
     sheetIdsBefore.has(sheetId) &&
-    [...after.cellsHeldByRow(sheetId).values()].reduce((count?: Dynamic, rowCells?: Dynamic) => count + rowCells.size, 0) >
+    [...after.cellsHeldByRow(sheetId).values()].reduce((count, rowCells) => count + rowCells.size, 0) >
       MAX_CHANGED_CELLS_LISTED;
   if (changedCells === null && sheetsToScan.some(isTooBigToScan)) return null;
   let changed =
     changedCells?.filter(isChanged) ??
-    sheetsToScan.flatMap(({ sheetId: sheetId, rowCount: rowCount, columnCount: columnCount }: Dynamic) => {
+    sheetsToScan.flatMap(({ sheetId, rowCount, columnCount }) => {
       let filled = after.filledCellsIn(sheetId, {
         topRowIndex: 0,
         leftColumnIndex: 0,
-        rowCount: rowCount,
-        columnCount: columnCount,
+        rowCount,
+        columnCount,
       });
       return sheetIdsBefore.has(sheetId) ? filled.filter(isChanged) : filled;
     });
-  let positionsOf = (input?: Dynamic) => input.flatMap((input2?: Dynamic) => after.positionOfCell(input2) ?? []);
-  return after.listSheets().flatMap(({ sheetId: sheetId }: Dynamic) => {
-    let inSheet = changed.filter((input?: Dynamic) => input.sheetId === sheetId);
-    let byRow = new (Map as Dynamic)(inSheet.map((input?: Dynamic) => [input.rowId, input]));
-    let byColumn = new (Map as Dynamic)(inSheet.map((input?: Dynamic) => [input.columnId, input]));
+  let positionsOf = (cellIds: CellId[]) => cellIds.flatMap((cellId) => after.positionOfCell(cellId) ?? []);
+  return after.listSheets().flatMap(({ sheetId }) => {
+    let inSheet = changed.filter((cellId) => cellId.sheetId === sheetId);
+    let byRow = new Map(inSheet.map((cellId) => [cellId.rowId, cellId]));
+    let byColumn = new Map(inSheet.map((cellId) => [cellId.columnId, cellId]));
     let covering = placeCoveringCells(sheetId, positionsOf([...byRow.values(), ...byColumn.values()]), after);
     if (covering === null) return [];
     let isWholePlace = inSheet.length === covering.cellCount || inSheet.length > MAX_CHANGED_CELLS_LISTED;
-    let filled = inSheet.filter((input?: Dynamic) => after.cellOf(input) !== null);
+    let filled = inSheet.filter((cellId) => after.cellOf(cellId) !== null);
     return [
       {
         place: covering.place,
         changed: isWholePlace ? [] : positionsOf(inSheet),
-        rowsFilled: new (Set as Dynamic)(filled.map(({ rowId: rowId }: Dynamic) => rowId)).size,
+        rowsFilled: new Set(filled.map(({ rowId }) => rowId)).size,
       },
     ];
   });
 }
-export function areaBeforeByUnmovedLines(sheetId?: Dynamic, areaAfter?: Dynamic, before?: Dynamic, after?: Dynamic) {
+export function areaBeforeByUnmovedLines(
+  sheetId: SheetId,
+  areaAfter: CellArea,
+  before: WorkbookReads,
+  after: WorkbookReads,
+): CellArea | null {
   let [linesBefore, linesAfter] = [before.linesOf(sheetId), after.linesOf(sheetId)];
   if (linesBefore === null || linesAfter === null) return null;
   let isUnmoved =
@@ -369,28 +468,28 @@ export function areaBeforeByUnmovedLines(sheetId?: Dynamic, areaAfter?: Dynamic,
   return isUnmoved && rowCount > 0
     ? {
         ...areaAfter,
-        rowCount: rowCount,
+        rowCount,
       }
     : null;
 }
-export function findChangedCellsInPlace(place?: Dynamic, before?: Dynamic, after?: Dynamic) {
-  let unchanged = {
-    place: place,
+export function findChangedCellsInPlace(place: PlaceChanged | null, before: WorkbookReads, after: WorkbookReads): CellsChangedInPlace {
+  let unchanged: CellsChangedInPlace = {
+    place,
     changed: [],
   };
   let areaAfter = resolvePlaceArea(place, after)?.area ?? null;
   if (place === null || areaAfter === null) return unchanged;
-  let { sheetId: sheetId } = place;
+  let { sheetId } = place;
   let areaBefore = resolvePlaceArea(place, before)?.area ?? areaBeforeByUnmovedLines(sheetId, areaAfter, before, after);
   if (areaBefore === null || areaBefore.rowCount <= 0 || areaBefore.columnCount <= 0) return unchanged;
   let filledAfter = after.filledCellsIn(sheetId, areaAfter);
   let changedCells = [
     ...filledAfter.filter(didCellInputChange(before, after)),
-    ...before.filledCellsIn(sheetId, areaBefore).filter((input?: Dynamic) => after.cellOf(input) === null),
+    ...before.filledCellsIn(sheetId, areaBefore).filter((cellId) => after.cellOf(cellId) === null),
   ];
-  let positionsWithinArea = (input?: Dynamic) =>
-    input.flatMap((input2?: Dynamic) => {
-      let position = after.positionOfCell(input2);
+  let positionsWithinArea = (cellIds: CellId[]) =>
+    cellIds.flatMap((cellId) => {
+      let position = after.positionOfCell(cellId);
       return position !== null &&
         position.rowIndex >= areaAfter.topRowIndex &&
         position.rowIndex < areaAfter.topRowIndex + areaAfter.rowCount &&
@@ -400,7 +499,7 @@ export function findChangedCellsInPlace(place?: Dynamic, before?: Dynamic, after
         : [];
     });
   let changedPositions = positionsWithinArea(changedCells);
-  let sheet = after.listSheets().find((input?: Dynamic) => input.sheetId === sheetId);
+  let sheet = after.listSheets().find((summary) => summary.sheetId === sheetId);
   let coversWholeLines = areaAfter.rowCount === sheet?.rowCount || areaAfter.columnCount === sheet?.columnCount;
   if (changedPositions.length === 0 && coversWholeLines) return unchanged;
   let covering = placeCoveringCells(sheetId, changedPositions.length > 0 ? changedPositions : positionsWithinArea(filledAfter), after);
@@ -410,27 +509,32 @@ export function findChangedCellsInPlace(place?: Dynamic, before?: Dynamic, after
     changed: changedPositions.length === covering.cellCount ? [] : changedPositions,
   };
 }
-export function placesChangedByRevision(place?: Dynamic, before?: Dynamic, after?: Dynamic, isOfLayoutAlone?: Dynamic) {
+export function placesChangedByRevision(
+  place: PlaceChanged | null,
+  before: WorkbookReads,
+  after: WorkbookReads,
+  isOfLayoutAlone: boolean,
+): CellsChangedInPlace[] {
   let inPlace = findChangedCellsInPlace(place, before, after);
   if (!isOfLayoutAlone && place?.cells !== null) return [inPlace];
   let changedPlaces =
     findChangedPlacesBySheet(before, after, !isOfLayoutAlone) ?? (place?.cells === null ? findChangedPlacesBySheet(before, after, true) : null);
   if (changedPlaces === null) return [inPlace];
-  let inSameSheet = changedPlaces.filter((input?: Dynamic) => input.place?.sheetId === place?.sheetId);
+  let inSameSheet = changedPlaces.filter((changedPlace) => changedPlace.place?.sheetId === place?.sheetId);
   let candidates = isOfLayoutAlone || inSameSheet.length === 0 ? changedPlaces : inSameSheet;
-  let mostRowsFilled = (Math.max as Dynamic)(...candidates.map(({ rowsFilled: rowsFilled }: Dynamic) => rowsFilled));
-  let mostFilled = candidates.find(({ rowsFilled: rowsFilled }: Dynamic) => rowsFilled === mostRowsFilled);
+  let mostRowsFilled = Math.max(...candidates.map(({ rowsFilled }) => rowsFilled));
+  let mostFilled = candidates.find(({ rowsFilled }) => rowsFilled === mostRowsFilled);
   let isAllInSameSheet = inSameSheet.length === candidates.length && place?.cells !== null;
   if (mostFilled === undefined) return [inPlace];
   let rowCountOfSheet = (workbook: WorkbookReads) =>
-    workbook.listSheets().find(({ sheetId: sheetId }: Dynamic) => sheetId === place?.sheetId)?.rowCount;
-  let addsColumnsToKnownRows = (place2?: Dynamic) => {
-    let linesBefore = place2 === null ? null : before.linesOf(place2.sheetId);
-    if (place2 === null || place2.cells === null || linesBefore === null) return false;
-    let corners = [place2.cells.topLeft, place2.cells.bottomRight];
+    workbook.listSheets().find(({ sheetId }) => sheetId === place?.sheetId)?.rowCount;
+  let addsColumnsToKnownRows = (placeToCheck: PlaceChanged | null) => {
+    let linesBefore = placeToCheck === null ? null : before.linesOf(placeToCheck.sheetId);
+    if (placeToCheck === null || placeToCheck.cells === null || linesBefore === null) return false;
+    let corners = [placeToCheck.cells.topLeft, placeToCheck.cells.bottomRight];
     return (
-      corners.every(({ r: rowId }: Dynamic) => linesBefore.rows.indexOf(rowId) !== null) &&
-      corners.some(({ c: columnId }: Dynamic) => linesBefore.columns.indexOf(columnId) === null)
+      corners.every(({ r: rowId }) => linesBefore.rows.indexOf(rowId) !== null) &&
+      corners.some(({ c: columnId }) => linesBefore.columns.indexOf(columnId) === null)
     );
   };
   let isOfNewColumns =
@@ -438,141 +542,147 @@ export function placesChangedByRevision(place?: Dynamic, before?: Dynamic, after
   if (isAllInSameSheet) return [isOfNewColumns ? mostFilled : inPlace];
   return [
     mostFilled,
-    ...candidates.filter((input?: Dynamic) => input !== mostFilled),
+    ...candidates.filter((candidate) => candidate !== mostFilled),
     ...(inSameSheet.length > 0 || place?.cells === null ? [] : [inPlace]),
   ];
 }
-export function findChartPlacedByEdit(sheetId?: Dynamic, place?: Dynamic, before?: Dynamic, after?: Dynamic) {
+export function findChartPlacedByEdit(
+  sheetId: SheetId,
+  place: PlaceChanged | null,
+  before: WorkbookReads | null,
+  after: WorkbookReads,
+): PlacementOnGrid | undefined {
   let placements = after.placementsIn(sheetId);
   if (place?.sheetId === sheetId && place.placementId !== undefined)
-    return placements.find(({ placementId: placementId }: Dynamic) => placementId === place.placementId);
+    return placements.find(({ placementId }) => placementId === place.placementId);
   if (before === null) return;
-  let placementIdsBefore = new (Set as Dynamic)(
-    before.placementsIn(sheetId).map(({ placementId: placementId }: Dynamic) => placementId),
+  let placementIdsBefore = new Set(
+    before.placementsIn(sheetId).map(({ placementId }) => placementId),
   );
-  return placements.findLast(({ placementId: placementId }: Dynamic) => !placementIdsBefore.has(placementId));
+  return placements.findLast(({ placementId }) => !placementIdsBefore.has(placementId));
 }
-export function selectionOfPlace(place?: Dynamic) {
+export function selectionOfPlace(place: PlaceChanged | null): CellsChanged | null {
   if (place === null || place.cells === null) return null;
-  let { sheetId: sheetId, cells: cells } = place;
+  let { sheetId, cells } = place;
   return {
     activeCell: {
-      sheetId: sheetId,
+      sheetId,
       rowId: cells.topLeft.r,
       columnId: cells.topLeft.c,
     },
     selectionCorner: {
-      sheetId: sheetId,
+      sheetId,
       rowId: cells.bottomRight.r,
       columnId: cells.bottomRight.c,
     },
   };
 }
 export function createChangesByAgentTracker(
-  workbook?: Dynamic,
-  wait: Dynamic = (delayMs?: Dynamic) => new (Promise as Dynamic)((resolve?: Dynamic) => void setTimeout(resolve, delayMs)),
-  nowMs2: Dynamic = () => performance.now(),
-) {
-  let editsStreamed = new (Map as Dynamic)();
-  let changes: Dynamic = [];
-  let listeners = new (Set as Dynamic)();
-  let notifyListener = (listener?: Dynamic) => {
+  agentActivity: Pick<AgentActivity, 'isWorking' | 'onChanged'>,
+  wait: (delayMs: number) => Promise<void> = (delayMs) => new Promise<void>((resolve) => void setTimeout(resolve, delayMs)),
+  nowMs: () => number = () => performance.now(),
+): ChangesByAgentTracker {
+  let editsStreamed = new Map<number, EditStreamed>();
+  let changes: ChangeArrivedFromAgent[] = [];
+  let listeners = new Set<(changes: ChangeArrivedFromAgent[]) => void>();
+  let notifyListener = (listener: (changes: ChangeArrivedFromAgent[]) => void) => {
     try {
       listener(changes);
-    } catch (error: Dynamic) {
+    } catch (error) {
       reportErrorSoftly(error, 'changesByAgent');
     }
   };
-  let pending: Dynamic = null;
-  let groupCount: Dynamic = 0;
-  let runSince: Dynamic = 0;
-  let fadeOutAt = async (fadeBeginsAtMs?: Dynamic): Promise<Dynamic> => {
-    await wait(fadeBeginsAtMs + AGENT_CHANGE_FADE_MS - nowMs2());
-    let hasFaded = (input?: Dynamic) => input.fadeBeginsAtMs !== null && input.fadeBeginsAtMs <= fadeBeginsAtMs;
+  let held: ChangeHeld | null = null;
+  let holdEndsAtMs = 0;
+  let runSince = 0;
+  let fadeOutAt = async (fadeBeginsAtMs: number): Promise<void> => {
+    await wait(fadeBeginsAtMs + AGENT_CHANGE_FADE_MS - nowMs());
+    let hasFaded = (change: ChangeArrivedFromAgent) => change.fadeBeginsAtMs !== null && change.fadeBeginsAtMs <= fadeBeginsAtMs;
     if (!changes.some(hasFaded)) return;
-    changes = changes.filter((input?: Dynamic) => !hasFaded(input));
-    if (pending !== null && hasFaded(pending.change)) pending = null;
+    changes = changes.filter((change) => !hasFaded(change));
+    if (held !== null && hasFaded(held.change)) held = null;
     listeners.forEach(notifyListener);
   };
-  let startPendingFade = () => {
-    if (pending === null) return;
-    let { change: change, onShowAtMs: onShowAtMs } = pending;
-    pending = null;
-    let fadeAtMs = Math.max(onShowAtMs, nowMs2());
+  let startHeldFade = () => {
+    if (held === null) return;
+    let { change, onShowAtMs } = held;
+    held = null;
+    let fadeAtMs = Math.max(onShowAtMs, nowMs());
     if (change.fadeBeginsAtMs !== null && change.fadeBeginsAtMs <= fadeAtMs) return;
     let fadingChange = {
       ...change,
       fadeBeginsAtMs: fadeAtMs,
     };
-    changes = changes.map((input?: Dynamic) => (input === change ? fadingChange : input));
+    changes = changes.map((shown) => (shown === change ? fadingChange : shown));
     fadeOutAt(fadeAtMs);
   };
-  let showPending = () => {
-    if (pending === null) return;
-    startPendingFade();
+  let showHeld = () => {
+    if (held === null) return;
+    startHeldFade();
     listeners.forEach(notifyListener);
   };
-  let showPendingAfterMaxWait = async (change?: Dynamic): Promise<Dynamic> => {
+  let showHeldAfterMaxWait = async (change: ChangeArrivedFromAgent): Promise<void> => {
     await wait(AGENT_CHANGE_MAX_WAIT_MS);
-    if (pending?.change === change) showPending();
+    if (held?.change === change) showHeld();
   };
-  workbook.onChanged(() => {
-    if (!workbook.isWorking()) showPending();
+  agentActivity.onChanged(() => {
+    if (!agentActivity.isWorking()) showHeld();
   });
-  let tracker = {
+  let tracker: ChangesByAgentTracker = {
     streamChanged: () => editsStreamed.clear(),
-    editByAgentStreamed(revision?: Dynamic, isOfViewer?: Dynamic, isOfLayoutAlone?: Dynamic) {
+    editByAgentStreamed(revision, isOfViewer, isOfLayoutAlone) {
       editsStreamed.set(revision, {
-        isOfViewer: isOfViewer,
-        isOfLayoutAlone: isOfLayoutAlone,
-        streamedAtMs: nowMs2(),
+        isOfViewer,
+        isOfLayoutAlone,
+        streamedAtMs: nowMs(),
       });
-      if (!isOfLayoutAlone) showPending();
+      if (!isOfLayoutAlone) showHeld();
     },
-    caughtUpByLoad({ revisionBefore: revisionBefore, revision: revision, before: before, after: after }: Dynamic) {
-      let streamedInLoad = Array.from<Dynamic>(editsStreamed).filter(
-        ([input]: Dynamic) => input > revisionBefore && input <= revision,
+    caughtUpByLoad({ revisionBefore, revision, before, after }: CaughtUpByLoad) {
+      let streamedInLoad = Array.from(editsStreamed).filter(
+        ([streamedRevision]) => streamedRevision > revisionBefore && streamedRevision <= revision,
       );
       if (streamedInLoad.length < revision - revisionBefore) return;
       editsStreamed.set(revision, {
-        isOfViewer: streamedInLoad.every(([, { isOfViewer: input }]: Dynamic) => input),
-        isOfLayoutAlone: streamedInLoad.every(([, { isOfLayoutAlone: input }]: Dynamic) => input),
-        streamedAtMs: (Math.min as Dynamic)(...streamedInLoad.map(([, { streamedAtMs: input }]: Dynamic) => input)),
+        isOfViewer: streamedInLoad.every(([, { isOfViewer }]) => isOfViewer),
+        isOfLayoutAlone: streamedInLoad.every(([, { isOfLayoutAlone }]) => isOfLayoutAlone),
+        streamedAtMs: Math.min(...streamedInLoad.map(([, { streamedAtMs }]) => streamedAtMs)),
       });
       tracker.editsOfOthersMade(
         [
           {
-            revision: revision,
+            revision,
             placeChanged: null,
           },
         ],
         before,
         after,
       );
-      if (pending?.change.revision !== revision) for (let [revision2, streamed] of streamedInLoad as Dynamic) editsStreamed.set(revision2, streamed);
+      if (held?.change.revision !== revision)
+        for (let [streamedRevision, streamed] of streamedInLoad) editsStreamed.set(streamedRevision, streamed);
     },
-    editsOfOthersMade(edits?: Dynamic, before?: Dynamic, after?: Dynamic) {
-      let nowMs3 = nowMs2();
-      let newChanges: Dynamic = [];
-      let layoutChanges: Dynamic = [];
-      let largestCellCount: Dynamic = 0;
-      let hasNewMark: Dynamic = null;
-      let areAllStreamed = edits.every(({ revision: revision }: Dynamic) => editsStreamed.has(revision));
-      for (let { revision: value, placeChanged: placeChanged } of edits as Dynamic) {
-        let streamed = editsStreamed.get(value);
-        for (let value2 of editsStreamed.keys() as Dynamic) if (value2 <= value) editsStreamed.delete(value2);
+    editsOfOthersMade(edits: EditOfAnother[], before: WorkbookReads | null, after: WorkbookReads) {
+      let madeAtMs = nowMs();
+      let newChanges: Omit<ChangeArrivedFromAgent, 'fadeBeginsAtMs'>[] = [];
+      let layoutChanges: ChangeArrivedFromAgent[] = [];
+      let largestCellCount = 0;
+      let hasNewMark: boolean | null = null;
+      let areAllStreamed = edits.every(({ revision }) => editsStreamed.has(revision));
+      for (let { revision, placeChanged } of edits) {
+        let streamed = editsStreamed.get(revision);
+        for (let streamedRevision of editsStreamed.keys()) if (streamedRevision <= revision) editsStreamed.delete(streamedRevision);
         if (streamed === undefined) continue;
         if (streamed.isOfLayoutAlone) {
-          let value2 = selectionOfPlace(placeChanged);
-          if (value2 !== null)
+          let cellsOfPlace = selectionOfPlace(placeChanged);
+          if (cellsOfPlace !== null)
             layoutChanges.push({
-              revision: value,
-              cells: value2,
+              revision,
+              cells: cellsOfPlace,
               ...(streamed.isOfViewer && {
                 isOfViewer: true,
               }),
               isOfLayoutAlone: true,
-              fadeBeginsAtMs: nowMs3,
+              fadeBeginsAtMs: madeAtMs,
             });
           continue;
         }
@@ -585,7 +695,7 @@ export function createChangesByAgentTracker(
                   changed: [],
                 },
               ];
-        let [firstChange, ...inOtherSheets] = changedPlaces.flatMap(({ place: place, changed: changed }: Dynamic) => {
+        let [firstChange, ...inOtherSheets] = changedPlaces.flatMap(({ place, changed }) => {
           let selection = selectionOfPlace(place);
           if (selection === null) return [];
           let groupsApart = selectionsApartForChangedCells(changed, selection.activeCell.sheetId, after);
@@ -593,31 +703,31 @@ export function createChangesByAgentTracker(
             {
               cells: selection,
               ...(groupsApart.length > 0 && {
-                groupsApart: groupsApart,
+                groupsApart,
               }),
             },
           ];
         });
-        let isInRun = streamed.streamedAtMs < groupCount || hasNewMark !== null;
-        if (!isInRun) runSince = value;
+        let isInRun = streamed.streamedAtMs < holdEndsAtMs || hasNewMark !== null;
+        if (!isInRun) runSince = revision;
         hasNewMark = firstChange !== undefined;
         if (firstChange === undefined) continue;
-        for (let value2 of [firstChange, ...inOtherSheets].flatMap(
-          ({ cells: cells, groupsApart: groupsApart }: Dynamic) => groupsApart ?? [cells],
-        ) as Dynamic) {
-          let area = selectedArea(value2, after);
+        for (let groupCells of [firstChange, ...inOtherSheets].flatMap(
+          ({ cells, groupsApart }) => groupsApart ?? [cells],
+        )) {
+          let area = selectedArea(groupCells, after);
           largestCellCount = Math.max(largestCellCount, area === null ? 1 / 0 : area.rowCount * area.columnCount);
         }
         let beforeIfOneEdit = edits.length === 1 ? before : null;
         let chart = findChartPlacedByEdit(firstChange.cells.activeCell.sheetId, placeChanged, beforeIfOneEdit, after);
         newChanges.push({
-          revision: value,
+          revision,
           ...firstChange,
           ...(chart !== undefined && {
-            chart: chart,
+            chart,
           }),
           ...(inOtherSheets.length > 0 && {
-            inOtherSheets: inOtherSheets,
+            inOtherSheets,
           }),
           ...(streamed.isOfViewer && {
             isOfViewer: true,
@@ -628,50 +738,50 @@ export function createChangesByAgentTracker(
         });
       }
       if (hasNewMark === null && layoutChanges.length === 0) return;
-      if (layoutChanges.length > 0) fadeOutAt(nowMs3);
+      if (layoutChanges.length > 0) fadeOutAt(madeAtMs);
       if (hasNewMark !== null) {
-        startPendingFade();
-        groupCount = Math.max(groupCount, nowMs3 + changeHoldMsForCellCount(largestCellCount));
+        startHeldFade();
+        holdEndsAtMs = Math.max(holdEndsAtMs, madeAtMs + changeHoldMsForCellCount(largestCellCount));
       }
-      let fadeAtMs = groupCount;
+      let fadeAtMs = holdEndsAtMs;
       let lastChange = hasNewMark === true ? newChanges.pop() : undefined;
-      let fadingChanges: Dynamic = [];
-      for (let value of newChanges as Dynamic)
+      let fadingChanges: ChangeArrivedFromAgent[] = [];
+      for (let change of newChanges)
         fadingChanges.push({
-          ...value,
+          ...change,
           fadeBeginsAtMs: fadeAtMs,
         });
       if (fadingChanges.length > 0) fadeOutAt(fadeAtMs);
       changes = [...changes, ...fadingChanges];
-      if (lastChange !== undefined && workbook.isWorking()) {
-        let state = {
+      if (lastChange !== undefined && agentActivity.isWorking()) {
+        let lastHeld = {
           ...lastChange,
           fadeBeginsAtMs: null,
         };
-        pending = {
-          change: state,
+        held = {
+          change: lastHeld,
           onShowAtMs: fadeAtMs,
         };
-        changes = [...changes, state];
-        showPendingAfterMaxWait(state);
+        changes = [...changes, lastHeld];
+        showHeldAfterMaxWait(lastHeld);
       } else if (lastChange !== undefined) {
-        let state = {
+        let lastHeld = {
           ...lastChange,
-          fadeBeginsAtMs: nowMs3 + AGENT_CHANGE_HOLD_MS,
+          fadeBeginsAtMs: madeAtMs + AGENT_CHANGE_HOLD_MS,
         };
-        pending = {
-          change: state,
+        held = {
+          change: lastHeld,
           onShowAtMs: fadeAtMs,
         };
-        changes = [...changes, state];
-        fadeOutAt(state.fadeBeginsAtMs);
+        changes = [...changes, lastHeld];
+        fadeOutAt(lastHeld.fadeBeginsAtMs);
       }
       let allChanges = [...changes, ...layoutChanges];
-      allChanges.sort((input?: Dynamic, options?: Dynamic) => input.revision - options.revision);
+      allChanges.sort((a, b) => a.revision - b.revision);
       changes = allChanges;
       listeners.forEach(notifyListener);
     },
-    onChanged(listener?: Dynamic) {
+    onChanged(listener) {
       listeners.add(listener);
       if (changes.length > 0) notifyListener(listener);
       return () => void listeners.delete(listener);
@@ -679,7 +789,7 @@ export function createChangesByAgentTracker(
   };
   return tracker;
 }
-export function chartEndWordOfAgent(outcome?: Dynamic) {
+export function chartEndWordOfAgent(outcome: ChartOutcomeOfAgent): ChartEndWord {
   if (typeof outcome === 'object') return 'by_agent';
   switch (outcome) {
     case 'full':
@@ -698,13 +808,13 @@ export function chartEndWordOfAgent(outcome?: Dynamic) {
       return 'failed';
   }
 }
-export function chartCardActs(card?: Dynamic) {
+export function chartCardActs(card: ChartCardCount): string[] {
   if (card.step === 'open') return [`chart_open_${card.what}`];
   if (card.step === 'press') return ['chart_asked', `chart_asked_${card.what}`];
   return chartEndHealth(card.what, card.lane)[1] === 'success' ? ['chart_added', `chart_end_${card.what}`] : [`chart_end_${card.what}`];
 }
-export function chartEndHealth(what?: Dynamic, lane?: Dynamic) {
-  let kind = lane === 'page' ? 'insert' : 'generate';
+export function chartEndHealth(what: ChartEndWord, lane: ChartLane): ChartEndHealth {
+  let kind: ChartEndHealth[0] = lane === 'page' ? 'insert' : 'generate';
   switch (what) {
     case 'by_page':
     case 'by_page_late':
@@ -730,19 +840,22 @@ export function chartEndHealth(what?: Dynamic, lane?: Dynamic) {
       return [kind, 'aborted'];
   }
 }
-export function countChartAsk(count?: Dynamic, what?: Dynamic) {
+export function countChartAsk(
+  count: (card: ChartCardCount) => void,
+  what: ChartAskKindWord,
+): (endWhat: ChartEndWord, lane: ChartLane) => void {
   count({
     step: 'press',
-    what: what,
+    what,
   });
-  let isCounted: Dynamic = false;
-  return (endWhat?: Dynamic, lane?: Dynamic) => {
+  let isCounted = false;
+  return (endWhat, lane) => {
     if (isCounted) return;
     isCounted = true;
     count({
       step: 'end',
       what: endWhat,
-      lane: lane,
+      lane,
     });
   };
 }
@@ -753,20 +866,20 @@ export const CHANGE_HOLD_PER_CELL_MS = 60;
 export const CHANGE_HOLD_MAX_GROWTH_MS = 2000;
 export const CHANGE_HOLD_TAIL_MS = 200;
 export const CHANGE_HOLD_BASE_MS = 100;
-export const changeHoldMsForCellCount = (cellCount?: Dynamic) =>
+export const changeHoldMsForCellCount = (cellCount: number): number =>
   CHANGE_HOLD_BASE_MS + Math.min(CHANGE_HOLD_MAX_GROWTH_MS, cellCount * CHANGE_HOLD_PER_CELL_MS) + CHANGE_HOLD_TAIL_MS;
 export const MAX_CHANGE_GROUPS_APART = 8;
-export const gapBetweenSpans = (start?: Dynamic, length?: Dynamic, otherStart?: Dynamic, otherLength?: Dynamic) =>
+export const gapBetweenSpans = (start: number, length: number, otherStart: number, otherLength: number): number =>
   Math.max(start - (otherStart + otherLength - 1), otherStart - (start + length - 1), 0);
 export const CHANGE_JOIN_GAP = 1;
 export const CHANGED_CELL_CLUSTER_GAP = 2;
-export const CLUSTER_NEIGHBOUR_OFFSETS = Array.from<Dynamic, Dynamic>(
+export const CLUSTER_NEIGHBOUR_OFFSETS: [rowOffset: number, columnOffset: number][] = Array.from(
   {
     length: CHANGED_CELL_CLUSTER_GAP,
   },
-  (input?: Dynamic, index?: Dynamic) => index + 1,
+  (_, index) => index + 1,
 ).flatMap(
-  (distance?: Dynamic) => [
+  (distance): [number, number][] => [
     [-distance, 0],
     [distance, 0],
     [0, -distance],
@@ -775,17 +888,17 @@ export const CLUSTER_NEIGHBOUR_OFFSETS = Array.from<Dynamic, Dynamic>(
 );
 export const MAX_CHANGED_CELL_CLUSTERS = 64;
 export const didCellInputChange =
-  (before?: Dynamic, after?: Dynamic) =>
-  (cellId?: Dynamic) => {
+  (before: WorkbookReads, after: WorkbookReads) =>
+  (cellId: CellId): boolean => {
     let [cellBefore, cellAfter] = [before.cellOf(cellId), after.cellOf(cellId)];
     return cellBefore !== cellAfter && JSON.stringify(cellBefore?.input) !== JSON.stringify(cellAfter?.input);
   };
 export const MAX_CHANGED_CELLS_LISTED = 1e4;
-export const linesKeptUpToLast = (before?: Dynamic, after?: Dynamic) =>
+export const linesKeptUpToLast = (before: LineIndex, after: LineIndex): boolean =>
   linesKeepTheirOrder(before, after) && after.idAt(before.count - 1) === before.idAt(before.count - 1);
-export const chartAskKindWord = (chartKind?: Dynamic, isTyped?: Dynamic, hasSuggestions?: Dynamic) =>
+export const chartAskKindWord = (chartKind: StockKind | 'any', isTyped: boolean, hasSuggestions: boolean): ChartAskKindWord =>
   isTyped ? 'typed' : chartKind === 'any' ? 'quick' : hasSuggestions ? 'suggested' : 'plain_kind';
-export const CHART_END_WORDS = {
+export const CHART_END_WORDS: Record<'full' | 'codeRefused' | 'notMade', ChartEndWord> = {
   full: 'full',
   codeRefused: 'cant_be_shown',
   notMade: 'refused',

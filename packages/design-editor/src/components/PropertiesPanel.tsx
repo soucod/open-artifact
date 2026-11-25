@@ -84,6 +84,7 @@ import {
   PNote,
   PRow,
   PSection,
+  PSearchSelect,
   PSegments,
   PSelect,
   PTipButton,
@@ -584,8 +585,9 @@ function TextSection({ ctx, source }: { ctx: ElementContext; source: string }) {
         />
       </PRow>
       <PRow label="Font">
-        <PSelect
+        <PSearchSelect
           aria-label="Font"
+          searchLabel="Search fonts"
           value={fontOptions.some((f) => f.value === currentFont) ? currentFont : null}
           placeholder={currentFont || 'Default'}
           options={fontOptions}

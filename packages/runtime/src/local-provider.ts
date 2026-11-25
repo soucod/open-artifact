@@ -51,6 +51,7 @@ import {
   type DbGetResponse,
   type DbListResponse,
   type DbWriteRequest,
+  type DbWriteResponse,
   type ErrorResponse,
   type FilesResponse,
   type HistoryDiffResponse,
@@ -71,7 +72,7 @@ import {
   type ServerEvents,
   type SessionResponse,
 } from './http-api.ts';
-import { SHEET_API, SHEET_EVENT, type ImportFileResponse, type SheetFrame, type SheetSendResponse, type WidgetResponse } from './sheet-api.ts';
+import { SHEET_API, SHEET_EVENT, SHEET_WALKTHROUGH_EVENT, type ImportFileResponse, type SheetFrame, type SheetSendResponse, type SheetWalkthrough, type WidgetResponse } from './sheet-api.ts';
 import {
   DOC_API,
   type DocHistoryRequest,
@@ -379,9 +380,14 @@ export function createLocalProvider(options: LocalProviderOptions = {}): Capabil
       const capability: DbCapability = {
         get: async (path) => (await json<DbGetResponse>(API.dbGet, { cache: 'no-store' }, { path })).data,
         list: async (collection) => (await json<DbListResponse>(API.dbList, { cache: 'no-store' }, { collection })).documents,
+        listing: async (collection) => {
+          const { documents, epoch, seq } = await json<DbListResponse>(API.dbList, { cache: 'no-store' }, { collection });
+          return typeof epoch === 'string' && typeof seq === 'number' ? { documents, epoch, seq } : { documents };
+        },
         write: async (writes) => {
           const body: DbWriteRequest = { writes, client };
-          await post<{ ok: true }>(API.dbWrite, body);
+          const { epoch, seq, documents } = await post<DbWriteResponse>(API.dbWrite, body);
+          return typeof epoch === 'string' && typeof seq === 'number' && documents !== undefined ? { epoch, seq, documents } : undefined;
         },
         onChange: (listener: (event: DbChangeEvent) => void) => subscribe('db', listener),
       };
@@ -497,9 +503,16 @@ export function createLocalProvider(options: LocalProviderOptions = {}): Capabil
     async sheet() {
       const { stores } = await getSession();
       if (!stores?.sheet) return null;
+      // Sends go one at a time, each once the one before it is answered: the server takes them, and the page hears
+      // their answers, in the order the page made them, though each request is a fetch of its own.
+      let sending: Promise<unknown> = Promise.resolve();
       const capability: SheetCapability = {
         read: (request) => post(SHEET_API.read, request),
-        send: (request) => post<SheetSendResponse>(SHEET_API.send, request),
+        send: (request) => {
+          const answer = sending.then(() => post<SheetSendResponse>(SHEET_API.send, request));
+          sending = answer.catch(() => undefined);
+          return answer;
+        },
         widget: (request) => post<WidgetResponse>(SHEET_API.widget, request),
         importFile: (file, name) =>
           json<ImportFileResponse>(
@@ -508,6 +521,7 @@ export function createLocalProvider(options: LocalProviderOptions = {}): Capabil
             { name },
           ),
         onFrame: (listener: (frame: SheetFrame) => void) => subscribe(SHEET_EVENT, listener),
+        onWalkthrough: (listener: (walkthrough: SheetWalkthrough) => void) => subscribe(SHEET_WALKTHROUGH_EVENT, listener),
       };
       return capability;
     },

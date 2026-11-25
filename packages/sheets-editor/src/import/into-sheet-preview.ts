@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cellShownText } from '../clipboard/text-escaping.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { previewCellsUnderReading, shortenImportLabel, PREVIEW_ROW_COUNT } from './preview.ts';
@@ -8,32 +7,56 @@ import { isFormulaCell } from '../model/workbook.ts';
 import { tableImportRequest, countTableChangeRows } from './places.ts';
 import { tableWriteHasRoom } from '../model/workbook-room.ts';
 import { dataLineNumbers, readingFittingTexts, importColumnTexts } from './column-readings.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function previewCellOfSheetCell(reads: WorkbookReads, cellId?: Dynamic) {
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { Color, ColumnId, ReadInput, RowId, WhatATableChangesAnswer, WhatBecomesOfARow } from '@open-artifact/sheets-core';
+import type {
+  ImportFile,
+  ImportIntoSheet,
+  ImportIntoSheetChanges,
+  ImportIntoSheetRow,
+  ImportPreviewCell,
+  ImportSheetColumnLabel,
+} from '../state/initial-state.ts';
+import type { ImportReading } from '../state/event-reducer.ts';
+import type { ImportPreviewCellRead, ImportTablePlan } from './preview.ts';
+import type { SheetDestination } from './places.ts';
+/** A column of a sheet with its letters and the name in its header cell. */
+export interface SheetColumnNamed extends ImportSheetColumnLabel {
+  columnId: ColumnId;
+}
+export function previewCellOfSheetCell(reads: WorkbookReads, cellId: CellId): ImportPreviewCell {
   let cell = reads.cellOnShowIn(cellId);
   let shown = cellShownText(cell, reads.decimalSign);
   if (cell === null || shown === '')
     return {
       kind: 'blank',
     };
+  // The engine writes the key only for a cell that holds an option.
   if ('dropdownOption' in cell)
     return {
       kind: 'option',
-      shown: cell.dropdownOption.label,
-      color: cell.dropdownOption.color,
+      shown: cell.dropdownOption!.label,
+      color: cell.dropdownOption!.color,
     };
   let kind = cellValueOf(cell)?.kind;
   if (kind === 'number')
     return {
-      kind: kind,
-      shown: shown,
+      kind,
+      shown,
     };
   return {
     kind: kind === 'boolean' ? 'trueOrFalse' : 'text',
-    shown: shown,
+    shown,
   };
 }
-export function previewCellsIntoSheet(reading: Dynamic, texts: Dynamic, cellIds: Dynamic, optionsAdded: Dynamic, reads: WorkbookReads) {
+/** How the texts of a file's column would show in the sheet's cells they go into, by the cells' dropdowns and number formats. */
+export function previewCellsIntoSheet(
+  reading: ImportReading,
+  texts: string[],
+  cellIds: (CellId | null)[],
+  optionsAdded: Map<string, string[]>,
+  reads: WorkbookReads,
+): ImportPreviewCell[] {
   let previewCells = previewCellsUnderReading(
     reading.kind === 'dropdown'
       ? {
@@ -43,7 +66,7 @@ export function previewCellsIntoSheet(reading: Dynamic, texts: Dynamic, cellIds:
     texts,
     reads,
   );
-  return texts.map((text?: Dynamic, index?: Dynamic) => {
+  return texts.map((text, index): ImportPreviewCell => {
     let cellId = cellIds[index] ?? null;
     let lowered = text.trim().toLowerCase();
     let dropdown = cellId === null || lowered === '' ? null : reads.dropdownOf(cellId);
@@ -51,14 +74,14 @@ export function previewCellsIntoSheet(reading: Dynamic, texts: Dynamic, cellIds:
     let option = [
       ...(dropdown?.options ?? []),
       ...labelsAdded.map(
-        (label?: Dynamic) => ({
-          label: label,
+        (label): { label: string; color: Color } => ({
+          label,
           color: {
             kind: 'none',
           },
         }),
       ),
-    ].find(({ label: label }: Dynamic) => label.trim().toLowerCase() === lowered);
+    ].find(({ label }) => label.trim().toLowerCase() === lowered);
     if (option !== undefined)
       return {
         kind: 'option',
@@ -70,7 +93,7 @@ export function previewCellsIntoSheet(reading: Dynamic, texts: Dynamic, cellIds:
       return {
         kind: 'blank',
       };
-    let { cell: cell, held: held, hasAFormatOfItsOwn: hasAFormatOfItsOwn } = previewCell;
+    let { cell, held, hasAFormatOfItsOwn } = previewCell;
     let numberFormat = cellId === null ? DEFAULT_CELL_FORMAT.numberFormat : reads.formatOf(cellId).numberFormat;
     if (cell.kind !== 'number' || numberFormat.pattern === DEFAULT_CELL_FORMAT.numberFormat.pattern) return cell;
     if (!isNumberInput(held)) return cell;
@@ -81,15 +104,19 @@ export function previewCellsIntoSheet(reading: Dynamic, texts: Dynamic, cellIds:
     };
   });
 }
-export function sheetColumnsOf(columnIds: Dynamic, { sheetId: sheetId, headerRowId: headerRowId }: Dynamic, reads: WorkbookReads) {
-  let columns = [...columnIds].flatMap((columnId?: Dynamic) => {
+export function sheetColumnsOf(
+  columnIds: Set<ColumnId>,
+  { sheetId, headerRowId }: Pick<SheetDestination, 'sheetId' | 'headerRowId'>,
+  reads: WorkbookReads,
+): SheetColumnNamed[] {
+  let columns = [...columnIds].flatMap((columnId) => {
     let columnIndex = reads.columnIndexOf(sheetId, columnId);
     let name = shortenImportLabel(
       cellShownText(
         reads.cellOnShowIn({
-          sheetId: sheetId,
+          sheetId,
           rowId: headerRowId,
-          columnId: columnId,
+          columnId,
         }),
         reads.decimalSign,
       ),
@@ -99,39 +126,43 @@ export function sheetColumnsOf(columnIds: Dynamic, { sheetId: sheetId, headerRow
       : [
           {
             at: columnIndex,
-            columnId: columnId,
+            columnId,
             letters: columnLetters(columnIndex),
             name: name === '' ? null : name,
           },
         ];
   });
-  columns.sort((a?: Dynamic, b2?: Dynamic) => a.at - b2.at);
+  columns.sort((a, b) => a.at - b.at);
   return columns.map(
-    ({ columnId: columnId, letters: letters, name: name }: Dynamic) => ({
-      columnId: columnId,
-      letters: letters,
-      name: name,
+    ({ columnId, letters, name }) => ({
+      columnId,
+      letters,
+      name,
     }),
   );
 }
-export function dropdownOptionsAdded({ optionsAdded: optionsAdded }: Dynamic, destination: Dynamic, reads: WorkbookReads) {
-  let labelsByColumn = new (Map as Dynamic)();
-  for (let { column: column, labels: labels } of optionsAdded as Dynamic) {
+export function dropdownOptionsAdded(
+  { optionsAdded }: Pick<WhatATableChangesAnswer, 'optionsAdded'>,
+  destination: SheetDestination,
+  reads: WorkbookReads,
+): ImportIntoSheetChanges['optionsAdded'] {
+  let labelsByColumn = new Map<ColumnId, string[]>();
+  for (let { column, labels } of optionsAdded) {
     let columnId = destination.intoColumns[column] ?? null;
     if (columnId !== null) labelsByColumn.set(columnId, [...(labelsByColumn.get(columnId) ?? []), ...labels]);
   }
-  return sheetColumnsOf(new (Set as Dynamic)(labelsByColumn.keys()), destination, reads).flatMap(
-    ({ columnId: columnId, letters: letters, name: name }: Dynamic) => {
-      let shortLabels = [...new (Set as Dynamic)(labelsByColumn.get(columnId))]
+  return sheetColumnsOf(new Set(labelsByColumn.keys()), destination, reads).flatMap(
+    ({ columnId, letters, name }) => {
+      let shortLabels = [...new Set(labelsByColumn.get(columnId))]
         .map(shortenImportLabel)
-        .filter((label?: Dynamic) => label !== '');
+        .filter((label) => label !== '');
       return shortLabels.length === 0
         ? []
         : [
             {
               column: {
-                letters: letters,
-                name: name,
+                letters,
+                name,
               },
               labels: shortLabels,
             },
@@ -139,19 +170,23 @@ export function dropdownOptionsAdded({ optionsAdded: optionsAdded }: Dynamic, de
     },
   );
 }
-export function formulasWrittenOver(changedRows: Dynamic, destination: Dynamic, reads: WorkbookReads) {
-  let { sheetId: sheetId, intoColumns: intoColumns } = destination;
-  let count: Dynamic = 0;
-  let columnIds = new (Set as Dynamic)();
-  for (let { row: rowId, columns: columns } of changedRows as Dynamic)
-    for (let columnIndex of columns as Dynamic) {
+export function formulasWrittenOver(
+  changedRows: Extract<WhatBecomesOfARow, { kind: 'changes' }>[],
+  destination: SheetDestination,
+  reads: WorkbookReads,
+): ImportIntoSheetChanges['formulasWrittenOver'] {
+  let { sheetId, intoColumns } = destination;
+  let count = 0;
+  let columnIds = new Set<ColumnId>();
+  for (let { row: rowId, columns } of changedRows)
+    for (let columnIndex of columns) {
       let columnId = intoColumns[columnIndex] ?? null;
       if (columnId === null) continue;
       if (
         !isFormulaCell(reads, {
-          sheetId: sheetId,
-          rowId: rowId,
-          columnId: columnId,
+          sheetId,
+          rowId,
+          columnId,
         })
       )
         continue;
@@ -159,31 +194,37 @@ export function formulasWrittenOver(changedRows: Dynamic, destination: Dynamic, 
       columnIds.add(columnId);
     }
   return {
-    count: count,
+    count,
     columns: sheetColumnLabels(columnIds, destination, reads),
   };
 }
-export function columnsClearedByReplace(rowIds: Dynamic, destination: Dynamic, reads: WorkbookReads) {
-  let { sheetId: sheetId, intoColumns: intoColumns } = destination;
-  let rowIndexes = rowIds.flatMap((rowId?: Dynamic) => reads.rowIndexOf(sheetId, rowId) ?? []);
-  let sheetColumnCount = reads.listSheets().find((sheet?: Dynamic) => sheet.sheetId === sheetId)?.columnCount;
+/** The sheet's columns that replacing the rows would clear: filled in those rows, but not imported into. */
+export function columnsClearedByReplace(rowIds: RowId[], destination: SheetDestination, reads: WorkbookReads): ImportSheetColumnLabel[] {
+  let { sheetId, intoColumns } = destination;
+  let rowIndexes = rowIds.flatMap((rowId) => reads.rowIndexOf(sheetId, rowId) ?? []);
+  let sheetColumnCount = reads.listSheets().find((sheet) => sheet.sheetId === sheetId)?.columnCount;
   if (rowIndexes.length === 0 || sheetColumnCount === undefined) return [];
-  let rowIdSet = new (Set as Dynamic)(rowIds);
-  let { firstIndex: firstIndex, count: count } = spanOfIndexes(rowIndexes);
+  let rowIdSet = new Set(rowIds);
+  let { firstIndex, count } = spanOfIndexes(rowIndexes);
   let filledCells = reads.filledCellsIn(sheetId, {
     topRowIndex: firstIndex,
     rowCount: count,
     leftColumnIndex: 0,
     columnCount: sheetColumnCount,
   });
-  let clearedColumnIds = new (Set as Dynamic)(
+  let clearedColumnIds = new Set(
     filledCells.flatMap(
-      ({ rowId: rowId, columnId: columnId }: Dynamic) => (rowIdSet.has(rowId) && !intoColumns.includes(columnId) ? [columnId] : []),
+      ({ rowId, columnId }) => (rowIdSet.has(rowId) && !intoColumns.includes(columnId) ? [columnId] : []),
     ),
   );
   return sheetColumnLabels(clearedColumnIds, destination, reads);
 }
-export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dynamic, reads: WorkbookReads) {
+export function previewIntoSheet(
+  file: Pick<ImportFile, 'lines'>,
+  plan: ImportTablePlan,
+  destination: SheetDestination,
+  reads: WorkbookReads,
+): ImportIntoSheet | null {
   let request = tableImportRequest(destination, file, plan);
   let read = reads.whatATableChanges(request);
   if (read === null || read.kind === 'refused') return read;
@@ -192,74 +233,74 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
       kind: 'refused',
       refusal: 'tooManyCells',
     };
-  let { sheetId: sheetId, headerRowId: headerRowId, intoColumns: intoColumns } = destination;
-  let columnsInto = intoColumns.flatMap((columnId?: Dynamic, columnIndexInTheFile?: Dynamic) => {
+  let { sheetId, headerRowId, intoColumns } = destination;
+  let columnsInto = intoColumns.flatMap((columnId, columnIndexInTheFile) => {
     let at = columnId === null ? null : reads.columnIndexOf(sheetId, columnId);
     return columnId === null || at === null
       ? []
       : [
           {
-            columnId: columnId,
-            columnIndexInTheFile: columnIndexInTheFile,
-            at: at,
+            columnId,
+            columnIndexInTheFile,
+            at,
           },
         ];
   });
-  columnsInto.sort((a?: Dynamic, b2?: Dynamic) => a.at - b2.at);
+  columnsInto.sort((a, b) => a.at - b.at);
   let columns = columnsInto;
-  let cellIdAt = (rowId: Dynamic, { columnId: columnId }: Dynamic) => ({
-    sheetId: sheetId,
-    rowId: rowId,
-    columnId: columnId,
+  let cellIdAt = (rowId: RowId, { columnId }: { columnId: ColumnId }): CellId => ({
+    sheetId,
+    rowId,
+    columnId,
   });
-  let lastRow: Dynamic = null;
+  let lastRow: { rowId: RowId; at: number } | null = null;
   let headerRowIndex = reads.rowIndexOf(sheetId, headerRowId) ?? 0;
-  for (let rowId of reads.rowsAsTheyStand(sheetId).keys() as Dynamic) {
+  for (let rowId of reads.rowsAsTheyStand(sheetId).keys()) {
     let rowIndex = reads.rowIndexOf(sheetId, rowId);
     if (rowIndex !== null && rowIndex > headerRowIndex && rowIndex > (lastRow?.at ?? -1))
       lastRow = {
-        rowId: rowId,
+        rowId,
         at: rowIndex,
       };
   }
   let lastRowId = lastRow?.rowId ?? null;
   let isReplace = destination.how.kind === 'replaceRows';
   let indexedRows = read.rows.map(
-    (row?: Dynamic, index?: Dynamic) => ({
-      row: row,
-      index: index,
+    (row, index) => ({
+      row,
+      index,
     }),
   );
   let changedRows = isReplace
     ? []
     : indexedRows
         .flatMap(
-          ({ row: row, index: index }: Dynamic) =>
+          ({ row, index }) =>
             row.kind === 'changes'
               ? [
                   {
-                    row: row,
-                    index: index,
+                    row,
+                    index,
                   },
                 ]
               : [],
         )
         .slice(0, MAX_CHANGED_ROWS_SHOWN);
   let addedRows = indexedRows
-    .filter(({ row: row }: Dynamic) => (isReplace ? row.kind !== 'leftOut' : row.kind === 'added'))
+    .filter(({ row }) => (isReplace ? row.kind !== 'leftOut' : row.kind === 'added'))
     .slice(0, PREVIEW_ROW_COUNT - changedRows.length);
   let shownRows = [
     ...changedRows.map(
-      ({ row: row, index: index }: Dynamic) => ({
-        index: index,
+      ({ row, index }) => ({
+        index,
         rowId: row.row,
         looksAs: row.row,
-        changes: new (Set as Dynamic)(row.columns),
+        changes: new Set(row.columns),
       }),
     ),
     ...addedRows.map(
-      ({ row: row, index: index }: Dynamic) => ({
-        index: index,
+      ({ row, index }) => ({
+        index,
         rowId: null,
         looksAs: row.kind === 'changes' || row.kind === 'same' ? row.row : lastRowId,
         changes: null,
@@ -267,39 +308,39 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
     ),
   ];
   let records = dataLineNumbers(file, plan);
-  let labelsByDropdown = new (Map as Dynamic)(
-    read.optionsAdded.map(({ dropdownId: dropdownId, labels: labels }: Dynamic) => [dropdownId, labels]),
+  let labelsByDropdown = new Map(
+    read.optionsAdded.map(({ dropdownId, labels }) => [dropdownId, labels]),
   );
-  let previewColumns = columns.map((column?: Dynamic) => {
-    let reading = plan.columns[column.columnIndexInTheFile]?.reading ?? {
+  let previewColumns = columns.map((column) => {
+    let reading: ImportReading = plan.columns[column.columnIndexInTheFile]?.reading ?? {
       kind: 'text',
     };
     let fittingReading = readingFittingTexts(reading, importColumnTexts(file, records, column.columnIndexInTheFile));
     return previewCellsIntoSheet(
       fittingReading,
-      shownRows.map(({ index: index }: Dynamic) => request.rows[index]?.[column.columnIndexInTheFile] ?? ''),
-      shownRows.map(({ looksAs: looksAs }: Dynamic) => (looksAs === null ? null : cellIdAt(looksAs, column))),
+      shownRows.map(({ index }) => request.rows[index]?.[column.columnIndexInTheFile] ?? ''),
+      shownRows.map(({ looksAs }) => (looksAs === null ? null : cellIdAt(looksAs, column))),
       labelsByDropdown,
       reads,
     );
   });
   let rows = shownRows.map(
-    ({ index: index, rowId: rowId, changes: changes }: Dynamic, rowIndex?: Dynamic) => ({
+    ({ index, rowId, changes }, rowIndex): ImportIntoSheetRow => ({
       id: rowId ?? `row ${index} of the file`,
       kind: rowId === null ? 'added' : 'changed',
-      cells: columns.map((column?: Dynamic, columnIndex?: Dynamic) => {
-        let cell = previewColumns[columnIndex]?.[rowIndex] ?? {
+      cells: columns.map((column, columnIndex) => {
+        let cell: ImportPreviewCell = previewColumns[columnIndex]?.[rowIndex] ?? {
           kind: 'blank',
         };
         if (rowId === null)
           return {
-            cell: cell,
+            cell,
             before: null,
           };
         let before = previewCellOfSheetCell(reads, cellIdAt(rowId, column));
         return changes.has(column.columnIndexInTheFile)
           ? {
-              cell: cell,
+              cell,
               before: before.kind === 'blank' ? '' : before.shown,
             }
           : {
@@ -310,11 +351,11 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
     }),
   );
   let goneRows = read.rowsThatGo.slice(0, isReplace ? 0 : MAX_GONE_ROWS_SHOWN).map(
-    (rowId?: Dynamic) => ({
+    (rowId): ImportIntoSheetRow => ({
       id: rowId,
       kind: 'gone',
       cells: columns.map(
-        (column?: Dynamic) => ({
+        (column) => ({
           cell: previewCellOfSheetCell(reads, cellIdAt(rowId, column)),
           before: null,
         }),
@@ -325,7 +366,7 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
   return {
     kind: 'changes',
     columns: columns.map(
-      (column?: Dynamic) => ({
+      (column) => ({
         columnIndexInTheFile: column.columnIndexInTheFile,
         name: cellShownText(reads.cellOnShowIn(cellIdAt(headerRowId, column)), reads.decimalSign),
         reading: plan.columns[column.columnIndexInTheFile]?.reading ?? {
@@ -335,12 +376,12 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
     ),
     isReplaced: isReplace,
     columnsLeftOut: plan.columns.flatMap(
-      ({ name: name }: Dynamic, columnIndex?: Dynamic) =>
+      ({ name }, columnIndex) =>
         (intoColumns[columnIndex] ?? null) === null
           ? [
               {
                 columnIndexInTheFile: columnIndex,
-                name: name,
+                name,
               },
             ]
           : [],
@@ -348,32 +389,37 @@ export function previewIntoSheet(file: Dynamic, plan: Dynamic, destination: Dyna
     optionsAdded: dropdownOptionsAdded(read, destination, reads),
     columnsCleared: isReplace
       ? columnsClearedByReplace(
-          read.rows.flatMap((row?: Dynamic) => (row.kind === 'changes' ? [row.row] : [])),
+          read.rows.flatMap((row) => (row.kind === 'changes' ? [row.row] : [])),
           destination,
           reads,
         )
       : [],
     formulasWrittenOver: formulasWrittenOver(
-      read.rows.flatMap((row?: Dynamic) => (row.kind === 'changes' ? [row] : [])),
+      read.rows.flatMap((row) => (row.kind === 'changes' ? [row] : [])),
       destination,
       reads,
     ),
     rows: [...rows, ...goneRows],
-    addedCount: addedCount,
-    changedCount: changedCount,
-    sameCount: sameCount,
+    addedCount,
+    changedCount,
+    sameCount,
     goneCount: read.rowsThatGo.length,
     untouchedCount: destination.how.kind === 'addRows' ? (lastRow?.at ?? headerRowIndex) - headerRowIndex : read.rowsNotInTheTable.length,
   };
 }
 export const MAX_CHANGED_ROWS_SHOWN = 50;
 export const MAX_GONE_ROWS_SHOWN = 10;
-export const isNumberInput = (value?: Dynamic) =>
+/** A number read from the file; a preview cell is held only under a true-or-false reading, so it is never a number. */
+export const isNumberInput = (value: ImportPreviewCellRead['held']): value is Extract<ReadInput, { kind: 'number' }> =>
   typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'number';
-export const sheetColumnLabels = (columnIds: Dynamic, place: Dynamic, reads: WorkbookReads) =>
+export const sheetColumnLabels = (
+  columnIds: Set<ColumnId>,
+  place: Pick<SheetDestination, 'sheetId' | 'headerRowId'>,
+  reads: WorkbookReads,
+): ImportSheetColumnLabel[] =>
   sheetColumnsOf(columnIds, place, reads).map(
-    ({ letters: letters, name: name }: Dynamic) => ({
-      letters: letters,
-      name: name,
+    ({ letters, name }) => ({
+      letters,
+      name,
     }),
   );

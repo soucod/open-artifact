@@ -29,6 +29,7 @@
  */
 
 import { parseUnicodeRange } from '@open-artifact/export-kit';
+import { fetchRetrying } from './assets.ts';
 import { fontClass, fontFamilies } from './css.ts';
 import { containsGlyph, fsTypeAllowsEmbedding, panoseHex, readFontTables, wrapEot, type FontTables } from './font-tables.ts';
 import type { ExportNotes } from './notes.ts';
@@ -53,7 +54,7 @@ export interface EmbeddedFont {
 }
 
 /** What became of one family. */
-export type FontOutcome = 'carried' | 'licence' | 'variable' | 'format' | 'budget' | 'fetch';
+export type FontOutcome = 'carried' | 'licence' | 'variable' | 'format' | 'budget' | 'slow' | 'fetch';
 
 export interface FamilyOutcome {
   family: string;
@@ -132,10 +133,30 @@ function* textRuns(slides: readonly PptxSlide[]): Generator<TextRun> {
   }
 }
 
+/** Markers drawn in their paragraph's font, as runs of that font. */
+function* markerRuns(slides: readonly PptxSlide[]): Generator<TextRun> {
+  function* markers(body?: TextBody): Generator<TextRun> {
+    for (const paragraph of body?.paragraphs ?? []) {
+      const bullet = paragraph.bullet;
+      if (bullet?.type !== 'char' || !bullet.ownFont) continue;
+      const first = paragraph.runs.find((run) => run.font && !run.lineBreak);
+      if (first) yield { text: bullet.char, size: first.size, font: first.font };
+    }
+  }
+  for (const slide of slides) {
+    for (const element of slide.elements) {
+      if (element.type === 'shape') yield* markers(element.text);
+      if (element.type === 'table') {
+        for (const row of element.rows) for (const cell of row.cells) yield* markers(cell.text);
+      }
+    }
+  }
+}
+
 /** Every family the exported text is set in, with its characters and italic use. */
 export function collectFontUses(slides: readonly PptxSlide[]): Map<string, FontUse> {
   const uses = new Map<string, FontUse>();
-  for (const run of textRuns(slides)) {
+  for (const run of [...textRuns(slides), ...markerRuns(slides)]) {
     if (!run.font || run.lineBreak) continue;
     const key = run.font.toLowerCase();
     let use = uses.get(key);
@@ -321,7 +342,7 @@ async function vetFace(bytes: Uint8Array, unpack: EmbeddingOptions['unpackWoff2'
 
 /** The most telling reason a family with no usable face was left out. */
 function worstOutcome(failed: readonly FontOutcome[]): FontOutcome {
-  return (['licence', 'variable', 'format'] as const).find((reason) => failed.includes(reason)) ?? 'fetch';
+  return (['licence', 'variable', 'format', 'slow'] as const).find((reason) => failed.includes(reason)) ?? 'fetch';
 }
 
 /**
@@ -356,7 +377,7 @@ export async function embedDeckFonts(uses: ReadonlyMap<string, FontUse>, faces: 
     } catch {
       family = null;
     }
-    if (!family) return { use, attempts: [], catalogFailed: 'fetch' };
+    if (!family) return { use, attempts: [], catalogFailed: overall.signal.aborted ? 'slow' : 'fetch' };
     if (!licenceAllowsEmbedding(family.licence)) return { use, attempts: [], catalogFailed: 'licence' };
     const subset = pickSubset(family, use.codePoints);
     if (!subset) return { use, attempts: [], catalogFailed: 'fetch' };
@@ -369,7 +390,7 @@ export async function embedDeckFonts(uses: ReadonlyMap<string, FontUse>, faces: 
           if ('failed' in vetted) return { style, failed: vetted.failed };
           return { style, data: vetted.data, info: vetted.info, partial: subset.partial };
         } catch {
-          return { style, failed: 'fetch' };
+          return { style, failed: overall.signal.aborted ? 'slow' : 'fetch' };
         }
       }),
     );
@@ -442,6 +463,9 @@ export function noteFontEmbedding(notes: Pick<ExportNotes, 'family'>, embedding:
       case 'budget':
         notes.family(afterOthers ? 'fontBudgetAfter' : 'fontBudget', family);
         break;
+      case 'slow':
+        notes.family('fontSlow', family);
+        break;
       case 'fetch':
         notes.family('fontFetch', family);
         break;
@@ -460,12 +484,12 @@ export function fontNoticeText(embedding: FontEmbedding): string | undefined {
 /** Fetches over the network for {@link embedDeckFonts} (no credentials: these are public files). */
 export const networkFetchers: Pick<EmbeddingOptions, 'fetchJson' | 'fetchBytes'> = {
   async fetchJson(url, signal) {
-    const response = await fetch(url, { signal, credentials: 'omit' });
+    const response = await fetchRetrying(url, { signal, credentials: 'omit' });
     if (!response.ok) throw new Error(`fetch ${response.status}`);
     return response.json();
   },
   async fetchBytes(url, signal) {
-    const response = await fetch(url, { signal, credentials: 'omit' });
+    const response = await fetchRetrying(url, { signal, credentials: 'omit' });
     if (!response.ok) throw new Error(`fetch ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());
   },

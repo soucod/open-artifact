@@ -40,13 +40,15 @@ export interface ChartEdits {
   add(chart: unknown, sheets: SheetView[]): void;
   set(chartId: unknown, chart: unknown, sheets: SheetView[]): boolean;
   remove(chartId: unknown, sheets: SheetView[]): void;
+  /** An interactive panel on a blank tab of its own (charts.ts). */
+  addInteractive(panel: unknown, sheets: SheetView[]): void;
 }
 
 export const EDIT_KINDS = [
   'writeCells', 'addSheet', 'renameSheet', 'restoreSheet', 'moveSheets', 'formatCells', 'groupRows', 'groupColumns', 'ungroupRows', 'ungroupColumns',
   'mergeCells', 'unmergeCells', 'setBorders', 'setColumnWidths', 'fitColumns', 'setRowHeights', 'insertRows', 'insertColumns', 'moveRows', 'moveColumns',
   'sortRows', 'sortCells', 'deleteRows', 'deleteColumns', 'deleteSheet', 'setSheetSettings', 'makeDropdown', 'setDropdownOptions', 'setCellTable',
-  'replaceConditionalFormats', 'addChart', 'setChart', 'deleteChart', 'setTimeZone', 'setLocale',
+  'replaceConditionalFormats', 'addChart', 'setChart', 'deleteChart', 'addInteractive', 'setTimeZone', 'setLocale',
 ];
 
 /**
@@ -313,6 +315,11 @@ function applyEdit(edit: unknown, context: EditContext): boolean {
       context.charts.remove(edit.chartId, sheets);
       return true;
     }
+    case 'addInteractive':
+      checkKeys(edit, ['interactive']);
+      if (!context.charts) throw new AgentError('interactiveNotAvailable', 'Interactive panels are made only by an update of the Sheet itself.');
+      context.charts.addInteractive(edit.interactive, sheets);
+      return true;
     case 'setTimeZone': {
       checkKeys(edit, ['timeZone']);
       const zone = edit.timeZone;

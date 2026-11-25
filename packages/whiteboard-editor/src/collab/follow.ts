@@ -45,7 +45,7 @@ export function startFollow(): () => void {
     const area = peer ? peerViewArea(peer) : undefined;
     const state = useCamera.getState();
     if (area) {
-      const { min, max } = zoomRange(state);
+      const { min, max } = zoomRange();
       const viewport = { w: state.width, h: state.height, top: state.insets.top, bottom: state.insets.bottom };
       const target = cameraFittingArea(area, viewport, (zoom) => clampZoom(zoom, min, max));
       const next = easeCameraToward(state.camera, target, last === 0 ? 16 : Math.min(100, time - last), { w: state.width, h: state.height });

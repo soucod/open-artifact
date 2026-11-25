@@ -1,6 +1,5 @@
-import type { Dynamic } from '../dynamic.ts';
-import { DEFAULT_CELL_DENSITY } from '../grid/cell-metrics-values.ts';
-export function readStoredDensity(getStorage: Dynamic = defaultDensityStorage) {
+import { DEFAULT_CELL_DENSITY, type CellDensity } from '../grid/cell-metrics-values.ts';
+export function readStoredDensity(getStorage: () => Storage = defaultDensityStorage) {
   try {
     let stored = getStorage().getItem(DENSITY_STORAGE_KEY);
     return stored === 'comfortable' || stored === 'compact' ? stored : DEFAULT_CELL_DENSITY;
@@ -8,9 +7,9 @@ export function readStoredDensity(getStorage: Dynamic = defaultDensityStorage) {
     return DEFAULT_CELL_DENSITY;
   }
 }
-export function storeDensity(input?: Dynamic, options: Dynamic = defaultDensityStorage) {
+export function storeDensity(density: CellDensity, getStorage: () => Storage = defaultDensityStorage) {
   try {
-    options().setItem(DENSITY_STORAGE_KEY, input);
+    getStorage().setItem(DENSITY_STORAGE_KEY, density);
   } catch {}
 }
 export const DENSITY_STORAGE_KEY = 'sheets-density';

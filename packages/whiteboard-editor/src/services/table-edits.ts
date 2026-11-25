@@ -16,18 +16,24 @@
 import {
   TEXT_CUT_NOTICE,
   exceedsTableCellLimit,
+  isElementLocked,
   parseTsvGrid,
   tableCellValue,
   tableColumnIds,
   tableRowIds,
   trimPastedTableCells,
   type ElementId,
+  type FillColor,
+  type TableAxis,
   type TableEditor,
+  type TableElement,
 } from '@open-artifact/whiteboard-core';
+import { TABLE_TINT_MESSAGES, heatChangeMessage, heatColorFor } from '../lib/table-heat.ts';
 import { useBoard } from '../state/board.ts';
 import { useSelection } from '../state/selection.ts';
-import { TABLE_MESSAGES } from './actions.ts';
-import { announce, notify, refuse } from './announce.ts';
+import { useTableHeat } from '../state/table-heat.ts';
+import { TABLE_MESSAGES, ensureEditable } from './actions.ts';
+import { LOCKED_MESSAGE, announce, notify, refuse } from './announce.ts';
 
 /** Names of the buttons that add a row or a column. */
 export const TABLE_ADD_LABELS = { row: 'Add a row', column: 'Add a column' } as const;
@@ -136,4 +142,53 @@ export function addTableLine(id: ElementId, line: 'row' | 'column'): string | un
   const key = line === 'row' ? editor.addRow(id, rows) : editor.addCol(id, cols);
   if (key !== undefined) announce(TABLE_MESSAGES.added(line));
   return key;
+}
+
+/** The table `id` and the editor when the viewer may change its colors (refusing, with the reason, otherwise). */
+function tintableTable(id: ElementId): { table: TableElement; tables: TableEditor } | undefined {
+  if (!ensureEditable()) return undefined;
+  const table = useBoard.getState().byId.get(id);
+  if (table?.type !== 'table' || editor === null) return undefined;
+  if (isElementLocked(table)) return void refuse(LOCKED_MESSAGE);
+  flushTableCell();
+  return { table, tables: editor };
+}
+
+/** Sets the fill of table cells (`""` clears it) as one step. */
+export function setTableCellFill(id: ElementId, cells: readonly { row: string; col: string }[], color: FillColor | ''): boolean {
+  const target = tintableTable(id);
+  if (target === undefined) return false;
+  const changed = target.tables.setFills(
+    id,
+    cells.map(({ row, col }) => [row, col, color] as const),
+  );
+  if (changed) announce(color === '' ? TABLE_TINT_MESSAGES.fillRemoved : TABLE_TINT_MESSAGES.fill);
+  return changed;
+}
+
+/**
+ * Sets the heat map of one column or row (`""` takes it off) as one step;
+ * turning one on takes the other axis's heat maps off and clears the
+ * fills of the cells it shades.
+ */
+export function setTableLineHeat(id: ElementId, axis: TableAxis, line: string, color: FillColor | ''): boolean {
+  const target = tintableTable(id);
+  if (target === undefined) return false;
+  const changed = target.tables.setHeat(id, axis, line, color);
+  if (changed) announce(heatChangeMessage(target.table.heat, axis, line, color));
+  return changed;
+}
+
+/** Turns the heat map of one column or row on (in the color it would take) or off. */
+export function toggleTableLineHeat(id: ElementId, axis: TableAxis, line: string): boolean {
+  const table = useBoard.getState().byId.get(id);
+  if (table?.type !== 'table') return false;
+  const on = table.heat?.[axis]?.[line] !== undefined;
+  return setTableLineHeat(id, axis, line, on ? '' : heatColorFor(table, axis, line, useTableHeat.getState().lastPicked));
+}
+
+/** Sets a heat map's color, remembering it for the next heat map turned on. */
+export function pickTableHeatColor(id: ElementId, axis: TableAxis, line: string, color: FillColor): boolean {
+  useTableHeat.getState().remember(color);
+  return setTableLineHeat(id, axis, line, color);
 }

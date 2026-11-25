@@ -94,6 +94,26 @@ test('nested totals distinguish aggregate options and ignore the rank argument w
   assert.deepEqual(cells.rows, { 1: formulas.map((formula, index) => ({ formula, value: [error, error, 1, 1][index] })) });
 });
 
+test('writeCells takes formulas with many words of their own, in any script, and many of them at once', () => {
+  // The page shows such formulas to the person before it pastes them (toBeShownFirst); the agent's writes show nothing.
+  const sheet = 'Sheet1';
+  const summary = '="数据区间 "&TEXT(MIN(A:A),"yyyy-mm-dd")&" 至 "&TEXT(MAX(A:A),"yyyy-mm-dd")&" · 共 "&C1&" 笔订单"';
+  const cjk = '=IF(C1>=40,"高毛利核心产品线","常规需优化产品线")';
+  const ascii = '=IF(C1>=40,"a high margin core product line","a regular line to optimize")';
+  let steps = record(record([], [{ kind: 'addSheet', name: sheet }]), [
+    { kind: 'writeCells', sheet, topLeft: 'A1', rows: [[{ date: '2026-01-05' }, summary, 42], [{ date: '2026-03-31' }, cjk, null], [null, ascii, null]] },
+  ]);
+  assert.deepEqual(read(steps, { kind: 'readCells', sheet, range: 'B1:B3' }).rows, {
+    1: [{ formula: summary, value: '数据区间 2026-01-05 至 2026-03-31 · 共 42 笔订单' }],
+    2: [{ formula: cjk, value: '高毛利核心产品线' }],
+    3: [{ formula: ascii, value: 'a high margin core product line' }],
+  });
+  // More than the 50 texts a page may show first, each its own.
+  const many = Array.from({ length: 60 }, (_, i) => [`=IF(C1>=40,"第${i + 1}组高毛利核心产品线","常规需优化产品线")`]);
+  steps = record(steps, [{ kind: 'writeCells', sheet, topLeft: 'E1', rows: many }]);
+  assert.deepEqual(read(steps, { kind: 'readCells', sheet, range: 'E60' }).rows, { 60: [{ formula: many[59]![0], value: '第60组高毛利核心产品线' }] });
+});
+
 test('a refusal names the edit and its word', () => {
   const steps = record([], [{ kind: 'addSheet', name: 'Sheet1' }]);
   assert.throws(

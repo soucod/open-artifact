@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/canvas-engine",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "A generic WebGL2 canvas engine (crates/open-artifact-canvas via @open-artifact/wasm-canvas): TS owns the document, the engine mirrors it, draws every frame and handles pointer, wheel and camera.",
@@ -10,7 +10,7 @@
     "./camera": "./src/camera.ts"
   },
   "dependencies": {
-    "@open-artifact/wasm-canvas": "0.9.2"
+    "@open-artifact/wasm-canvas": "0.14.6"
   },
   "license": "Apache-2.0"
 }

@@ -1,5 +1,13 @@
-import type { Dynamic } from '../dynamic.ts';
-export function focusOrFallback(target?: Dynamic, canFocus?: Dynamic, getFallback?: Dynamic, getActiveElement?: Dynamic) {
+/**
+ * Focuses `target` if it may take the focus; when the focus does not land there, focuses the
+ * fallback instead. Says whether either of them ends up focused.
+ */
+export function focusOrFallback(
+  target: HTMLElement | null,
+  canFocus: (target: HTMLElement) => boolean,
+  getFallback: () => HTMLElement | null,
+  getActiveElement: () => Element | null,
+): boolean {
   if (target === null || !canFocus(target)) return false;
   target.focus({
     preventScroll: true,

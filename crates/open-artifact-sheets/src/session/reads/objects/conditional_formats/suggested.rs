@@ -83,7 +83,7 @@ pub(super) fn suggestions(
         "isWidenedToColumn": widened,
         "suggestions": suggestions,
         "ruleToStartFrom": {"ranges": [ids(*about)], "effect": start},
-        "table": {"records": ids(records.block), "columns": columns},
+        "table": {"cells": ids(records.table), "records": ids(records.block), "columns": columns},
     })
 }
 

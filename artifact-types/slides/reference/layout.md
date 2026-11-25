@@ -46,8 +46,8 @@ holds up to 24 more), or splits into two slides.
 - **Two unequal columns.** `flex:2` and `flex:1`, or `width:800px` on one and `flex:1` on the other.
 - **Push apart.** An empty `<div style="flex:1"></div>` between siblings, or
   `justify-content:space-between` on the parent.
-- **Bottom-anchored block.** A column section with `margin-top:auto` on the block (a deck with
-  `format`), or an empty `flex:1` spacer above it (an inline deck has no `margin`).
+- **Bottom-anchored block.** A column section with `margin-top:auto` on the block, or an empty
+  `flex:1` spacer above it.
 - **Centered block**, for a one-off slide (a statement, a quote, a closing line):
   `justify-content:center` on the section's column. Without it a short column hangs from the top, which
   is what a slide with a heading wants (next idiom).

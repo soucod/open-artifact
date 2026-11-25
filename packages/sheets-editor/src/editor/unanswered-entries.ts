@@ -1,26 +1,34 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellContents, Edit, Entry, Paragraph } from '@open-artifact/sheets-core';
 import { TEXT_PREFIX_QUOTE } from '../model/cell-text.ts';
 import { isSameCell } from '../selection/model.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function markEditByPage(edit?: Dynamic) {
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { EnterEdit } from '../model/edit-effects.ts';
+import type { EntryUnanswered, PageState } from '../state/initial-state.ts';
+import type { PageContext } from '../state/event-reducer.ts';
+/** An entry not yet answered, with the cell it makes when it starts a list after the `'` that keeps it a text. */
+export interface EntryUnansweredWithList extends EntryUnanswered {
+  cellWithList?: CellContents;
+}
+export function markEditByPage<E extends Edit>(edit: E): E {
   return (EDITS_BY_PAGE.add(edit), edit);
 }
-export function plainTextOfEntry(input?: Dynamic) {
-  if (input.kind === 'text') return input.text;
-  if (input.kind !== 'textWithLooks') return '';
-  return input.paragraphs.map(({ runs: runs }: Dynamic) => runs.map(({ text: text }: Dynamic) => text).join('')).join(`
+export function plainTextOfEntry(entry: Entry): string {
+  if (entry.kind === 'text') return entry.text;
+  if (entry.kind !== 'textWithLooks') return '';
+  return entry.paragraphs.map(({ runs }) => runs.map(({ text }) => text).join('')).join(`
 `);
 }
-export function cellWithListOfEntry({ cell: cell, entry: entry }: Dynamic, reads: WorkbookReads) {
+export function cellWithListOfEntry({ cell, entry }: EnterEdit, reads: WorkbookReads): CellContents | null {
   if (entry.kind !== 'textWithLooks') return null;
-  let lists = entry.paragraphs.map(({ list: list }: Dynamic) => list);
+  let lists = entry.paragraphs.map(({ list }) => list);
   let text = plainTextOfEntry(entry);
-  if (!text.startsWith(TEXT_PREFIX_QUOTE) || lists.every(({ kind: kind }: Dynamic) => kind === 'none')) return null;
-  let isAtStart: Dynamic = true;
+  if (!text.startsWith(TEXT_PREFIX_QUOTE) || lists.every(({ kind }) => kind === 'none')) return null;
+  let isAtStart = true;
+  // The page writes the link of every run it enters (editor/text-looks.ts, richTextFromLooks).
   let paragraphs = entry.paragraphs.map(
-    ({ list: list, runs: runs }: Dynamic) => ({
-      list: list,
-      runs: runs.flatMap((run?: Dynamic) => {
+    ({ list, runs }) => ({
+      list,
+      runs: runs.flatMap((run) => {
         let runText = isAtStart && run.text !== '' ? run.text.slice(TEXT_PREFIX_QUOTE.length) : run.text;
         return (
           (isAtStart &&= run.text === ''),
@@ -33,27 +41,30 @@ export function cellWithListOfEntry({ cell: cell, entry: entry }: Dynamic, reads
         );
       }),
     }),
-  );
+  ) as Paragraph[];
   return {
     ...cell,
     input: {
       kind: 'richText',
-      paragraphs: paragraphs,
+      paragraphs,
     },
     value: {
       kind: 'text',
       value: text.slice(TEXT_PREFIX_QUOTE.length),
     },
-    numbersOfListLines: (reads.listLinesAsKept(lists) ?? []).map(({ number: number }: Dynamic) => number),
+    numbersOfListLines: (reads.listLinesAsKept(lists) ?? []).map(({ number }) => number),
   };
 }
-export function readsWithUnansweredEntries(reads: WorkbookReads, { entriesUnanswered: entriesUnanswered }: Dynamic) {
+export function readsWithUnansweredEntries<Reads extends WorkbookReads>(
+  reads: Reads,
+  { entriesUnanswered }: { entriesUnanswered: readonly EntryUnansweredWithList[] },
+): Reads {
   if (entriesUnanswered.length === 0) return reads;
-  let cellOf = (cell?: Dynamic) => {
-    let unanswered = entriesUnanswered.findLast((entry?: Dynamic) => isSameCell(entry.cellId, cell));
+  let cellOf = (cell: CellId): CellContents | null => {
+    let unanswered = entriesUnanswered.findLast((entry) => isSameCell(entry.cellId, cell));
     if (unanswered === undefined) return reads.cellOf(cell);
-    let { text: unansweredText, cellWithList: cellWithList } = unanswered;
-    let { rowId: rowId, columnId: columnId } = cell;
+    let { text: unansweredText, cellWithList } = unanswered;
+    let { rowId, columnId } = cell;
     return (
       cellWithList ??
       (unansweredText === ''
@@ -70,35 +81,35 @@ export function readsWithUnansweredEntries(reads: WorkbookReads, { entriesUnansw
   };
   return {
     ...reads,
-    cellOf: cellOf,
-    cellOnShowIn: (cell?: Dynamic) => cellOf(cell) ?? reads.spilledCellOf(cell),
-    columnIndexesOnShowIn(sheetId?: Dynamic, rowIndex?: Dynamic) {
-      let unansweredColumnIndexes = entriesUnanswered.flatMap(({ cellId: cellId }: Dynamic) => {
+    cellOf,
+    cellOnShowIn: (cell) => cellOf(cell) ?? reads.spilledCellOf(cell),
+    columnIndexesOnShowIn(sheetId, rowIndex) {
+      let unansweredColumnIndexes = entriesUnanswered.flatMap(({ cellId }) => {
         let position = cellId.sheetId === sheetId ? reads.positionOfCell(cellId) : null;
         return position?.rowIndex === rowIndex ? [position.columnIndex] : [];
       });
       let columnIndexes = reads.columnIndexesOnShowIn(sheetId, rowIndex);
       if (unansweredColumnIndexes.length === 0) return columnIndexes;
-      let allColumnIndexes = [...new (Set as Dynamic)([...columnIndexes, ...unansweredColumnIndexes])];
-      allColumnIndexes.sort((index?: Dynamic, otherIndex?: Dynamic) => index - otherIndex);
+      let allColumnIndexes = [...new Set([...columnIndexes, ...unansweredColumnIndexes])];
+      allColumnIndexes.sort((index, otherIndex) => index - otherIndex);
       return allColumnIndexes;
     },
   };
 }
-export const EDITS_BY_PAGE = new (WeakSet as Dynamic)();
-export const isEditByPage = (edit?: Dynamic) =>
+export const EDITS_BY_PAGE = new WeakSet<Edit>();
+export const isEditByPage = (edit: Edit): boolean =>
   (edit.kind === 'declareCellTable' && edit.isAskedFor !== true) || EDITS_BY_PAGE.has(edit);
-export const unansweredEntryOf = (entry?: Dynamic) => ({
+export const unansweredEntryOf = (entering: EnterEdit): EntryUnanswered => ({
   cellId: {
-    sheetId: entry.sheetId,
-    rowId: entry.cell.r,
-    columnId: entry.cell.c,
+    sheetId: entering.sheetId,
+    rowId: entering.cell.r,
+    columnId: entering.cell.c,
   },
-  text: plainTextOfEntry(entry.entry),
+  text: plainTextOfEntry(entering.entry),
 });
-export const textOfUnansweredEntryAt = ({ entriesUnanswered: entriesUnanswered }: Dynamic, cell?: Dynamic) =>
-  entriesUnanswered.findLast((unanswered?: Dynamic) => isSameCell(unanswered.cellId, cell))?.text ?? null;
+export const textOfUnansweredEntryAt = ({ entriesUnanswered }: Pick<PageState, 'entriesUnanswered'>, cell: CellId): string | null =>
+  entriesUnanswered.findLast((unanswered) => isSameCell(unanswered.cellId, cell))?.text ?? null;
 export const isEntryWorkPending = (
-  { entriesUnanswered: entriesUnanswered }: Dynamic,
-  { areFormulasLeft: areFormulasLeft }: Dynamic,
-) => areFormulasLeft || entriesUnanswered.length > 0;
+  { entriesUnanswered }: Pick<PageState, 'entriesUnanswered'>,
+  { areFormulasLeft }: Pick<PageContext, 'areFormulasLeft'>,
+): boolean => areFormulasLeft || entriesUnanswered.length > 0;

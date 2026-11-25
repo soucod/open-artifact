@@ -8,7 +8,9 @@ pub mod grid;
 pub mod layout;
 pub mod load;
 pub mod objects;
+pub mod reorder;
 pub mod rich;
+pub(crate) mod snapshot;
 pub mod version;
 
 use std::collections::BTreeMap;
@@ -94,7 +96,15 @@ pub struct Sheet {
     pub dropdowns: BTreeMap<layout::IdKey, (String, Vec<objects::DropdownOption>)>,
     pub conditional_formats: BTreeMap<layout::IdKey, (String, objects::ConditionalFormat)>,
     pub cell_tables: BTreeMap<layout::IdKey, (String, objects::CellTable)>,
+    pub named_views: BTreeMap<layout::IdKey, (String, objects::NamedView)>,
     pub placements: BTreeMap<layout::IdKey, (String, objects::Placement)>,
+    pub interactive: Option<String>,
+}
+
+impl Sheet {
+    pub fn shown_views(&self) -> impl Iterator<Item = &str> {
+        self.placements.values().map(|(_, p)| p.shows.view_id()).chain(self.interactive.as_deref())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -207,12 +217,20 @@ impl Workbook {
     }
 
     fn reference_text(&self, from_sheet: usize, reference: &Reference) -> String {
+        self.reference_text_moved(from_sheet, reference, 0)
+    }
+
+    /// A reference's text as `reference_text` writes it, its rows not fixed moved `delta` rows (past the sheet's
+    /// end, as they would be written).
+    pub(crate) fn reference_text_moved(&self, from_sheet: usize, reference: &Reference, delta: i64) -> String {
         let Some(at) = self.locate(reference) else {
             return CellError::Reference.text().to_owned();
         };
         let sheet = &self.sheets[at.sheet];
         let prefix = if at.sheet == from_sheet { String::new() } else { format!("{}!", sheet_name_text(&sheet.name)) };
-        let row = |(p, absolute): End| format!("{}{}", if absolute { "$" } else { "" }, p + 1);
+        let row = |(p, absolute): End| {
+            format!("{}{}", if absolute { "$" } else { "" }, p as i64 + 1 + if absolute { 0 } else { delta })
+        };
         let column = |(p, absolute): End| format!("{}{}", if absolute { "$" } else { "" }, column_letters(p));
         let text = match reference {
             Reference::Cell { .. } => format!("{}{}", column(at.left), row(at.top)),
@@ -316,6 +334,9 @@ impl Workbook {
             put("name", json!(sheet.name));
             put("rows", json!(sheet.rows.runs(bases)));
             put("columns", json!(sheet.columns.runs(bases)));
+            if let Some(view) = &sheet.interactive {
+                put("interactive", json!(view));
+            }
             let mut list = |key: &str, items: Vec<Value>| {
                 if !items.is_empty() {
                     put(key, Value::Array(items));
@@ -351,6 +372,10 @@ impl Workbook {
             list("conditionalFormats", objects::conditional_formats_contents(bases, sheet));
             list("placements", objects::placements_contents(bases, sheet));
             list("cellTables", objects::cell_tables_contents(bases, sheet));
+            list(
+                "namedViews",
+                sheet.named_views.values().map(|(id, view)| json!({"namedViewId": id, "namedView": view})).collect(),
+            );
             drop(list);
             let head = std::mem::take(&mut out);
             let spilled: Vec<Value> = self.spilled_cells(index, locale).into_iter().map(|(_, cell)| cell).collect();
@@ -375,7 +400,7 @@ impl Workbook {
         // A view placed only on deleted sheets goes with them (it is still there to set, and comes back with them);
         // one placed nowhere stays.
         fn placed(sheets: &[Sheet]) -> hashbrown::HashSet<&str> {
-            sheets.iter().flat_map(|s| s.placements.values()).map(|(_, p)| p.shows.view_id()).collect()
+            sheets.iter().flat_map(Sheet::shown_views).collect()
         }
         let (live, deleted) = (placed(&self.sheets), placed(&self.deleted_sheets));
         let views: Vec<Value> = self
@@ -506,52 +531,59 @@ impl Workbook {
     /// The empty cells the arrays of a sheet fill, by their places (row, column) in order: the formula each comes
     /// from and what it comes to, shown in the cell's own number format, else in the one its number brings.
     pub fn spilled_cells(&self, index: usize, locale: &crate::locale::Locale) -> Vec<((usize, usize), serde_json::Value)> {
+        self.spilled_cells_where(index, locale, |_, _| true)
+    }
+
+    pub(crate) fn spilled_cells_where(
+        &self,
+        index: usize,
+        locale: &crate::locale::Locale,
+        selected: impl Fn(usize, usize) -> bool,
+    ) -> Vec<((usize, usize), serde_json::Value)> {
         let sheet = &self.sheets[index];
         let mut out = Vec::new();
         for ((id, r, c), outcome) in &self.outcomes {
-            let Some(SpillOutcome::Fills { array, to, formats }) = (*id == sheet.id).then_some(outcome.spill.as_ref()).flatten()
+            let Some(SpillOutcome::Fills { array, formats, .. }) = (*id == sheet.id).then_some(outcome.spill.as_ref()).flatten()
             else {
                 continue;
             };
             let (Some(top), Some(left)) = (sheet.rows.position(*r), sheet.columns.position(*c)) else { continue };
             let from = serde_json::json!({"r": self.bases.text(*r), "c": self.bases.text(*c)});
-            for row in top..=to.0 {
-                for column in (left..=to.1).filter(|&column| (row, column) != (top, left)) {
-                    let (Some(rl), Some(cl)) = (sheet.rows.line(row), sheet.columns.line(column)) else { continue };
-                    let (i, j) = (row - top, column - left);
-                    let value = array.get(i, j);
-                    // Nothing spills where the array holds nothing, nor into a cell given a value since it was
-                    // worked out.
-                    if matches!(value, Value::Blank) || sheet.cells.contains_key(&(rl, cl)) {
-                        continue;
-                    }
-                    let mut cell = serde_json::json!({
-                        "r": self.bases.text(rl), "c": self.bases.text(cl), "from": from, "value": ValueContents::of(value),
-                    });
-                    let room = crate::number_format::Room::AsText;
-                    let own = sheet.formats.get(formats::Leaf::NumberFormat, (rl, cl));
-                    if let Some(pattern) = own.and_then(|f| f.get("pattern")?.as_str()) {
-                        // A text is shown in a number format only through a section for texts.
-                        let reads = crate::number_format::NumberFormat::parse(pattern);
-                        let shows = match value {
-                            Value::Number(_) => true,
-                            Value::Text(_) => reads.is_ok_and(|format| format.shows_texts()),
-                            _ => false,
-                        };
-                        if let Some(shown) = shows.then(|| crate::shown::shown(value, Some(pattern), room, locale).ok()).flatten() {
-                            cell["shown"] = serde_json::json!(shown);
-                        }
-                    } else if let (Value::Number(_), Some(brought)) =
-                        (value, formats.as_ref().and_then(|f| f.get(i * array.columns() + j)?.as_ref()))
-                    {
-                        if let Ok(shown) = crate::shown::shown(value, Some(&brought.pattern), room, locale) {
-                            cell["shown"] = serde_json::json!(shown);
-                        }
-                        let brought = BroughtContents { kind: brought.kind.name(), pattern: brought.pattern.to_string() };
-                        cell["numberFormatBrought"] = serde_json::json!(brought);
-                    }
-                    out.push(((row, column), cell));
+            for ((i, j), value) in array.entries().filter(|(position, _)| *position != (0, 0)) {
+                let (row, column) = (top + i, left + j);
+                if !selected(row, column) {
+                    continue;
                 }
+                let (Some(rl), Some(cl)) = (sheet.rows.line(row), sheet.columns.line(column)) else { continue };
+                if sheet.cells.contains_key(&(rl, cl)) {
+                    continue;
+                }
+                let mut cell = serde_json::json!({
+                    "r": self.bases.text(rl), "c": self.bases.text(cl), "from": from, "value": ValueContents::of(value),
+                });
+                let room = crate::number_format::Room::AsText;
+                let own = sheet.formats.get(formats::Leaf::NumberFormat, (rl, cl));
+                if let Some(pattern) = own.and_then(|f| f.get("pattern")?.as_str()) {
+                    // A text is shown in a number format only through a section for texts.
+                    let reads = crate::number_format::NumberFormat::parse(pattern);
+                    let shows = match value {
+                        Value::Number(_) => true,
+                        Value::Text(_) => reads.is_ok_and(|format| format.shows_texts()),
+                        _ => false,
+                    };
+                    if let Some(shown) = shows.then(|| crate::shown::shown(value, Some(pattern), room, locale).ok()).flatten() {
+                        cell["shown"] = serde_json::json!(shown);
+                    }
+                } else if let (Value::Number(_), Some(brought)) =
+                    (value, formats.as_ref().and_then(|f| f.get(array.columns(), (i, j))))
+                {
+                    if let Ok(shown) = crate::shown::shown(value, Some(&brought.pattern), room, locale) {
+                        cell["shown"] = serde_json::json!(shown);
+                    }
+                    let brought = BroughtContents { kind: brought.kind.name(), pattern: brought.pattern.to_string() };
+                    cell["numberFormatBrought"] = serde_json::json!(brought);
+                }
+                out.push(((row, column), cell));
             }
         }
         out.sort_by_key(|(at, _)| *at);
@@ -569,7 +601,7 @@ impl Workbook {
                 by: match by {
                     crate::calculate::BlockedBy::FilledCell(p) => BlockedContents::FilledCell { cell: cell(*p) },
                     crate::calculate::BlockedBy::EarlierFormula(p) => BlockedContents::EarlierFormula { cell: cell(*p) },
-                    crate::calculate::BlockedBy::EndOfSheet => BlockedContents::EndOfSheet,
+                    crate::calculate::BlockedBy::EndOfSheet(_) => BlockedContents::EndOfSheet,
                 },
                 would_fill_to: cell(*would_fill_to),
             },
@@ -602,6 +634,23 @@ pub struct SheetContents {
     pub head: serde_json::Map<String, serde_json::Value>,
     pub cells: Vec<CellContents>,
     pub tail: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Contents {
+    pub(crate) fn pack(self, mut blocks_for: impl FnMut(Vec<CellContents>) -> Vec<usize>) -> serde_json::Value {
+        use serde_json::{json, Value};
+        let Contents { mut head, sheets, mut tail } = self;
+        head.insert("kind".into(), json!("workbookContentsWithCellsPacked"));
+        let sheets = sheets.into_iter().map(|sheet| {
+            let SheetContents { mut head, cells, mut tail } = sheet;
+            head.insert("cells".into(), json!(blocks_for(cells)));
+            head.append(&mut tail);
+            Value::Object(head)
+        }).collect();
+        head.insert("sheets".into(), Value::Array(sheets));
+        head.append(&mut tail);
+        Value::Object(head)
+    }
 }
 
 /// An object written as `head`, then one more key, then `tail`.

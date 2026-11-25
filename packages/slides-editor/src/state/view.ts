@@ -26,6 +26,11 @@ export interface Presenting {
   start: string;
   /** Open the speaker window too. */
   speaker: boolean;
+  /**
+   * One slide on its own, from a link: every build shown, arrows page whole
+   * slides, no control bar or full screen.
+   */
+  only?: boolean;
 }
 
 /** Zoom of the stage: a factor, or fit to the window. */
@@ -60,6 +65,8 @@ interface ViewState {
   showNotes: boolean;
   findOpen: boolean;
   presenting: Presenting | null;
+  /** Counts shows started, so following the same link again starts afresh. */
+  presentRun: number;
   /** Copied style (Copy style / Paste style). */
   styleClipboard: { style: StyleMap; kind: string } | null;
   /** Slide hovered in the rail / grid by a drag (insertion gap). */
@@ -125,6 +132,7 @@ export const useView = create<ViewState>()((set, get) => ({
   showNotes: prefs.showNotes ?? false,
   findOpen: false,
   presenting: null,
+  presentRun: 0,
   styleClipboard: null,
   dropGap: null,
 
@@ -185,7 +193,7 @@ export const useView = create<ViewState>()((set, get) => ({
     writePrefs(get());
   },
   present(presenting) {
-    set({ presenting, textEdit: null, cropping: null });
+    set({ presenting, presentRun: get().presentRun + (presenting ? 1 : 0), textEdit: null, cropping: null });
   },
   setStyleClipboard(value) {
     set({ styleClipboard: value });

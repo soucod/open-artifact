@@ -1,0 +1,33 @@
+{
+  "name": "zcode",
+  "title": "ZCode",
+  "agentName": "ZCode",
+  "level": "L2",
+  "entry": "mcp",
+  "plugin": "open-artifact",
+  "mcp": {
+    "command": "node",
+    "args": [
+      "${CLAUDE_PLUGIN_ROOT}/skills/open-artifact/scripts/open-artifact.mjs",
+      "mcp",
+      "--harness",
+      "zcode"
+    ]
+  },
+  "skillsDir": "~/.zcode/skills",
+  "wake": [
+    "inbox"
+  ],
+  "open": "browser",
+  "wakesIdle": false,
+  "hookDialect": "claude-code",
+  "caps": {
+    "tools": "mcp",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    },
+    "wake": {}
+  }
+}

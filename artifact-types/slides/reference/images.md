@@ -130,6 +130,41 @@ by PowerPoint's own approximations: `dashed` and `dotted` map to its dash styles
 the notes shown with the download: a `double` border (drawn single), a shadow's spread, an `inset` or layered
 shadow, a blend mode, a `filter`.
 
+## Polygon clipping
+
+Give a panel or picture frame a `clip-path:polygon(...)`. The points use the border box as their
+reference. Percentage coordinates can describe triangles, hexagons, arrows and concave outlines.
+Mix percentages and px with `calc()` to keep a fixed distance from an edge.
+
+```css
+:root { --cut: 12px; }
+.hexagon {
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+}
+.chamfer {
+  clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, 0 100%);
+}
+```
+
+```html
+<img class="chamfer" src="/_blob/<id>" alt="The office" style="width:640px;height:400px;object-fit:cover">
+```
+
+The chamfer cuts the upper-right corner by 12px along each edge at any frame size. The same rule
+can clip a panel or its contents on a `<div>`. Percentages move with the box; px distances stay
+fixed when the box is resized in Slides. A `style` attribute takes no `var()`: in an inline deck,
+write the polygon there with `12px` in place of the variable.
+
+Only `polygon()` is read, with the border box as its reference (`border-box` may be written, no other
+box). For a rounded or round frame use `border-radius`; `inset()`, `circle()` and `ellipse()` are
+dropped. Draw any other outline in an `<svg>`.
+
+Standalone HTML, PDF and PNG keep the CSS clip. Editable PowerPoint draws a plain filled panel as a
+custom shape and a clipped `<img>` as a picture with an editable crop, cut to the polygon. A clipped
+`<div>` that holds children (its text included), a polygon that crosses itself, and a clip together
+with a border, a shadow, a filter or rounded corners become one picture, listed in the export notes.
+Resizing an exported custom shape in PowerPoint scales its outline with it.
+
 ## On the page
 
 The Insert menu's **Image or video…** and dropping a file onto a slide both upload the file and place

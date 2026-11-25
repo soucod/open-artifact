@@ -1,10 +1,21 @@
 import { likelyHasKeyboard } from '../kit/platform.ts';
-import type { Dynamic } from '../dynamic.ts';
+import type { FigureOfCells } from '../selection/figures.ts';
+import type { SelectedRangeView } from '../view/page-view.ts';
 import { translateMessage } from './messages.ts';
 import { figureWithValueLabel, truncateGraphemes, HEADING_LABEL_MAX_CHARACTERS } from './grid-action-labels.ts';
 import { formatNumberWithSigns } from '../format/number-signs.ts';
 import { selectionWithHiddenLinesWords } from '../messages/line-groups.ts';
-export function selectionSummaryText(summary?: Dynamic) {
+/** How many rows and columns of a selection are hidden. */
+type HiddenLineCounts = SelectedRangeView['outOfSight'];
+/** A pull request or issue a link points to. */
+export type GithubLinkKind = 'pullRequest' | 'issue';
+/** The parts of a link to a pull request or issue. */
+export interface GithubLinkParts {
+  owner: string;
+  repository: string;
+  number: string;
+}
+export function selectionSummaryText(summary: FigureOfCells): string {
   switch (summary.kind) {
     case 'errors':
       return translateMessage(
@@ -63,18 +74,18 @@ export function selectionSummaryText(summary?: Dynamic) {
   }
 }
 export function severalRangesSelectedText(
-  { rangeCount: rangeCount, cellCount: cellCount, lastRange: lastRange }: Dynamic,
-  summary?: Dynamic,
-) {
+  { rangeCount, cellCount, lastRange }: NonNullable<SelectedRangeView['ofSeveral']>,
+  summary: FigureOfCells | null,
+): string {
   let selected = translateMessage(
     {
       defaultMessage: '{rangeCount, plural, one {# group selected} other {# groups selected}}, {cellCount, number} cells. Latest: {lastRange}',
       id: 'MnTMWToY1E',
     },
     {
-      rangeCount: rangeCount,
-      cellCount: cellCount,
-      lastRange: lastRange,
+      rangeCount,
+      cellCount,
+      lastRange,
     },
   );
   return summary === null
@@ -85,12 +96,12 @@ export function severalRangesSelectedText(
           id: '6NKrsJFlKx',
         },
         {
-          selected: selected,
+          selected,
           summary: selectionSummaryText(summary),
         },
       );
 }
-export function selectionWithSummaryText(selection?: Dynamic, summary?: Dynamic, hiddenLines?: Dynamic) {
+export function selectionWithSummaryText(selection: string, summary: FigureOfCells | null, hiddenLines: HiddenLineCounts): string {
   let selected = selectionWithHiddenLinesWords(selection, hiddenLines);
   if (summary === null) return selected;
   return summary.kind === 'checked'
@@ -101,7 +112,7 @@ export function selectionWithSummaryText(selection?: Dynamic, summary?: Dynamic,
           id: 'IZnh+fTHlb',
         },
         {
-          selected: selected,
+          selected,
           count: summary.count,
           checkboxCount: summary.checkboxCount,
         },
@@ -112,12 +123,12 @@ export function selectionWithSummaryText(selection?: Dynamic, summary?: Dynamic,
           id: 'CPIFAHrIzO',
         },
         {
-          selected: selected,
+          selected,
           summary: selectionSummaryText(summary),
         },
       );
 }
-export function pointedCellText({ cells: cells, text: text }: Dynamic, isInFormula?: Dynamic) {
+export function pointedCellText({ cells, text }: { cells: string; text: string | null }, isInFormula: boolean): string {
   let pointed =
     text === null
       ? cells
@@ -138,7 +149,7 @@ export function pointedCellText({ cells: cells, text: text }: Dynamic, isInFormu
             },
             {
               cell: cells,
-              text: text,
+              text,
             },
           );
   return isInFormula
@@ -148,12 +159,12 @@ export function pointedCellText({ cells: cells, text: text }: Dynamic, isInFormu
           id: '8KUzE6J2o7',
         },
         {
-          pointed: pointed,
+          pointed,
         },
       )
     : pointed;
 }
-export function githubLinkKindLabel(linkKind?: Dynamic) {
+export function githubLinkKindLabel(linkKind: GithubLinkKind): string {
   switch (linkKind) {
     case 'pullRequest':
       return translateMessage({
@@ -168,13 +179,13 @@ export function githubLinkKindLabel(linkKind?: Dynamic) {
   }
 }
 export const cellsSelectedText = (
-  cells?: Dynamic,
-  summary?: Dynamic,
-  hiddenLines: Dynamic = {
+  cells: string,
+  summary: FigureOfCells | null,
+  hiddenLines: HiddenLineCounts = {
     rowCount: 0,
     columnCount: 0,
   },
-) =>
+): string =>
   hiddenLines.rowCount > 0 || hiddenLines.columnCount > 0
     ? selectionWithSummaryText(cells, summary, hiddenLines)
     : summary === null
@@ -184,7 +195,7 @@ export const cellsSelectedText = (
             id: '4z9c+Fys6D',
           },
           {
-            cells: cells,
+            cells,
           },
         )
       : summary.kind === 'checked'
@@ -195,7 +206,7 @@ export const cellsSelectedText = (
               id: 'sf9FYLeOYn',
             },
             {
-              cells: cells,
+              cells,
               count: summary.count,
               checkboxCount: summary.checkboxCount,
             },
@@ -206,48 +217,48 @@ export const cellsSelectedText = (
               id: 'KxkbBoGyod',
             },
             {
-              cells: cells,
+              cells,
               summary: selectionSummaryText(summary),
             },
           );
-export const savingStoppedText = () =>
+export const savingStoppedText = (): string =>
   translateMessage({
     defaultMessage: 'Changes can’t be saved from this page any more. Reload it to keep working.',
     id: 'qftXaMTs+h',
   });
-export const githubLinkTitle = ({ owner: owner, repository: repository, number: number }: Dynamic) =>
+export const githubLinkTitle = ({ owner, repository, number }: GithubLinkParts): string =>
   translateMessage(
     {
       defaultMessage: '{owner}/{repository} #{number}',
       id: 'YmXS4Uj0KT',
     },
     {
-      owner: owner,
-      repository: repository,
-      number: number,
+      owner,
+      repository,
+      number,
     },
   );
-export const builtLinkAddressLabel = (address?: Dynamic) =>
+export const builtLinkAddressLabel = (address: string): string =>
   translateMessage(
     {
       defaultMessage: '{address}. Address built by a formula',
       id: 'tBP5zE+Gav',
     },
     {
-      address: address,
+      address,
     },
   );
-export const builtLinkWarning = (address?: Dynamic) =>
+export const builtLinkWarning = (address: string): string =>
   translateMessage(
     {
       defaultMessage: '{address}. A formula sets this address. Check the formula before you open the link.',
       id: '12if/u+wKE',
     },
     {
-      address: address,
+      address,
     },
   );
-export const openLinkHint = (isMac?: Dynamic) =>
+export const openLinkHint = (isMac: boolean): string =>
   isMac
     ? translateMessage({
         defaultMessage: '⌘-click to open',
@@ -257,7 +268,7 @@ export const openLinkHint = (isMac?: Dynamic) =>
         defaultMessage: 'Ctrl-click to open',
         id: '8z6tlNVybF',
       });
-export const linkPositionText = (position?: Dynamic, count?: Dynamic, address?: Dynamic, isListOpen?: Dynamic) =>
+export const linkPositionText = (position: number, count: number, address: string, isListOpen: boolean): string =>
   isListOpen && count > 1
     ? translateMessage(
         {
@@ -265,9 +276,9 @@ export const linkPositionText = (position?: Dynamic, count?: Dynamic, address?: 
           id: 'bmfkjg66kG',
         },
         {
-          position: position,
-          count: count,
-          address: address,
+          position,
+          count,
+          address,
         },
       )
     : translateMessage(
@@ -276,22 +287,22 @@ export const linkPositionText = (position?: Dynamic, count?: Dynamic, address?: 
           id: 'NCL6sXT5xv',
         },
         {
-          position: position,
-          count: count,
-          address: address,
+          position,
+          count,
+          address,
         },
       );
-export const linkCountLabel = (count?: Dynamic) =>
+export const linkCountLabel = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {Contains a link} other {Contains # links}}',
       id: 'dCj8XZT0If',
     },
     {
-      count: count,
+      count,
     },
   );
-export const commentModeHint = (hasKeyboard: Dynamic = likelyHasKeyboard()) =>
+export const commentModeHint = (hasKeyboard: boolean = likelyHasKeyboard()): string =>
   hasKeyboard
     ? translateMessage({
         defaultMessage: 'Click a cell to comment. Press Esc to exit.',
@@ -301,7 +312,7 @@ export const commentModeHint = (hasKeyboard: Dynamic = likelyHasKeyboard()) =>
         defaultMessage: 'Tap a cell to comment.',
         id: 'ZOVxl27AHu',
       });
-export const readOnlyText = () =>
+export const readOnlyText = (): string =>
   translateMessage({
     defaultMessage: 'You can’t edit this Sheet. Ask an owner for edit access.',
     id: '6GbxQyLQKU',

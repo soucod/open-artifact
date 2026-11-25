@@ -38,6 +38,7 @@ import {
   rotateElements,
   rotationKeyStep,
   selectionChromeFor,
+  ELEMENT_KIND_AFFORDANCES,
   topLevelSelectedIds,
   type TextResizeFitting,
 } from '../src/selection.ts';
@@ -284,9 +285,16 @@ describe('selection', () => {
   });
 
   it('picks selection chrome by state and tool', () => {
-    assert.deepEqual(selectionChromeFor('note', 'selected', { tool: 'select' }), { outline: 'full', dots: 'adds', bar: true });
+    assert.deepEqual(selectionChromeFor('note', 'selected', { tool: 'select' }), { outline: 'full', dots: 'adds, connects', bar: true });
     assert.deepEqual(selectionChromeFor('arrow', 'selected', { tool: 'arrow' }), { outline: 'none', dots: 'none', bar: true });
     assert.equal(selectionChromeFor('image', 'typing', { tool: 'select' }).bar, false);
     assert.equal(selectionChromeFor('text', 'typing', { tool: 'select', empty: true }).dots, 'none');
+  });
+
+  it('gives side dots to notes and shapes only', () => {
+    const withDots = (Object.keys(ELEMENT_KIND_AFFORDANCES) as (keyof typeof ELEMENT_KIND_AFFORDANCES)[]).filter((kind) => ELEMENT_KIND_AFFORDANCES[kind].dots !== 'none');
+    assert.deepEqual(withDots.sort(), ['note', 'shape']);
+    assert.equal(selectionChromeFor('text', 'typing', { tool: 'arrow' }).dots, 'none');
+    assert.equal(selectionChromeFor('table', 'selected', { tool: 'select' }).dots, 'none');
   });
 });

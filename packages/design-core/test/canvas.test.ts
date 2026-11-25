@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   buildViewContext,
   checkDesignProject,
+  MAX_INDEX_BYTES,
   MAX_PROJECT_BYTES,
   MAX_PROJECT_FILES,
   emptyCanvas,
@@ -41,6 +42,14 @@ describe('canvas', () => {
     assert.equal(canvas.boards['A.dc.html']!.h, 8000);
     assert.equal(canvas.boards['A.dc.html']!.custom, 1);
     assert.deepEqual(canvas.extra, { keep: true });
+  });
+
+  it('keeps every note however many there are', () => {
+    const notes: Record<string, { x: number; y: number; text: string }> = {};
+    for (let i = 0; i < 1500; i++) notes[`n${i}`] = { x: i, y: 0, text: 'note' };
+    const canvas = normalizeCanvas({ v: 3, boards: {}, notes });
+    assert.equal(Object.keys(canvas.notes).length, 1500);
+    assert.equal(canvas.notes.n1499!.x, 1499);
   });
 
   it('round trips endpoints after moving a line and preserves link and guide metadata', () => {
@@ -188,6 +197,19 @@ describe('project check', () => {
     const files = project([['styles.css', `body { background: url(/_blob/${id}); }`]]);
     assert.ok(of(checkDesignProject(files, { blobExists: () => false }), 'error').some((d) => d.file === 'styles.css' && d.message.includes(id)));
     assert.deepEqual(of(checkDesignProject(files, { blobExists: () => true }), 'error'), []);
+  });
+
+  it('limits the index by bytes, not by its note count', () => {
+    const files = project();
+    const canvas = JSON.parse(files.get('canvas.json')!);
+    canvas.notes = {};
+    for (let i = 0; i < 1500; i++) canvas.notes[`n${i}`] = { x: i * 300, y: 2000, text: 'note' };
+    files.set('canvas.json', JSON.stringify(canvas));
+    assert.deepEqual(of(checkDesignProject(files), 'error'), []);
+    canvas.notes.long = { x: 0, y: 4000, text: '\u00e9'.repeat(MAX_INDEX_BYTES / 2) };
+    files.set('canvas.json', JSON.stringify(canvas));
+    const size = of(checkDesignProject(files), 'error').filter((d) => d.file === 'canvas.json' && d.message.includes('under 1 MiB'));
+    assert.equal(size.length, 1);
   });
 
   it('compares $preview with the board size', () => {

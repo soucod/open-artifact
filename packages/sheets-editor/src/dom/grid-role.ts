@@ -1,3 +1,2 @@
-import type { Dynamic } from '../dynamic.ts';
-export const isGridOrGridPopupTrigger = (element?: Dynamic) =>
+export const isGridOrGridPopupTrigger = (element: Element): boolean =>
   element.getAttribute('role') === 'grid' || element.getAttribute('aria-haspopup') === 'grid';

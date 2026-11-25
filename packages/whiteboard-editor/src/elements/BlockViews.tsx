@@ -29,6 +29,7 @@ import {
   shapeFillPaint,
   shapePathData,
   shapeTextInsetStyle,
+  showsTextPlaceholder,
   textProfileForElement,
   type ContainerElement,
   type NoteElement,
@@ -41,10 +42,10 @@ import { useCamera } from '../state/camera.ts';
 import { currentMeasures, useMeasures } from '../state/measures.ts';
 import { useColorScheme } from '../state/theme.ts';
 import { useSectionHover } from '../tools/hover.ts';
-import { editTextActionLabel } from './describe.ts';
+import { editTextActionLabel, placeholderHintId, placeholderNeedsDescription } from './describe.ts';
 import { useIsFeatured, useMeasureNode } from './hooks.ts';
 import { useSelection } from '../state/selection.ts';
-import { AgentChip, useItemProps } from './item.tsx';
+import { useItemProps } from './item.tsx';
 import { RichText } from './markup.tsx';
 import { alignStyle, fontStyle, paperFont, rotationStyle, type ViewStyle } from './style.ts';
 import { TextEditor, useEditing, writeElementText } from './TextEditor.tsx';
@@ -101,7 +102,6 @@ export const NoteView = memo(function NoteView({ element }: { element: NoteEleme
           </div>
         ) : null}
       </div>
-      <AgentChip element={element} />
     </div>
   );
 });
@@ -146,7 +146,6 @@ export const ShapeView = memo(function ShapeView({ element }: { element: ShapeEl
           )}
         </div>
       </div>
-      <AgentChip element={element} />
     </div>
   );
 });
@@ -162,7 +161,9 @@ export const TextView = memo(function TextView({ element }: { element: TextEleme
   const editing = useEditing(element.id, 'element');
   const backdrop = useElementView((state) => state.backdrops.get(element.id));
   const font = paperFont(element.size);
-  const ref = useMeasureNode<HTMLDivElement>(element.id, 'wh', `${element.text}|${element.size}|${element.wrap ?? ''}|${editing !== null}`);
+  const hinted = showsTextPlaceholder(element);
+  const ref = useMeasureNode<HTMLDivElement>(element.id, 'wh', `${element.text}|${element.size}|${element.wrap ?? ''}|${editing !== null}|${hinted ? element.placeholder : ''}`);
+  const hintId = hinted && placeholderNeedsDescription(element.placeholder) ? placeholderHintId(element.id) : undefined;
   const style: ViewStyle = {
     left: element.x,
     top: element.y,
@@ -173,9 +174,14 @@ export const TextView = memo(function TextView({ element }: { element: TextEleme
     '--wb-ink': inkColorOnFill(element.color, backdrop, scheme),
     ...(backdrop !== undefined ? { '--wb-paper-chip': chipColorOn(backdrop) } : {}),
   };
-  const className = `wb-el wb-text wb-text-${element.size}${element.wrap !== undefined ? ' wb-text-wrap' : ''}`;
+  const className = `wb-el wb-text wb-text-${element.size}${element.wrap !== undefined ? ' wb-text-wrap' : ''}${hinted ? ' wb-text-hinted' : ''}`;
   return (
-    <div {...item} ref={ref} className={className} style={style}>
+    <div {...item} {...(hintId !== undefined ? { 'aria-describedby': hintId } : {})} ref={ref} className={className} style={style} data-wb-backdrop={backdrop !== undefined || undefined}>
+      {hinted ? (
+        <div className="wb-text-hint" aria-hidden="true">
+          {element.placeholder}
+        </div>
+      ) : null}
       {editing ? (
         <TextEditor
           target={editing}
@@ -183,12 +189,18 @@ export const TextView = memo(function TextView({ element }: { element: TextEleme
           onChange={(text) => writeElementText(element.id, text)}
           profile={TEXT_PROFILES.text}
           label={editTextActionLabel(element)}
-          hint="Type something"
+          describedBy={hintId}
+          hint={hinted ? '' : 'Type something'}
+          className={hinted ? 'wb-edit-over-hint' : undefined}
         />
-      ) : (
+      ) : hinted ? null : (
         <RichText text={element.text} profile={TEXT_PROFILES.text} font={font} />
       )}
-      <AgentChip element={element} />
+      {hintId !== undefined ? (
+        <span id={hintId} hidden>
+          {element.placeholder}
+        </span>
+      ) : null}
     </div>
   );
 });
@@ -228,7 +240,6 @@ export const SectionView = memo(function SectionView({ element }: { element: Con
         <path d={shapePathData('frame', w, h)} />
       </svg>
       <SectionTitle element={element} />
-      <AgentChip element={element} />
     </div>
   );
 });
@@ -262,38 +273,6 @@ function useTitleScale(box: RefObject<HTMLDivElement | null>, element: Container
       offMeasures();
     };
   }, [box, element, editing, shown]);
-}
-
-/**
- * The title of a section the canvas engine draws (it has no view of its own
- * then), drawn again above the canvas: “Add a title” over an untitled one,
- * and, under the pointer, the title in the accent. The
- * same title box as the view's, in a layer at the section's top-left corner
- * scaled to the zoom.
- */
-export function SectionTitleHint({ element, zoom, at, glowing }: { element: ContainerElement; zoom: number; at: { x: number; y: number }; glowing: boolean }) {
-  const empty = element.text.trim() === '';
-  const profile = textProfileForElement(element) ?? TEXT_PROFILES.title;
-  const scheme = useColorScheme();
-  const box = useRef<HTMLDivElement>(null);
-  useTitleScale(box, element, false, true);
-  const style: ViewStyle = {
-    left: at.x,
-    top: at.y,
-    width: element.w,
-    transform: `scale(${zoom})`,
-    '--wb-ink': sectionInkColor(element.color, scheme),
-  };
-  return (
-    <div className="wb-sel-title-hint" style={style} aria-hidden="true">
-      <div ref={box} className={glowing ? 'wb-container-title wb-glowing' : 'wb-container-title'} dir="auto" style={{ '--wb-title-lift': ZOOMED_OUT_TITLE_LIFT } as ViewStyle}>
-        {element.locked ? <Lock className="wb-container-lock" size={12} aria-label="Locked" /> : null}
-        <span className="wb-container-title-text">
-          {empty ? <span className="wb-container-hint">Add a title</span> : <RichText text={element.text} profile={profile} />}
-        </span>
-      </div>
-    </div>
-  );
 }
 
 /** The title of a section, scaled to the zoom imperatively (no re-render on zoom). */

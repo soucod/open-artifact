@@ -2,7 +2,7 @@
   "slug": "slides",
   "name": "Slides",
   "title": "Slides (presentation deck)",
-  "description": "Presentation decks as local files: project/deck.json holds the title, slide order, outline and typefaces, and each slide is an HTML file on a 16:9 or 4:3 canvas. Slides can share a deck stylesheet or use inline styles. Edited in a local page with a slide rail, an overview of every slide by section, speaker notes, builds, transitions and a full-screen presenter. Can install a design system and use its colors, type and fonts.",
+  "description": "Presentation decks as local files: project/deck.json holds the title, slide order, outline and typefaces, and each slide is an HTML file on a 16:9 or 4:3 canvas. Slides can share a deck stylesheet or use inline styles, with polygon clips on panels and photos that carry into exports. Edited in a local page with a slide rail, an overview of every slide by section, speaker notes, builds, transitions and a full-screen presenter. Can install a design system and use its colors, type and fonts.",
   "summary": "A presentation deck: 16:9 or 4:3 slides with speaker notes, builds and a presenter.",
   "artifactTitle": "Untitled deck",
   "category": "Presentations",

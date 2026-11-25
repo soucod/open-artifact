@@ -1,4 +1,11 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellCondition, ColumnId, SortDirection, ValueContents } from '@open-artifact/sheets-core';
+import type { ColumnHolds, TableHolds, WordsReadAsFilter } from '../state/initial-state.ts';
+import type { SortKeyOfColumn } from '../state/event-reducer.ts';
+import type { SignsOfNumbers } from '../model/workbook.ts';
+import type { FilterLine } from '../tables/filter-model.ts';
+import type { PhraseMeaning, TypedWord } from './tokens.ts';
+import type { ConditionRead } from './conditions.ts';
+import type { ColumnNamed } from './column-names.ts';
 import { filterEntry, filterOfEntries } from '../tables/filter-model.ts';
 import { NO_WORD_TOKEN, wordsMatchAt, splitIntoWords, isWordOrItsPlural, plainWordsOf } from './tokens.ts';
 import {
@@ -84,113 +91,162 @@ import {
 import { saysOverdueAt, isMonthName } from './dates.ts';
 import { dateToSerial } from '../model/date-serials.ts';
 import { columnNameWords } from './numbers.ts';
-export function filterClausesOfAsks(asksByColumn?: Dynamic) {
-  let clauses: Dynamic = [];
-  for (let [
+/** What the words ask of a column: values to show, values to hide, conditions to meet. */
+export interface AsksOfColumn {
+  oneOf: (ValueContents | null)[];
+  noneOf: (ValueContents | null)[];
+  meets: CellCondition[];
+}
+/** The sort keys read from the words, the column of the last one, and where the words go on. */
+export interface SortKeysRead {
+  keys: SortKeyOfColumn[];
+  last: ColumnHolds | null;
+  next: number;
+}
+/** How to read words as a filter. */
+export interface FilterWordsSituation {
+  /** Read the words as asking of this column only. */
+  only?: ColumnId;
+  /** Today's date, `YYYY-MM-DD`; without it no dates are read. */
+  today?: string | null;
+  /** Read values only after the name of their column. */
+  needsHeaders?: boolean;
+  signsOfNumbers?: SignsOfNumbers;
+  isMonthFirst?: boolean;
+}
+/** What the words ask of a column at a place, and how many words it takes. */
+type TestRead =
+  | ({ kind: 'condition' } & ConditionRead)
+  | { kind: 'values'; values: (ValueContents | null)[]; wordCount: number; isNot?: true }
+  | { kind: 'viewer'; wordCount: number };
+/** A condition read for a column. */
+interface ConditionReadForColumn extends ConditionRead {
+  column: ColumnHolds;
+}
+/** A word that applies to a column: `of` is the column, or `null` until one is named. */
+interface WordForColumn {
+  word: TypedWord;
+  of: ColumnHolds | null;
+}
+/** A joining word, and the column named before it. */
+interface JoinerAfterColumn {
+  word: TypedWord;
+  after: ColumnHolds | null;
+}
+export function filterClausesOfAsks(asksByColumn: Map<ColumnId, AsksOfColumn>): FilterLine[] {
+  const clauses: FilterLine[] = [];
+  for (const [
     c,
     {
-      oneOf: oneOf,
-      noneOf: noneOf,
+      oneOf,
+      noneOf,
       meets: [condition],
     },
-  ] of asksByColumn as Dynamic) {
-    let [kind, [firstValue, ...otherValues]] = oneOf.length > 0 ? ['isOneOf', oneOf] : ['isNoneOf', noneOf];
+  ] of asksByColumn) {
+    const [kind, [firstValue, ...otherValues]]: ['isOneOf' | 'isNoneOf', (ValueContents | null)[]] =
+      oneOf.length > 0 ? ['isOneOf', oneOf] : ['isNoneOf', noneOf];
     if (condition !== undefined)
       clauses.push(
         filterEntry(c, {
           kind: 'meets',
-          condition: condition,
+          condition,
         }),
       );
     else if (firstValue !== undefined)
       clauses.push(
         filterEntry(c, {
-          kind: kind,
+          kind,
           values: [firstValue, ...otherValues],
         }),
       );
   }
   return clauses;
 }
-export function readSortKeys(holds?: Dynamic, words?: Dynamic, from?: Dynamic, notPlace?: Dynamic, isDirectionOnly: Dynamic = false) {
-  let keys: Dynamic = [];
-  let lastColumn: Dynamic = null;
-  let joiner: Dynamic = isDirectionOnly ? NO_WORD_TOKEN : (words[from - 1] ?? null);
-  let at2: Dynamic = from;
-  while (at2 < words.length) {
-    let word = words[at2] ?? NO_WORD_TOKEN;
-    let lastKey = joiner === null || joiner.plain === ',' ? keys.at(-1) : undefined;
-    let direction = sortDirectionAt(words, at2, lastColumn);
-    let onTopPhrase = ON_TOP_PHRASES.find((phrase?: Dynamic) => wordsMatchAt(words, at2 + 1, phrase));
-    let superlativeDirection = onTopPhrase === undefined ? undefined : SUPERLATIVE_DIRECTIONS.get(word.plain);
-    let named = joiner === null ? null : columnNamedAt(holds, words, at2, true, true);
+export function readSortKeys(
+  holds: TableHolds,
+  words: readonly TypedWord[],
+  from: number,
+  notPlace: (word: TypedWord) => void,
+  isDirectionOnly: boolean = false,
+): SortKeysRead {
+  const keys: SortKeyOfColumn[] = [];
+  let lastColumn: ColumnHolds | null = null;
+  let joiner: TypedWord | null = isDirectionOnly ? NO_WORD_TOKEN : (words[from - 1] ?? null);
+  let at = from;
+  while (at < words.length) {
+    const word = words[at] ?? NO_WORD_TOKEN;
+    const lastKey = joiner === null || joiner.plain === ',' ? keys.at(-1) : undefined;
+    const direction = sortDirectionAt(words, at, lastColumn);
+    const onTopPhrase = ON_TOP_PHRASES.find((phrase) => wordsMatchAt(words, at + 1, phrase));
+    const superlativeDirection = onTopPhrase === undefined ? undefined : SUPERLATIVE_DIRECTIONS.get(word.plain);
+    const named: ColumnNamed | null = joiner === null ? null : columnNamedAt(holds, words, at, true, true);
     if (lastKey !== undefined && direction !== undefined) {
       keys[keys.length - 1] = {
         ...lastKey,
         direction: direction[1],
       };
       joiner = null;
-      at2 += direction[0].length;
+      at += direction[0].length;
     } else if (lastKey !== undefined && superlativeDirection !== undefined && lastColumn !== null && isSuperlativeFor(lastColumn, word.plain)) {
       keys[keys.length - 1] = {
         ...lastKey,
         direction: superlativeDirection,
       };
       joiner = null;
-      at2 += 1 + (onTopPhrase?.length ?? 0);
-    } else if (named !== null && keys.every(({ c: c }: Dynamic) => c !== named.column.c)) {
+      at += 1 + (onTopPhrase?.length ?? 0);
+    } else if (named !== null && keys.every(({ c }) => c !== named.column.c)) {
       keys.push({
         c: named.column.c,
         direction: 'ascending',
       });
       [lastColumn, joiner] = [named.column, null];
-      at2 += named.wordCount;
+      at += named.wordCount;
     } else {
       let isColumnWord = word.plain === 'column' || (word.plain === 'date' && lastColumn?.kind === 'date');
       if (joiner === null && SORT_KEY_JOINERS.has(word.plain)) joiner = word;
       else if (!(joiner === null ? isColumnWord : SORT_LIST_WORDS.has(word.plain))) break;
-      at2 += 1;
+      at += 1;
     }
   }
-  let endsWithAnd = keys.length > 0 && at2 < words.length && joiner?.plain === 'and';
+  const endsWithAnd = keys.length > 0 && at < words.length && joiner?.plain === 'and';
   if (joiner !== null && joiner.plain !== ',' && !endsWithAnd) notPlace(joiner);
   return {
-    keys: keys,
+    keys,
     last: lastColumn,
-    next: at2,
+    next: at,
   };
 }
-export function knownWordsForColumn(column?: Dynamic, today2?: Dynamic) {
+export function knownWordsForColumn(column: ColumnHolds | null, today: string | null): Set<string> | null {
   if (column === null || column.kind === 'checkbox') return null;
   let measure = measureOfColumn(column);
   if (measure === null) return TEXT_TEST_WORDS;
   if (measure === 'numbers') return NUMBER_CONDITION_WORDS;
-  return today2 === null ? null : DATE_CONDITION_WORDS;
+  return today === null ? null : DATE_CONDITION_WORDS;
 }
 export function readWordsAsFilter(
-  typed?: Dynamic,
-  holds?: Dynamic,
-  viewerId?: Dynamic,
-  { only: onlyC, today: today2 = null, needsHeaders = false, signsOfNumbers: signsOfNumbers, isMonthFirst = true }: Dynamic = {},
-) {
+  typed: string,
+  holds: TableHolds,
+  viewerId: string | null,
+  { only: onlyC, today = null, needsHeaders = false, signsOfNumbers, isMonthFirst = true }: FilterWordsSituation = {},
+): WordsReadAsFilter {
   if (typed.length > MOST_CHARACTERS_OF_WORDS) return FILTER_WORDS_NOT_READ;
-  let isTypedPlainly = (PLAINLY_TYPED_PATTERN as Dynamic).test(typed.replace(NUMBER_SIGN_OR_HYPHEN_PATTERN, ''));
-  let onlyColumn = onlyC === undefined ? null : (holds.columns.find(({ c: c }: Dynamic) => c === onlyC) ?? null);
+  const isTypedPlainly = PLAINLY_TYPED_PATTERN.test(typed.replace(NUMBER_SIGN_OR_HYPHEN_PATTERN, ''));
+  const onlyColumn = onlyC === undefined ? null : (holds.columns.find(({ c }) => c === onlyC) ?? null);
   if (onlyC !== undefined && onlyColumn === null) return FILTER_WORDS_NOT_READ;
-  let words = splitIntoWords(typed, onlyColumn === null, signsOfNumbers);
-  let wordsNotPlacedSet = new (Set as Dynamic)();
-  let notPlaced = {
-    push: (...words2: Dynamic[]) => words2.forEach((word?: Dynamic) => wordsNotPlacedSet.add(word)),
+  const words = splitIntoWords(typed, onlyColumn === null, signsOfNumbers);
+  const wordsNotPlacedSet = new Set<TypedWord>();
+  const notPlaced = {
+    push: (...unplaced: TypedWord[]) => unplaced.forEach((word) => wordsNotPlacedSet.add(word)),
   };
-  let isDecimalComma = signsOfNumbers?.decimalSign === 'comma';
-  let isGroupNotPoint = isDecimalComma && signsOfNumbers.groupSign !== 'point';
-  let isGroupSpace = isDecimalComma && signsOfNumbers.groupSign.endsWith('Space');
-  let numberWordsInDoubt = new (Set as Dynamic)();
-  let doubtNumberWords = (...doubted: Dynamic[]) => {
-    doubted.forEach((word?: Dynamic) => numberWordsInDoubt.add(word));
+  const isDecimalComma = signsOfNumbers?.decimalSign === 'comma';
+  const isGroupNotPoint = isDecimalComma && signsOfNumbers.groupSign !== 'point';
+  const isGroupSpace = isDecimalComma && signsOfNumbers.groupSign.endsWith('Space');
+  const numberWordsInDoubt = new Set<TypedWord>();
+  const doubtNumberWords = (...doubted: TypedWord[]) => {
+    doubted.forEach((word) => numberWordsInDoubt.add(word));
     notPlaced.push(...doubted);
   };
-  for (let [at, word] of words.entries() as Dynamic) {
+  for (const [at, word] of words.entries()) {
     let [wordBefore, wordAfter] = [words[at - 1] ?? NO_WORD_TOKEN, words[at + 1] ?? NO_WORD_TOKEN];
     if (isGroupNotPoint && /^-?(?!0)\d{1,3}(?:\.\d{3})+$/.test(word.said)) doubtNumberWords(word);
     let isDigitJustAfter = !wordAfter.isAfterBlank && /^\d/.test(wordAfter.said);
@@ -217,16 +273,18 @@ export function readWordsAsFilter(
     let isNumberBefore = !word.isAfterBlank && /^\d+$/.test(wordBefore.plain);
     if (!isMonthFirst && word.said === '/' && isNumberBefore && isNumberAfter) notPlaced.push(word);
   }
-  let asksByColumn = new (Map as Dynamic)();
-  let sortBy: Dynamic = [];
-  let pendingSortVerb: Dynamic = null;
-  let asksForAll: Dynamic = false;
-  let negation: Dynamic = null;
-  let havingWord: Dynamic = null;
-  let pendingJoiner: Dynamic = null;
-  let hidingWord: Dynamic = null;
-  let wasColumnTouched: Dynamic = false;
-  let noteColumnTouched = (column?: Dynamic) => {
+  const asksByColumn = new Map<ColumnId, AsksOfColumn>();
+  let sortBy: SortKeyOfColumn[] = [];
+  let pendingSortVerb: TypedWord | null = null;
+  let asksForAll = false;
+  // Closures below assign `negation`, `lastColumn` and `currentColumn`; the `as` keeps the checker
+  // from taking them to stay `null` in the loop that calls those closures.
+  let negation = null as WordForColumn | null;
+  let havingWord: TypedWord | null = null;
+  let pendingJoiner: JoinerAfterColumn | null = null;
+  let hidingWord: WordForColumn | null = null;
+  let wasColumnTouched = false;
+  const noteColumnTouched = (column: ColumnHolds) => {
     wasColumnTouched = true;
     if (hidingWord !== null && hidingWord.of !== null && hidingWord.of !== column) notPlaced.push(hidingWord.word);
     if (hidingWord !== null)
@@ -235,24 +293,24 @@ export function readWordsAsFilter(
         of: column,
       };
   };
-  let yetWord: Dynamic = null;
-  let lastColumn: Dynamic = null;
-  let currentColumn: Dynamic = null;
-  let columnOfLastTest: Dynamic = null;
-  let addValuesFor = (column?: Dynamic, values?: Dynamic, asNoneOf?: Dynamic) => {
+  let yetWord: TypedWord | null = null;
+  let lastColumn = null as ColumnHolds | null;
+  let currentColumn = null as ColumnHolds | null;
+  let columnOfLastTest: ColumnHolds | null = null;
+  const addValuesFor = (column: ColumnHolds, values: (ValueContents | null)[], asNoneOf?: boolean) => {
     noteColumnTouched(column);
     if (column !== columnOfLastTest) columnOfLastTest = null;
     if (pendingJoiner !== null && pendingJoiner.after !== null && pendingJoiner.after !== column) notPlaced.push(pendingJoiner.word);
     if (negation !== null && negation.of !== null && negation.of !== column) negation = null;
-    let asks = asksByColumn.get(column.c) ?? {
+    const asks = asksByColumn.get(column.c) ?? {
       oneOf: [],
       noneOf: [],
       meets: [],
     };
     asksByColumn.set(column.c, asks);
-    let list = (asNoneOf ?? negation !== null) ? asks.noneOf : asks.oneOf;
-    let keys = new (Set as Dynamic)(list.map(filterValueKey));
-    for (let value of values as Dynamic) {
+    const list = (asNoneOf ?? negation !== null) ? asks.noneOf : asks.oneOf;
+    const keys = new Set(list.map(filterValueKey));
+    for (const value of values) {
       if (!keys.has(filterValueKey(value))) list.push(value);
       keys.add(filterValueKey(value));
     }
@@ -263,40 +321,40 @@ export function readWordsAsFilter(
       };
     [havingWord, pendingJoiner, lastColumn, currentColumn] = [null, null, column, column];
   };
-  let resetCurrentColumn = () => {
+  const resetCurrentColumn = () => {
     [currentColumn, columnOfLastTest] = [null, null];
     if (negation !== null && negation.of !== null) negation = null;
   };
-  let noteNegation = (word?: Dynamic) => {
+  const noteNegation = (word: TypedWord) => {
     if (negation !== null && negation.of === null) notPlaced.push(negation.word);
     negation = {
-      word: word,
+      word,
       of: null,
     };
     currentColumn = null;
     if (hidingWord !== null && word.plain === 'except') notPlaced.push(word);
     if (HIDING_WORDS.has(word.plain))
       hidingWord ??= {
-        word: word,
+        word,
         of: null,
       };
   };
-  let isNegated = (column?: Dynamic) => negation !== null && negation.of === column;
-  let noteJoiner = (word?: Dynamic) => {
+  const isNegated = (column: ColumnHolds) => negation !== null && negation.of === column;
+  const noteJoiner = (word: TypedWord) => {
     if (negation !== null && negation.of === null) notPlaced.push(negation.word);
     if (word.said === '/' && /\/\s*\d/.test(lastColumn?.name ?? '')) notPlaced.push(word);
     if (word.plain === 'or')
       pendingJoiner = {
-        word: word,
+        word,
         after: lastColumn,
       };
     if (word.plain === 'or' && lastColumn === null) notPlaced.push(word);
   };
-  let addCondition = (column?: Dynamic, condition?: Dynamic) => {
+  const addCondition = (column: ColumnHolds, condition: CellCondition) => {
     noteColumnTouched(column);
     if (pendingJoiner !== null) notPlaced.push(pendingJoiner.word);
-    let negationWord = negation !== null && negation.of === null ? negation.word : null;
-    let negatedCondition =
+    const negationWord = negation !== null && negation.of === null ? negation.word : null;
+    const negatedCondition: CellCondition | null =
       condition.kind === 'numberIs' && condition.comparison === 'equalTo'
         ? {
             ...condition,
@@ -314,7 +372,7 @@ export function readWordsAsFilter(
               }
             : null;
     if (negationWord !== null && negatedCondition === null) notPlaced.push(negationWord);
-    let asks = asksByColumn.get(column.c) ?? {
+    const asks = asksByColumn.get(column.c) ?? {
       oneOf: [],
       noneOf: [],
       meets: [],
@@ -323,25 +381,25 @@ export function readWordsAsFilter(
     asks.meets.push(negationWord !== null && negatedCondition !== null ? negatedCondition : condition);
     [negation, havingWord, pendingJoiner, lastColumn, currentColumn] = [null, null, null, column, null];
   };
-  let endClause = () => {
+  const endClause = () => {
     if (negation !== null && negation.of === null) notPlaced.push(negation.word);
     if (havingWord !== null) notPlaced.push(havingWord);
     if (pendingJoiner !== null) notPlaced.push(pendingJoiner.word);
     [negation, havingWord, pendingJoiner, lastColumn, currentColumn, columnOfLastTest] = [null, null, null, null, null, null];
   };
-  let addSortKeys = (keys?: Dynamic, from?: Dynamic, to?: Dynamic) => {
+  const addSortKeys = (keys: SortKeyOfColumn[], from: number, to: number) => {
     endClause();
     if (sortBy.length > 0) notPlaced.push(...words.slice(from, to));
     sortBy = [...sortBy, ...keys];
   };
-  let startsSortByAt = (at?: Dynamic) => {
-    let phrase = SORT_BY_PHRASES.find((phrase2?: Dynamic) => wordsMatchAt(words, at, phrase2));
+  const startsSortByAt = (at: number) => {
+    const phrase = SORT_BY_PHRASES.find((sortByPhrase) => wordsMatchAt(words, at, sortByPhrase));
     return phrase !== undefined && columnNamedAt(holds, words, at + phrase.length, true, true) !== null;
   };
-  let startsColumnTestAt = (at?: Dynamic) => {
-    let named = columnNamedAt(holds, words, at, true);
+  const startsColumnTestAt = (at: number) => {
+    const named = columnNamedAt(holds, words, at, true);
     if (named === null) return false;
-    let testAt: Dynamic = at + named.wordCount;
+    let testAt = at + named.wordCount;
     while (EQUALS_WORDS.has(words[testAt]?.plain ?? '')) testAt += 1;
     return (
       testPhraseWordCountAt(words, testAt) > 0 ||
@@ -350,10 +408,10 @@ export function readWordsAsFilter(
       (columnNamedAt(holds, words, at) !== null && readTestFor(named.column, testAt) !== null)
     );
   };
-  let endsTextAt = (at?: Dynamic) => {
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
+  const endsTextAt = (at: number) => {
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
     if (plain === ',' || startsColumnTestAt(at)) return true;
-    let nextAt = at + 1;
+    const nextAt = at + 1;
     return (
       LIST_JOINERS.has(plain) &&
       (startsColumnTestAt(nextAt) ||
@@ -364,35 +422,35 @@ export function readWordsAsFilter(
         }) !== null)
     );
   };
-  let mayBeUnfinishedNameAt = (at?: Dynamic) => {
-    let plainWords = words.slice(at).map(({ plain: plain }: Dynamic) => plain);
-    let lastPlain = plainWords.at(-1);
+  const mayBeUnfinishedNameAt = (at: number) => {
+    const plainWords = words.slice(at).map(({ plain }) => plain);
+    const lastPlain = plainWords.at(-1);
     if (lastPlain === undefined) return true;
     return [
-      ...columnNamesOf(holds.columns).map(({ name: name }: Dynamic) => name),
+      ...columnNamesOf(holds.columns).map(({ name }) => name),
       ...holds.columns
         .filter(isColumnOfFewValues)
-        .flatMap((column?: Dynamic) => valueLabelsOf(column).map((label?: Dynamic) => label.words)),
+        .flatMap((column) => valueLabelsOf(column).map((label) => label.words)),
     ].some(
-      (nameWords?: Dynamic) =>
+      (nameWords) =>
         nameWords.length >= plainWords.length &&
-        plainWords.slice(0, -1).every((plain?: Dynamic, index?: Dynamic) => plain === nameWords[index]) &&
+        plainWords.slice(0, -1).every((plain, index) => plain === nameWords[index]) &&
         nameWords[plainWords.length - 1]?.startsWith(lastPlain) === true,
     );
   };
-  let stopsTextAt = (at?: Dynamic, isQuoted?: Dynamic) => {
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
+  const stopsTextAt = (at: number, isQuoted: boolean) => {
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
     if (plain === 'or' || plain === 'but' || NEGATING_WORDS.has(plain) || FIRST_PERSON_WORDS.has(plain)) return true;
     if (startsNumberComparisonAt(words, at) || startsSortByAt(at)) return true;
     if (LARGEST_SMALLEST_WORDS.has(plain) && /^\d/.test(words[at + 1]?.plain ?? '')) return true;
     if (LIST_JOINERS.has(plain) && (columnNamedAt(holds, words, at + 1, true) !== null || mayBeUnfinishedNameAt(at + 1))) return true;
     return at === words.length - 1 && !/\s$/.test(typed) && !isQuoted && 'and'.startsWith(plain);
   };
-  let readTextOrColumnTest = (column?: Dynamic, at?: Dynamic) => {
+  const readTextOrColumnTest = (column: ColumnHolds, at: number): ConditionRead | null => {
     if (column.kind === 'checkbox') return null;
-    let comparison = columnComparisonAt(words, at, column);
-    let testWordCount = Math.max(testPhraseWordCountAt(words, at), comparison?.wordCount ?? 0);
-    for (let wordAt: Dynamic = at; wordAt < at + testWordCount; wordAt += 1)
+    const comparison = columnComparisonAt(words, at, column);
+    const testWordCount = Math.max(testPhraseWordCountAt(words, at), comparison?.wordCount ?? 0);
+    for (let wordAt = at; wordAt < at + testWordCount; wordAt += 1)
       if (
         columnNamedAt(holds, words, wordAt) !== null ||
         valuesNamedAt(holds, words, wordAt, {
@@ -402,12 +460,12 @@ export function readWordsAsFilter(
         }).length > 0
       )
         return null;
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
-    let isNotText =
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
+    const isNotText =
       testWordCount === 0 &&
       (!/^\p{L}/u.test(plain) ||
         [COMMAND_WORDS, BLANK_WORDS, FILLED_WORDS, TASK_NOUNS, NUMBER_CONDITION_WORDS, DATE_CONDITION_WORDS].some(
-          (wordSet?: Dynamic) => wordSet.has(plain) && !SET_STATE_WORDS.has(plain),
+          (wordSet) => wordSet.has(plain) && !SET_STATE_WORDS.has(plain),
         ) ||
         columnNamedAt(holds, words, at, true)?.isPart === false ||
         valuesNamedAt(holds, words, at, {
@@ -415,11 +473,11 @@ export function readWordsAsFilter(
           rather: null,
           wholeLabelsOnly: true,
         }).length > 0);
-    let test =
+    const test =
       (measureOfColumn(column) !== null || isNotText ? null : readTextCondition(words, at, endsTextAt, stopsTextAt)) ??
       readCellTestCondition(words, at);
     if (test !== null) return test;
-    let otherColumn = comparison === null ? null : columnNamedAt(holds, words, at + comparison.wordCount, true, true);
+    const otherColumn = comparison === null ? null : columnNamedAt(holds, words, at + comparison.wordCount, true, true);
     if (comparison === null || otherColumn === null || otherColumn.column === column) return null;
     if (measureOfColumn(otherColumn.column) !== measureOfColumn(column)) return null;
     return {
@@ -434,14 +492,14 @@ export function readWordsAsFilter(
       wordCount: comparison.wordCount + otherColumn.wordCount,
     };
   };
-  let readTestFor = (column?: Dynamic, at?: Dynamic) => {
-    let condition = readMeasureCondition(words, at, column, today2);
+  const readTestFor = (column: ColumnHolds, at: number): TestRead | null => {
+    const condition = readMeasureCondition(words, at, column, today);
     if (condition !== null)
       return {
         kind: 'condition',
         ...condition,
       };
-    let valueNamed = valueNamedAt(holds, words, at, {
+    const valueNamed = valueNamedAt(holds, words, at, {
       only: column,
       rather: null,
     });
@@ -452,13 +510,13 @@ export function readWordsAsFilter(
         wordCount: valueNamed.wordCount,
       };
     if (onlyColumn === null && wordsMatchAt(words, at, ['set', 'to']) && words[at]?.isInQuotes !== true) {
-      let setToTest = readTestFor(column, at + 2);
+      const setToTest = readTestFor(column, at + 2);
       if (setToTest !== null)
         return {
           ...setToTest,
           wordCount: setToTest.wordCount + 2,
         };
-      let setToValue = valueNamedAt(holds, words, at + 1, {
+      const setToValue = valueNamedAt(holds, words, at + 1, {
         only: column,
         rather: null,
       });
@@ -468,27 +526,27 @@ export function readWordsAsFilter(
           values: setToValue.values,
           wordCount: setToValue.wordCount + 1,
         };
-      let isNegatedOrAll =
-        [NEGATING_WORDS, ALL_WORDS].some((wordSet?: Dynamic) => wordSet.has(words[at + 2]?.plain ?? '')) ||
+      const isNegatedOrAll =
+        [NEGATING_WORDS, ALL_WORDS].some((wordSet) => wordSet.has(words[at + 2]?.plain ?? '')) ||
         words[at + 2]?.plain === 'anything';
       if (!namesSomethingAt(at + 1) && !isNegatedOrAll) return null;
     }
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
     if (FIRST_PERSON_WORDS.has(plain) && isPeopleColumn(column))
       return {
         kind: 'viewer',
         wordCount: 1,
       };
-    let unassignedLength = isPeopleColumn(column) ? unassignedPhraseLengthAt(words, at) : 0;
+    const unassignedLength = isPeopleColumn(column) ? unassignedPhraseLengthAt(words, at) : 0;
     if (unassignedLength > 0)
       return {
         kind: 'values',
         values: [null],
         wordCount: unassignedLength,
       };
-    let isSetState = SET_STATE_WORDS.has(plain) && (onlyColumn !== null || words[at]?.isInQuotes === true);
-    let isAnythingBut = plain === 'anything' && words[at + 1]?.plain === 'but';
-    let isBlankOrFilled = column.kind !== 'checkbox' && !isSetState && !isAnythingBut;
+    const isSetState = SET_STATE_WORDS.has(plain) && (onlyColumn !== null || words[at]?.isInQuotes === true);
+    const isAnythingBut = plain === 'anything' && words[at + 1]?.plain === 'but';
+    const isBlankOrFilled = column.kind !== 'checkbox' && !isSetState && !isAnythingBut;
     if (isBlankOrFilled && BLANK_WORDS.has(plain))
       return {
         kind: 'values',
@@ -502,7 +560,7 @@ export function readWordsAsFilter(
         wordCount: 1,
         isNot: true,
       };
-    let equalsNumber = readEqualsNumberCondition(words, at, column);
+    const equalsNumber = readEqualsNumberCondition(words, at, column);
     return equalsNumber === null
       ? null
       : {
@@ -510,10 +568,10 @@ export function readWordsAsFilter(
           ...equalsNumber,
         };
   };
-  let readAnyTestFor = (column?: Dynamic, at?: Dynamic) => {
-    let test = readTestFor(column, at);
+  const readAnyTestFor = (column: ColumnHolds, at: number): TestRead | null => {
+    const test = readTestFor(column, at);
     if (test !== null || onlyColumn !== null) return test;
-    let textTest = readTextOrColumnTest(column, at);
+    const textTest = readTextOrColumnTest(column, at);
     return textTest === null
       ? null
       : {
@@ -521,10 +579,10 @@ export function readWordsAsFilter(
           ...textTest,
         };
   };
-  let unreadConditionWord: Dynamic = NO_WORD_TOKEN;
-  let placeTest = (column?: Dynamic, test?: Dynamic, at?: Dynamic) => {
-    let values = test.kind === 'viewer' ? valuesOfUserInColumn(column, viewerId) : test.kind === 'values' ? test.values : [];
-    let includesBlank = test.kind === 'values' && test.isNot !== true && values.includes(null) && !EMPTY_WORDS.has(words[at]?.plain ?? '');
+  let unreadConditionWord = NO_WORD_TOKEN;
+  const placeTest = (column: ColumnHolds, test: TestRead, at: number) => {
+    const values = test.kind === 'viewer' ? valuesOfUserInColumn(column, viewerId) : test.kind === 'values' ? test.values : [];
+    const includesBlank = test.kind === 'values' && test.isNot !== true && values.includes(null) && !EMPTY_WORDS.has(words[at]?.plain ?? '');
     if (onlyColumn === null && includesBlank && hasZeroValues(column)) notPlaced.push(...words.slice(at, at + 1));
     if (test.kind === 'condition' && test.condition !== null) addCondition(column, test.condition);
     else if (test.kind === 'condition') {
@@ -533,31 +591,31 @@ export function readWordsAsFilter(
     } else if (values.length === 0) notPlaced.push(...words.slice(at + test.wordCount - 1, at + test.wordCount));
     else if (test.kind === 'values' && test.isNot === true) {
       if (negation !== null && negation.of === column) notPlaced.push(...words.slice(at, at + 1));
-      let isNegatedHere = negation !== null && negation.of === null;
+      const isNegatedHere = negation !== null && negation.of === null;
       negation = null;
       addValuesFor(column, values, !isNegatedHere);
     } else addValuesFor(column, values);
     return at + test.wordCount;
   };
-  let columnNameWords2 = new (Set as Dynamic)();
-  let partialValueWords = new (Set as Dynamic)();
-  let columnForKnownWords: Dynamic = onlyColumn;
-  let stopsReading: Dynamic = false;
-  let notPlace = (word?: Dynamic) => {
+  const wordsNamingColumns = new Set<TypedWord>();
+  const partialValueWords = new Set<TypedWord>();
+  let columnForKnownWords = onlyColumn;
+  let stopsReading = false;
+  const notPlace = (word: TypedWord) => {
     notPlaced.push(word);
     if (NUMBER_CONDITION_WORDS.has(word.plain) || DATE_CONDITION_WORDS.has(word.plain)) stopsReading = true;
   };
-  let isLongerDateReading = (column?: Dynamic, at?: Dynamic, test?: Dynamic) => {
+  const isLongerDateReading = (column: ColumnHolds, at: number, test: TestRead | null) => {
     if (test?.kind !== 'condition') return false;
-    let longerTest = readMeasureCondition(words, at, column, today2);
+    const longerTest = readMeasureCondition(words, at, column, today);
     return longerTest?.wordCount === test.wordCount + 1 && JSON.stringify(longerTest.condition) !== JSON.stringify(test.condition);
   };
-  let readForColumn = (column?: Dynamic, at?: Dynamic) => {
-    let word = words[at] ?? NO_WORD_TOKEN;
-    let test = readAnyTestFor(column, at);
-    let named = columnNamedAt(holds, words, at);
+  const readForColumn = (column: ColumnHolds, at: number) => {
+    const word = words[at] ?? NO_WORD_TOKEN;
+    const test = readAnyTestFor(column, at);
+    const named = columnNamedAt(holds, words, at);
     if (named !== null && (test === null || test.wordCount < named.wordCount)) {
-      let afterName = at + named.wordCount;
+      const afterName = at + named.wordCount;
       if (named.column !== column || isLongerDateReading(column, afterName - 1, readAnyTestFor(column, afterName)))
         notPlaced.push(...words.slice(at, afterName));
       return afterName;
@@ -573,43 +631,43 @@ export function readWordsAsFilter(
     }
     return at + 1;
   };
-  let readLargestBy = (at?: Dynamic) => {
-    for (let column of holds.columns as Dynamic) {
-      let largest = measureOfColumn(column) === 'numbers' ? readMeasureCondition(words, at, column, today2) : null;
-      let kind = largest?.condition?.kind;
+  const readLargestBy = (at: number): ConditionReadForColumn | null => {
+    for (const column of holds.columns) {
+      const largest = measureOfColumn(column) === 'numbers' ? readMeasureCondition(words, at, column, today) : null;
+      const kind = largest?.condition?.kind;
       if (largest === null || (kind !== 'isAmongTheLargest' && kind !== 'isAmongTheSmallest')) continue;
-      let afterLargest = at + largest.wordCount;
-      let byColumn = words[afterLargest]?.plain === 'by' ? columnNamedAt(holds, words, afterLargest + 1) : null;
-      let wordAfter = words[afterLargest + 1 + (byColumn?.wordCount ?? 0)]?.plain;
+      const afterLargest = at + largest.wordCount;
+      const byColumn = words[afterLargest]?.plain === 'by' ? columnNamedAt(holds, words, afterLargest + 1) : null;
+      const wordAfter = words[afterLargest + 1 + (byColumn?.wordCount ?? 0)]?.plain;
       if (byColumn?.column === column && (wordAfter === undefined || LIST_JOINERS.has(wordAfter)))
         return {
           ...largest,
-          column: column,
+          column,
           wordCount: largest.wordCount + 1 + byColumn.wordCount,
         };
     }
     return null;
   };
-  let columnTestAt = (at?: Dynamic) => {
-    let named = columnNamedAt(holds, words, at, true, true);
+  const columnTestAt = (at: number): ColumnNamed | null => {
+    const named = columnNamedAt(holds, words, at, true, true);
     if (named === null) return null;
-    let testAt: Dynamic = at + named.wordCount;
+    let testAt = at + named.wordCount;
     if (sortDirectionAt(words, testAt, named.column) !== undefined) return named;
     while (EQUALS_WORDS.has(words[testAt]?.plain ?? '')) testAt += 1;
     if (NEGATING_WORDS.has(words[testAt]?.plain ?? '') && readTextOrColumnTest(named.column, testAt) === null) testAt += 1;
-    return readTextOrColumnTest(named.column, testAt) !== null || (named.isPart && readMeasureCondition(words, testAt, named.column, today2) !== null)
+    return readTextOrColumnTest(named.column, testAt) !== null || (named.isPart && readMeasureCondition(words, testAt, named.column, today) !== null)
       ? named
       : null;
   };
-  let valuesNamedHere = (at?: Dynamic) =>
+  const valuesNamedHere = (at: number) =>
     valuesNamedAt(holds, words, at, {
       only: null,
       rather: null,
     });
-  let namesSomethingAt = (at?: Dynamic) => columnNamedAt(holds, words, at, true) !== null || valuesNamedHere(at).length > 0;
-  let namesPersonAt = (at?: Dynamic) => {
-    let nameAt = words[at]?.plain === 'to' ? at + 1 : at;
-    let valueNamed = valueNamedAt(holds, words, nameAt, {
+  const namesSomethingAt = (at: number) => columnNamedAt(holds, words, at, true) !== null || valuesNamedHere(at).length > 0;
+  const namesPersonAt = (at: number) => {
+    const nameAt = words[at]?.plain === 'to' ? at + 1 : at;
+    const valueNamed = valueNamedAt(holds, words, nameAt, {
       only: null,
       rather: null,
     });
@@ -619,10 +677,10 @@ export function readWordsAsFilter(
       (valueNamed !== null && isPeopleColumn(valueNamed.column))
     );
   };
-  let columnToTestAt = (at?: Dynamic) => {
-    let named = columnNamedAt(holds, words, at);
+  const columnToTestAt = (at: number) => {
+    const named = columnNamedAt(holds, words, at);
     if (named === null || named.column.kind === 'checkbox' || isOnlyTextColumn(holds, named.column)) return null;
-    let saysDate = named.column.kind === 'date' && words[at + named.wordCount]?.plain === 'date';
+    const saysDate = named.column.kind === 'date' && words[at + named.wordCount]?.plain === 'date';
     return startsColumnTestAt(at)
       ? null
       : {
@@ -630,98 +688,98 @@ export function readWordsAsFilter(
           wordCount: named.wordCount + Number(saysDate),
         };
   };
-  let readCheckboxWords = (at?: Dynamic) => {
-    let next: Dynamic = at;
+  const readCheckboxWords = (at: number) => {
+    let next = at;
     while (EQUALS_WORDS.has(words[next]?.plain ?? '')) next += 1;
-    let hadEqualsWord = next > at;
-    let notBefore =
+    const hadEqualsWord = next > at;
+    const notBefore =
       NOT_VERBS.has(words[next]?.plain ?? '') &&
       (CHECKED_RULE_WORDS.has(words[next + 1]?.plain ?? '') || UNCHECKED_WORDS.has(words[next + 1]?.plain ?? ''))
         ? words[next]
         : undefined;
     if (notBefore !== undefined) next += 1;
-    let said =
-      columnNamedAt(holds, words, next) !== null || valuesNamedHere(next).some(({ wordCount: wordCount }: Dynamic) => wordCount > 1)
+    const said =
+      columnNamedAt(holds, words, next) !== null || valuesNamedHere(next).some(({ wordCount }) => wordCount > 1)
         ? NO_WORD_TOKEN
         : (words[next] ?? NO_WORD_TOKEN);
-    let endsHere =
+    const endsHere =
       words[next + 1] === undefined ||
       LIST_JOINERS.has(words[next + 1]?.plain ?? '') ||
-      SORT_BY_PHRASES.some((phrase?: Dynamic) => wordsMatchAt(words, next + 1, phrase));
-    let isUnassigned = unassignedPhraseLengthAt(words, next) > 0 && !namesSomethingAt(next + 1);
-    let nextColumn = columnNamedAt(holds, words, next + 1);
-    let isSetCheckbox =
+      SORT_BY_PHRASES.some((phrase) => wordsMatchAt(words, next + 1, phrase));
+    const isUnassigned = unassignedPhraseLengthAt(words, next) > 0 && !namesSomethingAt(next + 1);
+    const nextColumn = columnNamedAt(holds, words, next + 1);
+    const isSetCheckbox =
       nextColumn !== null &&
       words[next + 1 + nextColumn.wordCount]?.plain === 'set' &&
       readAnyTestFor(nextColumn.column, next + 1 + nextColumn.wordCount)?.wordCount === 1;
-    let isNoBeforeName = said.plain === 'no' && !hadEqualsWord && (columnToTestAt(next + 1) !== null || isSetCheckbox || isUnassigned);
-    let isNoOfEither = said.plain === 'no' && !hadEqualsWord && !endsHere && !isNoBeforeName;
-    let isOfBoxes = CHECKED_RULE_WORDS.has(said.plain) || (UNCHECKED_WORDS.has(said.plain) && !isNoBeforeName);
+    const isNoBeforeName = said.plain === 'no' && !hadEqualsWord && (columnToTestAt(next + 1) !== null || isSetCheckbox || isUnassigned);
+    const isNoOfEither = said.plain === 'no' && !hadEqualsWord && !endsHere && !isNoBeforeName;
+    const isOfBoxes = CHECKED_RULE_WORDS.has(said.plain) || (UNCHECKED_WORDS.has(said.plain) && !isNoBeforeName);
     return {
-      next: next,
-      notBefore: notBefore,
-      said: said,
-      isOfBoxes: isOfBoxes,
-      isNoOfEither: isNoOfEither,
+      next,
+      notBefore,
+      said,
+      isOfBoxes,
+      isNoOfEither,
     };
   };
-  let saysBoxesAt = (at?: Dynamic) => {
-    let { next: next, isOfBoxes: isOfBoxes } = readCheckboxWords(at);
+  const saysBoxesAt = (at: number) => {
+    const { next, isOfBoxes } = readCheckboxWords(at);
     return isOfBoxes && !namesSomethingAt(next);
   };
-  let readSortAt = (at?: Dynamic, isDirectionOnly: Dynamic = false) => {
-    let {
-      keys: keys,
-      last: lastColumn2,
-      next: next,
-    } = readSortKeys(holds, words, at, (word?: Dynamic) => notPlaced.push(word), isDirectionOnly);
+  const readSortAt = (at: number, isDirectionOnly: boolean = false) => {
+    const {
+      keys,
+      last: lastSortColumn,
+      next,
+    } = readSortKeys(holds, words, at, (word) => notPlaced.push(word), isDirectionOnly);
     if (isDirectionOnly && next === at) notPlaced.push(...words.slice(at, at + 1));
     addSortKeys(keys, at, next);
-    let wordAfter = words[next];
+    const wordAfter = words[next];
     if (
       wordAfter !== undefined &&
-      lastColumn2 !== null &&
+      lastSortColumn !== null &&
       !LIST_JOINERS.has(words[next - 1]?.plain ?? '') &&
-      (readAnyTestFor(lastColumn2, next) !== null || isFillerWord(wordAfter))
+      (readAnyTestFor(lastSortColumn, next) !== null || isFillerWord(wordAfter))
     )
       notPlaced.push(wordAfter);
     return isDirectionOnly ? Math.max(next, at + 1) : next;
   };
-  let readSuperlativeAt = (at?: Dynamic) => {
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
-    let direction = SUPERLATIVE_DIRECTIONS.get(plain);
+  const readSuperlativeAt = (at: number) => {
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
+    const direction = SUPERLATIVE_DIRECTIONS.get(plain);
     if (direction === undefined) return null;
-    let named = columnNamedAt(holds, words, at + 1, true, true);
-    let saysDate = named?.column.kind === 'date' && words[at + 1 + named.wordCount]?.plain === 'date';
-    let wordCount = 1 + (named?.wordCount ?? 0) + Number(saysDate);
-    let onTopPhrase = ON_TOP_PHRASES.find((phrase?: Dynamic) => wordsMatchAt(words, at + wordCount, phrase));
-    let [column, ...otherColumns] = holds.columns.filter((column2?: Dynamic) => isSuperlativeFor(column2, plain));
-    let isTested = (asksByColumn.get(column?.c ?? '')?.meets.length ?? 0) > 0;
-    let fitsAlone =
+    const named = columnNamedAt(holds, words, at + 1, true, true);
+    const saysDate = named?.column.kind === 'date' && words[at + 1 + named.wordCount]?.plain === 'date';
+    const wordCount = 1 + (named?.wordCount ?? 0) + Number(saysDate);
+    const onTopPhrase = ON_TOP_PHRASES.find((phrase) => wordsMatchAt(words, at + wordCount, phrase));
+    const [column, ...otherColumns] = holds.columns.filter((candidate) => isSuperlativeFor(candidate, plain));
+    const isTested = (asksByColumn.get(column?.c ?? '')?.meets.length ?? 0) > 0;
+    const fitsAlone =
       otherColumns.length === 0 &&
       !NON_COLUMN_SUPERLATIVES.has(plain) &&
       (isTested || !AGE_SUPERLATIVES.has(plain)) &&
       !holds.columns.some(isRankColumn) &&
       !(DATE_SUPERLATIVES.has(plain) && holds.columns.some(looksLikeDateColumn));
-    let sortColumn = named === null ? (fitsAlone ? column : undefined) : named.column;
-    let isAlsoNamedValue = named !== null && valuesNamedHere(at + 1).length > 0;
+    const sortColumn = named === null ? (fitsAlone ? column : undefined) : named.column;
+    const isAlsoNamedValue = named !== null && valuesNamedHere(at + 1).length > 0;
     if (onTopPhrase === undefined || sortColumn === undefined || !isSuperlativeFor(sortColumn, plain) || isAlsoNamedValue) return null;
     return {
       key: {
         c: sortColumn.c,
-        direction: direction,
+        direction,
       },
       wordCount: wordCount + onTopPhrase.length,
     };
   };
-  let bareConditionAt = (at?: Dynamic) => {
-    let { plain: plain } = words[at] ?? NO_WORD_TOKEN;
+  const bareConditionAt = (at: number): ConditionReadForColumn | null => {
+    const { plain } = words[at] ?? NO_WORD_TOKEN;
     if (!/^[\d.<>≤≥$€£¥]/.test(plain) && !NUMBER_CONDITION_WORDS.has(plain) && !DATE_CONDITION_WORDS.has(plain)) return null;
-    let saysOverdue = saysOverdueAt(words, at);
-    let readings: Dynamic = [];
-    for (let column of holds.columns as Dynamic) {
+    const saysOverdue = saysOverdueAt(words, at);
+    let readings: ConditionReadForColumn[] = [];
+    for (const column of holds.columns) {
       if (saysOverdue && !isDueColumn(column)) continue;
-      let reading = readMeasureCondition(words, at, column, today2);
+      const reading = readMeasureCondition(words, at, column, today);
       if (reading?.condition?.kind === 'isAmongTheLargest' || reading?.condition?.kind === 'isAmongTheSmallest') continue;
       if (reading === null || reading.wordCount < (readings[0]?.wordCount ?? 0)) continue;
       readings =
@@ -730,73 +788,73 @@ export function readWordsAsFilter(
               ...readings,
               {
                 ...reading,
-                column: column,
+                column,
               },
             ]
           : [
               {
                 ...reading,
-                column: column,
+                column,
               },
             ];
     }
-    let [only, ...others] = readings;
+    const [only, ...others] = readings;
     if (only === undefined || others.length > 0) return null;
-    let slice = words.slice(at, at + only.wordCount);
-    let [lastWord, wordAfter] = [slice.at(-1) ?? NO_WORD_TOKEN, words[at + only.wordCount] ?? NO_WORD_TOKEN];
+    const slice = words.slice(at, at + only.wordCount);
+    const [lastWord, wordAfter] = [slice.at(-1) ?? NO_WORD_TOKEN, words[at + only.wordCount] ?? NO_WORD_TOKEN];
     if (
       slice.some(
-        (word?: Dynamic) =>
+        (word) =>
           valuesNamedHere(word.at).length > 0 ||
-          holds.columns.some((column?: Dynamic) => isPeopleColumn(column) && leadingNameWordsOf(column).has(word.plain)) ||
+          holds.columns.some((column) => isPeopleColumn(column) && leadingNameWordsOf(column).has(word.plain)) ||
           (word.plain.length > 2 &&
             columnNamesOf(holds.columns).some(
-              ({ column: column, name: name }: Dynamic) => column !== only.column && name.includes(word.plain),
+              ({ column, name }) => column !== only.column && name.includes(word.plain),
             )),
       )
     )
       return null;
     if (only.column.kind === 'date') {
       if (lastWord === words.at(-1) && !/\s$/.test(typed) && /^\p{L}/u.test(lastWord.plain) && mayBeUnfinishedNameAt(lastWord.at)) return null;
-      let column =
-        slice.some((word?: Dynamic) => isMonthName(word.plain) || word.said === '/') &&
-        !slice.some((word?: Dynamic) => /^\d{4}$/.test(word.plain));
-      let reading =
-        today2 !== null &&
+      const saysMonthOrSlash =
+        slice.some((word) => isMonthName(word.plain) || word.said === '/') &&
+        !slice.some((word) => /^\d{4}$/.test(word.plain));
+      const isNearToday =
+        today !== null &&
         numbersOfCondition(only.condition).some(
-          (dayNumber?: Dynamic) => Math.abs(dayNumber - dateToSerial(today2)) <= MOST_DAYS_FROM_TODAY_FOR_DATES,
+          (dayNumber) => Math.abs(dayNumber - dateToSerial(today)) <= MOST_DAYS_FROM_TODAY_FOR_DATES,
         );
-      let isNearDates =
+      const isNearDates =
         only.column.areMoreValuesLeftOut ||
-        (today2 !== null &&
+        (today !== null &&
           only.column.values.some(
-            ({ value: value }: Dynamic) => value?.kind === 'number' && Math.abs(value.value - dateToSerial(today2)) <= 366,
+            ({ value }) => value?.kind === 'number' && Math.abs(value.value - dateToSerial(today)) <= 366,
           ));
-      return (column && !reading) || plain === 'starting' || !isNearDates || holds.columns.some(looksLikeDateColumn) ? null : only;
+      return (saysMonthOrSlash && !isNearToday) || plain === 'starting' || !isNearDates || holds.columns.some(looksLikeDateColumn) ? null : only;
     }
-    let letterWords = slice.filter((word?: Dynamic) => /^\p{L}/u.test(word.plain) && !NUMBER_CONDITION_WORDS.has(word.plain));
-    let named = columnNamedAt(holds, words, letterWords[0]?.at ?? -1, true, true);
-    let namesOtherColumn = letterWords.length > 0 && (named?.column !== only.column || named.wordCount !== letterWords.length);
-    let isFollowedByNoun =
-      [RECORD_NOUNS, TABLE_SUBJECT_NOUNS, TASK_NOUNS, FIRST_PERSON_WORDS].some((wordSet?: Dynamic) => wordSet.has(wordAfter.plain)) ||
+    const letterWords = slice.filter((word) => /^\p{L}/u.test(word.plain) && !NUMBER_CONDITION_WORDS.has(word.plain));
+    const named = columnNamedAt(holds, words, letterWords[0]?.at ?? -1, true, true);
+    const namesOtherColumn = letterWords.length > 0 && (named?.column !== only.column || named.wordCount !== letterWords.length);
+    const isFollowedByNoun =
+      [RECORD_NOUNS, TABLE_SUBJECT_NOUNS, TASK_NOUNS, FIRST_PERSON_WORDS].some((wordSet) => wordSet.has(wordAfter.plain)) ||
       namesSomethingAt(wordAfter.at);
-    let isOverdueNear = [wordAfter.at, at - 1, at - 2].some((at2?: Dynamic) => saysOverdueAt(words, at2));
-    let isOtherCurrency =
+    const isOverdueNear = [wordAfter.at, at - 1, at - 2].some((nearAt) => saysOverdueAt(words, nearAt));
+    const isOtherCurrency =
       letterWords.length === 0 &&
       only.column.kind !== 'currency' &&
-      slice.some((word?: Dynamic) => /^[$€£¥]$/.test(word.plain)) &&
-      holds.columns.some((column?: Dynamic) => column !== only.column && measureOfColumn(column) === 'numbers');
+      slice.some((word) => /^[$€£¥]$/.test(word.plain)) &&
+      holds.columns.some((column) => column !== only.column && measureOfColumn(column) === 'numbers');
     return namesOtherColumn || isFollowedByNoun || isOverdueNear || isOtherCurrency ? null : only;
   };
-  let checkboxColumnNames = columnNamesOf(holds.columns).filter(
-    ({ column: column, name: name }: Dynamic) => column.kind === 'checkbox' && name.length > 1,
+  const checkboxColumnNames = columnNamesOf(holds.columns).filter(
+    ({ column, name }) => column.kind === 'checkbox' && name.length > 1,
   );
-  let checkboxPhraseAt = (at?: Dynamic) => {
-    for (let { column: column, name: name } of checkboxColumnNames as Dynamic)
-      for (let count: Dynamic = 1; count < name.length; count += 1) {
-        let end: Dynamic = at + count;
+  const checkboxPhraseAt = (at: number) => {
+    for (const { column, name } of checkboxColumnNames)
+      for (let count = 1; count < name.length; count += 1) {
+        let end = at + count;
         while (LINKING_VERBS.has(words[end]?.plain ?? '') || NOT_VERBS.has(words[end]?.plain ?? '')) end += 1;
-        let [denied, ...moreDenied] = words.slice(at + count, end).filter(({ plain: plain }: Dynamic) => NOT_VERBS.has(plain));
+        const [denied, ...moreDenied] = words.slice(at + count, end).filter(({ plain }) => NOT_VERBS.has(plain));
         if (
           end > at + count &&
           moreDenied.length === 0 &&
@@ -804,15 +862,15 @@ export function readWordsAsFilter(
           wordsMatchAt(words, end, name.slice(count))
         )
           return {
-            column: column,
+            column,
             wordCount: end + name.length - count - at,
-            denied: denied,
+            denied,
           };
       }
     return null;
   };
-  let atAfterColumn: Dynamic = -1;
-  for (let at: Dynamic = 0; at < words.length; ) {
+  let atAfterColumn = -1;
+  for (let at = 0; at < words.length; ) {
     if (wasColumnTouched) [wasColumnTouched, atAfterColumn] = [false, at];
     if (stopsReading) {
       notPlaced.push(...words.slice(at));
@@ -822,9 +880,9 @@ export function readWordsAsFilter(
       at = readForColumn(onlyColumn, at);
       continue;
     }
-    let word = words[at] ?? NO_WORD_TOKEN;
+    const word = words[at] ?? NO_WORD_TOKEN;
     if (word.isAfterHyphen) notPlaced.push(word);
-    let checkboxPhrase = checkboxPhraseAt(at);
+    const checkboxPhrase = checkboxPhraseAt(at);
     if (checkboxPhrase !== null) {
       if (checkboxPhrase.denied !== undefined) noteNegation(checkboxPhrase.denied);
       addValuesFor(checkboxPhrase.column, [CHECKED_BOOLEAN_VALUE]);
@@ -832,23 +890,23 @@ export function readWordsAsFilter(
       at += checkboxPhrase.wordCount;
       continue;
     }
-    let valueNamed = valueNamedAt(holds, words, at, {
+    const valueNamed = valueNamedAt(holds, words, at, {
       only: null,
       rather: currentColumn,
     });
     if (/[–—]/.test(word.gap) && currentColumn !== null && valueNamed?.column === currentColumn) notPlaced.push(word);
-    let valueNamedHere =
+    const valueNamedHere =
       valueNamed?.wordCount === 1 && NEGATING_WORDS.has(word.plain) && (namesSomethingAt(at + 1) || namesPersonAt(at + 1)) ? null : valueNamed;
-    let columnNamed = columnNamedAt(holds, words, at) ?? columnTestAt(at);
-    let valueNamedSure = valueNamedHere?.isFirstName === true && columnNamed !== null ? null : valueNamedHere;
-    let [testAt, negatingWord]: Dynamic = [at + (columnNamed?.wordCount ?? 0), null];
+    const columnNamed = columnNamedAt(holds, words, at) ?? columnTestAt(at);
+    const valueNamedSure = valueNamedHere?.isFirstName === true && columnNamed !== null ? null : valueNamedHere;
+    let [testAt, negatingWord]: [number, TypedWord | null] = [at + (columnNamed?.wordCount ?? 0), null];
     if (columnNamed?.column.kind === 'date' && words[testAt]?.plain === 'date') testAt += 1;
-    let afterColumn = testAt;
+    const afterColumn = testAt;
     while (EQUALS_WORDS.has(words[testAt]?.plain ?? '')) testAt += 1;
-    let testForColumnAt = (at2?: Dynamic) => {
+    const testForColumnAt = (wordAt: number): TestRead | null => {
       if (columnNamed === null) return null;
-      if (!isOnlyTextColumn(holds, columnNamed.column)) return readAnyTestFor(columnNamed.column, at2);
-      let textTest = readTextOrColumnTest(columnNamed.column, at2);
+      if (!isOnlyTextColumn(holds, columnNamed.column)) return readAnyTestFor(columnNamed.column, wordAt);
+      const textTest = readTextOrColumnTest(columnNamed.column, wordAt);
       return textTest === null
         ? null
         : {
@@ -870,52 +928,52 @@ export function readWordsAsFilter(
       negatingWord = words[testAt] ?? null;
       testAt += 1;
     }
-    let testRead = testForColumnAt(testAt);
-    let test = columnNamed?.isPart === true && saysOverdueAt(words, testAt) && !isDueColumn(columnNamed.column) ? null : testRead;
-    let isCheckboxNameEnd =
+    const testRead = testForColumnAt(testAt);
+    const test = columnNamed?.isPart === true && saysOverdueAt(words, testAt) && !isDueColumn(columnNamed.column) ? null : testRead;
+    const isCheckboxNameEnd =
       columnNamed?.column.kind === 'checkbox' &&
       isWordOrItsPlural(words[afterColumn - 1]?.plain ?? '', plainWordsOf(columnNamed.column.name ?? '').at(-1) ?? '');
-    let hasTest = test !== null || (isCheckboxNameEnd && saysBoxesAt(afterColumn));
-    let isValueAsLongAsColumn = valueNamedSure !== null && columnNamed !== null && valueNamedSure.wordCount === columnNamed.wordCount;
-    let isValueNameLonger =
+    const hasTest = test !== null || (isCheckboxNameEnd && saysBoxesAt(afterColumn));
+    const isValueAsLongAsColumn = valueNamedSure !== null && columnNamed !== null && valueNamedSure.wordCount === columnNamed.wordCount;
+    const isValueNameLonger =
       valueNamedHere === null &&
       columnNamed !== null &&
       (valuesNamedAt(holds, words, at, {
         only: null,
         rather: currentColumn,
       })[0]?.wordCount ?? 0) >= columnNamed.wordCount;
-    let prefersColumn =
+    const prefersColumn =
       columnNamed !== null &&
       (isValueNameLonger
         ? hasTest
         : valueNamedSure === null ||
           valueNamedSure.wordCount < columnNamed.wordCount ||
           (isValueAsLongAsColumn && (valueNamedSure.column === columnNamed.column || hasTest)));
-    let sortByPhrase = SORT_BY_PHRASES.find((phrase?: Dynamic) => wordsMatchAt(words, at, phrase));
-    let largestBy = LARGEST_SMALLEST_WORDS.has(word.plain) ? readLargestBy(at) : null;
-    let namesNothing = columnNamed === null && valueNamedSure === null;
-    let superlative = namesNothing ? readSuperlativeAt(at) : null;
-    let bareCondition = namesNothing && !needsHeaders ? bareConditionAt(at) : null;
-    let sortDirectionAfter =
+    const sortByPhrase = SORT_BY_PHRASES.find((phrase) => wordsMatchAt(words, at, phrase));
+    const largestBy = LARGEST_SMALLEST_WORDS.has(word.plain) ? readLargestBy(at) : null;
+    const namesNothing = columnNamed === null && valueNamedSure === null;
+    const superlative = namesNothing ? readSuperlativeAt(at) : null;
+    const bareCondition = namesNothing && !needsHeaders ? bareConditionAt(at) : null;
+    const sortDirectionAfter =
       lastColumn !== null && measureOfColumn(lastColumn) !== null && (asksByColumn.get(lastColumn.c)?.meets.length ?? 0) > 0 && word.plain.length > 1
         ? sortDirectionAt(words, at, lastColumn)
         : undefined;
     if (columnNamed !== null && prefersColumn) {
-      let { column: column } = columnNamed;
+      const { column } = columnNamed;
       if (test !== null && isLongerDateReading(column, at + columnNamed.wordCount - 1, test)) {
-        (notPlaced.push as Dynamic)(...words.slice(at, testAt + test.wordCount));
+        notPlaced.push(...words.slice(at, testAt + test.wordCount));
         at = testAt + test.wordCount;
         continue;
       }
-      let noWord = negation !== null && negation.of === null && NO_WITHOUT_WORDS.has(negation.word.plain) ? negation.word : null;
+      const noOrWithoutWord = negation !== null && negation.of === null && NO_WITHOUT_WORDS.has(negation.word.plain) ? negation.word : null;
       if (
         test !== null &&
-        noWord !== null &&
+        noOrWithoutWord !== null &&
         isPeopleColumn(column) &&
         testAt === afterColumn &&
         (test.kind === 'viewer' || (test.kind === 'values' && test.isNot !== true))
       ) {
-        (notPlaced.push as Dynamic)(...words.slice(noWord.at, testAt + test.wordCount));
+        notPlaced.push(...words.slice(noOrWithoutWord.at, testAt + test.wordCount));
         negation = null;
         at = testAt + test.wordCount;
         continue;
@@ -927,46 +985,46 @@ export function readWordsAsFilter(
         columnOfLastTest = currentColumn;
         continue;
       }
-      let isSortFirst =
+      const saysSuperlativeFirst =
         measureOfColumn(column) !== null && words[afterColumn + 1]?.plain === 'first' && SUPERLATIVE_DIRECTIONS.has(words[afterColumn]?.plain ?? '');
-      if (negation === null && havingWord === null && (isSortFirst || sortDirectionAt(words, afterColumn, column) !== undefined)) {
+      if (negation === null && havingWord === null && (saysSuperlativeFirst || sortDirectionAt(words, afterColumn, column) !== undefined)) {
         at = readSortAt(at, true);
         continue;
       }
       at = afterColumn;
-      let negationWord = negation !== null && negation.of === null ? negation.word : null;
-      let saysNoOrWithout = negationWord !== null && NO_WITHOUT_WORDS.has(negationWord.plain);
-      let isSameColumn = currentColumn === column && !LIST_JOINERS.has(words[word.at - 1]?.plain ?? '');
+      const negationWord = negation !== null && negation.of === null ? negation.word : null;
+      const saysNoOrWithout = negationWord !== null && NO_WITHOUT_WORDS.has(negationWord.plain);
+      const isSameColumn = currentColumn === column && !LIST_JOINERS.has(words[word.at - 1]?.plain ?? '');
       if (column.kind === 'checkbox') {
-        let {
-          next: nextWord,
-          notBefore: notBefore,
-          said: saidWord,
-          isOfBoxes: isOfBoxes,
-          isNoOfEither: isNoOfEither,
+        const {
+          next: boxWordAt,
+          notBefore,
+          said: boxWord,
+          isOfBoxes,
+          isNoOfEither,
         } = readCheckboxWords(afterColumn);
         if ((columnNamed.isPart && !isOfBoxes) || (words[word.at - 1]?.plain === 'to' && !isCheckboxNameEnd))
           notPlaced.push(...words.slice(word.at, afterColumn));
         if (isNoOfEither) {
-          let [found] = valuesNamedHere(nextWord + 1);
-          notPlaced.push(...words.slice(nextWord, nextWord + 1 + (found?.wordCount ?? 1)));
+          const [valueAfter] = valuesNamedHere(boxWordAt + 1);
+          notPlaced.push(...words.slice(boxWordAt, boxWordAt + 1 + (valueAfter?.wordCount ?? 1)));
         }
         if (isOfBoxes) {
-          at = nextWord + 1;
-          let found = [negationWord, notBefore, CHECKED_RULE_WORDS.has(saidWord.plain) ? undefined : saidWord].filter(
-            (word2?: Dynamic) => word2 !== null && word2 !== undefined,
+          at = boxWordAt + 1;
+          const negatingWords = [negationWord, notBefore, CHECKED_RULE_WORDS.has(boxWord.plain) ? undefined : boxWord].filter(
+            (negating) => negating !== null && negating !== undefined,
           );
-          if (found.length > 1) notPlaced.push(saidWord);
-          else if (negationWord === null && found[0] !== undefined) noteNegation(found[0]);
+          if (negatingWords.length > 1) notPlaced.push(boxWord);
+          else if (negationWord === null && negatingWords[0] !== undefined) noteNegation(negatingWords[0]);
         }
         addValuesFor(column, [CHECKED_BOOLEAN_VALUE]);
       } else if (isOnlyTextColumn(holds, column)) {
         if (negationWord !== null && saysNoOrWithout) notPlaced.push(negationWord);
-        let nextWord = words.slice(testAt).find(({ plain: plain }: Dynamic) => !NEGATING_WORDS.has(plain)) ?? NO_WORD_TOKEN;
+        const nextWord = words.slice(testAt).find(({ plain }) => !NEGATING_WORDS.has(plain)) ?? NO_WORD_TOKEN;
         if (
           words
             .slice(afterColumn, nextWord.at + 1)
-            .some((word2?: Dynamic) => isWordBreakAt(words, word2.at) && word2.said !== '-' && word2.said !== '!') &&
+            .some((wordBetween) => isWordBreakAt(words, wordBetween.at) && wordBetween.said !== '-' && wordBetween.said !== '!') &&
           isSingleWordValueOf(column, nextWord.plain) &&
           namesSomethingAt(nextWord.at)
         )
@@ -984,7 +1042,7 @@ export function readWordsAsFilter(
         addValuesFor(column, [null]);
       } else if (!isSameColumn) {
         notPlaced.push(...words.slice(word.at, afterColumn));
-        for (let nextWord of words.slice(word.at, afterColumn) as Dynamic) columnNameWords2.add(nextWord);
+        for (const nameWord of words.slice(word.at, afterColumn)) wordsNamingColumns.add(nameWord);
         columnForKnownWords = column;
       }
       resetCurrentColumn();
@@ -999,7 +1057,7 @@ export function readWordsAsFilter(
       addValuesFor(valueNamedSure.column, valueNamedSure.values);
       at += valueNamedSure.wordCount;
     } else if (valueNamedSure !== null) {
-      (notPlaced.push as Dynamic)(...words.slice(at, at + valueNamedSure.wordCount));
+      notPlaced.push(...words.slice(at, at + valueNamedSure.wordCount));
       resetCurrentColumn();
       at += valueNamedSure.wordCount;
     } else if (sortByPhrase !== undefined && startsSortByAt(at)) at = readSortAt(at + sortByPhrase.length);
@@ -1010,8 +1068,8 @@ export function readWordsAsFilter(
       addCondition(largestBy.column, largestBy.condition);
       at += largestBy.wordCount;
     } else if (bareCondition !== null) {
-      let column = atAfterColumn === at && lastColumn !== null && !isPeopleColumn(lastColumn);
-      if (bareCondition.column.kind === 'date' && column) notPlaced.push(word);
+      const followsColumn = atAfterColumn === at && lastColumn !== null && !isPeopleColumn(lastColumn);
+      if (bareCondition.column.kind === 'date' && followsColumn) notPlaced.push(word);
       at = placeTest(
         bareCondition.column,
         {
@@ -1029,103 +1087,105 @@ export function readWordsAsFilter(
         at += 1;
       }
     } else if (sortDirectionAfter !== undefined && lastColumn !== null) {
-      let column = {
+      const sortKey = {
         c: lastColumn.c,
         direction: sortDirectionAfter[1],
       };
-      addSortKeys([column], at, at + sortDirectionAfter[0].length);
+      addSortKeys([sortKey], at, at + sortDirectionAfter[0].length);
       at += sortDirectionAfter[0].length;
     } else {
-      let [column] = valuesNamedAt(holds, words, at, {
+      const [firstValueNamed] = valuesNamedAt(holds, words, at, {
         only: null,
         rather: currentColumn,
       });
-      for (let found of words.slice(at, at + (column?.wordCount ?? 0)) as Dynamic) partialValueWords.add(found);
-      let noWord = word.plain === 'me' && SHOW_VERBS.has(words[at - 1]?.plain ?? '');
-      let isSortFirst = words[at + 1]?.plain === 'but';
-      let negationWord = ALL_WORDS.has(words[at - 1]?.plain ?? '') || ANYONE_WORDS.has(words[at - 1]?.plain ?? '');
-      let isSameColumn = !(word.plain.startsWith('un') && word.plain.length > 5)
+      for (const valueWord of words.slice(at, at + (firstValueNamed?.wordCount ?? 0))) partialValueWords.add(valueWord);
+      const saysShowMe = word.plain === 'me' && SHOW_VERBS.has(words[at - 1]?.plain ?? '');
+      const isBeforeBut = words[at + 1]?.plain === 'but';
+      const isAfterAllOrAnyone = ALL_WORDS.has(words[at - 1]?.plain ?? '') || ANYONE_WORDS.has(words[at - 1]?.plain ?? '');
+      const uncheckedColumn = !(word.plain.startsWith('un') && word.plain.length > 5)
         ? undefined
         : holds.columns.find(
-            ({ kind: kind, name: name }: Dynamic) => kind === 'checkbox' && plainWordsOf(name ?? '').join(' ') === word.plain.slice(2),
+            ({ kind, name }) => kind === 'checkbox' && plainWordsOf(name ?? '').join(' ') === word.plain.slice(2),
           );
       if (word.plain === 'assigned') {
-        let found = words[at - 1]?.plain === 'date' ? at - 1 : at;
-        let others = [1, 2, 3].some(
-          (wordCount?: Dynamic) =>
-            [at, found].some((end?: Dynamic) => {
-              let value = columnNamedAt(holds, words, end - wordCount, true);
-              return value?.wordCount === wordCount && asksByColumn.get(value.column.c)?.oneOf.includes(null) === true;
+        const phraseStart = words[at - 1]?.plain === 'date' ? at - 1 : at;
+        const followsBlankAsk = [1, 2, 3].some(
+          (wordCount) =>
+            [at, phraseStart].some((end) => {
+              const named = columnNamedAt(holds, words, end - wordCount, true);
+              return named?.wordCount === wordCount && asksByColumn.get(named.column.c)?.oneOf.includes(null) === true;
             }),
         );
-        let peopleColumn = currentColumn !== null && isPeopleColumn(currentColumn) && !LIST_JOINERS.has(words[at - 1]?.plain ?? '');
-        let wordAfterPhrase = namesPersonAt(at + 1);
-        if (!wordAfterPhrase && !peopleColumn && !others) {
+        const isOfPeopleColumn = currentColumn !== null && isPeopleColumn(currentColumn) && !LIST_JOINERS.has(words[at - 1]?.plain ?? '');
+        const namesPersonAfter = namesPersonAt(at + 1);
+        if (!namesPersonAfter && !isOfPeopleColumn && !followsBlankAsk) {
           notPlace(word);
           resetCurrentColumn();
         }
-        if (wordAfterPhrase) resetCurrentColumn();
-        at += wordAfterPhrase && words[at + 1]?.plain === 'to' ? 2 : 1;
+        if (namesPersonAfter) resetCurrentColumn();
+        at += namesPersonAfter && words[at + 1]?.plain === 'to' ? 2 : 1;
         continue;
       }
-      if (isSameColumn !== undefined && negation === null) {
+      if (uncheckedColumn !== undefined && negation === null) {
         noteNegation(word);
-        addValuesFor(isSameColumn, [CHECKED_BOOLEAN_VALUE]);
+        addValuesFor(uncheckedColumn, [CHECKED_BOOLEAN_VALUE]);
         resetCurrentColumn();
         at += 1;
         continue;
       }
-      let nextWord = (word.plain === 'no' || word.plain === 'not') && namesSomethingAt(at + 1);
-      let notBefore = word.plain === 'not' && words[at + 1]?.plain === 'assigned' && namesPersonAt(at + 2);
-      let saidWord = nextWord || notBefore ? 0 : unassignedPhraseLengthAt(words, at);
-      let isOfBoxes = EMPTY_WORDS.has(word.plain) ? columnToTestAt(at + 1) : null;
-      if (saidWord > 0) {
-        let [found, ...others] = holds.columns.filter(isPeopleColumn);
-        let peopleColumn = currentColumn !== null && isPeopleColumn(currentColumn) ? currentColumn : others.length === 0 ? found : undefined;
-        let wordAfterPhrase = words[at + saidWord];
-        let endsPhrase = wordAfterPhrase === undefined || isFillerWord(wordAfterPhrase) || TASK_NOUNS.has(wordAfterPhrase.plain);
-        let isFollowedByIsHas =
-          IS_HAS_WORDS.has(wordAfterPhrase?.plain ?? '') || (POSSESSIVE_ONES_WORDS.has(words[at + saidWord - 1]?.plain ?? '') && !endsPhrase);
+      const isNoBeforeName = (word.plain === 'no' || word.plain === 'not') && namesSomethingAt(at + 1);
+      const isNotAssignedTo = word.plain === 'not' && words[at + 1]?.plain === 'assigned' && namesPersonAt(at + 2);
+      const unassignedLength = isNoBeforeName || isNotAssignedTo ? 0 : unassignedPhraseLengthAt(words, at);
+      const emptyColumn = EMPTY_WORDS.has(word.plain) ? columnToTestAt(at + 1) : null;
+      if (unassignedLength > 0) {
+        const [onlyPeopleColumn, ...otherPeopleColumns] = holds.columns.filter(isPeopleColumn);
+        const peopleColumn =
+          currentColumn !== null && isPeopleColumn(currentColumn) ? currentColumn : otherPeopleColumns.length === 0 ? onlyPeopleColumn : undefined;
+        const wordAfterPhrase = words[at + unassignedLength];
+        const endsPhrase = wordAfterPhrase === undefined || isFillerWord(wordAfterPhrase) || TASK_NOUNS.has(wordAfterPhrase.plain);
+        const isFollowedByIsHas =
+          IS_HAS_WORDS.has(wordAfterPhrase?.plain ?? '') || (POSSESSIVE_ONES_WORDS.has(words[at + unassignedLength - 1]?.plain ?? '') && !endsPhrase);
         if (peopleColumn === undefined || isFollowedByIsHas || isNegated(peopleColumn)) {
-          (notPlaced.push as Dynamic)(...words.slice(at, at + saidWord));
+          notPlaced.push(...words.slice(at, at + unassignedLength));
           resetCurrentColumn();
         } else addValuesFor(peopleColumn, [null]);
-        at += saidWord;
+        at += unassignedLength;
         continue;
       }
-      if (isOfBoxes !== null) {
-        if (isNegated(isOfBoxes.column)) {
-          (notPlaced.push as Dynamic)(...words.slice(at, at + 1 + isOfBoxes.wordCount));
+      if (emptyColumn !== null) {
+        if (isNegated(emptyColumn.column)) {
+          notPlaced.push(...words.slice(at, at + 1 + emptyColumn.wordCount));
           resetCurrentColumn();
-        } else addValuesFor(isOfBoxes.column, [null]);
-        at += 1 + isOfBoxes.wordCount;
+        } else addValuesFor(emptyColumn.column, [null]);
+        at += 1 + emptyColumn.wordCount;
         continue;
       }
-      let isNoOfEither = words[at - 1]?.plain === 'or' && currentColumn?.kind !== 'checkbox';
-      if (currentColumn !== null && isNoOfEither && !isNegated(currentColumn) && BLANK_WORDS.has(word.plain)) {
+      const isAfterOr = words[at - 1]?.plain === 'or' && currentColumn?.kind !== 'checkbox';
+      if (currentColumn !== null && isAfterOr && !isNegated(currentColumn) && BLANK_WORDS.has(word.plain)) {
         addValuesFor(currentColumn, [null]);
         at += 1;
         continue;
       }
-      if (FIRST_PERSON_WORDS.has(word.plain) && !noWord) {
-        let [found, ...others] = holds.columns.filter((column2?: Dynamic) => valuesOfUserInColumn(column2, viewerId).length > 0);
-        if (found === undefined || others.length > 0) notPlaced.push(word);
-        else addValuesFor(found, valuesOfUserInColumn(found, viewerId));
-      } else if (NEGATING_WORDS.has(word.plain) || EXCLUDE_VERBS.has(word.plain) || (word.plain === 'but' && negationWord)) noteNegation(word);
+      if (FIRST_PERSON_WORDS.has(word.plain) && !saysShowMe) {
+        const [viewerColumn, ...otherViewerColumns] = holds.columns.filter((candidate) => valuesOfUserInColumn(candidate, viewerId).length > 0);
+        if (viewerColumn === undefined || otherViewerColumns.length > 0) notPlaced.push(word);
+        else addValuesFor(viewerColumn, valuesOfUserInColumn(viewerColumn, viewerId));
+      } else if (NEGATING_WORDS.has(word.plain) || EXCLUDE_VERBS.has(word.plain) || (word.plain === 'but' && isAfterAllOrAnyone)) noteNegation(word);
       else if (wordsMatchAt(words, at, ['leave', 'out'])) {
         noteNegation(word);
         at += 1;
       } else if (LIST_JOINERS.has(word.plain)) noteJoiner(word);
       else {
-        let found =
+        const isBeforeNegation =
           NEGATING_WORDS.has(words[at + 1]?.plain ?? '') &&
           (word.plain === 'but' || HAVING_WORDS.has(word.plain)) &&
           columnNamedAt(holds, words, at + 1) === null;
-        let others =
-          QUESTION_FILLER_WORDS.has(word.plain) && holds.columns.some((column2?: Dynamic) => isSingleWordValueOf(column2, word.plain));
-        let peopleColumn = word.plain === 'but' && lastColumn !== null && !asksForAll && columnNamedAt(holds, words, at + 1) !== null;
-        let wordAfterPhrase = !others && (isFillerWord(word) || TASK_NOUNS.has(word.plain) || noWord || found || peopleColumn);
-        let endsPhrase =
+        const isFillerAlsoValue =
+          QUESTION_FILLER_WORDS.has(word.plain) && holds.columns.some((candidate) => isSingleWordValueOf(candidate, word.plain));
+        const isButBeforeColumn = word.plain === 'but' && lastColumn !== null && !asksForAll && columnNamedAt(holds, words, at + 1) !== null;
+        const isPassedOver =
+          !isFillerAlsoValue && (isFillerWord(word) || TASK_NOUNS.has(word.plain) || saysShowMe || isBeforeNegation || isButBeforeColumn);
+        const isToBeforeValue =
           word.plain === 'to' &&
           currentColumn !== null &&
           valueNamedAt(holds, words, at + 1, {
@@ -1133,11 +1193,11 @@ export function readWordsAsFilter(
             rather: null,
           }) !== null;
         columnForKnownWords = columnNamedAt(holds, words, at, true)?.column ?? columnForKnownWords;
-        if (found) resetCurrentColumn();
+        if (isBeforeNegation) resetCurrentColumn();
         else if (HAVING_WORDS.has(word.plain)) havingWord = word;
-        else if (ALL_WORDS.has(word.plain) || (ANYONE_WORDS.has(word.plain) && (isSortFirst || !LIST_JOINERS.has(words[at - 1]?.plain ?? ''))))
+        else if (ALL_WORDS.has(word.plain) || (ANYONE_WORDS.has(word.plain) && (isBeforeBut || !LIST_JOINERS.has(words[at - 1]?.plain ?? ''))))
           asksForAll = true;
-        else if (!wordAfterPhrase || isRangeWordFor(word, lastColumn) || endsPhrase) notPlace(word);
+        else if (!isPassedOver || isRangeWordFor(word, lastColumn) || isToBeforeValue) notPlace(word);
         if (isRangeWordFor(word, lastColumn)) columnForKnownWords = lastColumn;
         if (word.plain === YET_WORD || (word.plain === 'still' && NEGATING_WORDS.has(words[at + 1]?.plain ?? ''))) yetWord ??= word;
         resetCurrentColumn();
@@ -1147,126 +1207,131 @@ export function readWordsAsFilter(
   }
   endClause();
   if (pendingSortVerb !== null && sortBy.length === 0) notPlaced.push(pendingSortVerb);
-  let excludesLastOption = ({ c: c, optionsOfDropdown: optionsOfDropdown }: Dynamic) => {
-    let excludedTexts = (asksByColumn.get(c)?.noneOf ?? []).filter((value?: Dynamic) => value?.kind === 'text');
-    return excludedTexts.length === 0 || excludedTexts.some((value?: Dynamic) => value.value === optionsOfDropdown?.at(-1));
+  const excludesLastOption = ({ c, optionsOfDropdown }: ColumnHolds) => {
+    const excludedTexts = (asksByColumn.get(c)?.noneOf ?? []).filter((value) => value?.kind === 'text');
+    return excludedTexts.length === 0 || excludedTexts.some((value) => value.value === optionsOfDropdown?.at(-1));
   };
-  if (yetWord !== null && !holds.columns.every((column?: Dynamic) => isPeopleColumn(column) || excludesLastOption(column)))
+  if (yetWord !== null && !holds.columns.every((column) => isPeopleColumn(column) || excludesLastOption(column)))
     notPlaced.push(yetWord);
-  let hasSeveralAsksInColumn = [...asksByColumn.values()].some(
-    ({ oneOf: oneOf, noneOf: noneOf, meets: meets }: Dynamic) => Number(oneOf.length > 0) + Number(noneOf.length > 0) + meets.length > 1,
+  const hasSeveralAsksInColumn = [...asksByColumn.values()].some(
+    ({ oneOf, noneOf, meets }) => Number(oneOf.length > 0) + Number(noneOf.length > 0) + meets.length > 1,
   );
-  let isEmojiOfFewValues = (emoji?: Dynamic) =>
-    holds.columns.some((column?: Dynamic) => isColumnOfFewValues(column) && emojiInColumn(column).has(emoji));
-  let emojiSaid = [...new (Set as Dynamic)(onlyColumn === null ? emojiInText(typed) : [])].filter(
-    (emoji?: Dynamic) => CROSS_MARK_EMOJI.has(emoji) || isEmojiOfFewValues(emoji),
+  const isEmojiOfFewValues = (emoji: string) =>
+    holds.columns.some((column) => isColumnOfFewValues(column) && emojiInColumn(column).has(emoji));
+  const emojiSaid = [...new Set(onlyColumn === null ? emojiInText(typed) : [])].filter(
+    (emoji) => CROSS_MARK_EMOJI.has(emoji) || isEmojiOfFewValues(emoji),
   );
-  let textsOfAsks = (emojiSaid.length === 0 ? [] : holds.columns).flatMap(({ c: c, name: name }: Dynamic) => {
-    let { oneOf = [], noneOf = [], meets = [] } = asksByColumn.get(c) ?? {};
-    let isAsked = asksByColumn.has(c) || sortBy.some((key?: Dynamic) => key.c === c);
+  const textsOfAsks = (emojiSaid.length === 0 ? [] : holds.columns).flatMap(({ c, name }) => {
+    const { oneOf = [], noneOf = [], meets = [] } = asksByColumn.get(c) ?? {};
+    const isAsked = asksByColumn.has(c) || sortBy.some((key) => key.c === c);
     return oneOf
       .concat(noneOf)
-      .map((value?: Dynamic) => String(value?.value ?? ''))
+      .map((value) => String(value?.value ?? ''))
       .concat(
-        meets.map((condition?: Dynamic) => ('text' in condition ? condition.text : '')),
+        meets.map((condition) => ('text' in condition ? condition.text : '')),
         isAsked ? (name ?? '') : '',
       );
   });
-  let emojiNotPlaced = emojiSaid.filter((emoji?: Dynamic) => !textsOfAsks.some((text?: Dynamic) => text.includes(emoji)));
+  const emojiNotPlaced = emojiSaid.filter((emoji) => !textsOfAsks.some((text) => text.includes(emoji)));
   if (wordsNotPlacedSet.size > 0 || hasSeveralAsksInColumn || emojiNotPlaced.length > 0) {
-    let at = [...wordsNotPlacedSet];
-    at.sort((word2?: Dynamic, other?: Dynamic) => word2.at - other.at);
-    let word = (word2?: Dynamic) => COMMAND_WORDS.has(word2.plain) || word2 !== words.at(-1) || /\s$/.test(typed);
-    let checkboxPhrase = knownWordsForColumn(columnForKnownWords, today2);
-    let valueNamed = onlyColumn !== null && checkboxPhrase === TEXT_TEST_WORDS ? null : checkboxPhrase;
-    let valueNamedHere = (onlyColumn === null ? holds.columns : [onlyColumn]).map(leadingNameWordsOf);
-    let columnNamed = (word2?: Dynamic) =>
-      COMMAND_WORDS.has(word2.plain) ||
-      (onlyColumn === null && WORDS_NOT_TAKEN_AS_VALUES.has(word2.plain)) ||
-      columnNameWords2.has(word2) ||
-      valueNamedHere.some((leadingWords?: Dynamic) => leadingWords.has(word2.plain)) ||
-      partialValueWords.has(word2) ||
-      (EMPTY_WORDS.has(word2.plain) && word2 !== words.at(-1) && mayBeUnfinishedNameAt(word2.at + 1)) ||
-      (valueNamed !== null &&
-        word2 !== unreadConditionWord &&
-        (valueNamed.has(word2.plain) || (valueNamed !== TEXT_TEST_WORDS && /^-?[\d.]/.test(word2.plain))));
-    let [valueNamedSure, testAt]: Dynamic = [0, words.length - 1];
-    for (; testAt >= 0 && valueNamedSure < at.length; testAt -= 1) {
-      let { plain: plain } = words[testAt] ?? NO_WORD_TOKEN;
-      if (wordsNotPlacedSet.has(words[testAt] ?? NO_WORD_TOKEN)) valueNamedSure += 1;
+    const unplacedWords = [...wordsNotPlacedSet];
+    unplacedWords.sort((one, other) => one.at - other.at);
+    const isWordFinished = (word: TypedWord) => COMMAND_WORDS.has(word.plain) || word !== words.at(-1) || /\s$/.test(typed);
+    const knownWords = knownWordsForColumn(columnForKnownWords, today);
+    const knownWordsUsed = onlyColumn !== null && knownWords === TEXT_TEST_WORDS ? null : knownWords;
+    const leadingWordSets = (onlyColumn === null ? holds.columns : [onlyColumn]).map(leadingNameWordsOf);
+    const mayBeOnItsWay = (word: TypedWord) =>
+      COMMAND_WORDS.has(word.plain) ||
+      (onlyColumn === null && WORDS_NOT_TAKEN_AS_VALUES.has(word.plain)) ||
+      wordsNamingColumns.has(word) ||
+      leadingWordSets.some((leadingWords) => leadingWords.has(word.plain)) ||
+      partialValueWords.has(word) ||
+      (EMPTY_WORDS.has(word.plain) && word !== words.at(-1) && mayBeUnfinishedNameAt(word.at + 1)) ||
+      (knownWordsUsed !== null &&
+        word !== unreadConditionWord &&
+        (knownWordsUsed.has(word.plain) || (knownWordsUsed !== TEXT_TEST_WORDS && /^-?[\d.]/.test(word.plain))));
+    let [trailingUnplaced, wordAt] = [0, words.length - 1];
+    for (; wordAt >= 0 && trailingUnplaced < unplacedWords.length; wordAt -= 1) {
+      const { plain } = words[wordAt] ?? NO_WORD_TOKEN;
+      if (wordsNotPlacedSet.has(words[wordAt] ?? NO_WORD_TOKEN)) trailingUnplaced += 1;
       else if (!FILTER_FILLER_WORDS.has(plain) && !LIST_JOINERS.has(plain)) break;
     }
-    let isOnItsWay =
+    const isOnItsWay =
       numberWordsInDoubt.size === 0 &&
-      !(isDecimalComma && at.some(({ said: said }: Dynamic) => /^-?\d*,\d+$/.test(said))) &&
-      (at.length > 0 || (emojiNotPlaced.length > 0 && !hasSeveralAsksInColumn)) &&
+      !(isDecimalComma && unplacedWords.some(({ said }) => /^-?\d*,\d+$/.test(said))) &&
+      (unplacedWords.length > 0 || (emojiNotPlaced.length > 0 && !hasSeveralAsksInColumn)) &&
       emojiNotPlaced.every(isEmojiOfFewValues) &&
-      valueNamedSure === at.length &&
-      at.every((wordNotPlaced?: Dynamic) => columnNamed(wordNotPlaced) || !word(wordNotPlaced));
-    let afterColumn: Dynamic = [];
-    for (let plain of at as Dynamic)
-      if (afterColumn.at(-1)?.at(-1)?.at === plain.at - 1) afterColumn.at(-1)?.push(plain);
-      else afterColumn.push([plain]);
-    let testForColumnAt = (word2?: Dynamic) =>
-      !word2.isInQuotes &&
-      (COMMAND_WORDS.has(word2.plain) ||
-        columnNameWords2.has(word2) ||
-        BLANK_WORDS.has(word2.plain) ||
-        FILLED_WORDS.has(word2.plain) ||
-        word2.plain === 'but' ||
-        EXCLUDE_VERBS.has(word2.plain) ||
-        word2.plain === 'assigned');
-    let testRead = (texts?: Dynamic) => [
+      trailingUnplaced === unplacedWords.length &&
+      unplacedWords.every((unplaced) => mayBeOnItsWay(unplaced) || !isWordFinished(unplaced));
+    const wordGroups: TypedWord[][] = [];
+    for (const unplaced of unplacedWords)
+      if (wordGroups.at(-1)?.at(-1)?.at === unplaced.at - 1) wordGroups.at(-1)?.push(unplaced);
+      else wordGroups.push([unplaced]);
+    const isKnownWord = (word: TypedWord) =>
+      !word.isInQuotes &&
+      (COMMAND_WORDS.has(word.plain) ||
+        wordsNamingColumns.has(word) ||
+        BLANK_WORDS.has(word.plain) ||
+        FILLED_WORDS.has(word.plain) ||
+        word.plain === 'but' ||
+        EXCLUDE_VERBS.has(word.plain) ||
+        word.plain === 'assigned');
+    const withEmojiNotPlaced = (texts: string[]) => [
       ...texts,
-      ...emojiNotPlaced.filter((emoji?: Dynamic) => !texts.some((text?: Dynamic) => text.includes(emoji))),
+      ...emojiNotPlaced.filter((emoji) => !texts.some((text) => text.includes(emoji))),
     ];
     return {
       kind: 'notRead',
-      wordsNotPlaced: testRead(afterColumn.map(textOfWords)),
-      wordsNotKnown: testRead(afterColumn.filter((group?: Dynamic) => !group.every(testForColumnAt)).map(textOfWords)),
-      isOnItsWay: isOnItsWay,
+      wordsNotPlaced: withEmojiNotPlaced(wordGroups.map(textOfWords)),
+      wordsNotKnown: withEmojiNotPlaced(wordGroups.filter((group) => !group.every(isKnownWord)).map(textOfWords)),
+      isOnItsWay,
     };
   }
-  let filter = filterOfEntries(filterClausesOfAsks(asksByColumn));
+  const filter = filterOfEntries(filterClausesOfAsks(asksByColumn));
   if (filter === null && sortBy.length === 0 && !asksForAll) return FILTER_WORDS_NOT_READ;
   return {
     kind: 'read',
     asked: {
-      filter: filter,
-      sortBy: sortBy,
+      filter,
+      sortBy,
     },
   };
 }
-export const CHECKED_BOOLEAN_VALUE = {
+export const CHECKED_BOOLEAN_VALUE: ValueContents = {
   kind: 'boolean',
   value: true,
 };
-export const filterValueKey = (filterValue?: Dynamic) => (filterValue === null ? '' : `${filterValue.kind} ${filterValue.value}`);
-export const isDueColumn = (column?: Dynamic) => columnNameWords(column).some((word?: Dynamic) => DUE_WORDS.has(word));
-export const numbersOfCondition = (condition?: Dynamic) =>
+export const filterValueKey = (filterValue: ValueContents | null): string =>
+  filterValue === null ? '' : `${filterValue.kind} ${filterValue.value}`;
+export const isDueColumn = (column: ColumnHolds): boolean => columnNameWords(column).some((word) => DUE_WORDS.has(word));
+export const numbersOfCondition = (condition: CellCondition | null): number[] =>
   (condition?.kind === 'numberIs'
     ? [condition.operand]
     : condition?.kind === 'numberIsBetween'
       ? [condition.oneEnd, condition.otherEnd]
       : []
-  ).flatMap((operand?: Dynamic) => (operand.kind === 'number' ? [operand.number] : []));
-export const isRankColumn = (column?: Dynamic) => columnNameWords(column).some((word?: Dynamic) => RANK_WORDS.has(word));
-export const isSuperlativeFor = (column?: Dynamic, superlative?: Dynamic) =>
+  ).flatMap((operand) => (operand.kind === 'number' ? [operand.number] : []));
+export const isRankColumn = (column: ColumnHolds): boolean => columnNameWords(column).some((word) => RANK_WORDS.has(word));
+export const isSuperlativeFor = (column: ColumnHolds, superlative: string): boolean =>
   measureOfColumn(column) === (DATE_SUPERLATIVES.has(superlative) ? 'days' : 'numbers') && !isRankColumn(column);
-export const sortDirectionAt = (words?: Dynamic, at?: Dynamic, column?: Dynamic) =>
+export const sortDirectionAt = (
+  words: readonly TypedWord[],
+  at: number,
+  column: ColumnHolds | null,
+): PhraseMeaning<SortDirection> | undefined =>
   [...SORT_DIRECTION_PHRASES, ...(column !== null && measureOfColumn(column) !== null && !isRankColumn(column) ? RANGE_DIRECTION_PHRASES : [])].find(
-    ([phrase]: Dynamic) => wordsMatchAt(words, at, phrase),
+    ([phrase]) => wordsMatchAt(words, at, phrase),
   );
-export const isFillerWord = ({ plain: plain }: Dynamic) => FILTER_FILLER_WORDS.has(plain) || QUESTION_FILLER_WORDS.has(plain);
-export const SORT_LIST_WORDS = new (Set as Dynamic)([...SORT_KEY_JOINERS, 'by', 'the']);
-export const isRangeWordFor = (word?: Dynamic, column?: Dynamic) =>
+export const isFillerWord = ({ plain }: TypedWord): boolean => FILTER_FILLER_WORDS.has(plain) || QUESTION_FILLER_WORDS.has(plain);
+export const SORT_LIST_WORDS = new Set<string>([...SORT_KEY_JOINERS, 'by', 'the']);
+export const isRangeWordFor = (word: TypedWord, column: ColumnHolds | null): boolean =>
   (word.plain === 'to' || word.isAfterHyphen) && column !== null && measureOfColumn(column) !== null;
-export const textOfWords = (words?: Dynamic) =>
-  words.map(({ said: said, gap: gap }: Dynamic, index?: Dynamic) => (index === 0 ? said : gap + said)).join('');
-export const FILTER_WORDS_NOT_READ = {
+export const textOfWords = (words: readonly TypedWord[]): string =>
+  words.map(({ said, gap }, index) => (index === 0 ? said : gap + said)).join('');
+export const FILTER_WORDS_NOT_READ: WordsReadAsFilter = {
   kind: 'notRead',
   wordsNotPlaced: [],
   wordsNotKnown: [],
   isOnItsWay: false,
 };
-export const isNumberSaid = ({ said: said }: Dynamic) => /^-?[\d.,]*\d$/.test(said);
+export const isNumberSaid = ({ said }: TypedWord): boolean => /^-?[\d.,]*\d$/.test(said);

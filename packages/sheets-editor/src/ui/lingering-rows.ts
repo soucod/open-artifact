@@ -1,16 +1,34 @@
-import type { Dynamic } from '../dynamic.ts';
 import * as React from 'react';
 import { OFF_SCREEN_TOP } from '../view/page-view.ts';
-export function lingeringStillDue(lingering: Dynamic, { rows: rows, pagesTurned: pagesTurned, isTimeUp: isTimeUp }: Dynamic) {
+import type { DrawnCell, DrawnRow } from '../grid/grid-drawing.tsx';
+/** A row that scrolled off screen and stays drawn for a while, for a screen reader still reading it. */
+export interface LingeringRow {
+  row: DrawnRow;
+  /** The pages turned when the row left the screen. */
+  leftAt: number;
+  /** The row's cells as they were when it left, when it held the active cell. */
+  saidOfActiveCell: string | null;
+}
+/** The rows drawn and the rows that linger after leaving the screen. */
+export interface LingeringRowsState {
+  rows: DrawnRow[];
+  pagesTurned: number;
+  lingering: LingeringRow[];
+  isTimeUp: boolean;
+}
+export function lingeringStillDue(
+  lingering: LingeringRow[],
+  { rows, pagesTurned, isTimeUp }: Pick<LingeringRowsState, 'rows' | 'pagesTurned' | 'isTimeUp'>,
+): LingeringRow[] {
   let offScreenRows = offScreenRowsByKey(rows);
   let kept = lingering.filter(
-    ({ row: row, leftAt: leftAt, saidOfActiveCell: saidOfActiveCell }: Dynamic) =>
+    ({ row, leftAt, saidOfActiveCell }) =>
       (!isTimeUp && pagesTurned - leftAt < LINGER_PAGE_TURNS) ||
       (saidOfActiveCell !== null && saidOfActiveCell === cellsSignatureOf(offScreenRows.get(row.key))),
   );
   return kept.length === lingering.length ? lingering : kept;
 }
-export function lingeringAfterTimeUp(state?: Dynamic) {
+export function lingeringAfterTimeUp(state: LingeringRowsState): LingeringRowsState {
   let offScreenRows = offScreenRowsByKey(state.rows);
   return {
     ...state,
@@ -18,49 +36,49 @@ export function lingeringAfterTimeUp(state?: Dynamic) {
     lingering: lingeringStillDue(state.lingering, {
       ...state,
       isTimeUp: true,
-    }).map(({ row: row, leftAt: leftAt, saidOfActiveCell: saidOfActiveCell }: Dynamic) => {
-      let keysStillDrawn = offScreenRows.get(row.key)?.cells.map(({ key: key }: Dynamic) => key) ?? [];
-      let cellsStillDrawn = row.cells.filter(({ key: key }: Dynamic) => keysStillDrawn.includes(key));
+    }).map(({ row, leftAt, saidOfActiveCell }) => {
+      let keysStillDrawn = offScreenRows.get(row.key)?.cells.map(({ key }) => key) ?? [];
+      let cellsStillDrawn = row.cells.filter(({ key }) => keysStillDrawn.includes(key));
       return {
         row: rowWithCells(row, cellsStillDrawn),
-        leftAt: leftAt,
-        saidOfActiveCell: saidOfActiveCell,
+        leftAt,
+        saidOfActiveCell,
       };
     }),
   };
 }
-export function lingeringAfterRows(state: Dynamic, rows: Dynamic, pagesTurned: Dynamic) {
+export function lingeringAfterRows(state: LingeringRowsState, rows: DrawnRow[], pagesTurned: number): LingeringRowsState {
   if (rows === state.rows && pagesTurned === state.pagesTurned) return state;
   if (pagesTurned === state.pagesTurned) {
     if (state.lingering.length === 0)
       return {
         ...state,
-        rows: rows,
+        rows,
       };
     return rowsOnScreenSignature(rows) === rowsOnScreenSignature(state.rows)
       ? {
           ...state,
-          rows: rows,
+          rows,
           lingering: lingeringStillDue(state.lingering, {
             ...state,
-            rows: rows,
+            rows,
           }),
         }
       : {
           ...state,
-          rows: rows,
+          rows,
           lingering: [],
         };
   }
-  let keysOnScreen = new Set(rows.filter(isRowOnScreen).map(({ key: key }: Dynamic) => key));
+  let keysOnScreen = new Set(rows.filter(isRowOnScreen).map(({ key }) => key));
   let offScreenRows = offScreenRowsByKey(rows);
   let next = {
-    rows: rows,
-    pagesTurned: pagesTurned,
+    rows,
+    pagesTurned,
     isTimeUp: false,
   };
   let justLeft = state.rows.filter(isRowOnScreen).map(
-    (row?: Dynamic) => ({
+    (row) => ({
       row: rowMovedOffScreen(row),
       leftAt: pagesTurned,
       saidOfActiveCell: cellsSignatureOf(offScreenRows.get(row.key)),
@@ -68,10 +86,10 @@ export function lingeringAfterRows(state: Dynamic, rows: Dynamic, pagesTurned: D
   );
   return {
     ...next,
-    lingering: lingeringStillDue([...state.lingering, ...justLeft], next).filter(({ row: row }: Dynamic) => !keysOnScreen.has(row.key)),
+    lingering: lingeringStillDue([...state.lingering, ...justLeft], next).filter(({ row }) => !keysOnScreen.has(row.key)),
   };
 }
-export function lingeringCellUpdated(cell: Dynamic, cellNow: Dynamic) {
+export function lingeringCellUpdated(cell: DrawnCell, cellNow: DrawnCell | undefined): DrawnCell {
   let isActive = cellNow !== undefined;
   let elementId = cellNow?.elementId ?? null;
   let isBehindBars = !isActive && cell.isBehindBars;
@@ -79,21 +97,21 @@ export function lingeringCellUpdated(cell: Dynamic, cellNow: Dynamic) {
     ? cell
     : {
         ...cell,
-        isActive: isActive,
-        elementId: elementId,
-        isBehindBars: isBehindBars,
+        isActive,
+        elementId,
+        isBehindBars,
       };
 }
-export function rowsWithLingering({ rows: rows, lingering: lingering }: Dynamic) {
+export function rowsWithLingering({ rows, lingering }: Pick<LingeringRowsState, 'rows' | 'lingering'>): DrawnRow[] {
   if (lingering.length === 0) return rows;
   let offScreenRows = offScreenRowsByKey(rows);
-  let lingeringRows = lingering.map(({ row: row }: Dynamic) => {
+  let lingeringRows = lingering.map(({ row }) => {
     let rowNow = offScreenRows.get(row.key);
-    let cellNowOf = (cell?: Dynamic) => rowNow?.cells.find(({ key: key }: Dynamic) => key === cell.key);
-    let cells = row.cells.map((cell?: Dynamic) => lingeringCellUpdated(cell, cellNowOf(cell)));
+    let cellNowOf = (cell: DrawnCell) => rowNow?.cells.find(({ key }) => key === cell.key);
+    let cells = row.cells.map((cell) => lingeringCellUpdated(cell, cellNowOf(cell)));
     if (rowNow === undefined) return rowWithCells(row, cells);
     let cellsOnlyNow = rowNow.cells.filter(
-      ({ key: key }: Dynamic) => row.cells.every((cell?: Dynamic) => cell.key !== key),
+      ({ key }) => row.cells.every((cell) => cell.key !== key),
     );
     return {
       ...row,
@@ -102,18 +120,18 @@ export function rowsWithLingering({ rows: rows, lingering: lingering }: Dynamic)
       cells:
         cellsOnlyNow.length === 0
           ? cells
-          : [...cells, ...cellsOnlyNow].toSorted((a?: Dynamic, b?: Dynamic) => a.columnNumber - b.columnNumber),
+          : [...cells, ...cellsOnlyNow].toSorted((a, b) => a.columnNumber - b.columnNumber),
     };
   });
-  let lingeringKeys = new Set(lingeringRows.map(({ key: key }: Dynamic) => key));
-  return [...rows.filter(({ key: key }: Dynamic) => !lingeringKeys.has(key)), ...lingeringRows].toSorted(
-    (a?: Dynamic, b?: Dynamic) => a.rowNumber - b.rowNumber,
+  let lingeringKeys = new Set(lingeringRows.map(({ key }) => key));
+  return [...rows.filter(({ key }) => !lingeringKeys.has(key)), ...lingeringRows].toSorted(
+    (a, b) => a.rowNumber - b.rowNumber,
   );
 }
-export function useLingeringRows(rows: Dynamic, pagesTurned: Dynamic, isOn: Dynamic) {
-  let [state, setState] = React.useState({
-    rows: rows,
-    pagesTurned: pagesTurned,
+export function useLingeringRows(rows: DrawnRow[], pagesTurned: number, isOn: boolean): DrawnRow[] {
+  let [state, setState] = React.useState<LingeringRowsState>({
+    rows,
+    pagesTurned,
     lingering: [],
     isTimeUp: false,
   });
@@ -123,7 +141,7 @@ export function useLingeringRows(rows: Dynamic, pagesTurned: Dynamic, isOn: Dyna
   React.useEffect(() => {
     if (!isLingering) return;
     let timer = setTimeout(
-      () => setState((current?: Dynamic) => (current.pagesTurned === pagesTurned ? lingeringAfterTimeUp(current) : current)),
+      () => setState((current) => (current.pagesTurned === pagesTurned ? lingeringAfterTimeUp(current) : current)),
       LINGER_MS,
     );
     return () => clearTimeout(timer);
@@ -132,20 +150,20 @@ export function useLingeringRows(rows: Dynamic, pagesTurned: Dynamic, isOn: Dyna
 }
 export const LINGER_MS = 1e4;
 export const LINGER_PAGE_TURNS = 2;
-export const isRowOnScreen = ({ top: top }: Dynamic) => top > OFF_SCREEN_TOP / 2;
-export const rowMovedOffScreen = (row?: Dynamic) => ({
+export const isRowOnScreen = ({ top }: Pick<DrawnRow, 'top'>): boolean => top > OFF_SCREEN_TOP / 2;
+export const rowMovedOffScreen = (row: DrawnRow): DrawnRow => ({
   ...row,
   top: OFF_SCREEN_TOP,
 });
-export const rowWithCells = (row?: Dynamic, cells?: Dynamic) => ({
+export const rowWithCells = (row: DrawnRow, cells: DrawnCell[]): DrawnRow => ({
   ...row,
-  cells: cells,
+  cells,
 });
-export const rowsOnScreenSignature = (rows?: Dynamic) =>
+export const rowsOnScreenSignature = (rows: readonly DrawnRow[]): string =>
   rows
     .filter(isRowOnScreen)
-    .map(({ key: key, rowNumber: rowNumber }: Dynamic) => `${key} ${rowNumber}`)
+    .map(({ key, rowNumber }) => `${key} ${rowNumber}`)
     .join();
-export const offScreenRowsByKey = (rows?: Dynamic) =>
-  new Map(rows.filter((row?: Dynamic) => !isRowOnScreen(row)).map((row?: Dynamic) => [row.key, row]));
-export const cellsSignatureOf = (row?: Dynamic) => (row === undefined ? null : JSON.stringify(row.cells));
+export const offScreenRowsByKey = (rows: readonly DrawnRow[]): Map<string, DrawnRow> =>
+  new Map(rows.filter((row) => !isRowOnScreen(row)).map((row): [string, DrawnRow] => [row.key, row]));
+export const cellsSignatureOf = (row: DrawnRow | undefined): string | null => (row === undefined ? null : JSON.stringify(row.cells));

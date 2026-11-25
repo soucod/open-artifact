@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { TOUCH_MOVE_SLOP_PX, movedPastTouchSlop, reduceTouchPress, type TouchPress } from '../src/tools/touch.ts';
+import { TOUCH_MOVE_SLOP_PX, TOUCH_QUICK_TAP, isQuickTap, movedPastTouchSlop, reduceTouchPress, type TouchPress } from '../src/tools/touch.ts';
 
 const at = (x: number, y: number) => ({ x, y });
 const press = (overrides: Partial<TouchPress> = {}): TouchPress => ({ start: at(100, 100), selected: false, popped: false, ...overrides });
@@ -40,5 +40,15 @@ describe('touch press', () => {
     assert.equal(reduceTouchPress(press(), { kind: 'up' }).outcome, 'tap');
     assert.equal(reduceTouchPress(press({ popped: true }), { kind: 'up' }).outcome, 'none');
     assert.equal(reduceTouchPress(press(), { kind: 'cancel' }).outcome, 'cancel');
+  });
+});
+
+describe('quick taps', () => {
+  it('last at most 400 ms and drift at most 10 px', () => {
+    assert.deepEqual(TOUCH_QUICK_TAP, { ms: 400, px: 10 });
+    assert.equal(isQuickTap(at(0, 0), 1000, at(0, 0), 1400), true);
+    assert.equal(isQuickTap(at(0, 0), 1000, at(6, 8), 1100), true);
+    assert.equal(isQuickTap(at(0, 0), 1000, at(0, 0), 1401), false);
+    assert.equal(isQuickTap(at(0, 0), 1000, at(7, 8), 1100), false);
   });
 });

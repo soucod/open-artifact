@@ -4,14 +4,15 @@
  * through the browser; copies URLs and paths.
  */
 
-import { browserDownloadUrl } from '@open-artifact/editor-kit';
+import { browserDownloadUrl, writeClipboardText } from '@open-artifact/editor-kit';
 import { toast } from '@open-artifact/ui';
-import { session } from './session.ts';
+import { maybeSession, session } from './session.ts';
 
 /** Downloads `url` as `name`. */
 export async function downloadUrl(url: string, name: string): Promise<void> {
   const downloads = session().downloads;
-  if (downloads && session().isOwner) {
+  // The owner, or anyone on a host that saves in the browser (it decides whether a viewer may).
+  if (downloads && (session().isOwner || downloads.browser === true)) {
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -29,7 +30,7 @@ export async function downloadUrl(url: string, name: string): Promise<void> {
 /** Copies text, with a toast. */
 export async function copyText(text: string, what: string): Promise<void> {
   try {
-    await navigator.clipboard.writeText(text);
+    await writeClipboardText(text, maybeSession()?.shell);
     toast.add({ title: `Copied ${what}` });
   } catch {
     toast.add({ title: `Could not copy ${what}`, description: text });

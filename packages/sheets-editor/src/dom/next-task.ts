@@ -1,7 +1,6 @@
-import type { Dynamic } from '../dynamic.ts';
-export const waitForNextTask = () =>
-  new (Promise as Dynamic)((resolve?: Dynamic) => {
-    let { port1: receiver, port2: sender } = new (MessageChannel as Dynamic)();
+export const waitForNextTask = (): Promise<void> =>
+  new Promise<void>((resolve) => {
+    let { port1: receiver, port2: sender } = new MessageChannel();
     receiver.addEventListener('message', () => {
       receiver.close();
       resolve();

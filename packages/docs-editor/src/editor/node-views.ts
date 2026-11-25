@@ -1,7 +1,9 @@
 /** How the editor draws what plain DOM can't: check boxes, chips, pictures and blocks still being written. */
+import { type ChipLookup, chipText, shownDate, tabOfRef } from '@open-artifact/docs-core';
 import type { Node as PMNode } from 'prosemirror-model';
 import type { EditorView, NodeView, NodeViewConstructor } from 'prosemirror-view';
-import { getDocs } from '../app/store.ts';
+import { nameOfPerson, usePeopleNames } from '../app/people.ts';
+import { getDocs, useDocs } from '../app/store.ts';
 import { schema } from './schema.ts';
 
 /** The URL a picture's bytes are at. */
@@ -13,12 +15,7 @@ export function mediaSrc(attrs: Record<string, unknown>): string {
 }
 
 export function formatDate(ts: unknown): string {
-  if (typeof ts !== 'string' || !ts) return 'Date';
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(ts) ? new Date(`${ts}T00:00:00`) : new Date(ts);
-  if (Number.isNaN(date.getTime())) return ts;
-  const now = new Date();
-  const sameYear = date.getFullYear() === now.getFullYear();
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+  return shownDate(ts) || 'Date';
 }
 
 /** A dropdown chip's option: its name and color, or null when the list or option is gone. */
@@ -28,6 +25,22 @@ export function dropdownOption(enumId: unknown, index: unknown): { name: string;
   const option = list.options[index];
   return option ? { name: option.name, color: option.color ?? null } : null;
 }
+
+/** What the chips in this doc name, as the page knows it now. */
+export const pageChips: ChipLookup = {
+  option: (list, index) => dropdownOption(list, index)?.name ?? null,
+  tab: id => getDocs().project?.files.find(file => file.id === id)?.name ?? null,
+  person: id => nameOfPerson(id) ?? null,
+};
+
+/** Swaps a view's own classes, leaving the ones the editor put on it (a find highlight, a selection). */
+export function setOwnClasses(dom: HTMLElement, before: readonly string[], after: readonly string[]): void {
+  const keep = new Set(after);
+  for (const name of before) if (!keep.has(name)) dom.classList.remove(name);
+  for (const name of after) dom.classList.add(name);
+}
+
+const classesOf = (dom: HTMLElement) => [...dom.classList];
 
 class CheckItemView implements NodeView {
   dom: HTMLElement;
@@ -161,21 +174,47 @@ class AtomChipView implements NodeView {
   dom: HTMLElement;
   private node: PMNode;
   private draw: (node: PMNode) => HTMLElement;
+  private own: string[];
+  private readonly stop: () => void;
 
-  constructor(node: PMNode, draw: (node: PMNode) => HTMLElement) {
+  /** `watchNames`: the chip shows a tab's or a person's name, so it is drawn again when those change. */
+  constructor(node: PMNode, draw: (node: PMNode) => HTMLElement, watchNames = false) {
     this.node = node;
     this.draw = draw;
     this.dom = draw(node);
+    this.own = classesOf(this.dom);
+    if (!watchNames) {
+      this.stop = () => undefined;
+      return;
+    }
+    const stopTabs = useDocs.subscribe((state, before) => {
+      if (state.project?.files !== before.project?.files) this.redraw();
+    });
+    const stopPeople = usePeopleNames.subscribe(() => this.redraw());
+    this.stop = () => {
+      stopTabs();
+      stopPeople();
+    };
+  }
+
+  private redraw(): void {
+    const next = this.draw(this.node);
+    const own = classesOf(next);
+    setOwnClasses(this.dom, this.own, own);
+    this.own = own;
+    if (this.dom.textContent !== next.textContent) this.dom.textContent = next.textContent;
+    for (const name of next.getAttributeNames()) if (name !== 'class') this.dom.setAttribute(name, next.getAttribute(name)!);
   }
 
   update(node: PMNode): boolean {
     if (node.type !== this.node.type) return false;
     this.node = node;
-    const next = this.draw(node);
-    this.dom.className = next.className;
-    this.dom.textContent = next.textContent;
-    for (const name of next.getAttributeNames()) this.dom.setAttribute(name, next.getAttribute(name)!);
+    this.redraw();
     return true;
+  }
+
+  destroy(): void {
+    this.stop();
   }
 
   selectNode(): void {
@@ -190,11 +229,10 @@ class AtomChipView implements NodeView {
 const drawDate = (node: PMNode) => chip('doc-date', formatDate(node.attrs.ts), { 'data-date': String(node.attrs.ts ?? '') });
 
 const drawMention = (node: PMNode) => {
-  const { label, name, ref, principal } = node.attrs as Record<string, string | null>;
-  const isTab = typeof ref === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}$/.test(ref);
-  const tabName = isTab ? getDocs().project?.files.find(file => file.id === ref)?.name : null;
-  const text = label ?? tabName ?? name ?? (principal === 'agent' ? 'agent' : (ref ?? 'someone'));
-  return chip(isTab ? 'doc-mention doc-mention-tab' : 'doc-mention', `${isTab ? '' : '@'}${text}`, { 'data-mention': principal ?? ref ?? '' });
+  const { ref, principal } = node.attrs as Record<string, string | null>;
+  const isTab = tabOfRef(ref) !== null;
+  const text = chipText('mention', node.attrs, pageChips) ?? (isTab ? (ref ?? '') : '@someone');
+  return chip(isTab ? 'doc-mention doc-mention-tab' : 'doc-mention', text, { 'data-mention': principal ?? ref ?? '' });
 };
 
 const drawDropdown = (node: PMNode) => {
@@ -207,6 +245,7 @@ const drawDropdown = (node: PMNode) => {
 const drawPending = (node: PMNode) => {
   const dom = document.createElement('div');
   dom.className = 'doc-pending';
+  dom.dir = 'auto';
   dom.textContent = (node.attrs.intent as string) || 'Writing…';
   if (node.attrs.bid) dom.dataset.bid = node.attrs.bid;
   return dom;
@@ -226,7 +265,7 @@ export const baseNodeViews: Record<string, NodeViewConstructor> = {
   listItem: (node, view, getPos) => (node.attrs.checked === null ? (undefined as unknown as NodeView) : new CheckItemView(node, view, getPos)),
   media: node => new MediaView(node),
   date: node => new AtomChipView(node, drawDate),
-  mention: node => new AtomChipView(node, drawMention),
+  mention: node => new AtomChipView(node, drawMention, true),
   dropdown: node => new AtomChipView(node, drawDropdown),
   pending: node => new AtomChipView(node, drawPending),
   embed: node => new AtomChipView(node, drawEmbed),

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{cell_of, CellAt};
+use crate::workbook::grid::CellForm;
 use crate::workbook::load::{CellToSet, Op, Refusal};
 use crate::workbook::rich::{self, Person};
 use crate::workbook::{Input, Workbook};
@@ -119,5 +120,5 @@ pub fn change_people(workbook: &Workbook, edit: &Value) -> Result<Vec<Op>, Refus
         return Err(Refusal::CellCoveredByMergedRange);
     }
     let cells = vec![CellToSet { r: workbook.bases.text(place.0), c: workbook.bases.text(place.1), input }];
-    Ok(vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, listed: false }])
+    Ok(vec![Op::SetCells { sheet_id: sheet.id.clone(), cells, form: CellForm::Auto }])
 }

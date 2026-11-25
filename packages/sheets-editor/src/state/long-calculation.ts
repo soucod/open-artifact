@@ -37,7 +37,7 @@ export const NO_LONG_CALCULATION: NoLongCalculation = {
 };
 export const longCalculationWait = (told: LongCalculationTold): Wait | null =>
   told.kind === 'noticeIsDue' || told.kind === 'toldAWhileLonger' ? told.wait : null;
-export const isLongCalculationTold = ({ kind: kind }: LongCalculationTold): boolean => kind === 'told' || kind === 'toldAWhileLonger';
+export const isLongCalculationTold = ({ kind }: LongCalculationTold): boolean => kind === 'told' || kind === 'toldAWhileLonger';
 export interface NoLongCalculation {
   kind: 'noCalculation';
 }

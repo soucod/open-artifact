@@ -21,6 +21,13 @@ const HIDDEN = 'invisible opacity-0';
 const ENTRY = 'text-body cds-text-entry-floored py-[calc((var(--cds-h-control)_-_1lh)_/_2)]';
 const TEXT_ENTRY = 'textarea, [contenteditable="true"], [role="textbox"]';
 
+/**
+ * Past these heights the text scrolls inside its box. `--comment-card-room` is the height the card around it may take
+ * (set by the popover it opens in), so the box shrinks before the card's own buttons are pushed out of view.
+ */
+const REPLY_HEIGHT = 'scroll-thin max-h-[min(5lh,var(--comment-card-room,100vh)_-_12rem)]';
+const DRAFT_HEIGHT = 'scroll-thin max-h-[min(8lh,max(2lh,var(--comment-card-room,100vh)_-_8rem))]';
+
 export interface CommentComposerProps {
   value: string;
   onChange: (value: string) => void;
@@ -161,6 +168,7 @@ export function CommentComposer({
           aria-disabled={busy || undefined}
           className={cn(
             'min-h-[1lh] placeholder:overflow-hidden placeholder:text-ellipsis placeholder:whitespace-nowrap',
+            inReplyField ? REPLY_HEIGHT : DRAFT_HEIGHT,
             tagged && 'indent-[calc(var(--cc-tag-w,0px)+var(--cds-gap-xs))]',
           )}
         />

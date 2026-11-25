@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { measureOfColumn, isPeopleColumn, valuesOfUserInColumn } from '../words/column-holds.ts';
 import {
   serialToIsoDate,
@@ -12,8 +11,43 @@ import { cleanTextForAgent, isPromptDataTooLong } from '../agent/prompt-text.ts'
 import { taggedJson } from '../format/conditional/agent-prompts.ts';
 import { isNonNullObject } from '../utils/objects.ts';
 import { filterOfEntries } from './filter-model.ts';
-export function listedValuesEntry(key?: Dynamic, values?: Dynamic, count?: Dynamic, isMoreLeftOut?: Dynamic) {
-  let listed = values.filter((value?: Dynamic) => value.length <= MAX_LISTED_VALUE_LENGTH).slice(0, count);
+import type { Asked, CellCondition, Comparison, DecimalSignName, NumberOperand, SortDirection, ValueAskedFor } from '@open-artifact/sheets-core';
+import type { LimitsOfConditionalFormats } from '../model/workbook.ts';
+import type { SerialRangeCondition } from '../model/date-serials.ts';
+import type { AgentPrompt } from '../format/conditional/agent-prompts.ts';
+import type { ColumnHolds, RowsAskColumnTold } from '../state/initial-state.ts';
+import type { RowsAsked, SortKeyOfColumn } from '../state/event-reducer.ts';
+import type { FilterLine, FilterTerm } from './filter-model.ts';
+/** The table the agent is told of when asked which rows: its columns by letters, and how many records it has. */
+export interface TableToldOfRows {
+  columns: RowsAskColumnTold[];
+  records: number;
+}
+/** What else the agent is told of the table when asked which rows: the day, and how numbers and dates are typed. */
+export interface FactsToldOfRows {
+  today: string;
+  decimalSign: DecimalSignName;
+  isMonthFirst: boolean;
+}
+/** What the agent's answer of which rows is read against: the columns it was told of, who asks, the day, and the workbook's limits. */
+export interface RowsAnswerContext {
+  columns: RowsAskColumnTold[];
+  viewer: string | null;
+  today: string;
+  limits: LimitsOfConditionalFormats;
+}
+/** A JSON object of the agent's answer, not yet checked. */
+export type ObjectOfAnswer = Record<PropertyKey, unknown>;
+/** An operand that is a plain number. */
+export type PlainNumberOperand = Extract<NumberOperand, { kind: 'number' }>;
+/** What a condition asks of a cell, as a filter asks it. */
+export type ConditionAsked = Extract<Asked, { kind: 'meets' }>;
+/** The span a named period of days goes by: a day, a week, or so many months; and how many spans from today's. */
+export type NamedDayPeriod = readonly [unit: 'day' | 'week' | number, offset: number];
+/** A kind of test of text the agent may answer with. */
+export type AnswerTextTestKind = (typeof ANSWER_TEXT_TEST_KINDS)[number];
+export function listedValuesEntry(key: 'options' | 'values', values: readonly string[], count: number, isMoreLeftOut: boolean) {
+  let listed = values.filter((value) => value.length <= MAX_LISTED_VALUE_LENGTH).slice(0, count);
   return {
     [key]: listed,
     ...((isMoreLeftOut || listed.length < values.length) && {
@@ -21,19 +55,19 @@ export function listedValuesEntry(key?: Dynamic, values?: Dynamic, count?: Dynam
     }),
   };
 }
-export function columnOfRowsPrompt({ letters: letters, holds: holds }: Dynamic, listedCount?: Dynamic) {
-  let { name: name, kind: kind, values: values, optionsOfDropdown: optionsOfDropdown, areMoreValuesLeftOut: areMoreValuesLeftOut } = holds;
-  let blankCount = values.find(({ value: value }: Dynamic) => value === null)?.records ?? (areMoreValuesLeftOut ? null : 0);
+export function columnOfRowsPrompt({ letters, holds }: RowsAskColumnTold, listedCount: number) {
+  let { name, kind, values, optionsOfDropdown, areMoreValuesLeftOut } = holds;
+  let blankCount = values.find(({ value }) => value === null)?.records ?? (areMoreValuesLeftOut ? null : 0);
   let entry = {
     c: letters,
-    name: name,
-    kind: kind,
+    name,
+    kind,
     blank: blankCount,
   };
   if (kind === 'checkbox') return entry;
   if (measureOfColumn(holds) !== null) {
-    let numbers = values.flatMap(({ value: value }: Dynamic) => (value?.kind === 'number' ? [value.value] : []));
-    let shownNumber = (number?: Dynamic) => (number === undefined ? null : kind === 'date' ? serialToIsoDate(number) : number);
+    let numbers = values.flatMap(({ value }) => (value?.kind === 'number' ? [value.value] : []));
+    let shownNumber = (number: number | undefined) => (number === undefined ? null : kind === 'date' ? serialToIsoDate(number) : number);
     let largest = areMoreValuesLeftOut ? undefined : numbers.at(-1);
     return kind === 'date'
       ? {
@@ -55,37 +89,37 @@ export function columnOfRowsPrompt({ letters: letters, holds: holds }: Dynamic, 
     };
   let texts = values
     .flatMap(
-      ({ value: value, records: records }: Dynamic) =>
+      ({ value, records }) =>
         value?.kind === 'text'
           ? [
               {
                 text: value.value,
-                records: records,
+                records,
               },
             ]
           : [],
     )
-    .toSorted((one?: Dynamic, other?: Dynamic) => other.records - one.records)
-    .map(({ text: text }: Dynamic) => text);
+    .toSorted((one, other) => other.records - one.records)
+    .map(({ text }) => text);
   return {
     ...entry,
     kind: isPeopleColumn(holds) ? 'people' : 'text',
     ...listedValuesEntry('values', texts, listedCount, areMoreValuesLeftOut),
   };
 }
-export function rowsFromWordsPrompt(words: Dynamic, { columns: columns, records: records }: Dynamic, tableFacts?: Dynamic) {
+export function rowsFromWordsPrompt(words: string, { columns, records }: TableToldOfRows, tableFacts: FactsToldOfRows): AgentPrompt | null {
   let cleanWords = cleanTextForAgent(words);
   if (cleanWords === '') return null;
   let prompt = `${ROWS_FROM_WORDS_INSTRUCTIONS}
 
 The person typed: ${JSON.stringify(cleanWords)}`;
-  for (let listedCount of LISTED_VALUE_COUNTS as Dynamic) {
-    let shownColumns = columns.map((column?: Dynamic) => columnOfRowsPrompt(column, listedCount));
+  for (let listedCount of LISTED_VALUE_COUNTS) {
+    let shownColumns = columns.map((column) => columnOfRowsPrompt(column, listedCount));
     let request = {
       words: prompt,
       data: taggedJson('table', {
         ...tableFacts,
-        records: records,
+        records,
         columns: shownColumns,
       }),
     };
@@ -93,39 +127,39 @@ The person typed: ${JSON.stringify(cleanWords)}`;
   }
   return null;
 }
-export function daySerialOfAnswerDay(isoDay?: Dynamic) {
+export function daySerialOfAnswerDay(isoDay: unknown): number | null {
   if (typeof isoDay !== 'string' || !ANSWER_DAY_PATTERN.test(isoDay)) return null;
   let serial = dateToSerial(isoDay);
   return Number.isFinite(serial) && serialToIsoDate(serial) === isoDay ? serial : null;
 }
-export function answerTestText(text: Dynamic, { limits: limits }: Dynamic) {
+export function answerTestText(text: unknown, { limits }: Pick<RowsAnswerContext, 'limits'>): string | null {
   if (typeof text !== 'string' || /[\t\n\r]/.test(text)) return null;
   return text.trim() !== '' &&
     cleanTextForAgent(text) === text.trim() &&
-    Array.from<Dynamic>(text.trim()).length <= limits.longestTextOfAConditionInCharacters
+    Array.from(text.trim()).length <= limits.longestTextOfAConditionInCharacters
     ? text.trim()
     : null;
 }
-export function columnValuesByText(column?: Dynamic) {
+export function columnValuesByText(column: ColumnHolds): Map<string, ValueAskedFor> {
   let cached = columnValuesByTextCache.get(column);
   if (cached !== undefined) return cached;
-  let byText = new (Map as Dynamic)();
-  for (let value of (column.optionsOfDropdown ?? []) as Dynamic)
-    byText.set(foldAnswerValueText(value), {
+  let byText = new Map<string, ValueAskedFor>();
+  for (let option of column.optionsOfDropdown ?? [])
+    byText.set(foldAnswerValueText(option), {
       kind: 'text',
-      value: value,
+      value: option,
     });
-  for (let { value: value } of column.values as Dynamic) if (value?.kind === 'text') byText.set(foldAnswerValueText(value.value), value);
+  for (let { value } of column.values) if (value?.kind === 'text') byText.set(foldAnswerValueText(value.value), value);
   columnValuesByTextCache.set(column, byText);
   return byText;
 }
-export function answerValueInColumn(value?: Dynamic, column?: Dynamic, context?: Dynamic) {
+export function answerValueInColumn(value: unknown, column: ColumnHolds, context: RowsAnswerContext): ValueAskedFor | null | undefined {
   if (value === null) return null;
   if (typeof value === 'number')
     return Number.isFinite(value) && column.kind !== 'date' && column.kind !== 'checkbox'
       ? {
           kind: 'number',
-          value: value,
+          value,
         }
       : undefined;
   if (typeof value !== 'string') return;
@@ -142,33 +176,33 @@ export function answerValueInColumn(value?: Dynamic, column?: Dynamic, context?:
         value: text,
       };
 }
-export function answerOperand(operand?: Dynamic, isDateColumn?: Dynamic, context?: Dynamic) {
+export function answerOperand(operand: unknown, isDateColumn: boolean, context: RowsAnswerContext): NumberOperand | null {
   if (!isNonNullObject(operand)) return null;
   switch (operand.kind) {
     case 'number': {
-      let { number: value } = operand;
-      return !isDateColumn && hasExactlyKeys(operand, 'kind', 'number') && typeof value === 'number' && Number.isFinite(value)
-        ? numberOperandOf(value)
+      let { number } = operand;
+      return !isDateColumn && hasExactlyKeys(operand, 'kind', 'number') && typeof number === 'number' && Number.isFinite(number)
+        ? numberOperandOf(number)
         : null;
     }
     case 'day':
       return isDateColumn && hasExactlyKeys(operand, 'kind', 'day') ? numberOperandOf(daySerialOfAnswerDay(operand.day)) : null;
     case 'daysFromToday': {
-      let { days: value } = operand;
+      let { days } = operand;
       return isDateColumn &&
         hasExactlyKeys(operand, 'kind', 'days') &&
-        Number.isInteger(value) &&
-        typeof value === 'number' &&
-        Math.abs(value) <= 36600
-        ? numberOperandOf(dateToSerial(context.today) + value)
+        Number.isInteger(days) &&
+        typeof days === 'number' &&
+        Math.abs(days) <= 36600
+        ? numberOperandOf(dateToSerial(context.today) + days)
         : null;
     }
     case 'sameRowInColumn': {
-      let value = hasExactlyKeys(operand, 'kind', 'c') ? answerColumnByLetters(operand.c, context) : null;
-      return value !== null && measureOfColumn(value) === (isDateColumn ? 'days' : 'numbers')
+      let column = hasExactlyKeys(operand, 'kind', 'c') ? answerColumnByLetters(operand.c, context) : null;
+      return column !== null && measureOfColumn(column) === (isDateColumn ? 'days' : 'numbers')
         ? {
             kind: 'sameRowInColumn',
-            c: value.c,
+            c: column.c,
           }
         : null;
     }
@@ -176,12 +210,12 @@ export function answerOperand(operand?: Dynamic, isDateColumn?: Dynamic, context
       return null;
   }
 }
-export function dayComparisonOfAnswer(comparison?: Dynamic, day?: Dynamic) {
-  let dayStart = {
+export function dayComparisonOfAnswer(comparison: Comparison, day: number): CellCondition {
+  let dayStart: PlainNumberOperand = {
     kind: 'number',
     number: day,
   };
-  let dayEnd = {
+  let dayEnd: PlainNumberOperand = {
     kind: 'number',
     number: day + END_OF_DAY_FRACTION,
   };
@@ -202,59 +236,59 @@ export function dayComparisonOfAnswer(comparison?: Dynamic, day?: Dynamic) {
     case 'lessThanOrEqualTo':
       return {
         kind: 'numberIs',
-        comparison: comparison,
+        comparison,
         operand: dayEnd,
       };
     case 'greaterThanOrEqualTo':
     case 'lessThan':
       return {
         kind: 'numberIs',
-        comparison: comparison,
+        comparison,
         operand: dayStart,
       };
   }
 }
-export function dayPeriodOfAnswer(period?: Dynamic, today2?: Dynamic) {
+export function dayPeriodOfAnswer(period: unknown, today: string): SerialRangeCondition | null {
   if (typeof period !== 'string') return null;
   if (/^[1-9]\d{3}-\d{2}$/.test(period)) return daySerialOfAnswerDay(`${period}-01`) === null ? null : monthSpanRangeCondition(`${period}-01`, 0);
   if (/^[1-9]\d{3}$/.test(period)) return daySerialOfAnswerDay(`${period}-01-01`) === null ? null : monthSpanRangeCondition(`${period}-01-01`, 0, 12);
   let namedPeriod = Object.hasOwn(NAMED_DAY_PERIODS, period) ? NAMED_DAY_PERIODS[period] : undefined;
   if (namedPeriod === undefined) return null;
   let [unit, offset] = namedPeriod;
-  if (unit === 'day') return serialRangeCondition(dateToSerial(today2) + offset, dateToSerial(today2) + offset);
-  return unit === 'week' ? weekRangeCondition(today2, offset) : monthSpanRangeCondition(today2, offset, unit);
+  if (unit === 'day') return serialRangeCondition(dateToSerial(today) + offset, dateToSerial(today) + offset);
+  return unit === 'week' ? weekRangeCondition(today, offset) : monthSpanRangeCondition(today, offset, unit);
 }
-export function askedOfAnswerTest(test?: Dynamic, column?: Dynamic, context?: Dynamic) {
-  let { kind: kind } = test;
+export function askedOfAnswerTest(test: ObjectOfAnswer, column: ColumnHolds, context: RowsAnswerContext): Asked | null {
+  let { kind } = test;
   let isDateColumn = column.kind === 'date';
   let isMeasured = measureOfColumn(column) !== null;
-  let operandAt = (key?: Dynamic) => answerOperand(test[key], isDateColumn, context);
+  let operandAt = (key: string) => answerOperand(test[key], isDateColumn, context);
   switch (kind) {
     case 'isOneOf':
     case 'isNoneOf': {
-      let { values: value } = test;
-      if (!hasExactlyKeys(test, 'c', 'kind', 'values') || !Array.isArray(value)) return null;
-      if (value.length > MAX_ANSWER_VALUES_PER_TEST) return null;
-      let mapped = value.map((value2?: Dynamic) => answerValueInColumn(value2, column, context));
-      if (mapped.includes(undefined)) return null;
-      let entries = new (Map as Dynamic)(mapped.map((value2?: Dynamic) => [JSON.stringify(value2), value2]));
-      let [matches, ...matches2] = [...entries.values()].filter((value2?: Dynamic) => value2 !== undefined);
-      return matches === undefined
+      let { values } = test;
+      if (!hasExactlyKeys(test, 'c', 'kind', 'values') || !Array.isArray(values)) return null;
+      if (values.length > MAX_ANSWER_VALUES_PER_TEST) return null;
+      let valuesInColumn = values.map((answered: unknown) => answerValueInColumn(answered, column, context));
+      if (valuesInColumn.includes(undefined)) return null;
+      let byJson = new Map<string, ValueAskedFor | null | undefined>(valuesInColumn.map((inColumn) => [JSON.stringify(inColumn), inColumn]));
+      let [firstValue, ...otherValues] = [...byJson.values()].filter((inColumn) => inColumn !== undefined);
+      return firstValue === undefined
         ? null
         : {
-            kind: kind,
-            values: [matches, ...matches2],
+            kind,
+            values: [firstValue, ...otherValues],
           };
     }
     case 'isTheViewer':
     case 'isNotTheViewer': {
       if (!hasExactlyKeys(test, 'c', 'kind')) return null;
-      let [value, ...value2] = valuesOfUserInColumn(column, context.viewer);
-      return value === undefined
+      let [firstValue, ...otherValues] = valuesOfUserInColumn(column, context.viewer);
+      return firstValue === undefined
         ? null
         : {
             kind: kind === 'isTheViewer' ? 'isOneOf' : 'isNoneOf',
-            values: [value, ...value2],
+            values: [firstValue, ...otherValues],
           };
     }
     case 'isBlank':
@@ -262,86 +296,86 @@ export function askedOfAnswerTest(test?: Dynamic, column?: Dynamic, context?: Dy
     case 'appearsMoreThanOnce':
       return hasExactlyKeys(test, 'c', 'kind')
         ? meetsConditionAsked({
-            kind: kind,
+            kind,
           })
         : null;
     case 'numberIs': {
-      let { comparison: value } = test;
-      let value2 = operandAt('operand');
+      let { comparison } = test;
+      let operand = operandAt('operand');
       if (!hasExactlyKeys(test, 'c', 'kind', 'comparison', 'operand') || !isMeasured) return null;
-      if (!isAnswerComparison(value) || value2 === null) return null;
+      if (!isAnswerComparison(comparison) || operand === null) return null;
       return meetsConditionAsked(
-        isDateColumn && value2.kind === 'number'
-          ? dayComparisonOfAnswer(value, value2.number)
+        isDateColumn && operand.kind === 'number'
+          ? dayComparisonOfAnswer(comparison, operand.number)
           : {
-              kind: kind,
-              comparison: value,
-              operand: value2,
+              kind,
+              comparison,
+              operand,
             },
       );
     }
     case 'numberIsBetween':
     case 'numberIsNotBetween': {
-      let [items, items2] = [operandAt('oneEnd'), operandAt('otherEnd')];
+      let [oneEnd, otherEnd] = [operandAt('oneEnd'), operandAt('otherEnd')];
       if (!hasExactlyKeys(test, 'c', 'kind', 'oneEnd', 'otherEnd') || !isMeasured) return null;
-      if (items === null || items2 === null) return null;
+      if (oneEnd === null || otherEnd === null) return null;
       if (!isDateColumn)
         return meetsConditionAsked({
-          kind: kind,
-          oneEnd: items,
-          otherEnd: items2,
+          kind,
+          oneEnd,
+          otherEnd,
         });
-      if (items.kind !== 'number' || items2.kind !== 'number') return null;
-      let [value, value2] = [items.number, items2.number].toSorted((one?: Dynamic, other?: Dynamic) => one - other);
-      if (value === undefined || value2 === undefined) return null;
+      if (oneEnd.kind !== 'number' || otherEnd.kind !== 'number') return null;
+      let [firstDay, lastDay] = [oneEnd.number, otherEnd.number].toSorted((one, other) => one - other);
+      if (firstDay === undefined || lastDay === undefined) return null;
       return meetsConditionAsked({
-        kind: kind,
+        kind,
         oneEnd: {
           kind: 'number',
-          number: value,
+          number: firstDay,
         },
         otherEnd: {
           kind: 'number',
-          number: value2 + END_OF_DAY_FRACTION,
+          number: lastDay + END_OF_DAY_FRACTION,
         },
       });
     }
     case 'dayIsIn':
       return hasExactlyKeys(test, 'c', 'kind', 'period') && isDateColumn ? meetsConditionAsked(dayPeriodOfAnswer(test.period, context.today)) : null;
     case 'booleanIs': {
-      let { value: value } = test;
+      let { value } = test;
       return hasExactlyKeys(test, 'c', 'kind', 'value') && column.kind === 'checkbox' && typeof value === 'boolean'
         ? meetsConditionAsked({
-            kind: kind,
-            value: value,
+            kind,
+            value,
           })
         : null;
     }
     case 'isAmongTheLargest':
     case 'isAmongTheSmallest': {
-      let { count: value } = test;
-      if (!(hasExactlyKeys(test, 'c', 'kind', 'count') && isMeasured) || typeof value !== 'number' || !Number.isInteger(value)) return null;
-      return value >= 1 && value <= context.limits.largestCountInACondition
+      let { count } = test;
+      if (!(hasExactlyKeys(test, 'c', 'kind', 'count') && isMeasured) || typeof count !== 'number' || !Number.isInteger(count)) return null;
+      return count >= 1 && count <= context.limits.largestCountInACondition
         ? meetsConditionAsked({
-            kind: kind,
-            count: value,
+            kind,
+            count,
           })
         : null;
     }
     default: {
       if (!isAnswerTextTestKind(kind) || !hasExactlyKeys(test, 'c', 'kind', 'text')) return null;
       if (isMeasured || column.kind === 'checkbox') return null;
-      let value = answerTestText(test.text, context);
-      return value === null
+      let text = answerTestText(test.text, context);
+      return text === null
         ? null
         : meetsConditionAsked({
-            kind: kind,
-            text: value,
+            kind,
+            text,
           });
     }
   }
 }
-export function answerTest(test?: Dynamic, context?: Dynamic) {
+export function answerTest(test: unknown, context: RowsAnswerContext): FilterTerm | null {
   if (!isNonNullObject(test)) return null;
   let column = answerColumnByLetters(test.c, context);
   let asked = column === null ? null : askedOfAnswerTest(test, column, context);
@@ -349,46 +383,46 @@ export function answerTest(test?: Dynamic, context?: Dynamic) {
     ? null
     : {
         c: column.c,
-        asked: asked,
+        asked,
       };
 }
-export function readAnswerItems(items?: Dynamic, maxCount?: Dynamic, readItem?: Dynamic) {
+export function readAnswerItems<Item>(items: unknown, maxCount: number, readItem: (item: unknown) => Item | null): [Item, ...Item[]] | null {
   if (!Array.isArray(items) || items.length > maxCount) return null;
   let read = items.map(readItem);
-  let [first, ...rest] = read.filter((item?: Dynamic) => item !== null);
+  let [first, ...rest] = read.filter((item) => item !== null);
   return first === undefined || rest.length + 1 < read.length ? null : [first, ...rest];
 }
-export function answerFilterLine(line?: Dynamic, context?: Dynamic) {
+export function answerFilterLine(line: unknown, context: RowsAnswerContext): FilterLine | null {
   if (!isNonNullObject(line) || !hasExactlyKeys(line, 'anyOf')) return null;
-  let tests = readAnswerItems(line.anyOf, MAX_ANSWER_TESTS_PER_LINE, (test?: Dynamic) => answerTest(test, context));
+  let tests = readAnswerItems(line.anyOf, MAX_ANSWER_TESTS_PER_LINE, (test) => answerTest(test, context));
   return tests === null
     ? null
     : {
         anyOf: tests,
       };
 }
-export function answerSortKey(key?: Dynamic, context?: Dynamic) {
+export function answerSortKey(key: unknown, context: RowsAnswerContext): SortKeyOfColumn | null {
   if (!isNonNullObject(key) || !hasExactlyKeys(key, 'c', 'direction')) return null;
   let column = answerColumnByLetters(key.c, context);
-  let { direction: direction } = key;
+  let { direction } = key;
   return column === null || !isSortDirection(direction)
     ? null
     : {
         c: column.c,
-        direction: direction,
+        direction,
       };
 }
-export function readRowsAnswer(answer?: Dynamic, context?: Dynamic) {
+export function readRowsAnswer(answer: unknown, context: RowsAnswerContext): RowsAsked | null {
   if (!isNonNullObject(answer) || !hasExactlyKeys(answer, 'filter', 'sort')) return null;
-  let { filter: filter, sort: sort } = answer;
+  let { filter, sort } = answer;
   let filterLines =
-    filter === null ? [] : readAnswerItems(filter, MAX_ANSWER_FILTER_LINES, (line?: Dynamic) => answerFilterLine(line, context));
+    filter === null ? [] : readAnswerItems(filter, MAX_ANSWER_FILTER_LINES, (line) => answerFilterLine(line, context));
   let sortKeys =
     Array.isArray(sort) && sort.length === 0
       ? []
-      : readAnswerItems(sort, MAX_ANSWER_SORT_KEYS, (key?: Dynamic) => answerSortKey(key, context));
+      : readAnswerItems(sort, MAX_ANSWER_SORT_KEYS, (key) => answerSortKey(key, context));
   if (filterLines === null || sortKeys === null) return null;
-  if (new (Set as Dynamic)(sortKeys.map(({ c: letters }: Dynamic) => letters)).size < sortKeys.length) return null;
+  if (new Set(sortKeys.map(({ c: columnId }) => columnId)).size < sortKeys.length) return null;
   if (filterLines.length === 0 && sortKeys.length === 0) return null;
   return {
     filter: filterOfEntries(filterLines),
@@ -397,7 +431,7 @@ export function readRowsAnswer(answer?: Dynamic, context?: Dynamic) {
 }
 export const LISTED_VALUE_COUNTS = [40, 20, 10, 5, 0];
 export const MAX_LISTED_VALUE_LENGTH = 60;
-export const NAMED_DAY_PERIODS = {
+export const NAMED_DAY_PERIODS: Record<string, NamedDayPeriod> = {
   today: ['day', 0],
   yesterday: ['day', -1],
   tomorrow: ['day', 1],
@@ -451,7 +485,7 @@ export const MAX_ANSWER_FILTER_LINES = 8;
 export const MAX_ANSWER_TESTS_PER_LINE = 8;
 export const MAX_ANSWER_VALUES_PER_TEST = 100;
 export const MAX_ANSWER_SORT_KEYS = 4;
-export const ANSWER_COMPARISONS = new (Set as Dynamic)([
+export const ANSWER_COMPARISONS = new Set<string>([
   'equalTo',
   'notEqualTo',
   'greaterThan',
@@ -459,28 +493,28 @@ export const ANSWER_COMPARISONS = new (Set as Dynamic)([
   'lessThan',
   'lessThanOrEqualTo',
 ]);
-export const isAnswerComparison = (value?: Dynamic) => typeof value === 'string' && ANSWER_COMPARISONS.has(value);
-export const hasExactlyKeys = (record?: Dynamic, ...keys: Dynamic[]) =>
-  Object.keys(record).length === keys.length && keys.every((key?: Dynamic) => Object.hasOwn(record, key));
-export const foldAnswerValueText = (text?: Dynamic) => text.trim().replaceAll(/\s+/g, ' ').toLowerCase();
+export const isAnswerComparison = (value: unknown): value is Comparison => typeof value === 'string' && ANSWER_COMPARISONS.has(value);
+export const hasExactlyKeys = (record: ObjectOfAnswer, ...keys: string[]): boolean =>
+  Object.keys(record).length === keys.length && keys.every((key) => Object.hasOwn(record, key));
+export const foldAnswerValueText = (text: string): string => text.trim().replaceAll(/\s+/g, ' ').toLowerCase();
 export const ANSWER_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-export const answerColumnByLetters = (letters: Dynamic, { columns: columns }: Dynamic) =>
-  columns.find(({ letters: columnLetters2 }: Dynamic) => columnLetters2 === letters)?.holds ?? null;
-export const columnValuesByTextCache = new (WeakMap as Dynamic)();
-export const numberOperandOf = (number?: Dynamic) =>
+export const answerColumnByLetters = (letters: unknown, { columns }: Pick<RowsAnswerContext, 'columns'>): ColumnHolds | null =>
+  columns.find(({ letters: lettersOfColumn }) => lettersOfColumn === letters)?.holds ?? null;
+export const columnValuesByTextCache = new WeakMap<ColumnHolds, Map<string, ValueAskedFor>>();
+export const numberOperandOf = (number: number | null): PlainNumberOperand | null =>
   number === null
     ? null
     : {
         kind: 'number',
-        number: number,
+        number,
       };
-export const ANSWER_TEXT_TEST_KINDS = ['textIs', 'textIsNot', 'textContains', 'textDoesNotContain', 'textStartsWith', 'textEndsWith'];
-export const isAnswerTextTestKind = (kind?: Dynamic) => ANSWER_TEXT_TEST_KINDS.some((known?: Dynamic) => known === kind);
-export const meetsConditionAsked = (test?: Dynamic) =>
-  test === null
+export const ANSWER_TEXT_TEST_KINDS = ['textIs', 'textIsNot', 'textContains', 'textDoesNotContain', 'textStartsWith', 'textEndsWith'] as const;
+export const isAnswerTextTestKind = (kind: unknown): kind is AnswerTextTestKind => ANSWER_TEXT_TEST_KINDS.some((known) => known === kind);
+export const meetsConditionAsked = (condition: CellCondition | null): ConditionAsked | null =>
+  condition === null
     ? null
     : {
         kind: 'meets',
-        condition: test,
+        condition,
       };
-export const isSortDirection = (value?: Dynamic) => value === 'ascending' || value === 'descending';
+export const isSortDirection = (value: unknown): value is SortDirection => value === 'ascending' || value === 'descending';

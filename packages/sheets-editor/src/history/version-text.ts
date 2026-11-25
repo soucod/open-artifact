@@ -1,15 +1,25 @@
 import { AGENT_NAME } from '../agent/agent-name.ts';
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage, MESSAGE_LOCALE } from '../i18n/messages.ts';
-export function dayOfVersion(date?: Dynamic, now?: Dynamic) {
-  let yesterday = new (Date as Dynamic)(startOfDayMs(now));
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (startOfDayMs(date) >= startOfDayMs(now)) return 'today';
-  return startOfDayMs(date) === yesterday.getTime() ? 'yesterday' : null;
+import type { HistoryWhy, VersionNotTakenNotice, VersionRestoredOffer } from '../state/initial-state.ts';
+import type { ShownAuthor } from './version-history.ts';
+
+/** Why a history could not be read, in words: a title, a hint under it, and whether trying again may help. */
+export interface HistoryFailureWords {
+  title: string;
+  hint?: string;
+  canTryAgain: boolean;
 }
-export function versionTimeText(date?: Dynamic, now?: Dynamic) {
-  let timeOfDay = formatTimeOfDay(date);
-  let dayName = dayOfVersion(date, now);
+
+/** Whether a time falls today or yesterday, by the calendar. Times are in milliseconds. */
+export function dayOfVersion(atMs: number, nowMs: number): 'today' | 'yesterday' | null {
+  let yesterday = new Date(startOfDayMs(nowMs));
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (startOfDayMs(atMs) >= startOfDayMs(nowMs)) return 'today';
+  return startOfDayMs(atMs) === yesterday.getTime() ? 'yesterday' : null;
+}
+export function versionTimeText(atMs: number, nowMs: number): string {
+  let timeOfDay = formatTimeOfDay(atMs);
+  let dayName = dayOfVersion(atMs, nowMs);
   if (dayName === 'today')
     return translateMessage(
       {
@@ -30,18 +40,18 @@ export function versionTimeText(date?: Dynamic, now?: Dynamic) {
         time: timeOfDay,
       },
     );
-  let weekAgo = new (Date as Dynamic)(startOfDayMs(now));
+  let weekAgo = new Date(startOfDayMs(nowMs));
   weekAgo.setDate(weekAgo.getDate() - 6);
-  if (startOfDayMs(date) >= weekAgo.getTime())
+  if (startOfDayMs(atMs) >= weekAgo.getTime())
     return translateMessage(
       {
         defaultMessage: '{weekday} at {time}',
         id: 'nsfitrZH80',
       },
       {
-        weekday: new (Intl.DateTimeFormat as Dynamic)(MESSAGE_LOCALE, {
+        weekday: new Intl.DateTimeFormat(MESSAGE_LOCALE, {
           weekday: 'long',
-        }).format(date),
+        }).format(atMs),
         time: timeOfDay,
       },
     );
@@ -51,9 +61,9 @@ export function versionTimeText(date?: Dynamic, now?: Dynamic) {
       id: 'VbvjiChqJ2',
     },
     {
-      date: new (Intl.DateTimeFormat as Dynamic)(
+      date: new Intl.DateTimeFormat(
         MESSAGE_LOCALE,
-        isSameCalendarYear(date, now)
+        isSameCalendarYear(atMs, nowMs)
           ? {
               month: 'long',
               day: 'numeric',
@@ -63,15 +73,15 @@ export function versionTimeText(date?: Dynamic, now?: Dynamic) {
               day: 'numeric',
               year: 'numeric',
             },
-      ).format(date),
+      ).format(atMs),
       time: timeOfDay,
     },
   );
 }
-export function versionAuthorsText(authors?: Dynamic) {
+export function versionAuthorsText(authors: ShownAuthor[]): string {
   if (authors.map(versionAuthorName).includes('')) return '';
-  let [first, second, ...others] = authors.filter(({ kind: kind }: Dynamic) => kind !== 'agent').map(versionAuthorName);
-  let agentAuthor = authors.find(({ kind: kind }: Dynamic) => kind === 'agent');
+  let [first, second, ...others] = authors.filter(({ kind }) => kind !== 'agent').map(versionAuthorName);
+  let agentAuthor = authors.find(({ kind }) => kind === 'agent');
   let otherCount = others.length;
   if (first === undefined) return agentAuthor === undefined ? '' : versionAuthorName(agentAuthor);
   if (second === undefined)
@@ -135,7 +145,7 @@ export function versionAuthorsText(authors?: Dynamic) {
         },
       );
 }
-export function versionHistoryFailureText(why?: Dynamic) {
+export function versionHistoryFailureText(why: HistoryWhy): HistoryFailureWords {
   switch (why) {
     case 'storeDoesNotKnowHow':
       return {
@@ -176,7 +186,7 @@ export function versionHistoryFailureText(why?: Dynamic) {
       };
   }
 }
-export function versionNotRestoredText({ why: why }: Dynamic) {
+export function versionNotRestoredText({ why }: Pick<VersionNotTakenNotice, 'why'>): string | undefined {
   switch (why) {
     case 'tooMuch':
       return translateMessage({
@@ -215,7 +225,7 @@ export function versionNotRestoredText({ why: why }: Dynamic) {
       });
   }
 }
-export function versionNotShownText({ why: why }: Dynamic) {
+export function versionNotShownText({ why }: Pick<VersionNotTakenNotice, 'why'>): string | undefined {
   switch (why) {
     case 'editsNotSaved':
       return translateMessage({
@@ -240,13 +250,16 @@ export function versionNotShownText({ why: why }: Dynamic) {
       });
   }
 }
-export function versionRestoredToast(restored?: Dynamic, now?: Dynamic) {
-  let { isSaved: isSaved } = restored;
+export function versionRestoredToast(
+  restored: Pick<VersionRestoredOffer, 'atMs' | 'isSaved'>,
+  nowMs: number,
+): { title: string; undoLabel: string } {
+  let { isSaved } = restored;
   let undoLabel = translateMessage({
     defaultMessage: 'Undo restore',
     id: 'VjZlIRO33M',
   });
-  let when = formatLongDateTime(restored.atMs, now);
+  let when = formatLongDateTime(restored.atMs, nowMs);
   return {
     title: isSaved
       ? translateMessage(
@@ -255,7 +268,7 @@ export function versionRestoredToast(restored?: Dynamic, now?: Dynamic) {
             id: 'fnNVeIeZ0K',
           },
           {
-            when: when,
+            when,
           },
         )
       : translateMessage(
@@ -264,39 +277,39 @@ export function versionRestoredToast(restored?: Dynamic, now?: Dynamic) {
             id: 'mwbOK250TI',
           },
           {
-            when: when,
+            when,
           },
         ),
-    undoLabel: undoLabel,
+    undoLabel,
   };
 }
-export const startOfDayMs = (time?: Dynamic) => new (Date as Dynamic)(time).setHours(0, 0, 0, 0);
-export const isSameCalendarYear = (date?: Dynamic, now?: Dynamic) =>
-  new (Date as Dynamic)(date).getFullYear() === new (Date as Dynamic)(now).getFullYear();
-export const formatTimeOfDay = (date?: Dynamic) =>
-  new (Intl.DateTimeFormat as Dynamic)(MESSAGE_LOCALE, {
+export const startOfDayMs = (atMs: number): number => new Date(atMs).setHours(0, 0, 0, 0);
+export const isSameCalendarYear = (atMs: number, nowMs: number): boolean =>
+  new Date(atMs).getFullYear() === new Date(nowMs).getFullYear();
+export const formatTimeOfDay = (atMs: number): string =>
+  new Intl.DateTimeFormat(MESSAGE_LOCALE, {
     hour: 'numeric',
     minute: '2-digit',
-  }).format(date);
-export const formatShortDate = (date?: Dynamic, now?: Dynamic) =>
-  new (Intl.DateTimeFormat as Dynamic)(MESSAGE_LOCALE, {
+  }).format(atMs);
+export const formatShortDate = (atMs: number, nowMs: number): string =>
+  new Intl.DateTimeFormat(MESSAGE_LOCALE, {
     month: 'short',
     day: 'numeric',
-    ...(!isSameCalendarYear(date, now) && {
+    ...(!isSameCalendarYear(atMs, nowMs) && {
       year: 'numeric',
     }),
-  }).format(date);
-export const formatLongDateTime = (date?: Dynamic, now?: Dynamic) =>
-  new (Intl.DateTimeFormat as Dynamic)(MESSAGE_LOCALE, {
+  }).format(atMs);
+export const formatLongDateTime = (atMs: number, nowMs: number): string =>
+  new Intl.DateTimeFormat(MESSAGE_LOCALE, {
     month: 'long',
     day: 'numeric',
-    ...(!isSameCalendarYear(date, now) && {
+    ...(!isSameCalendarYear(atMs, nowMs) && {
       year: 'numeric',
     }),
     hour: 'numeric',
     minute: '2-digit',
-  }).format(date);
-export const versionAuthorName = (author?: Dynamic) => {
+  }).format(atMs);
+export const versionAuthorName = (author: ShownAuthor): string => {
   if (author.kind === 'agent') return AGENT_NAME;
   if (author.name === null) return '';
   if (author.name !== '') return author.name;
@@ -336,14 +349,14 @@ export const versionHistoryMessages = {
       defaultMessage: 'View only',
       id: 'qLYc9WJLAi',
     }),
-  earlierVersionSaid: (when?: Dynamic) =>
+  earlierVersionSaid: (when: string) =>
     translateMessage(
       {
         defaultMessage: '{when}, earlier version, view only',
         id: '1qbjHmTGxc',
       },
       {
-        when: when,
+        when,
       },
     ),
   currentVersionSaid: () =>

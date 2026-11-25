@@ -11,6 +11,7 @@
  * Pure: no stores, no DOM, so the transitions are unit-tested.
  */
 
+import { draftedText } from '@open-artifact/editor-kit';
 import type { AgentSendResult } from '@open-artifact/runtime';
 
 /** Where a request stands. */
@@ -30,8 +31,13 @@ export const ASK_STATUS_LABELS: Readonly<Record<AskStatus, string>> = {
   failed: 'Could not send',
 };
 
-/** The label of a request's status; a queued one says it waits for the next turn when the agent is not woken while it idles. */
-export function askStatusLabel(status: AskStatus, wakesIdle?: boolean): string {
+/**
+ * The label of a request's status; a queued one says it waits for the next turn when the agent is not woken while it
+ * idles, and a delivered one that was put in the conversation for the person to send (`drafted`) says so, as the
+ * Shell does.
+ */
+export function askStatusLabel(status: AskStatus, wakesIdle?: boolean, drafted?: boolean): string {
+  if (status === 'delivered' && drafted) return draftedText().label;
   return status === 'queued' && wakesIdle === false ? 'Queued for its next turn' : ASK_STATUS_LABELS[status];
 }
 

@@ -1,8 +1,15 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cellValueOf } from '../model/cell-values.ts';
 import { cellShownText } from '../clipboard/text-escaping.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function proposedFormulaResult(reads: WorkbookReads, cellId?: Dynamic, formula?: Dynamic) {
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { ProposedFormulaResult } from '../state/initial-state.ts';
+/** The same as `ProposedFormulaResult`, which now has `fillsTo`; kept for the modules that import it by this name. */
+export type ProposedFormulaResultRead = ProposedFormulaResult;
+/** What a formula would come to in a cell, `'error'`, `'ranOutOfTime'`, or `null` where that cannot be read now. */
+export function proposedFormulaResult(
+  reads: WorkbookReads,
+  cellId: CellId,
+  formula: string,
+): ProposedFormulaResult | 'ranOutOfTime' | 'error' | null {
   if (reads.calculationTookTooLong) return 'ranOutOfTime';
   let proposed = reads.proposedFormulaValue(cellId, formula);
   if (proposed === null) return null;

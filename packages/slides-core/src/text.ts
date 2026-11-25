@@ -14,6 +14,7 @@ export type MarkKey = (typeof MARK_KEYS)[number];
 export function marksEqual(a: Marks | undefined, b: Marks | undefined): boolean {
   return (
     (a?.b ?? false) === (b?.b ?? false) &&
+    (a?.regular ?? false) === (b?.regular ?? false) &&
     (a?.i ?? false) === (b?.i ?? false) &&
     (a?.u ?? false) === (b?.u ?? false) &&
     (a?.color ?? '') === (b?.color ?? '') &&
@@ -26,6 +27,7 @@ export function cleanMarks(marks: Marks | undefined): Marks | undefined {
   if (!marks) return undefined;
   const out: Marks = {};
   if (marks.b) out.b = true;
+  else if (marks.regular) out.regular = true;
   if (marks.i) out.i = true;
   if (marks.u) out.u = true;
   if (marks.color) out.color = marks.color;
@@ -71,6 +73,7 @@ export function countMarks(runs: readonly Run[]): number {
     const m = run.marks;
     if (!m) continue;
     if (m.b) n++;
+    if (m.regular) n++;
     if (m.i) n++;
     if (m.u) n++;
     if (m.color) n++;
@@ -125,15 +128,26 @@ export function setMark<K extends keyof Marks>(runs: readonly Run[], start: numb
       out.push(run);
     } else {
       if (from > pos) out.push({ text: run.text.slice(0, from - pos), marks: run.marks });
-      const marks: Marks = { ...(run.marks ?? {}) };
-      if (value === undefined || (value as unknown) === false) delete marks[key];
-      else marks[key] = value;
+      const marks = withMark(run.marks, key, value);
       out.push({ text: run.text.slice(from - pos, to - pos), marks });
       if (to < runEnd) out.push({ text: run.text.slice(to - pos), marks: run.marks });
     }
     pos = runEnd;
   }
   return normalizeRuns(out);
+}
+
+/** A copy of `marks` with one mark set or cleared; bold and regular weight replace each other. */
+export function withMark<K extends keyof Marks>(marks: Marks | undefined, key: K, value: Marks[K] | undefined): Marks {
+  const out: Marks = { ...(marks ?? {}) };
+  if (value === undefined || (value as unknown) === false) {
+    delete out[key];
+    return out;
+  }
+  out[key] = value;
+  if (key === 'b') delete out.regular;
+  if (key === 'regular') delete out.b;
+  return out;
 }
 
 /** True when every character of `[start, end)` carries the boolean mark. */

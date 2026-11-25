@@ -27,6 +27,8 @@ export interface BoardState {
   pending: number;
   /** A fatal load error. */
   error: string | null;
+  /** The initial camera, visible elements and toolbar can be shown. */
+  revealed: boolean;
 }
 
 /** An empty board. */
@@ -49,7 +51,13 @@ export const useBoard = create<BoardState>()(() => ({
   refusal: null,
   pending: 0,
   error: null,
+  revealed: false,
 }));
+
+/** Shows or hides the board behind its opening veil (see services/reveal.ts). */
+export function setBoardRevealed(revealed: boolean): void {
+  if (useBoard.getState().revealed !== revealed) useBoard.setState({ revealed });
+}
 
 /** Replaces the board (from the sync engine). Keeps identity when nothing changed. */
 export function setBoardSnapshot(board: Board, status?: Partial<Pick<BoardState, 'status' | 'refusal' | 'pending' | 'error'>>): void {
@@ -70,6 +78,11 @@ export interface ChangeOptions {
   coalesce?: string;
   /** Skip the undo history (remote-driven or cosmetic changes). */
   history?: boolean;
+  /**
+   * A follow-up of the change just made (a correction once the page has
+   * measured it): joins that change's undo step, keeping its label.
+   */
+  follows?: boolean;
 }
 
 /** Receives local changes: the sync engine plus history (wired by `services/sync.ts`). */

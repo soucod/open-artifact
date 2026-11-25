@@ -6,7 +6,8 @@
  * re-saved slide byte-stable.
  */
 
-import type { ShapeKind } from '../model.ts';
+import type { ItemMargin, ShapeKind } from '../model.ts';
+import { formatClipPath, parseClipPath } from './clip-path.ts';
 import { formatNumber } from './color.ts';
 import {
   formatBackground,
@@ -83,6 +84,8 @@ export const CSS_PROPERTIES = [
   'white-space',
   'text-decoration',
   'font-variant-numeric',
+  'list-style-type',
+  'list-style-position',
   '-webkit-text-stroke',
   'text-shadow',
   'border',
@@ -93,6 +96,7 @@ export const CSS_PROPERTIES = [
   'border-width',
   'border-style',
   'border-radius',
+  'clip-path',
   'box-shadow',
   'opacity',
   'transform',
@@ -162,8 +166,8 @@ export interface StyleContext {
   direction?: string;
   /** Lower-case families the deck declares (deck.json `faces`). */
   faces: ReadonlySet<string>;
-  /** `margin` is taken (a source slide's reading); otherwise it is outside the subset. */
-  margins?: boolean;
+  /** A source slide's reading: a pinned element keeps its `margin` too. */
+  pinnedMargins?: boolean;
 }
 
 /** The outcome of one declaration. */
@@ -415,7 +419,11 @@ function parseFontWeight(raw: string, ctx: StyleContext): DeclResult {
   else return fail(`font-weight:${value} — use 100–900 or bold`);
   if (n < 100 || n > 900) return fail(`font-weight:${value} is outside 100–900`);
   const rounded = Math.round(n / 100) * 100;
-  if (ctx.element === 'span') return done('font-weight', rounded >= 600 ? '700' : '400');
+  if (ctx.element === 'span') {
+    if (rounded >= 600) return done('font-weight', '700');
+    if (rounded === 400) return done('font-weight', '400');
+    return fail(`font-weight:${value} — a phrase is bold (600 or more) or regular (400)`);
+  }
   return done('font-weight', String(rounded), rounded !== n ? { note: `font-weight:${n} → ${rounded}` } : {});
 }
 
@@ -457,8 +465,9 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
     case 'margin-bottom':
     case 'margin-left':
       if (/^0(px)?(\s+0(px)?)*$/.test(value)) return { ok: false, reason: 'margin:0 is a no-op', noop: true };
-      if (!ctx.margins || property !== 'margin') return fail('margin is not supported: use gap, padding or a spacer');
       if (ctx.element === 'section' || ctx.element === 'cell' || ctx.element === 'span' || ctx.element === 'tr') return notHere();
+      if (ctx.pinned && !ctx.pinnedMargins) return fail('margin applies to flow children only — place a pinned element with left, top, right or bottom');
+      if (!ctx.pinned && !ctx.flowChild) return notHere();
       return parseMargin(value);
     case 'box-sizing':
       return value.toLowerCase() === 'border-box' ? { ok: false, reason: 'box-sizing is always border-box', noop: true } : fail('box-sizing is always border-box');
@@ -470,6 +479,9 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
       // Input-only shorthand: stored as its longhands.
       if (!(text || container || ctx.element === 'table')) return notHere();
       return parseFontShorthand(value, ctx);
+    case 'list-style':
+      if (ctx.element !== 'list') return notHere();
+      return parseListStyle(value);
     case 'background-color':
       if (ctx.element === 'span') return fail('a <span> takes color only');
     {
@@ -575,7 +587,7 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
     case 'padding': {
       if (ctx.element === 'cell') return from(property, parsePadding(value, 64));
       if (!(container || text || ctx.element === 'table')) return notHere();
-      return from(property, parsePadding(value, 256));
+      return from(property, parsePadding(value, 1920));
     }
     case 'overflow':
       if (!isDiv(ctx)) return notHere();
@@ -673,6 +685,11 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
       if (ctx.element === 'shape' && ctx.shape !== 'rect' && ctx.shape !== 'rounded') return fail('border-radius applies to rect shapes only');
       if (!(isDiv(ctx) || text || ['img', 'table', 'shape'].includes(ctx.element))) return notHere();
       return from(property, parseRadius(value));
+    case 'clip-path': {
+      if (!(isDiv(ctx) || ctx.element === 'img' || ctx.element === 'shape')) return notHere();
+      const clip = parseClipPath(value);
+      return clip.ok ? done(property, formatClipPath(clip.value)) : fail(clip.reason);
+    }
     case 'box-shadow': {
       if (!(isDiv(ctx) || text || ['img', 'table', 'icon', 'shape'].includes(ctx.element))) return notHere();
       const s = parseShadows(value);
@@ -709,6 +726,12 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
     case 'mix-blend-mode':
       if (!(isDiv(ctx) || text || ['img', 'shape'].includes(ctx.element))) return notHere();
       return keyword(property, value, ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten']);
+    case 'list-style-type':
+      if (ctx.element !== 'list') return notHere();
+      return parseListMarker(value);
+    case 'list-style-position':
+      if (ctx.element !== 'list') return notHere();
+      return keyword(property, value, ['outside', 'inside']);
     case 'object-fit':
       if (ctx.element !== 'img') return notHere();
       return keyword(property, value, ['cover', 'contain'], { fill: 'cover', 'scale-down': 'contain' });
@@ -716,7 +739,53 @@ export function parseDeclaration(name: string, raw: string, ctx: StyleContext): 
   return fail(`${property} is not in the subset`);
 }
 
-/** `margin` of a source slide's reading: one to four px lengths (−512 to 512) or `auto`. */
+const LIST_MARKERS = ['none', 'disc', 'circle', 'square', 'decimal', 'lower-alpha', 'upper-alpha', 'lower-roman', 'upper-roman'];
+const LIST_MARKER_TEXT = 8;
+
+/** `list-style-type`: a marker keyword, or a quoted marker of up to eight characters. */
+function parseListMarker(raw: string): DeclResult {
+  const value = raw.trim();
+  const quoted = /^(["'])(.*)\1$/s.exec(value);
+  if (quoted) {
+    const text = quoted[2]!;
+    if (!text || /["\\;<>\n]/.test(text)) return fail(`list-style-type:${value} — a quoted marker holds plain characters (no quotes, backslashes, ; < or >)`);
+    if ([...text].length > LIST_MARKER_TEXT) return fail(`list-style-type:${value} — a quoted marker is at most ${LIST_MARKER_TEXT} characters`);
+    return done('list-style-type', `"${text}"`);
+  }
+  const result = keyword('list-style-type', value, LIST_MARKERS, { 'lower-latin': 'lower-alpha', 'upper-latin': 'upper-alpha' });
+  return result.ok ? result : fail(`list-style-type:${value.toLowerCase()} — use ${LIST_MARKERS.join(', ')} or a quoted marker of up to ${LIST_MARKER_TEXT} characters`);
+}
+
+/** `list-style`: a marker and a position, in either order; no images. */
+function parseListStyle(raw: string): DeclResult {
+  const value = raw.trim();
+  if (/url\(|gradient\(/i.test(value)) return fail(`list-style:${value} — markers are text, not images`);
+  const parts = splitTopLevel(value, 'space');
+  let marker: string | undefined;
+  let position: string | undefined;
+  const notes: string[] = [];
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if ((lower === 'inside' || lower === 'outside') && position === undefined) position = lower;
+    else if (marker === undefined) {
+      const parsed = parseListMarker(part);
+      if (!parsed.ok) return parsed;
+      marker = parsed.set[0]![1];
+      if (parsed.note) notes.push(parsed.note);
+    } else if (lower === 'none' && marker === 'none') continue;
+    else return fail(`list-style:${value} — one marker and one position (inside or outside)`);
+  }
+  return {
+    ok: true,
+    set: [
+      ['list-style-type', marker ?? 'disc'],
+      ['list-style-position', position ?? 'outside'],
+    ],
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
+}
+
+/** `margin`: one to four px lengths (−1920 to 1920) or `auto`. */
 function parseMargin(value: string): DeclResult {
   const parts = splitTopLevel(value.trim().toLowerCase(), 'space');
   if (parts.length < 1 || parts.length > 4) return fail(`margin:${value} — one to four lengths`);
@@ -729,13 +798,71 @@ function parseMargin(value: string): DeclResult {
     }
     const len = parseLength(part);
     if (!len.ok) return fail(`margin:${value} — use Npx or auto`);
-    const n = Math.max(-512, Math.min(512, len.value));
-    if (n !== len.value) warning = `margin:${value} clamped to ±512px`;
+    const n = Math.max(-1920, Math.min(1920, len.value));
+    if (n !== len.value) warning = `margin:${value} clamped to ±1920px`;
     out.push(px(n));
   }
   const [t, r = t, b = t, l = r] = out as [string, string?, string?, string?];
   const text = t === b && r === l ? (t === r ? t : `${t} ${r}`) : r === l ? `${t} ${r} ${b}` : `${t} ${r} ${b} ${l}`;
   return done('margin', text, warning ? { warning } : {});
+}
+
+/** What one `<li>`'s margin declarations come to. */
+export interface ItemMarginRead {
+  /** Its top and bottom margin, when both are 0 or more px. */
+  margin?: ItemMargin;
+  /** Why the top and bottom margin can't be kept. */
+  reason?: string;
+  /** It gives itself a left or right margin, which an item can't keep. */
+  sideways: boolean;
+}
+
+const ITEM_MARGIN_SIDES: Record<string, readonly number[]> = {
+  'margin-top': [0],
+  'margin-right': [1],
+  'margin-bottom': [2],
+  'margin-left': [3],
+  'margin-block-start': [0],
+  'margin-block-end': [2],
+  'margin-inline-start': [3],
+  'margin-inline-end': [1],
+};
+
+/** True for the name of a margin declaration, shorthand or side. */
+export function isMarginProperty(name: string): boolean {
+  return /^margin(?:-(?:top|right|bottom|left|block|inline|block-start|block-end|inline-start|inline-end))?$/.test(name);
+}
+
+/** Reads one `<li>`'s margin declarations, in the order they apply, as its space above and below. */
+export function readItemMargin(declarations: Iterable<readonly [string, string]>): ItemMarginRead {
+  const sides: [string, string, string, string] = ['0', '0', '0', '0'];
+  for (const [rawName, rawValue] of declarations) {
+    const name = rawName.trim().toLowerCase();
+    if (!isMarginProperty(name)) continue;
+    const parts = splitTopLevel(rawValue.trim().toLowerCase(), 'space');
+    if (name === 'margin') {
+      const [t = '0', r = t, b = t, l = r] = parts;
+      sides.splice(0, 4, t, r, b, l);
+    } else if (name === 'margin-block' || name === 'margin-inline') {
+      const [a = '0', b = a] = parts;
+      if (name === 'margin-block') [sides[0], sides[2]] = [a, b];
+      else [sides[3], sides[1]] = [a, b];
+    } else for (const side of ITEM_MARGIN_SIDES[name] ?? []) sides[side] = parts[0] ?? '0';
+  }
+  const zero = (value: string): boolean => {
+    const len = parseLength(value);
+    return len.ok && len.value === 0;
+  };
+  const sideways = !zero(sides[1]) || !zero(sides[3]);
+  const top = parseLength(sides[0], { min: 0, max: 1920 });
+  const bottom = parseLength(sides[2], { min: 0, max: 1920 });
+  if (!top.ok || !bottom.ok) return { reason: `margin ${sides[0]} ${sides[2]} — an item takes a top and bottom margin of 0 or more px`, sideways };
+  return { margin: { top: top.value, bottom: bottom.value }, sideways };
+}
+
+/** The `margin` value of an {@link ItemMargin}: `12px 0`, or `0 0 8px` when top and bottom differ. */
+export function formatItemMargin(margin: ItemMargin): string {
+  return margin.top === margin.bottom ? `${px(margin.top)} 0` : `${px(margin.top)} 0 ${px(margin.bottom)}`;
 }
 
 function mapLen(result: ParseResult<number>): ParseResult {

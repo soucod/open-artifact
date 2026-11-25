@@ -8,13 +8,14 @@
 
 import { saveFile as saveKit } from '@open-artifact/editor-kit';
 import type { ColorScheme } from '@open-artifact/whiteboard-core';
-import { boardPngFilename } from '../export/frame.ts';
+import { boardPngFilename, EXPORT_MAX_PX, exportFrameFor } from '../export/frame.ts';
 import { exportBoardFile } from '../export/board-file.ts';
 import { exportBoardPng } from '../export/png.ts';
 import { useBoard } from '../state/board.ts';
 import { currentMeasures } from '../state/measures.ts';
 import { usePresence } from '../state/presence.ts';
 import { useTheme } from '../state/theme.ts';
+import { paintLooksForExport } from './drawing-looks.ts';
 import { maybeSession } from './session.ts';
 import { onShellCommand, setShellReport } from './shell.ts';
 
@@ -67,8 +68,10 @@ export function faceNameResolver(): (personId: string) => string | undefined {
 
 /**
  * Renders the whole board as a PNG in the board's current color scheme;
- * `undefined` for an empty board. A picture over `maxBytes` is drawn again
- * at three quarters the size until it fits (or gets small).
+ * `undefined` for an empty board. Drawings in textured looks are painted
+ * first (`paintLooksForExport`; those that take too long draw as written). A
+ * picture over `maxBytes` is drawn again at three quarters the size until
+ * it fits (or gets small).
  */
 export async function renderBoardPng(options: RenderBoardPngOptions = {}): Promise<Blob | undefined> {
   const { board } = useBoard.getState();
@@ -82,12 +85,18 @@ export async function renderBoardPng(options: RenderBoardPngOptions = {}): Promi
     showAuthors: options.showAuthors ?? true,
     faceName: faceNameResolver(),
   };
-  let maxPx = options.maxPx;
-  for (;;) {
-    const { blob } = await exportBoardPng({ ...input, ...(maxPx !== undefined ? { maxPx } : {}) });
-    const next = Math.floor((maxPx ?? 4096) * 0.75);
-    if (blob.size <= maxBytes || next < MIN_RETRY_PX) return blob;
-    maxPx = next;
+  const frame = exportFrameFor(input.elements, input.measures, options.maxPx ?? EXPORT_MAX_PX);
+  const painted = await paintLooksForExport(input.elements, input.scheme, frame?.scale ?? 1);
+  try {
+    let maxPx = options.maxPx;
+    for (;;) {
+      const { blob } = await exportBoardPng({ ...input, looks: painted.looks, ...(maxPx !== undefined ? { maxPx } : {}) });
+      const next = Math.floor((maxPx ?? 4096) * 0.75);
+      if (blob.size <= maxBytes || next < MIN_RETRY_PX) return blob;
+      maxPx = next;
+    }
+  } finally {
+    painted.release();
   }
 }
 

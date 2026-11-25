@@ -4,7 +4,8 @@
  * files (attached to the Ask panel, which opens for them; see
  * `services/files.ts`). While files the board can take are dragged over
  * the surface, the surface carries {@link DROP_HIGHLIGHT_CLASS}. Viewers
- * and commenters are told the board is read-only. (Stickers are dragged
+ * and commenters are told the board is read-only. Anywhere else on the
+ * page a dragged file shows the no-drop pointer. (Stickers are dragged
  * out of the picker with the pointer, `ui/sticker-drag.ts`.)
  */
 
@@ -66,9 +67,14 @@ export function installDrop(surface: HTMLElement): () => void {
     if (files.length > 0) void insertFiles(files, at);
   };
 
-  // A file dropped beside the surface must not open in this tab.
+  // A file dropped beside the surface must not open in this tab, and the
+  // pointer shows it cannot land there (places that take files, such as
+  // the surface or the Ask panel, have already answered the drag).
   const onWindowOver = (event: DragEvent): void => {
-    if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    const taken = event.defaultPrevented;
+    event.preventDefault();
+    if (!taken) event.dataTransfer.dropEffect = 'none';
   };
   const onWindowDrop = (event: DragEvent): void => {
     if (event.dataTransfer?.types.includes('Files')) event.preventDefault();

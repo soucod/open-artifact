@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { contoursToFillPaths, layerSvgForContrast, strokeToCapsulePaths } from '../src/drawn-svg/contrast.ts';
 import { brushStrokeOutline, brushSvgStrokes, hatchFillLines, hatchSvgFills, splitPolylineAtRepeats } from '../src/drawn-svg/restyle.ts';
-import { flattenSvgPath, flattenSvgShape, IDENTITY_MATRIX, invertMatrix, parseSvgTransform, svgShapePathData } from '../src/drawn-svg/svg-geometry.ts';
-import { drawingSvgOrPlaceholder, ensureSvgNamespace, findUnknownSvgParts, UNKNOWN_SVG_PART, UNREADABLE_DRAWING_SVG, WHOLE_SVG_PART } from '../src/drawn-svg/vetting.ts';
+import { flattenSvgPath, flattenSvgShape, IDENTITY_MATRIX, invertMatrix, parseSvgTransform, splitSvgPathArcs, svgShapePathData } from '../src/drawn-svg/svg-geometry.ts';
+import { drawingSvgOrPlaceholder, ensureSvgNamespace, findUnknownSvgParts, svgShapeLength, UNKNOWN_SVG_PART, UNREADABLE_DRAWING_SVG, WHOLE_SVG_PART } from '../src/drawn-svg/vetting.ts';
 import { createSvgElement, parseSvgTree, parseXml, serializeXml, XmlElement, XmlParseError } from '../src/drawn-svg/xml.ts';
 import { seededRandomFromString } from '../src/shape-paths.ts';
 
@@ -100,6 +100,22 @@ describe('vetting drawings', () => {
     assert.deepEqual(findUnknownSvgParts(`<svg xmlns="${SVG_NS}"><g><g><g><g><g><g><rect/></g></g></g></g></g></g></svg>`), ['<g>']);
     assert.deepEqual(findUnknownSvgParts('<svg><rect/></svg>'), [WHOLE_SVG_PART]);
     assert.deepEqual(findUnknownSvgParts(`<svg xmlns="${SVG_NS}"><rect>`), [WHOLE_SVG_PART]);
+  });
+
+  it('allows a dashed arc, counting it as the full circle of its larger radius', () => {
+    const path = (d: string): XmlElement => {
+      const element = createSvgElement('path');
+      element.setAttribute('d', d);
+      return element;
+    };
+    assert.deepEqual(splitSvgPathArcs('M10 50 A40 30 0 0 1 90 50 a5 5 0 1 0 10 0 L 0 0'), { radii: [40, 5], lines: 'M 10 50 L 90 50 l 10 0 L 0 0' });
+    assert.equal(svgShapeLength(path('M10 50 A40 40 0 0 1 90 50')), 2 * Math.PI * 40 + 80);
+    assert.equal(svgShapeLength(path('M0 0 a0.5 2 0 0 1 1 0')), 2 * Math.PI * 2 + 1, 'the larger radius counts');
+    assert.equal(svgShapeLength(path('M0 0 a0.5 0.5 0 0 1 1 0')), Infinity, 'an arc under radius 1');
+    const dashed = (d: string, dashes: string) => `<svg xmlns="${SVG_NS}" viewBox="0 0 100 100"><path d="${d}" fill="none" stroke="currentColor" stroke-dasharray="${dashes}"/></svg>`;
+    assert.deepEqual(findUnknownSvgParts(dashed('M10 50 A40 40 0 0 1 90 50', '6 4')), []);
+    assert.deepEqual(findUnknownSvgParts(dashed('M10 50 A0.5 0.5 0 0 1 11 50', '6 4')), ['stroke-dasharray']);
+    assert.deepEqual(findUnknownSvgParts(dashed('M10 50 A400 400 0 0 1 90 50', '0.1 0.1')), ['stroke-dasharray'], 'too many dashes');
   });
 
   it('adds a missing namespace', () => {

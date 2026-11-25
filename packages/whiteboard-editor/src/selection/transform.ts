@@ -2,7 +2,7 @@
  * The gestures the selection overlay's handles start: resizing (per-type
  * aspect rules, turned boxes, snapping edges to neighbours), turning,
  * dragging an arrow's end onto another item or point, side dots that draw a
- * connected arrow or (on a click) add a joined item, and panning an image
+ * connected arrow or (on a click) add the next item beside, and panning an image
  * inside its crop.
  *
  * Each writes the board on every frame under one coalesced undo step.
@@ -16,7 +16,6 @@ import {
   bendsForDraggedSegment,
   captureRotationStart,
   carriedArrowEnds,
-  createElementId,
   elementLayoutBox,
   elementTurn,
   guidesTouchingEdges,
@@ -27,7 +26,7 @@ import {
   normalizeArrow,
   normalizeTurnDegrees,
   panImageCrop,
-  placeNextItemBeside,
+  placeNextItemAtSide,
   resizeCropViewport,
   zoomImageCrop,
   resizeRectFromEdges,
@@ -57,18 +56,18 @@ import {
   type TextResizeFitting,
 } from '@open-artifact/whiteboard-core';
 import { create } from 'zustand';
-import type { Point } from '../lib/camera.ts';
 import { ARROW_ROUTE_MOVED_MESSAGE, addedMessage, announce, turnedMessage } from '../services/announce.ts';
 import { boardElements, editContent, selectedIds, viewerAuthor } from '../services/actions.ts';
 import { useBoard } from '../state/board.ts';
 import { currentMeasures } from '../state/measures.ts';
 import { useSelection } from '../state/selection.ts';
 import { useTool } from '../state/tool.ts';
+import { glideToReveal } from '../services/navigation.ts';
 import { arrowDrawGesture } from '../tools/arrow.ts';
-import type { Gesture, PointerSample } from '../tools/gesture.ts';
-import { OPPOSITE_SIDE, arrowEndAt, hitContext } from '../tools/hit.ts';
+import { gestureKey, type Gesture, type PointerSample } from '../tools/gesture.ts';
+import { arrowEndAt, hitContext } from '../tools/hit.ts';
 import { currentZoom, ensureRoom, randomNoteTilt } from '../tools/place.ts';
-import { gestureKey, hasModifier } from '../tools/select.ts';
+import { hasModifier } from '../tools/select.ts';
 import { guideLines, snapCandidatesNear, snapDistanceFor, stillBoxes } from '../tools/snap.ts';
 import { offerNextItem } from './next-offer.ts';
 import { useInteraction } from './store.ts';
@@ -335,16 +334,11 @@ function withRouteOf(current: ArrowElement, route: ArrowElement): ArrowElement {
 /* Side dots                                                                */
 /* ------------------------------------------------------------------------ */
 
-/** Items a click on a shape's side dot adds: the shape and the arrow joining it. */
-export const DOT_CLICK_ITEM_COUNT = 2;
-
 /** The side dot under the pointer (no button down), with the tilt a note it adds would take. */
 export interface HoveredSideDot {
   id: ElementId;
   side: ArrowSide;
   tilt: number;
-  /** Where a press on the dot started, board units (while it is held). */
-  pressedAt?: Point;
 }
 
 /** The hovered side dot: the overlay previews what a click on it would add. */
@@ -358,9 +352,10 @@ export function hoverSideDot(dot: { id: ElementId; side: ArrowSide } | null): vo
 }
 
 /**
- * The item a click on `element`'s `side` dot adds, placed beside it past
- * anything in the way: a sticky note after a note, an empty shape like it
- * (at the kind's default size) after a shape; `undefined` for other items.
+ * The item a click on `element`'s `side` dot adds: a sticky note after a
+ * note, an empty shape like it (at the kind's default size) after a shape,
+ * beside it on that side or else below it (core's `placeNextItemAtSide`);
+ * `undefined` for other items or when neither spot is clear.
  */
 export function sideDotItem(
   element: BoardElement,
@@ -369,48 +364,42 @@ export function sideDotItem(
   elements: readonly BoardElement[] = boardElements(),
   measures: ElementMeasures = currentMeasures(),
 ): NextItem | undefined {
-  if (element.type === 'note') return placeNextItemBeside(element, nextNoteBeside(element, viewerAuthor(), tilt), elements, measures, side);
-  if (element.type === 'shape') return placeNextItemBeside(element, nextShapeBeside(element), elements, measures, side);
+  if (element.type === 'note') return placeNextItemAtSide(element, nextNoteBeside(element, viewerAuthor(), tilt), side, elements, measures);
+  if (element.type === 'shape') return placeNextItemAtSide(element, nextShapeBeside(element), side, elements, measures);
   return undefined;
 }
 
-/** The arrow joining `from`'s `side` to the shape a side dot adds. */
-export function sideDotArrow(from: ElementId, side: ArrowSide, to: ElementId, color: ArrowElement['color'] = useTool.getState().ink): ArrowElement {
-  return { type: 'arrow', id: createElementId(), from, to, fromSide: side, toSide: OPPOSITE_SIDE[side], head: 'end', dash: false, color };
-}
-
 /**
- * Adds what a click on `element`'s `side` dot adds: a sticky note beside a
- * note, or a shape beside a shape joined to it by an arrow. Then selects it
- * and starts typing into it.
+ * Adds what a click on `element`'s `side` dot adds (see {@link sideDotItem}),
+ * selects it, starts typing into it and glides the view just enough to show it.
  */
-export function addJoinedItem(element: BoardElement, side: ArrowSide, tilt = randomNoteTilt()): boolean {
+export function addNextItemAtDot(element: BoardElement, side: ArrowSide, tilt = randomNoteTilt()): boolean {
   const next = sideDotItem(element, side, tilt);
-  if (!next) return false;
-  const arrow = next.type === 'shape' ? sideDotArrow(element.id, side, next.id) : undefined;
-  if (!ensureRoom(arrow ? DOT_CLICK_ITEM_COUNT : 1)) return false;
-  const added = editContent((content) => ({ ...content, elements: [...content.elements, next, ...(arrow ? [arrow] : [])] }), { label: next.type === 'note' ? 'Add note' : 'Add shape' });
+  if (!next || !ensureRoom()) return false;
+  const added = editContent((content) => ({ ...content, elements: [...content.elements, next] }), { label: next.type === 'note' ? 'Add note' : 'Add shape' });
   if (!added) return false;
   useSideDotHover.setState({ dot: null });
   useSelection.getState().select([next.id]);
   useSelection.getState().edit({ kind: 'element', id: next.id, selectAll: true });
+  glideToReveal({ x: next.x, y: next.y, w: next.w, h: next.h });
   announce(addedMessage(next.type));
   return true;
 }
 
-/** A press on a side dot: drag to draw a connected arrow; click to add a joined item. */
+/** A press on a side dot: drag to draw a connected arrow (ending any typing); click to add the next item. */
 export function sideDotGesture(sample: PointerSample, elementId: ElementId, side: ArrowSide): Gesture | null {
   const element = useBoard.getState().byId.get(elementId);
   if (!element || !ensureRoom()) return null;
   const hovered = useSideDotHover.getState().dot;
   const tilt = hovered?.id === elementId && hovered.side === side ? hovered.tilt : randomNoteTilt();
-  useSideDotHover.setState({ dot: { id: elementId, side, tilt, pressedAt: sample.board } });
+  useSideDotHover.setState({ dot: null });
+  if (useSelection.getState().editing !== null) useSelection.getState().edit(null);
   return arrowDrawGesture(sample, { end: elementId, side }, {
     byTool: false,
     color: useTool.getState().ink,
     onClick: () => {
       const current = useBoard.getState().byId.get(elementId);
-      if (current) addJoinedItem(current, side, tilt);
+      if (current) addNextItemAtDot(current, side, tilt);
     },
   });
 }

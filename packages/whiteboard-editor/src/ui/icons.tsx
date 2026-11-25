@@ -78,7 +78,7 @@ export function toolPickLabel(pick: ToolPick): string {
     case 'container':
       return 'Section';
     case 'note':
-      return 'Sticky';
+      return 'Note';
     default:
       return pick.tool.charAt(0).toUpperCase() + pick.tool.slice(1);
   }

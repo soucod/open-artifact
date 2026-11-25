@@ -12,6 +12,11 @@ export class WorkbookSession {
      * A request about this workbook, as JSON; its answer, as JSON.
      */
     answerJson(request: string): string;
+    /**
+     * A request about this workbook, as JSON; its answer, as JSON, with a packed read's cell blocks sent to `sink`
+     * in index order.
+     */
+    answerWithCells(request: string, sink: any): string;
     constructor();
 }
 
@@ -36,6 +41,7 @@ export interface InitOutput {
     readonly functionDescriptionsJson: () => [number, number];
     readonly start: () => void;
     readonly workbooksession_answerJson: (a: number, b: number, c: number) => [number, number];
+    readonly workbooksession_answerWithCells: (a: number, b: number, c: number, d: any) => [number, number];
     readonly workbooksession_new: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

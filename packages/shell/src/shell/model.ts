@@ -3,33 +3,122 @@
  * store, so it runs under `node --test`.
  */
 
-import { SLIDE_FRAGMENT } from '@open-artifact/protocol';
+import { INLINE_VIEW_FRAGMENT, SLIDE_FRAGMENT, hostToShellOf } from '@open-artifact/protocol';
 import {
+  CHROME_PEER_KEY,
+  FRAME_DENIED_REASONS,
+  MAX_CHROME_PEERS,
   SHELL_PARAMS,
   type ArtifactView,
   type ChromeAction,
   type ChromeFormat,
+  type ChromePeer,
   type ChromeReport,
   type ChromeSaved,
   type ChromeWhy,
+  type FrameDeniedReason,
   type HostCaps,
+  type HostDestination,
+  type HostTheme,
+  type HostToShell,
+  type ShellToHost,
   type ShareGuest,
   type ShareRole,
   type ShareView,
   type ShellBoot,
 } from '@open-artifact/protocol';
+import { isCloudShared } from '../lib/cloud.ts';
 
 /** The owner session as the library reports it. */
 export type Owner = NonNullable<ArtifactView['owner']>;
 
 /** The host that embeds the Shell, once it said `host_hello`. */
 export interface HostInfo {
-  /** The host's origin: host messages go only there. */
+  /** The host's origin: host messages go only there (`view`: the daemon's view channel). */
   origin: string;
   caps: HostCaps;
   /** What the host calls its agent, when it said. */
   agentName: string | null;
+  /**
+   * A connected adapter declared this origin (`caps.open.origins`), or the host is the adapter's own top-level view:
+   * it gets prompts, comment text, links and saved files. An undeclared host (no adapter declared any origin) gets
+   * what it got before, with no prompt or comment text.
+   */
+  declared: boolean;
+  /** How host messages travel: to the parent frame, or through the daemon to the adapter that opened the view. */
+  via: 'frame' | 'view';
+  /** The host's colour scheme, when it gave one. */
+  theme: HostTheme | null;
+  /** Where the host can send an export (a declared host's only, at most `MAX_HOST_DESTINATIONS`). */
+  destinations: HostDestination[];
 }
+
+/**
+ * Whether a `host_hello` from `origin` is taken: `declared` when a connected adapter declared the origin, `refused`
+ * when adapters declared others, `undeclared` when none declared any (or the list could not be read: `null`).
+ */
+export function hostVerdict(origin: string, hosts: readonly string[] | null): 'declared' | 'undeclared' | 'refused' {
+  if (!hosts || !hosts.length) return 'undeclared';
+  return hosts.includes(origin) ? 'declared' : 'refused';
+}
+
+/** The host a `host_hello` makes, reduced to its fields; `null` for anything else. */
+export function hostOf(message: unknown, origin: string, declared: boolean, via: HostInfo['via'] = 'frame'): HostInfo | null {
+  const hello = hostToShellOf(message);
+  if (!hello || hello.openArtifact !== 'host_hello') return null;
+  return {
+    origin,
+    caps: hello.caps,
+    agentName: hello.agentName ?? null,
+    declared,
+    via,
+    theme: hello.theme ?? null,
+    destinations: declared ? (hello.destinations ?? []) : [],
+  };
+}
+
+/**
+ * What a Shell message to `host` carries: an undeclared host gets no prompt or comment text, and neither links nor
+ * saved files (`null`: not sent).
+ */
+export function toHostMessage(host: HostInfo, message: ShellToHost): ShellToHost | null {
+  if (host.declared) return message;
+  switch (message.openArtifact) {
+    case 'new_session':
+      return { ...message, prompt: '' };
+    case 'comment_summon':
+      return { ...message, text: '' };
+    case 'open_external':
+    case 'saved_file':
+      return null;
+    default:
+      return message;
+  }
+}
+
+/** The page request a destination's pick sends the agent (data: the host's label and id, quoted). */
+export function destinationRequest(destination: HostDestination, artifactTitle: string): string {
+  return `Export "${artifactTitle}" and send it to the destination the person picked in the Export tab: "${destination.label}" (destination id: ${destination.id}). The host app that embeds the Shell offered this destination.`;
+}
+
+/**
+ * The CSS variables a host's accent sets (`--open-artifact-accent`, its text colour and soft tint); none for no accent
+ * or one that is not `#rrggbb`.
+ */
+export function accentVars(accent: string | null): Record<string, string> {
+  if (!accent || !/^#[0-9a-f]{6}$/i.test(accent)) return {};
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(accent.slice(i, i + 2), 16) / 255);
+  const lin = (c: number): number => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const luminance = 0.2126 * lin(r!) + 0.7152 * lin(g!) + 0.0722 * lin(b!);
+  return {
+    '--open-artifact-accent': accent.toLowerCase(),
+    '--open-artifact-accent-fg': luminance > 0.4 ? '#0b1220' : '#ffffff',
+    '--open-artifact-accent-soft': `${accent.toLowerCase()}1f`,
+  };
+}
+
+/** A goto or host_hello for the Shell; the parsed form of a host's message. */
+export type HostMessage = HostToShell;
 
 /** Share roles, most rights first. */
 export const ROLES: readonly ShareRole[] = ['editor', 'commenter', 'viewer'];
@@ -93,6 +182,9 @@ export function switchPool(library: ArtifactView[], owner: Owner | null | undefi
   return { inSession, list: [...pool].sort((a, b) => changedAt(b) - changedAt(a)) };
 }
 
+/** A readable Design link to a page, an artboard or a running artboard; the editor resolves the name. */
+const DESIGN_PLACE_FRAGMENT = /^#(?:page|artboard|play)-[^=&]+$/;
+
 /** The shareable page of a Design canvas. Keep only its page id from the fragment. */
 export function designPageFragment(fragment: string): string {
   const page = new URLSearchParams(fragment.replace(/^#/, '')).get('page');
@@ -102,10 +194,21 @@ export function designPageFragment(fragment: string): string {
 /** The page parameter is shared with Design. Old Sheet links used #sheet- followed by the sheet ID. */
 export function sheetPageFragment(fragment: string): string {
   if (fragment.startsWith('#sheet-') && !fragment.includes('=')) {
-    const id = fragment.slice(6);
+    const id = fragment.slice('#sheet-'.length);
     return id ? '#' + new URLSearchParams({ page: id }).toString() : '';
   }
   return designPageFragment(fragment);
+}
+
+/** The types with a read-only view for another page to frame at {@link INLINE_VIEW_FRAGMENT}. */
+const INLINE_VIEW_TYPES: ReadonlySet<string> = new Set(['slides', 'data']);
+
+/**
+ * A deck or a dashboard framed by another page at {@link INLINE_VIEW_FRAGMENT}: no bar, and the page shows the
+ * read-only view.
+ */
+export function inlineView(boot: Pick<ShellBoot, 'type'>, shellHref: string, embedded: boolean): boolean {
+  return embedded && INLINE_VIEW_TYPES.has(boot.type) && new URL(shellHref).hash === INLINE_VIEW_FRAGMENT;
 }
 
 /**
@@ -113,7 +216,7 @@ export function sheetPageFragment(fragment: string): string {
  * and the `comment` thread taken from the Shell's own address. `null` when
  * there is no page.
  */
-export function pageAddress(boot: Pick<ShellBoot, 'page' | 'id'> & Partial<Pick<ShellBoot, 'type' | 'typeServer'>>, shellHref: string): string | null {
+export function pageAddress(boot: Pick<ShellBoot, 'page' | 'id'> & Partial<Pick<ShellBoot, 'type' | 'typeServer'>>, shellHref: string, embedded = false): string | null {
   if (!boot.page) return null;
   const shell = new URL(shellHref);
   const thread = shell.searchParams.get(SHELL_PARAMS.comment);
@@ -122,6 +225,7 @@ export function pageAddress(boot: Pick<ShellBoot, 'page' | 'id'> & Partial<Pick<
     at.searchParams.set(SHELL_PARAMS.shell, shell.origin);
     at.searchParams.set(SHELL_PARAMS.id, boot.id);
     if (boot.type === 'slides' && SLIDE_FRAGMENT.test(shell.hash)) at.hash = shell.hash;
+    if (boot.type !== undefined && inlineView({ type: boot.type }, shell.href, embedded)) at.hash = shell.hash;
     if (boot.type === 'docs') {
       at.searchParams.set('doc_link_base', boot.typeServer?.invite || shell.origin + shell.pathname);
       const tab = shell.searchParams.get('tab');
@@ -130,7 +234,7 @@ export function pageAddress(boot: Pick<ShellBoot, 'page' | 'id'> & Partial<Pick<
     }
     if (boot.type === 'sheets') at.hash = sheetPageFragment(shell.hash);
     if (boot.type === 'design') {
-      const hash = designPageFragment(shell.hash);
+      const hash = DESIGN_PLACE_FRAGMENT.test(shell.hash) ? shell.hash : designPageFragment(shell.hash);
       if (hash) at.hash = hash;
     }
     if (boot.type === 'design' || boot.type === 'slides') {
@@ -172,8 +276,12 @@ export function pageOriginOf(page: string | null, shellHref: string): string {
   }
 }
 
-/** The Share button shows "shared": from the share state when loaded, else the page or the library. */
+/**
+ * The Share button shows "shared": from the share state when loaded (on a cloud host: anyone named, or access past
+ * them), else the page or the library.
+ */
 export function isShared(view: ShareView | null, report: ChromeReport, artifact: Pick<ArtifactView, 'shared'> | null): boolean {
+  if (view?.cloud) return isCloudShared(view.cloud);
   return view ? view.lan : !!(report.shareOn || artifact?.shared);
 }
 
@@ -195,13 +303,30 @@ export function leastRole(view: ShareView): ShareRole | null {
   return [...ROLES].reverse().find((role) => view.links[role]?.on) ?? null;
 }
 
+/**
+ * The link to give someone else, as the Export tab's Copy link and the title menu's give it: a cloud host's own
+ * address, or the invite link of the least role that is on (at the network address, not 127.0.0.1). `null` when every
+ * link is off: then only the Shell's own address is left.
+ */
+export function givenLink(view: ShareView): { which: string; url: string } | null {
+  if (view.cloud) return view.cloud.url ? { which: 'cloud', url: view.cloud.url } : null;
+  const role = leastRole(view);
+  const url = role ? view.links[role]?.url : undefined;
+  return role && url ? { which: role, url } : null;
+}
+
 /** How a message reached the owner session, from `artifacts.ask`'s `via`. */
-export type Delivery = 'delivered' | 'inbox' | 'failed';
+export type Delivery = 'delivered' | 'drafted' | 'inbox' | 'failed';
 
 /** The {@link Delivery} of an `artifacts.ask` answer. */
-export function deliveryOf(via: string | undefined): Delivery {
+export function deliveryOf(via: string | undefined, status?: string): Delivery {
+  // The harness put it in the conversation for the person to send there: delivered, but not yet to the agent.
+  if (via === 'live' && status === 'drafted') return 'drafted';
   if (via === 'live' || via === 'wait') return 'delivered';
-  if (via === 'inbox') return 'inbox';
+  // A cloud host whose owner's computer is connected: it has it now.
+  if (via === 'link' && status === 'delivered') return 'delivered';
+  // `link`: a cloud host keeps it until the owner's computer connects; like the inbox, the agent sees it later.
+  if (via === 'inbox' || via === 'link') return 'inbox';
   return 'failed';
 }
 
@@ -227,11 +352,66 @@ export function parseSent(raw: string | null): SentMessage[] {
     return value.filter(
       (m): m is SentMessage =>
         !!m && typeof m === 'object' && typeof (m as SentMessage).text === 'string' && typeof (m as SentMessage).at === 'string',
-    ).map((m) => ({ text: m.text, at: m.at, delivery: m.delivery === 'inbox' || m.delivery === 'failed' ? m.delivery : 'delivered' }));
+    ).map((m) => ({ text: m.text, at: m.at, delivery: m.delivery === 'inbox' || m.delivery === 'failed' || m.delivery === 'drafted' ? m.delivery : 'delivered' }));
   } catch {
     return [];
   }
 }
+
+// ---- the boot and the page's frame ---------------------------------------------------------------------------------
+
+/**
+ * The finished boot `artifacts.boot` answered for the pending boot `pending`: the same artifact, not pending. Throws
+ * when the answer is not one.
+ */
+export function finishedBoot(value: unknown, pending: Pick<ShellBoot, 'id'>): ShellBoot {
+  const boot = value as Partial<ShellBoot> | null;
+  if (!boot || typeof boot !== 'object' || boot.id !== pending.id || typeof boot.title !== 'string' || typeof boot.type !== 'string') {
+    throw new Error(`No boot for ${pending.id}.`);
+  }
+  const { pending: _pending, ...rest } = boot as ShellBoot;
+  return rest;
+}
+
+/** The boot while its page is being opened (again): what the bar needs stays, the page goes. */
+export function pendingBoot(boot: ShellBoot): ShellBoot {
+  return { ...boot, page: null, pageUrl: null, pageKind: null, problem: null, pending: true };
+}
+
+/** The boot that shows `problem` instead of the page. */
+export function problemBoot(boot: ShellBoot, problem: string): ShellBoot {
+  const { pending: _pending, ...rest } = boot;
+  return { ...rest, page: null, pageUrl: null, pageKind: null, problem };
+}
+
+/**
+ * Why a page server refused the frame (`frame_denied`), or `null` when the message is not one. An unknown reason
+ * reads as `not_open`: the address is asked for again either way.
+ */
+export function frameDeniedReason(message: unknown): FrameDeniedReason | null {
+  const m = message as { openArtifact?: unknown; reason?: unknown } | null;
+  if (!m || typeof m !== 'object' || m.openArtifact !== 'frame_denied') return null;
+  return (FRAME_DENIED_REASONS as readonly unknown[]).includes(m.reason) ? (m.reason as FrameDeniedReason) : 'not_open';
+}
+
+/** What a `frame_denied` does: ask for the page's address again (once), or show the problem. */
+export function afterFrameDenied(boot: Pick<ShellBoot, 'typeServer'>, retried: boolean): 'reopen' | 'problem' {
+  // A type server's own Shell has no Library API to ask: its page is the one it served.
+  return retried || boot.typeServer ? 'problem' : 'reopen';
+}
+
+/**
+ * The frame's page shows once it says so (its first `chrome_report`). A page that is not a type server's may never
+ * speak the chrome protocol: it shows on `load`.
+ */
+export function readyOnLoad(pageKind: ShellBoot['pageKind']): boolean {
+  return pageKind !== 'server';
+}
+
+/** The longest the cover stays after the frame's `load` when its page has not said it is ready. */
+export const FRAME_READY_FALLBACK_MS = 1_500;
+/** How long the cover takes to fade. */
+export const COVER_FADE_MS = 150;
 
 /**
  * A boot for development, when the daemon did not inject one: built from
@@ -271,6 +451,7 @@ const ACTION_ID = /^[a-z][a-z0-9_-]{0,31}$/;
 export const MAX_FORMATS = 8;
 export const MAX_VARIANTS = 16;
 const FORMAT = /^[a-z0-9]{1,8}$/;
+const COLOR = /^#[0-9a-fA-F]{6}$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -296,7 +477,7 @@ export function normalizeReport(raw: unknown): ChromeReport {
   const out: ChromeReport = {};
   if (typeof raw.title === 'string') out.title = raw.title.trim().slice(0, 256);
   for (const key of ['comments', 'agent'] as const) if (isRecord(raw[key])) (out as Record<string, unknown>)[key] = raw[key];
-  for (const key of ['history', 'share', 'shareOn', 'exports', 'leaveLosesWork', 'hasContent'] as const) {
+  for (const key of ['ready', 'history', 'share', 'shareOn', 'exports', 'leaveLosesWork', 'hasContent'] as const) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
   if (SAVED.includes(raw.saved as ChromeSaved)) out.saved = raw.saved as ChromeSaved;
@@ -351,7 +532,70 @@ export function normalizeReport(raw: unknown): ChromeReport {
   if (isRecord(raw.shareNotice) && raw.shareNotice.tone === 'warning' && typeof raw.shareNotice.text === 'string' && raw.shareNotice.text.trim()) {
     out.shareNotice = { text: raw.shareNotice.text.slice(0, 2000), tone: 'warning' };
   }
+  if (Array.isArray(raw.peers)) out.peers = peersOf(raw.peers);
+  if (raw.following === null) out.following = null;
+  else if (typeof raw.following === 'string' && CHROME_PEER_KEY.test(raw.following)) out.following = raw.following;
   return out;
+}
+
+/** The peers of a report: valid keys, once each, at most {@link MAX_CHROME_PEERS}. */
+function peersOf(raw: unknown[]): ChromePeer[] {
+  const seen = new Set<string>();
+  const peers: ChromePeer[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.key !== 'string' || !CHROME_PEER_KEY.test(entry.key) || seen.has(entry.key)) continue;
+    const name = shortText(entry.name, 80);
+    if (!name) continue;
+    seen.add(entry.key);
+    peers.push({
+      key: entry.key,
+      name,
+      ...(typeof entry.color === 'string' && COLOR.test(entry.color) ? { color: entry.color.toLowerCase() } : {}),
+      ...(entry.self === true ? { self: true } : {}),
+      ...(entry.followsYou === true ? { followsYou: true } : {}),
+    });
+    if (peers.length === MAX_CHROME_PEERS) break;
+  }
+  return peers;
+}
+
+/** The page offers following someone's view. */
+export function offersFollow(report: ChromeReport): boolean {
+  return report.following !== undefined;
+}
+
+/** The peer this view follows, while they are still listed. */
+export function followedPeer(report: ChromeReport): ChromePeer | null {
+  const key = report.following;
+  return key ? (report.peers?.find((peer) => peer.key === key) ?? null) : null;
+}
+
+/** Peer colours, as the pages pick them (editor-kit's palette), for a peer the page gave none. */
+const PEER_COLORS = ['#dc3c3d', '#019c7f', '#fbb315', '#ce447d', '#10a122', '#257de0', '#d25f25', '#785ee8'];
+
+/** A peer's colour: theirs, else one picked from their key. */
+export function peerColorOf(peer: Pick<ChromePeer, 'key' | 'color'>): string {
+  if (peer.color) return peer.color;
+  let hash = 0;
+  for (const char of peer.key) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return PEER_COLORS[hash % PEER_COLORS.length]!;
+}
+
+/** Text colour that reads on a peer colour. */
+export function inkOnColor(hex: string): '#0b0b0b' | '#ffffff' {
+  const channel = (at: number) => {
+    const c = parseInt(hex.slice(at, at + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  return luminance > 0.4 ? '#0b0b0b' : '#ffffff';
+}
+
+/** Initials for a peer's avatar: the first letters of the first two words. */
+export function peerInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const letters = words.slice(0, 2).map((word) => [...word][0] ?? '');
+  return (letters.join('') || '?').toUpperCase();
 }
 
 /** The page offers exports: detailed formats, or v1 items. */
@@ -384,6 +628,12 @@ const DRAWN_ELSEWHERE = new Set(['chat_toggle']);
 export function menuActions(report: ChromeReport): ChromeAction[] {
   return (report.actions ?? []).filter((action) => !DRAWN_ELSEWHERE.has(action.id));
 }
+
+/**
+ * How long a page must keep saving before the bar says "Saving…", ms. Pages report `saving` for every edit (it covers
+ * the write debounce too), so a quick save never shows.
+ */
+export const SAVING_SHOWN_AFTER_MS = 500;
 
 /** What the save indicator shows. */
 export type SaveIndicator = 'none' | 'saving' | 'reconnecting' | 'unsaved' | 'retry' | 'readonly';

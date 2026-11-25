@@ -27,7 +27,7 @@ export function formatOfSelectionWithEntries(selection: PageState, reads: Workbo
     return format;
   let typedCellAreas: CellArea[] = [
     ...(selection.mode.kind === 'editing' ? [activeAnchorCell(selection, reads)] : []),
-    ...selection.entriesUnanswered.flatMap(({ cellId: cellId, text: text }) => (text === '' ? [] : cellId)),
+    ...selection.entriesUnanswered.flatMap(({ cellId, text }) => (text === '' ? [] : cellId)),
   ].flatMap((cellId: CellId) => {
     let position = cellId.sheetId === selection.sheetId ? reads.positionOfCell(cellId) : null;
     return position === null ? [] : areaOfPosition(position);
@@ -40,12 +40,12 @@ export function formatOfSelectionWithEntries(selection: PageState, reads: Workbo
     ];
     return firstArea === undefined ? [] : moreAreas.reduce(unionOfAreas, firstArea);
   });
-  let { font: font, numberFormat: numberFormat, alignment: alignment } = sharedFormatOfAreas(selection, reads, formatAreas) ?? format;
+  let { font, numberFormat, alignment } = sharedFormatOfAreas(selection, reads, formatAreas) ?? format;
   return {
     ...format,
-    font: font,
-    numberFormat: numberFormat,
-    alignment: alignment,
+    font,
+    numberFormat,
+    alignment,
   };
 }
 export const sameJsonOrNull = <T>(value: T, otherValue: T): T | null => (JSON.stringify(value) === JSON.stringify(otherValue) ? value : null);
@@ -77,10 +77,10 @@ export const formatAreasOfAllRanges = (selection: PageState, reads: WorkbookRead
   allRangesOf(selection).flatMap((range): CellArea | CellArea[] => {
     let mergedArea = selectedArea(range, reads);
     if (mergedArea === null || !isSelectionOneCell(range, reads)) return mergedArea ?? [];
-    let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex } = mergedArea;
+    let { topRowIndex, leftColumnIndex } = mergedArea;
     return {
-      topRowIndex: topRowIndex,
-      leftColumnIndex: leftColumnIndex,
+      topRowIndex,
+      leftColumnIndex,
       rowCount: 1,
       columnCount: 1,
     };

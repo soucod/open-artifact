@@ -1,5 +1,5 @@
 import type { ClockFrame, EditFrame, Json } from '@open-artifact/runtime/sheet-api';
-import { isRecord, isUint32, asArrayOrEmpty } from './json.ts';
+import { isRecord, isUint32 } from './json.ts';
 import { madeAtUnixSeconds, type SheetState } from './sheet-state.ts';
 
 export interface ClockReading {
@@ -13,7 +13,6 @@ export interface StreamedEdit {
   revision: number;
   applied: { node: string; v: number; base: number; ops: Json[] };
   isOfLayoutAlone: boolean;
-  rowsInItsOneMove: number | null;
   isByAgent: boolean;
   madeUnder: string | null;
 }
@@ -33,17 +32,6 @@ export function readClockFrame({ unixMilliseconds, utcOffsetInMinutes, timeZone 
   return { unixMilliseconds, utcOffsetInMinutes, timeZone };
 }
 
-export function countRowsInOneMove(ops: readonly Json[]): number | null {
-  const [move, ...otherMoves] = ops.flatMap((op) => (isRecord(op) && op.kind === 'moveRows' ? asArrayOrEmpty(op.moves) : []));
-  if (!isRecord(move) || otherMoves.length > 0) return null;
-  let rowCount = 0;
-  for (const run of asArrayOrEmpty(move.rows)) {
-    if (!isRecord(run) || !isUint32(run.count)) return null;
-    rowCount += run.count;
-  }
-  return rowCount;
-}
-
 export function readStreamedEdit(frame: EditFrame, nodeId: string): StreamedEdit | null {
   if (!isUint32(frame.revision) || !isUint32(frame.v) || !Array.isArray(frame.ops)) return null;
   const { ops, actor } = frame;
@@ -51,7 +39,6 @@ export function readStreamedEdit(frame: EditFrame, nodeId: string): StreamedEdit
     revision: frame.revision,
     applied: { node: nodeId, v: frame.v, base: frame.base, ops },
     isOfLayoutAlone: ops.length > 0 && ops.every((op) => isRecord(op) && LAYOUT_OP_KINDS.has(op.kind)),
-    rowsInItsOneMove: countRowsInOneMove(ops),
     isByAgent: actor?.isAgent === true,
     madeUnder: typeof actor?.personId === 'string' ? actor.personId : null,
   };

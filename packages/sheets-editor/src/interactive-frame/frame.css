@@ -1,0 +1,39 @@
+@import "../chart-frame/frame.css";
+@source "./";
+
+html,
+body,
+#interactive {
+  height: 100%;
+  margin: 0;
+  background: transparent;
+}
+
+#interactive {
+  overflow: auto;
+}
+
+.interactive-root {
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+}
+
+/* Plain controls take the page's type and colors, and show where the caret is. */
+.interactive-root :is(button, input, select, textarea) {
+  font: inherit;
+  color: inherit;
+}
+
+.interactive-root :is(button, input, select, textarea):focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-shadow);
+}
+
+.interactive-root :is(button, input, select, textarea):disabled {
+  opacity: 0.5;
+}
+
+.interactive-root svg {
+  max-width: 100%;
+}

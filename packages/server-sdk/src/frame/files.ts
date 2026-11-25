@@ -9,8 +9,11 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync, type Stats } from 'node:fs';
-import { basename, dirname, extname, join, sep } from 'node:path';
+import { mkdirSync, readFileSync, readdirSync, lstatSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync, type Stats } from 'node:fs';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
+import type { FileEntry, PublishResult, BlobInfo, BlobList } from './page-values.ts';
+
+export type { FileEntry, PublishResult, BlobInfo, BlobList } from './page-values.ts';
 
 export const PUBLISH_MAX_PATHS = 256;
 export const FILE_MAX_BYTES = 16 * 1024 * 1024;
@@ -92,33 +95,94 @@ export class FrameError extends Error {
   }
 }
 
-/** Paths of the type (never the artifact's): neither listed nor writable by a page. */
+/**
+ * Paths of the type (never the artifact's): neither listed nor writable by a page. In any case: a folder on macOS or
+ * Windows is case-insensitive, so `SKILL.MD` there is `SKILL.md`.
+ */
 export function typePath(rel: string): boolean {
-  return rel === 'index.html' || rel === 'SKILL.md' || rel === 'artifact-type' || rel.startsWith('artifact-type/');
+  const low = rel.toLowerCase();
+  return low === 'index.html' || low === 'skill.md' || low === 'artifact-type' || low.startsWith('artifact-type/');
 }
 
-/** Paths the host keeps for itself. */
+/** Paths the host keeps for itself (in any case, as {@link typePath}). */
 export function reservedPath(rel: string): boolean {
-  const segs = rel.split('/');
+  const segs = rel.toLowerCase().split('/');
   if (segs.some((s) => s === '' || s === '.' || s === '..' || s.startsWith('.'))) return true;
   if (segs[0]!.startsWith('_')) return true;
   if (segs[0] === 'db' || segs[0] === 'history' || segs[0] === 'node_modules') return true;
-  if (rel === 'comments.json' || rel.endsWith('.lock')) return true;
+  const low = rel.toLowerCase();
+  if (low === 'comments.json' || low.endsWith('.lock')) return true;
   return false;
 }
+
+/** The longest name one folder entry may have, in bytes (APFS, ext4 and NTFS hold 255). */
+const SEGMENT_MAX_BYTES = 255;
+
+/**
+ * Whether `file` (there or not yet) stays under `root` once links are followed: the real path of `file`, or of its
+ * nearest ancestor that exists, is `root`'s or under it. A link in the artifact folder (or in `db/`, `_blobs/`) to a
+ * folder or file outside is how a write or a read would leave it; this is checked before each.
+ */
+export function staysInside(root: string, file: string): boolean {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch (error) {
+    // No folder yet (a first write makes it): nothing under it exists, so no link can lead out of it.
+    // A dangling link there is something, and is refused.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') return false;
+    try {
+      lstatSync(root);
+      return false;
+    } catch {
+      const top = resolve(root);
+      const at = resolve(file);
+      return at === top || at.startsWith(top + sep);
+    }
+  }
+  for (let p = file; ; ) {
+    try {
+      const real = realpathSync(p);
+      return real === realRoot || real.startsWith(realRoot + sep);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return false;
+      const up = dirname(p);
+      if (up === p) return false;
+      p = up;
+    }
+  }
+}
+
+/**
+ * How a store keeps inside the artifact folder: `inside(root, file)` (the check before each read and write) and
+ * `real(path)` (the path a file is served from). Each store takes one; the default is {@link LINK_GUARD}.
+ */
+export interface PathGuard {
+  inside(root: string, file: string): boolean;
+  real(path: string): string;
+}
+
+/** A folder on disk, where a link can lead out of it: {@link staysInside}, and links followed (`realpathSync`). */
+export const LINK_GUARD: PathGuard = Object.freeze({ inside: staysInside, real: (path: string) => realpathSync(path) });
+
+/** A storage with no links (a virtual file system): containment is the path's own. */
+export const PLAIN_GUARD: PathGuard = Object.freeze({
+  inside: (root: string, file: string) => {
+    const top = resolve(root);
+    const at = resolve(file);
+    return at === top || at.startsWith(top + sep);
+  },
+  real: (path: string) => resolve(path),
+});
 
 /** A page-relative path, normalized, or null when it is not one. */
 export function cleanPath(p: unknown): string | null {
   if (typeof p !== 'string' || !p || p.length > 1024 || p.includes('\\') || p.includes('\0')) return null;
   const rel = p.replace(/^\/+/, '');
-  if (!rel || rel.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!rel || rel.split('/').some((s) => s === '' || s === '.' || s === '..' || Buffer.byteLength(s) > SEGMENT_MAX_BYTES)) return null;
   return rel;
-}
-
-export interface FileEntry {
-  sha256: string;
-  size: number;
-  contentType: string;
 }
 
 export interface FileManifest {
@@ -129,13 +193,6 @@ export interface FileManifest {
 /** One write of a publish: content, or a delete; `ifMatch` is the sha256 expected now (null: must not exist). */
 export type FileWrite = { data: Buffer; contentType?: string; ifMatch?: string | null; delete?: false } | { delete: true; ifMatch?: string | null };
 
-export interface PublishResult {
-  version: string;
-  changed: { path: string; sha256: string | null }[];
-  shas: Record<string, string>;
-  unchanged?: true;
-}
-
 function writeAtomic(file: string, data: Buffer | string): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = join(dirname(file), `.${basename(file)}.${randomBytes(4).toString('hex')}.tmp`);
@@ -143,14 +200,31 @@ function writeAtomic(file: string, data: Buffer | string): void {
   renameSync(tmp, file);
 }
 
+/** Options of {@link FileStore}. */
+export interface FileStoreOptions {
+  /** Page mode: `index.html` is the artifact's own (listed, served and writable), not the type's. */
+  ownIndex?: boolean;
+  /** How it keeps inside the folder (default {@link LINK_GUARD}). */
+  guard?: PathGuard;
+}
+
 export class FileStore {
   readonly root: string;
   /** rel → the hash of the file at that mtime and size. */
   private readonly cache = new Map<string, { mtimeMs: number; size: number; sha256: string }>();
+  private readonly ownIndex: boolean;
+  private readonly guard: PathGuard;
   current: FileManifest | null = null;
 
-  constructor(root: string) {
+  constructor(root: string, options: FileStoreOptions = {}) {
     this.root = root;
+    this.ownIndex = options.ownIndex === true;
+    this.guard = options.guard ?? LINK_GUARD;
+  }
+
+  /** A path of the type's here: {@link typePath}, but for a page's own `index.html`. */
+  private ofType(rel: string): boolean {
+    return typePath(rel) && !(this.ownIndex && rel === 'index.html');
   }
 
   private sha(rel: string, st: Stats): string {
@@ -174,7 +248,7 @@ export class FileStore {
       }
       for (const e of entries) {
         const rel = prefix ? `${prefix}/${e.name}` : e.name;
-        if (reservedPath(rel) || typePath(rel)) continue;
+        if (reservedPath(rel) || this.ofType(rel)) continue;
         if (e.isDirectory()) walk(join(dir, e.name), rel);
         else if (e.isFile() && ++count <= WALK_MAX_FILES) {
           try {
@@ -207,12 +281,12 @@ export class FileStore {
   /** The artifact file a page asks for: an absolute path, or null. */
   resolve(rel: string): string | null {
     const clean = cleanPath(rel);
-    if (!clean || reservedPath(clean) || typePath(clean)) return null;
+    if (!clean || reservedPath(clean) || this.ofType(clean)) return null;
     const file = join(this.root, clean);
     if (!file.startsWith(this.root + sep)) return null;
     try {
-      const real = realpathSync(file);
-      const realRoot = realpathSync(this.root);
+      const real = this.guard.real(file);
+      const realRoot = this.guard.real(this.root);
       if (!real.startsWith(realRoot + sep)) return null;
       return statSync(real).isFile() ? real : null;
     } catch {
@@ -232,13 +306,14 @@ export class FileStore {
     for (const [p, spec] of entries) {
       const rel = cleanPath(p);
       if (!rel) throw new FrameError('invalid_content', `${JSON.stringify(p)} is not a file path.`);
-      if (typePath(rel)) throw new FrameError('read_only_path', `${rel} belongs to the type and cannot be written.`, 403);
+      if (this.ofType(rel)) throw new FrameError('read_only_path', `${rel} belongs to the type and cannot be written.`, 403);
       if (reservedPath(rel)) throw new FrameError(rel.startsWith('_') ? 'invalid_content' : 'read_only_path', `${rel} is reserved for the host.`, 403);
       if (spec.ifMatch !== undefined && spec.ifMatch !== null && !SHA.test(spec.ifMatch)) throw new FrameError('invalid_content', `${rel}: ifMatch is a lowercase sha256 or null.`);
       if (!spec.delete) {
         if (!Buffer.isBuffer(spec.data)) throw new FrameError('invalid_content', `${rel}: no content.`);
         if (spec.data.length > FILE_MAX_BYTES) throw new FrameError('too_large', `${rel} is over ${FILE_MAX_BYTES} bytes.`, 413);
       }
+      if (!this.guard.inside(this.root, join(this.root, rel))) throw new FrameError('read_only_path', `${rel} leads out of the artifact folder (a link).`, 403);
       plan.push({ rel, ...spec });
     }
     const before = this.manifest();
@@ -278,20 +353,17 @@ export class FileStore {
   }
 }
 
-export interface BlobMeta {
-  id: string;
-  contentType: string;
-  sizeBytes: number;
-  createdAt: string;
+export interface BlobMeta extends Omit<BlobInfo, 'url'> {
+  /** Everyone who uploaded these bytes (viewer ids), first first: the same bytes twice are one asset, claimed by both. */
+  uploaders?: string[];
+  /** The one uploader metadata written before `uploaders` records; read as `uploaders: [uploader]`. */
+  uploader?: string;
 }
 
-export interface BlobInfo extends BlobMeta {
-  url: string;
-}
-
-export interface BlobList {
-  assets: BlobInfo[];
-  usage: { files: number; bytes: number; maxFiles: number; maxBytes: number };
+/** Who claims an asset: `uploaders`, or the older single `uploader`; none (`[]`): a blob from before either, the owner's. */
+export function blobClaims(meta: Pick<BlobMeta, 'uploaders' | 'uploader'>): string[] {
+  if (Array.isArray(meta.uploaders)) return meta.uploaders.filter((u): u is string => typeof u === 'string');
+  return typeof meta.uploader === 'string' ? [meta.uploader] : [];
 }
 
 /** The most bytes an asset of `type` may have. */
@@ -304,14 +376,16 @@ export function blobLimit(type: string): number {
 export class BlobStore {
   readonly root: string;
   readonly dir: string;
+  private readonly guard: PathGuard;
 
-  constructor(root: string) {
+  constructor(root: string, options: { guard?: PathGuard } = {}) {
     this.root = root;
     this.dir = join(root, '_blobs');
+    this.guard = options.guard ?? LINK_GUARD;
   }
 
   meta(id: string): BlobMeta | null {
-    if (!BLOB_ID.test(id)) return null;
+    if (!BLOB_ID.test(id) || !this.guard.inside(this.root, join(this.dir, id))) return null;
     try {
       const m = JSON.parse(readFileSync(join(this.dir, `${id}.json`), 'utf8')) as Omit<BlobMeta, 'id'>;
       return existsSync(join(this.dir, id)) ? { id, ...m } : null;
@@ -324,31 +398,41 @@ export class BlobStore {
     return this.meta(id) ? join(this.dir, id) : null;
   }
 
-  list(): BlobList {
+  /** The assets, oldest first; `only`: those this test keeps (the usage still counts them all). */
+  list(only?: (meta: BlobMeta) => boolean): BlobList {
     let names: string[] = [];
     try {
-      names = readdirSync(this.dir);
+      if (this.guard.inside(this.root, this.dir)) names = readdirSync(this.dir);
     } catch {
       // none yet
     }
-    const assets: BlobInfo[] = [];
+    const all: BlobMeta[] = [];
     for (const n of names) {
       if (!BLOB_ID.test(n)) continue;
       const m = this.meta(n);
-      if (m) assets.push({ id: n, url: `/_blob/${n}`, contentType: m.contentType, sizeBytes: m.sizeBytes, createdAt: m.createdAt });
+      if (m) all.push(m);
     }
-    assets.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    const bytes = assets.reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
-    return { assets, usage: { files: assets.length, bytes, maxFiles: BLOBS_MAX_FILES, maxBytes: BLOBS_MAX_BYTES } };
+    all.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const bytes = all.reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
+    const assets: BlobInfo[] = all
+      .filter((m) => !only || only(m))
+      .map((m) => ({ id: m.id, url: `/_blob/${m.id}`, contentType: m.contentType, sizeBytes: m.sizeBytes, createdAt: m.createdAt }));
+    return { assets, usage: { files: all.length, bytes, maxFiles: BLOBS_MAX_FILES, maxBytes: BLOBS_MAX_BYTES } };
   }
 
-  upload(data: Buffer, contentType: unknown): BlobInfo {
+  /**
+   * Stores an asset by its content: the same bytes twice are one asset, and a second uploader adds its claim (so it
+   * lists and deletes it as its own). A claim added to a blob that had none (the owner's) leaves the owner, an editor,
+   * holding it as before.
+   */
+  upload(data: Buffer, contentType: unknown, uploader?: string): BlobInfo {
     const raw = typeof contentType === 'string' ? contentType.split(';')[0]!.trim().toLowerCase() : '';
     if (!raw) throw new FrameError('invalid_request', 'upload() needs a content type.');
     if (!BLOB_TYPES.has(raw)) throw new FrameError('unsupported_type', `Assets of type ${raw} are not supported.`);
     if (!data.length) throw new FrameError('invalid_request', 'An empty file.');
     const max = blobLimit(raw);
     if (data.length > max) throw new FrameError('too_large', `An asset of type ${raw} is at most ${max} bytes.`, 413);
+    if (!this.guard.inside(this.root, this.dir)) throw new FrameError('quota_or_state', '_blobs/ leads out of the artifact folder (a link).', 403);
     const id = createHash('sha256').update(data).digest('hex').slice(0, 32);
     if (!this.meta(id)) {
       const { usage } = this.list();
@@ -357,18 +441,40 @@ export class BlobStore {
       }
       mkdirSync(this.dir, { recursive: true });
       writeFileSync(join(this.dir, id), data);
-      writeFileSync(join(this.dir, `${id}.json`), `${JSON.stringify({ contentType: raw, sizeBytes: data.length, createdAt: new Date().toISOString() })}\n`);
+      writeFileSync(join(this.dir, `${id}.json`), `${JSON.stringify({ contentType: raw, sizeBytes: data.length, createdAt: new Date().toISOString(), ...(uploader ? { uploaders: [uploader] } : {}) })}\n`);
+    } else if (uploader) {
+      const have = this.meta(id)!;
+      const claims = blobClaims(have);
+      if (!claims.includes(uploader)) this.writeMeta(have, [...claims, uploader]);
     }
     const m = this.meta(id)!;
     return { id, url: `/_blob/${id}`, sizeBytes: m.sizeBytes, contentType: m.contentType, createdAt: m.createdAt };
   }
 
-  /** Deletes by id or `/_blob/<id>` url. */
-  delete(ref: unknown): { deleted: boolean } {
+  private writeMeta(meta: BlobMeta, uploaders: string[]): void {
+    const { id: _id, uploader: _old, uploaders: _was, ...rest } = meta;
+    writeFileSync(join(this.dir, `${meta.id}.json`), `${JSON.stringify({ ...rest, uploaders })}\n`);
+  }
+
+  /**
+   * Deletes by id or `/_blob/<id>` url. `claimant`: a viewer below editor, who removes only its own claim (else
+   * `not_uploader`); the bytes go once no claim is left. Without one (an editor): the asset goes, whoever claims it.
+   */
+  delete(ref: unknown, claimant?: string): { deleted: boolean } {
     const match = /^(?:\/?_blob\/)?([0-9a-f]{32})$/.exec(String(ref ?? '').replace(/^https?:\/\/[^/]+/, ''));
     if (!match) throw new FrameError('invalid_request', 'delete() takes an asset id or its /_blob/ url.');
     const id = match[1]!;
-    if (!this.meta(id)) return { deleted: false };
+    const meta = this.meta(id);
+    if (!meta) return { deleted: false };
+    if (claimant !== undefined) {
+      const claims = blobClaims(meta);
+      if (!claims.includes(claimant)) throw new FrameError('not_uploader', 'Only whoever uploaded an asset (or an editor) may delete it.', 403);
+      const left = claims.filter((c) => c !== claimant);
+      if (left.length) {
+        this.writeMeta(meta, left);
+        return { deleted: true };
+      }
+    }
     rmSync(join(this.dir, id), { force: true });
     rmSync(join(this.dir, `${id}.json`), { force: true });
     return { deleted: true };

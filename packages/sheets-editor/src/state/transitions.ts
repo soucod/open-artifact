@@ -1,9 +1,13 @@
-import type { ColumnId, CopiedWidgetNode, Edit, EngineCellTable, EngineRecordedEdit, IdRun, SheetId, TextThatNoCellShows } from '@open-artifact/sheets-core';
+import type { CopiedWidgetNode, Edit, EngineCellTable, EngineRecordedEdit, IdRun, SheetId, TextThatNoCellShows } from '@open-artifact/sheets-core';
 import type { CellId } from '../model/workbook.ts';
 import type { LineSpan } from '../model/line-ids.ts';
 import type { CellArea, SelectionPositions } from '../selection/model.ts';
-import type { newCommentPlace } from '../comments/comment-state.ts';
-import type { EntryLooks, EntryLooksInHistory, PageState } from './initial-state.ts';
+import type { NewCommentPlace } from '../comments/comment-state.ts';
+import type { CellHistoryScope, EntryLooks, EntryLooksInHistory, PageState, SelectedToldToAgent, UndoOfTurnOffered, VersionHistoryInPane, VersionRestoredOffer } from './initial-state.ts';
+import type { SelectionCorners } from '../presence/selections.ts';
+import type { MarksToTypeIn } from '../editor/entry-looks.ts';
+import type { FiguresOfNumbers } from './figures-of-selection.ts';
+import type { AgentPrompt } from '../format/conditional/agent-prompts.ts';
 import type { ChartNodesCopiedFor, IfQueued, KeyPressed, PageEvent } from './event-reducer.ts';
 /** An edit worked out to be queued on the workbook, with what the page does once it is answered. */
 export interface QueueEditEffect {
@@ -13,7 +17,8 @@ export interface QueueEditEffect {
   editsBefore?: { edit: Edit; isPointedAt: boolean }[];
   editsThatGoAlong?: Edit[];
   shownToThePerson?: TextThatNoCellShows[];
-  makesRoomForNumbersIn?: ColumnId[];
+  /** The sheet whose columns are widened to show the numbers the edit gives a format. */
+  makesRoomForNumbersIn?: SheetId;
 }
 export interface UndoOrRedoEffect {
   kind: 'undoOrRedo';
@@ -42,39 +47,41 @@ export type PageEffect =
   | { kind: 'waitForPeople'; searchedFor: string; key: KeyPressed }
   | { kind: 'dropWhatIsHeld' }
   | { kind: 'lookUpPeople'; userIds: string[] }
-  | { kind: 'tellOthersOwnSelection'; selection: unknown }
+  | { kind: 'tellOthersOwnSelection'; selection: SelectionCorners | null }
   | { kind: 'tellOthersWhomViewFollows'; tabKey: string | null }
   | { kind: 'copyLinkToSheet'; sheetId: SheetId }
-  | ({ kind: 'openCommentBox'; isForAgent: boolean } & NonNullable<ReturnType<typeof newCommentPlace>>)
+  | ({ kind: 'openCommentBox'; isForAgent: boolean } & NewCommentPlace)
   | { kind: 'openComment'; handle: string; isKeyboardLeft?: true }
   | { kind: 'shutComment' }
   | { kind: 'shutCommentBox' }
   | { kind: 'endCommentMode'; isAskNext: boolean }
-  | { kind: 'tellAgentWhatIsSelected'; selected: unknown }
-  | ({ kind: 'askAgentAboutImport'; asked: unknown } & AskOfAgent)
+  | { kind: 'tellAgentWhatIsSelected'; selected: SelectedToldToAgent }
+  | ({ kind: 'askAgentAboutImport'; asked: AgentPrompt } & AskOfAgent)
   | { kind: 'stopAskingAgentAboutImport' }
-  | ({ kind: 'askAgentAboutConditionalFormats'; asked: unknown } & AskOfAgent)
+  | ({ kind: 'askAgentAboutConditionalFormats'; asked: AgentPrompt } & AskOfAgent)
   | { kind: 'stopAskingAgentAboutConditionalFormats' }
   | ({ kind: 'askAgentWhichRowsAreAskedFor'; asked: { words: string; data: string }; isAtEnter: boolean } & AskOfAgent)
   | ({ kind: 'askAgentAheadWhichRowsAreAskedFor'; words: string } & AskOfAgent)
-  | ({ kind: 'tellAgentWhichRowsAreAskedFor'; rest: { typed: unknown; data: string } } & AskOfAgent)
+  | ({ kind: 'tellAgentWhichRowsAreAskedFor'; rest: { typed: string; data: string } } & AskOfAgent)
   | { kind: 'stopAskingAgentWhichRowsAreAskedFor' }
   | { kind: 'checkAgentForConditionalFormats' }
   | { kind: 'workOutFormulaRead'; formula: string }
   | { kind: 'checkAgentForFormulas' }
-  | ({ kind: 'askAgentForAFormula'; asked: { words: string; data: unknown } } & AskOfAgent)
+  | ({ kind: 'askAgentForAFormula'; asked: AgentPrompt } & AskOfAgent)
   | ({ kind: 'askAgentForANumberFormat'; asked: { words: string; data: null } } & AskOfAgent)
   | { kind: 'stopAskingAgentForAFormula' }
-  | ({ kind: 'askAgentForAFix'; asked: unknown } & AskOfAgent)
+  | ({ kind: 'askAgentForAFix'; asked: AgentPrompt } & AskOfAgent)
   | { kind: 'stopAskingAgentForFixes' }
   | ({ kind: 'readVersions'; before: { firstRevision: number } | null } & AskOfAgent)
-  | ({ kind: 'lookAtVersion'; revision: number; pane: unknown } & AskOfAgent)
-  | { kind: 'endLookAtVersion'; pane: unknown; thenRestore: number | null; isByPerson?: true }
-  | ({ kind: 'readCellHistory'; cell: CellId; scope: unknown } & AskOfAgent)
-  | ({ kind: 'readEditsThatTakeBack'; asked: unknown; afterMs: number } & AskOfAgent)
+  | ({ kind: 'lookAtVersion'; revision: number; pane: VersionHistoryInPane } & AskOfAgent)
+  | { kind: 'endLookAtVersion'; pane: VersionHistoryInPane | null; thenRestore: number | null; isByPerson?: true }
+  | ({ kind: 'readCellHistory'; cell: CellId; scope: CellHistoryScope } & AskOfAgent)
+  | ({ kind: 'readEditsThatTakeBack'; asked: EditsToTakeBack; afterMs: number } & AskOfAgent)
   | { kind: 'seeRowsInOwnOrder'; sheetId: SheetId; rows: readonly IdRun[] | null; staysAt: StaysAt }
-  | ({ kind: 'queueEditsThatTakeBack'; builtOnRevision: number; edits: EngineRecordedEdit[]; offerIfMade: unknown } & AskOfAgent);
+  | ({ kind: 'queueEditsThatTakeBack'; builtOnRevision: number; edits: EngineRecordedEdit[]; offerIfMade: VersionRestoredOffer | null } & AskOfAgent);
 /** Where the selection is, by rows and columns, so it can stay put when the rows change order. */
+/** The edits asked for to take back: all made since a revision, or only the runs of a turn of the agent. */
+export type EditsToTakeBack = { kind: 'allSince'; revision: number } | { kind: 'only'; ranges: UndoOfTurnOffered['edits'] };
 /** Where the view stays once rows are seen in a new order: `null` for a sheet not shown. */
 export type StaysAt = SelectionPositions | { scrollTop: number } | null;
 /** The page's state after an event, and what the controller is to do about it. */
@@ -87,18 +94,19 @@ export const isMenuHoldingField = (menu: PageState['menu']): boolean => isMenuHo
 export const cellsToSortOfMenu = (menu: PageState['menu']) => (menu?.holds === 'cellsToSort' ? (menu.cellsToSort ?? null) : null);
 export const sortColumnOfMenu = (menu: PageState['menu'], key: 'sheet' | 'range') =>
   (key === 'sheet' ? menu?.sortColumnPicked : undefined) ?? menu?.sortColumnsPointedAt?.[key] ?? null;
-export const SUM_BAR_AGGREGATES = ['sum', 'average', 'min', 'max', 'count'];
+/** The figures the bar under the grid shows of the selected cells, in its order. */
+export const SUM_BAR_AGGREGATES: (keyof FiguresOfNumbers)[] = ['sum', 'average', 'min', 'max', 'count'];
 export const NAVIGATING_MODE: NavigatingMode = {
   kind: 'navigating',
 };
-export const isOneLineEditor = ({ holdsOneLine: holdsOneLine, isInBoxOfOneLine: isInBoxOfOneLine }: EditingMode): boolean =>
+export const isOneLineEditor = ({ holdsOneLine, isInBoxOfOneLine }: EditingMode): boolean =>
   holdsOneLine === true || isInBoxOfOneLine === true;
 export const withNoEffects = (state: PageState): PageTransition => ({
-  state: state,
+  state,
   effects: [],
 });
-export const isIdleOrTapping = ({ dragging: dragging }: Pick<PageState, 'dragging'>): boolean => dragging === null || dragging.kind === 'tapping';
-export const lastDoneWorthKeeping = ({ lastDone: lastDone }: Pick<PageState, 'lastDone'>) =>
+export const isIdleOrTapping = ({ dragging }: Pick<PageState, 'dragging'>): boolean => dragging === null || dragging.kind === 'tapping';
+export const lastDoneWorthKeeping = ({ lastDone }: Pick<PageState, 'lastDone'>) =>
   (lastDone?.what === 'formatted' && lastDone.cellEnteredIn !== undefined) ||
   lastDone?.what === 'typedTextEntered' ||
   lastDone?.what === 'typedTextChangedNothing' ||
@@ -108,11 +116,11 @@ export const lastDoneWorthKeeping = ({ lastDone: lastDone }: Pick<PageState, 'la
     ? lastDone
     : null;
 export const withFormulasLeftToWorkOut = (state: PageState, thenEvent: PageEvent): PageTransition => ({
-  state: state,
+  state,
   effects: [
     {
       kind: 'workOutFormulasLeft',
-      thenEvent: thenEvent,
+      thenEvent,
     },
   ],
 });
@@ -135,7 +143,7 @@ export interface EditingMode {
   typingIn: 'cell' | 'formulaBar';
   looks?: EntryLooks;
   looksInHistory?: EntryLooksInHistory;
-  marksToTypeIn?: { from: number };
+  marksToTypeIn?: MarksToTypeIn;
   selectedInEntry?: { start: number; end: number };
   caretToPut?: { text: string; at: number };
   numbersOfLines?: (number | null)[];

@@ -55,19 +55,6 @@ export function suggestionAt(state: EditorState): string | null {
   return null;
 }
 
-/** Whether any part of a suggestion lies in a range of the editor's doc. */
-export function touchesSuggestion(doc: PMNode, from: number, to: number): boolean {
-  let found = false;
-  const $from = doc.resolve(from);
-  for (let depth = $from.depth; depth > 0; depth--) if (suggestIdOfNode($from.node(depth))) return true;
-  doc.nodesBetween(from, to, node => {
-    if (found) return false;
-    if (suggestIdOfNode(node) || (node.isInline && suggestIdOfMarks(node))) found = true;
-    return !found;
-  });
-  return found;
-}
-
 /** Every range of a suggestion in the editor's doc: its words, and the blocks it adds or strikes whole. */
 export function rangesOf(doc: PMNode, id: string): Array<{ from: number; to: number; block: boolean }> {
   const out: Array<{ from: number; to: number; block: boolean }> = [];

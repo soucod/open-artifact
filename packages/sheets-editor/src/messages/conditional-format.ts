@@ -1,6 +1,91 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CellCondition, Color, Comparison, FormatOfACondition, Matches } from '@open-artifact/sheets-core';
+import type { MessagePart } from '../i18n/messages.ts';
 import { translateMessage, joinMessageParts } from '../i18n/messages.ts';
-export function ruleColumnName(column?: Dynamic) {
+
+/** A column a rule reads or colors, as the rule list names it. */
+export type RuleColumn =
+  | { kind: 'named'; name: string }
+  | { kind: 'lettered'; letters: string }
+  | { kind: 'eachCell' }
+  | { kind: 'gone' };
+
+/** A value a condition compares cells with, as the rule list shows it. */
+export type RuleOperand =
+  | { kind: 'shown'; text: string }
+  | { kind: 'column'; column: RuleColumn }
+  | { kind: 'today' }
+  | { kind: 'daysFromToday'; days: number }
+  | { kind: 'daysAgo'; days: number };
+
+/** A cell condition with the values it compares with described for the rule list. */
+export type RuleCondition =
+  | Exclude<CellCondition, { kind: 'numberIs' | 'numberIsBetween' | 'numberIsNotBetween' }>
+  | { kind: 'numberIs'; comparison: Comparison; operand: RuleOperand }
+  | { kind: 'numberIsBetween' | 'numberIsNotBetween'; oneEnd: RuleOperand; otherEnd: RuleOperand };
+
+/** One test of a rule: the column it reads and its condition. */
+export interface RuleTest {
+  column: RuleColumn;
+  /** The column holds dates, so comparisons read as before and after. */
+  isOfDates: boolean;
+  condition: RuleCondition;
+}
+
+/** What a rule does, as the rule list describes it. */
+export type RuleEffect =
+  | { kind: 'formatWhere'; tests: [RuleTest, ...RuleTest[]]; format: FormatOfACondition }
+  | { kind: 'colorScale'; column: RuleColumn; colors: Color[] };
+
+/** One rule, described for the rule list. */
+export interface RuleDescription {
+  /** The cells the rule covers, as A1 references; empty when they were deleted. */
+  cells: string;
+  isWholeRow: boolean;
+  /** `null` when not worked out, and for a color scale. */
+  matches: Matches | null;
+  outOf: Matches;
+  does: RuleEffect;
+}
+
+/** A row of the rule list: one rule, or several rules shown together. */
+export type RuleEntry =
+  | { kind: 'one'; rule: RuleDescription }
+  | { kind: 'several'; first: RuleDescription; cells: string; ruleCount: number }
+  | { kind: 'oneColorForEach'; column: RuleColumn; isWholeRow: boolean; cells: string; fills: Color[]; ruleCount: number };
+
+/** The words of a rule list row. */
+export interface RuleEntryWords {
+  what: MessagePart[];
+  cells: string;
+  where: string;
+}
+
+/** A choice in a rule's condition menu. */
+export type ConditionChoice = Exclude<CellCondition['kind'], 'numberIs' | 'booleanIs'> | Comparison | 'isChecked' | 'isNotChecked';
+
+/** A choice in the menu of what a condition compares with. */
+export type OperandKind = 'number' | 'date' | 'today' | 'daysFromToday' | 'daysAgo' | 'column';
+
+export type RulePreset = 'red' | 'yellow' | 'green' | 'blue' | 'grayStruckThrough' | 'bold';
+
+/** A stop of a color scale. */
+export type ScaleStop = 'lowest' | 'middle' | 'highest';
+
+/** Where a color scale stop sits: at the end of the values, at a number, or at a percentile. */
+export type ScaleAnchorKind = 'end' | 'number' | 'percentile';
+
+/** Why conditional formats were not worked out. */
+export type RulesNotAppliedWhy = 'formulasTookTooLong' | 'tookTooLong' | 'tooManyRuns';
+
+/** A conditional formatting change, as the last-done line tells it. */
+export type ConditionalFormatDone =
+  | { what: 'rulesAdded'; ruleCount: number }
+  | { what: 'ruleChanged' | 'scaleColorsNothing' | 'offerDiscarded' | 'agentStopped' }
+  | { what: 'movedToNumbers'; column: RuleColumn }
+  | { what: 'ruleRemoved'; isSaved: boolean }
+  | { what: 'ruleMoved'; place: number; ruleCount: number };
+
+export function ruleColumnName(column: RuleColumn): string {
   switch (column.kind) {
     case 'named':
       return column.name;
@@ -26,7 +111,7 @@ export function ruleColumnName(column?: Dynamic) {
       });
   }
 }
-export function operandWords(operand?: Dynamic) {
+export function operandWords(operand: RuleOperand): MessagePart[] {
   switch (operand.kind) {
     case 'shown':
       return [
@@ -69,11 +154,17 @@ export function operandWords(operand?: Dynamic) {
       ];
   }
 }
-export function daysFromTodayRange(kind: Dynamic, { oneEnd: oneEnd, otherEnd: otherEnd }: Dynamic) {
+export function daysFromTodayRange(
+  kind: 'daysFromToday' | 'daysAgo',
+  { oneEnd, otherEnd }: { oneEnd: RuleOperand; otherEnd: RuleOperand },
+): number | null {
   let [todayEnd, daysEnd] = oneEnd.kind === 'today' ? [oneEnd, otherEnd] : [otherEnd, oneEnd];
   return todayEnd.kind === 'today' && daysEnd.kind === kind && daysEnd.days > 0 ? daysEnd.days : null;
 }
-export function comparisonSummary(test?: Dynamic, columnWords?: Dynamic) {
+export function comparisonSummary(
+  test: Pick<RuleTest, 'isOfDates'> & { condition: Extract<RuleCondition, { kind: 'numberIs' }> },
+  columnWords: MessagePart[],
+): MessagePart[] {
   let valueWords = operandWords(test.condition.operand);
   if (test.isOfDates)
     switch (test.condition.comparison) {
@@ -213,9 +304,9 @@ export function comparisonSummary(test?: Dynamic, columnWords?: Dynamic) {
       );
   }
 }
-export function ruleTestSummary(test?: Dynamic) {
+export function ruleTestSummary(test: RuleTest): MessagePart[] {
   let columnWords = ruleColumnWords(test.column);
-  let { condition: condition } = test;
+  let { condition } = test;
   switch (condition.kind) {
     case 'isBlank':
       return translateMessage(
@@ -261,7 +352,7 @@ export function ruleTestSummary(test?: Dynamic) {
       return comparisonSummary(
         {
           ...test,
-          condition: condition,
+          condition,
         },
         columnWords,
       );
@@ -470,7 +561,7 @@ export function ruleTestSummary(test?: Dynamic) {
       );
   }
 }
-export function ruleSummary(rule?: Dynamic) {
+export function ruleSummary(rule: RuleDescription): MessagePart[] {
   if (ruleColumnIsGone(rule)) return [CONDITIONAL_FORMATTING_WORDS.columnWasDeleted()];
   if (rule.does.kind === 'colorScale')
     return translateMessage(
@@ -484,7 +575,7 @@ export function ruleSummary(rule?: Dynamic) {
     );
   let [firstTest, ...otherTests] = rule.does.tests;
   return otherTests.reduce(
-    (summary?: Dynamic, test?: Dynamic) =>
+    (summary, test) =>
       translateMessage(
         {
           defaultMessage: '{first} and {second}',
@@ -498,7 +589,7 @@ export function ruleSummary(rule?: Dynamic) {
     ruleTestSummary(firstTest),
   );
 }
-export function ruleEntryWhatAndWhere(entry?: Dynamic) {
+export function ruleEntryWhatAndWhere(entry: RuleEntry): Omit<RuleEntryWords, 'cells'> {
   switch (entry.kind) {
     case 'one':
       return {
@@ -537,30 +628,30 @@ export function ruleEntryWhatAndWhere(entry?: Dynamic) {
     }
   }
 }
-export function wordsOfRuleEntry(entry?: Dynamic) {
-  let { what: what, where: where } = ruleEntryWhatAndWhere(entry);
+export function wordsOfRuleEntry(entry: RuleEntry): RuleEntryWords {
+  let { what, where } = ruleEntryWhatAndWhere(entry);
   switch (entry.kind) {
     case 'one':
       return {
         what: ruleListWhat(entry.rule),
         cells: ruleCellsWords(entry.rule.cells),
-        where: where,
+        where,
       };
     case 'several':
       return {
         what: entry.cells === entry.first.cells ? ruleListWhat(entry.first) : what,
         cells: ruleCellsWords(entry.cells),
-        where: where,
+        where,
       };
     case 'oneColorForEach':
       return {
-        what: what,
+        what,
         cells: ruleCellsWords(entry.cells),
-        where: where,
+        where,
       };
   }
 }
-export function conditionOperatorLabel(operator?: Dynamic, isDate?: Dynamic) {
+export function conditionOperatorLabel(operator: ConditionChoice, isDate: boolean): string {
   switch (operator) {
     case 'isBlank':
       return translateMessage({
@@ -704,7 +795,7 @@ export function conditionOperatorLabel(operator?: Dynamic, isDate?: Dynamic) {
       });
   }
 }
-export function operandKindLabel(operandKind?: Dynamic) {
+export function operandKindLabel(operandKind: OperandKind): string {
   switch (operandKind) {
     case 'number':
       return translateMessage({
@@ -738,7 +829,7 @@ export function operandKindLabel(operandKind?: Dynamic) {
       });
   }
 }
-export function rulePresetLabel(preset?: Dynamic) {
+export function rulePresetLabel(preset: RulePreset): string {
   switch (preset) {
     case 'red':
       return translateMessage({
@@ -772,7 +863,7 @@ export function rulePresetLabel(preset?: Dynamic) {
       });
   }
 }
-export function scaleStopLabel(stop?: Dynamic) {
+export function scaleStopLabel(stop: ScaleStop): string {
   switch (stop) {
     case 'lowest':
       return translateMessage({
@@ -791,7 +882,7 @@ export function scaleStopLabel(stop?: Dynamic) {
       });
   }
 }
-export function scaleAnchorKindLabel(anchorKind?: Dynamic, stop?: Dynamic, isDate?: Dynamic) {
+export function scaleAnchorKindLabel(anchorKind: ScaleAnchorKind, stop: ScaleStop, isDate: boolean): string {
   switch (anchorKind) {
     case 'end':
       if (isDate)
@@ -830,7 +921,7 @@ export function scaleAnchorKindLabel(anchorKind?: Dynamic, stop?: Dynamic, isDat
       });
   }
 }
-export function rulesNotAppliedReason(reason?: Dynamic) {
+export function rulesNotAppliedReason(reason: RulesNotAppliedWhy): string {
   switch (reason) {
     case 'formulasTookTooLong':
       return translateMessage({
@@ -845,7 +936,7 @@ export function rulesNotAppliedReason(reason?: Dynamic) {
       });
   }
 }
-export function ruleMatchCountWords(isWholeRow?: Dynamic, matched?: Dynamic, total?: Dynamic) {
+export function ruleMatchCountWords(isWholeRow: boolean, matched: Matches, total: Matches): string {
   if (isWholeRow)
     return matched.rows === 0
       ? translateMessage({
@@ -878,7 +969,7 @@ export function ruleMatchCountWords(isWholeRow?: Dynamic, matched?: Dynamic, tot
         },
       );
 }
-export function ruleReadingHint(reading?: Dynamic) {
+export function ruleReadingHint(reading: RuleDescription): string {
   let [ruleWords, cellsWords] = [joinMessageParts(ruleListWhat(reading)), ruleCellsWords(reading.cells)];
   if (reading.matches === null)
     return translateMessage(
@@ -917,7 +1008,7 @@ export function ruleReadingHint(reading?: Dynamic) {
         },
       );
 }
-export function conditionalFormatDoneWords(done?: Dynamic) {
+export function conditionalFormatDoneWords(done: ConditionalFormatDone): string {
   switch (done.what) {
     case 'rulesAdded':
       return translateMessage(
@@ -1288,9 +1379,9 @@ export const CONDITIONAL_FORMATTING_WORDS = {
       id: 'z2skHEnlaC',
     }),
 };
-export const joinWithDots = ([first = '', ...rest]: Dynamic) =>
+export const joinWithDots = ([first = '', ...rest]: readonly string[]): string =>
   rest.reduce(
-    (joined?: Dynamic, next?: Dynamic) =>
+    (joined, next) =>
       translateMessage(
         {
           defaultMessage: '{before} · {after}',
@@ -1303,9 +1394,9 @@ export const joinWithDots = ([first = '', ...rest]: Dynamic) =>
       ),
     first,
   );
-export const joinWithCommas = ([first = '', ...rest]: Dynamic) =>
+export const joinWithCommas = ([first = '', ...rest]: readonly string[]): string =>
   rest.reduce(
-    (joined?: Dynamic, next?: Dynamic) =>
+    (joined, next) =>
       translateMessage(
         {
           defaultMessage: '{before}, {after}',
@@ -1318,7 +1409,7 @@ export const joinWithCommas = ([first = '', ...rest]: Dynamic) =>
       ),
     first,
   );
-export const ruleColumnWords = (column?: Dynamic) =>
+export const ruleColumnWords = (column: RuleColumn): MessagePart[] =>
   column.kind === 'named'
     ? [
         {
@@ -1327,7 +1418,7 @@ export const ruleColumnWords = (column?: Dynamic) =>
         },
       ]
     : [ruleColumnName(column)];
-export const thisCellOfColumnWords = (column?: Dynamic) =>
+export const thisCellOfColumnWords = (column: RuleColumn): string =>
   column.kind === 'eachCell'
     ? CONDITIONAL_FORMATTING_WORDS.thisCell()
     : translateMessage(
@@ -1339,9 +1430,9 @@ export const thisCellOfColumnWords = (column?: Dynamic) =>
           column: ruleColumnName(column),
         },
       );
-export const ruleColumnIsGone = ({ does: does }: Dynamic) =>
-  does.kind === 'formatWhere' ? does.tests.some(({ column: column }: Dynamic) => column.kind === 'gone') : does.column.kind === 'gone';
-export const matchCountWords = (isWholeRow: Dynamic, { cells: cells, rows: rows }: Dynamic) =>
+export const ruleColumnIsGone = ({ does }: Pick<RuleDescription, 'does'>): boolean =>
+  does.kind === 'formatWhere' ? does.tests.some(({ column }) => column.kind === 'gone') : does.column.kind === 'gone';
+export const matchCountWords = (isWholeRow: boolean, { cells, rows }: Matches): string =>
   isWholeRow
     ? translateMessage(
         {
@@ -1349,7 +1440,7 @@ export const matchCountWords = (isWholeRow: Dynamic, { cells: cells, rows: rows 
           id: '28wJQ+OaEn',
         },
         {
-          rows: rows,
+          rows,
         },
       )
     : translateMessage(
@@ -1358,25 +1449,25 @@ export const matchCountWords = (isWholeRow: Dynamic, { cells: cells, rows: rows 
           id: 'YM/IyGGWdL',
         },
         {
-          cells: cells,
+          cells,
         },
       );
-export const ruleCountWords = (ruleCount?: Dynamic) =>
+export const ruleCountWords = (ruleCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{ruleCount, plural, one {# rule} other {# rules}}',
       id: 'TQN5y3Emob',
     },
     {
-      ruleCount: ruleCount,
+      ruleCount,
     },
   );
-export const ruleListWhat = (rule?: Dynamic) =>
+export const ruleListWhat = (rule: RuleDescription): MessagePart[] =>
   rule.does.kind === 'colorScale' && rule.does.column.kind === 'eachCell' ? [CONDITIONAL_FORMATTING_WORDS.colorScale()] : ruleSummary(rule);
-export const ruleCellsWords = (cells?: Dynamic) => (cells === '' ? CONDITIONAL_FORMATTING_WORDS.cellsDeleted() : cells);
-export const ruleWhereWords = ({ isWholeRow: isWholeRow, cells: cells, matches: matches }: Dynamic) =>
+export const ruleCellsWords = (cells: string): string => (cells === '' ? CONDITIONAL_FORMATTING_WORDS.cellsDeleted() : cells);
+export const ruleWhereWords = ({ isWholeRow, cells, matches }: Pick<RuleDescription, 'isWholeRow' | 'cells' | 'matches'>): string =>
   joinWithCommas([ruleCellsWords(cells), ...(matches === null || cells === '' ? [] : [matchCountWords(isWholeRow, matches)])]);
-export const movedToNumbersWords = (column?: Dynamic) =>
+export const movedToNumbersWords = (column: RuleColumn): MessagePart[] =>
   translateMessage(
     {
       defaultMessage: 'Moved to {column}. A color scale needs numbers or dates.',
@@ -1391,38 +1482,38 @@ export const writtenByAgentUnsavedWords = () =>
     defaultMessage: 'Written by Agent, not saved yet',
     id: 'B2Eu8oZA/S',
   });
-export const removeRuleLabel = (rule?: Dynamic) =>
+export const removeRuleLabel = (rule: string): string =>
   translateMessage(
     {
       defaultMessage: 'Remove {rule}',
       id: 'sUl586CSZG',
     },
     {
-      rule: rule,
+      rule,
     },
   );
-export const reorderRuleLabel = (rule?: Dynamic) =>
+export const reorderRuleLabel = (rule: string): string =>
   translateMessage(
     {
       defaultMessage: 'Reorder {rule}',
       id: 'a88OKxKyBN',
     },
     {
-      rule: rule,
+      rule,
     },
   );
-export const controlWithChoiceLabel = (control?: Dynamic, chosen?: Dynamic) =>
+export const controlWithChoiceLabel = (control: string, chosen: string | undefined): string =>
   translateMessage(
     {
       defaultMessage: '{control}, {chosen}',
       id: 'gRXwIQ2n3+',
     },
     {
-      control: control,
-      chosen: chosen,
+      control,
+      chosen,
     },
   );
-export const scaleStopControlLabel = (stop?: Dynamic, control?: Dynamic) =>
+export const scaleStopControlLabel = (stop: ScaleStop, control: string): string =>
   translateMessage(
     {
       defaultMessage: '{stop}, {control}',
@@ -1430,37 +1521,37 @@ export const scaleStopControlLabel = (stop?: Dynamic, control?: Dynamic) =>
     },
     {
       stop: scaleStopLabel(stop),
-      control: control,
+      control,
     },
   );
-export const moreSuggestionsWords = (count?: Dynamic) =>
+export const moreSuggestionsWords = (count: number): string =>
   translateMessage(
     {
       defaultMessage: '{count, plural, one {# more suggestion.} other {# more suggestions.}}',
       id: 'ufd39basPL',
     },
     {
-      count: count,
+      count,
     },
   );
-export const ruleCountBadgeLabel = (ruleCount?: Dynamic) =>
+export const ruleCountBadgeLabel = (ruleCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{ruleCount, plural, one {# rule} other {# rules}}',
       id: 'aAOjjG607L',
     },
     {
-      ruleCount: ruleCount,
+      ruleCount,
     },
   );
-export const addRulesLabel = (ruleCount?: Dynamic) =>
+export const addRulesLabel = (ruleCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{ruleCount, plural, one {Add # rule} other {Add all # rules}}',
       id: 'Ny8cS7HZG1',
     },
     {
-      ruleCount: ruleCount,
+      ruleCount,
     },
   );
 export const notARuleHint = () =>
@@ -1468,13 +1559,13 @@ export const notARuleHint = () =>
     defaultMessage: 'This doesn’t read as a rule. Press Enter to have Agent write rules.',
     id: '6b0FytsemC',
   });
-export const rulesReadyHint = (ruleCount?: Dynamic) =>
+export const rulesReadyHint = (ruleCount: number): string =>
   translateMessage(
     {
       defaultMessage: '{ruleCount, plural, one {# rule ready. Press Enter to add it.} other {# rules ready. Press Enter to add all.}}',
       id: 'Ay9b9vyCt/',
     },
     {
-      ruleCount: ruleCount,
+      ruleCount,
     },
   );

@@ -52,9 +52,23 @@ export function syncDeckFonts(faces: Readonly<Record<string, DeckFace>>, resolve
   }
 }
 
-/** Resolves once the document's fonts finished loading (or after `timeout` ms). */
-export function fontsReady(doc: Document = document, timeout = 4000): Promise<void> {
+/** The families of the faces still loading, unquoted, each once. */
+export function lateFontFamilies(faces: Iterable<{ family: string; status: string }>): string[] {
+  const late = [...faces].filter((face) => face.status === 'loading').map((face) => face.family.replace(/^\s*["']|["']\s*$/g, '').trim());
+  return [...new Set(late)].filter(Boolean);
+}
+
+/**
+ * Resolves once the document's fonts finished loading, or after `timeout` ms
+ * with the families still loading then (empty when all are in).
+ */
+export async function fontsReady(doc: Document = document, timeout = 4000): Promise<string[]> {
   const fonts = doc.fonts;
-  if (!fonts) return Promise.resolve();
-  return Promise.race([fonts.ready.then(() => undefined), new Promise<void>((resolve) => setTimeout(resolve, timeout))]);
+  if (!fonts) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), timeout);
+  });
+  const settled = await Promise.race([fonts.ready.then(() => 'ready' as const), late]).finally(() => clearTimeout(timer));
+  return settled === 'ready' ? [] : lateFontFamilies(fonts);
 }

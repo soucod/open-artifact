@@ -147,7 +147,7 @@ export interface TooltipProps {
   align?: TooltipAlign;
   /** Points the tooltip at something other than its children. */
   anchor?: PositionerProps['anchor'];
-  sideOffset?: number;
+  sideOffset?: PositionerProps['sideOffset'];
   collisionPadding?: PositionerProps['collisionPadding'];
   collisionAvoidance?: PositionerProps['collisionAvoidance'];
   delay?: number;
@@ -159,6 +159,11 @@ export interface TooltipProps {
   closeOnClick?: boolean;
   /** Shows even when focus came back from closing something. */
   openOnHandedBackFocus?: boolean;
+  /**
+   * Says why its trigger is disabled. The text may wrap, stays through clicks and comes back with
+   * focus; it can be hovered when it opened from hovering, and presses on it go no further.
+   */
+  explainsDisabled?: boolean;
   className?: string;
   children?: React.ReactNode;
 }
@@ -167,7 +172,8 @@ export interface TooltipProps {
 export function Tooltip({
   content,
   detail,
-  multiline = false,
+  explainsDisabled = false,
+  multiline = explainsDisabled,
   shortcut,
   side = 'top',
   align,
@@ -179,12 +185,13 @@ export function Tooltip({
   closeDelay,
   open,
   onOpenChange,
-  hoverable = false,
-  closeOnClick,
-  openOnHandedBackFocus = false,
+  hoverable: hoverableProp,
+  closeOnClick = explainsDisabled ? false : undefined,
+  openOnHandedBackFocus = explainsDisabled,
   className,
   children,
 }: TooltipProps): React.ReactElement {
+  const hoverable = hoverableProp ?? explainsDisabled;
   const groupDelay = React.useContext(GroupDelayContext);
   const openDelay = delay ?? groupDelay ?? TOOLTIP_DEFAULT_DELAY;
   const layer = useOverlayLayer('tooltip');
@@ -243,6 +250,10 @@ export function Tooltip({
     setView(cleared);
   }, []);
 
+  // A reason that opened from focus rather than hover does not stay open for the pointer to reach it.
+  const disableHoverablePopup =
+    !hoverable || (explainsDisabled && hoverableProp === undefined && isOpen && hoveredTrigger === null);
+
   const rendersTrigger = children !== undefined || anchor === undefined;
   useSingleActiveTooltip(handle, rendersTrigger && hasContent && isOpen);
 
@@ -296,6 +307,7 @@ export function Tooltip({
           >
             <BaseTooltip.Popup
               role="tooltip"
+              {...(explainsDisabled ? REASON_POPUP_HANDLERS : undefined)}
               style={closesInstantly ? { transition: 'none' } : undefined}
               className={cn(
                 'px-2',
@@ -343,7 +355,7 @@ export function Tooltip({
   return (
     <BaseTooltip.Root
       open={isOpen}
-      disableHoverablePopup={!hoverable}
+      disableHoverablePopup={disableHoverablePopup}
       disabled={!hasContent}
       actionsRef={actionsRef}
       onOpenChange={handleOpenChange}
@@ -359,6 +371,15 @@ export function Tooltip({
     </BaseTooltip.Root>
   );
 }
+
+const stopPropagation = (event: React.SyntheticEvent): void => event.stopPropagation();
+
+/** A press on a reason keeps focus where it was and does not reach what the tooltip sits over. */
+const REASON_POPUP_HANDLERS = {
+  onMouseDown: (event: React.MouseEvent): void => event.preventDefault(),
+  onClick: stopPropagation,
+  onDoubleClick: stopPropagation,
+};
 
 /** Shows a tooltip on the side where text ends: right, or left in right-to-left text. */
 export function InlineEndTooltip(props: Omit<TooltipProps, 'side'>): React.ReactElement {
@@ -441,8 +462,7 @@ export function DisabledReasonTooltip({
       {...tooltip}
       content={isEmptyTooltipContent(reason) ? undefined : reason}
       multiline={multiline}
-      closeOnClick={false}
-      openOnHandedBackFocus
+      explainsDisabled
     >
       <span {...disabledReasonWrapperProps(reason, descriptionId, wrapperClassName)}>
         {children}

@@ -49,7 +49,7 @@ export const isPointerOrMenuEvent = (event: PageEvent): boolean =>
 export const isMergeAnswered = (event: PageEvent): boolean =>
   event.kind === 'editAnswered' && (event.edit.kind === 'mergeCells' || event.edit.kind === 'unmergeCells');
 export const rowsOutOfViewOfSheet = ({
-  rowsOutOfViewByOwnFilters: rowsOutOfViewByOwnFilters,
-  sheetId: sheetId,
+  rowsOutOfViewByOwnFilters,
+  sheetId,
 }: Pick<PageState, 'rowsOutOfViewByOwnFilters' | 'sheetId'>): Set<RowId> | undefined =>
   rowsOutOfViewByOwnFilters.get(sheetId);

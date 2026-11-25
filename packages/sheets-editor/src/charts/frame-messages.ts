@@ -23,8 +23,8 @@ export const pressedAtMessage = ({ x, y }: PointAt, { width, height }: { width: 
     ? {
         kind: 'pressedAt',
         at: {
-          x: x,
-          y: y,
+          x,
+          y,
         },
       }
     : null;

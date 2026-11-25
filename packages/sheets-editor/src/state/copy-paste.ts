@@ -1,4 +1,4 @@
-import type { CellBlock, CopiedWidgetNode, Edit, SheetId } from '@open-artifact/sheets-core';
+import type { CellBlock, CopiedWidgetNode, Edit, SheetId, TextThatNoCellShows } from '@open-artifact/sheets-core';
 import type { CellId, SheetSummary, WorkbookReads } from '../model/workbook.ts';
 import type { LineSizes, ScrollPosition } from '../model/line-sizes.ts';
 import type { CellArea } from '../selection/model.ts';
@@ -58,9 +58,9 @@ export function copyOrCutSelection(state: PageState, workbook: WorkbookReads, cu
       {
         kind: 'putOnClipboard',
         sheetId: state.sheetId,
-        area: area,
-        rowsLeftOut: rowsLeftOut,
-        cutToken: cutToken,
+        area,
+        rowsLeftOut,
+        cutToken,
       },
     ],
   };
@@ -70,7 +70,7 @@ export function blockOfArea(workbook: WorkbookReads, sheetId: SheetId, block: Ce
   let bottomRightCell = workbook.cellIdAt(sheetId, block.topRowIndex + block.rowCount - 1, block.leftColumnIndex + block.columnCount - 1);
   return topLeftCell !== null && bottomRightCell !== null ? areaRefBetween(topLeftCell, bottomRightCell) : null;
 }
-export function cutBlockToMove({ copiedCells: copiedCells }: Pick<PageState, 'copiedCells'>, workbook: WorkbookReads, cutToken: string | null) {
+export function cutBlockToMove({ copiedCells }: Pick<PageState, 'copiedCells'>, workbook: WorkbookReads, cutToken: string | null) {
   if (copiedCells === null || cutToken === null || copiedCells.cutToken !== cutToken) return null;
   let area = selectedArea(copiedCells, workbook);
   return area === null ? null : blockOfArea(workbook, copiedCells.activeCell.sheetId, area);
@@ -87,39 +87,39 @@ export function pasteTopLeft(state: PageState, workbook: WorkbookReads): PasteTo
     columnId: inView.oneColumn,
   };
   return {
-    inView: inView,
-    topLeft: topLeft,
+    inView,
+    topLeft,
   };
 }
-export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, paste: PasteChosen, shownToThePerson?: unknown[]): PageTransition {
+export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, paste: PasteChosen, shownToThePerson?: TextThatNoCellShows[]): PageTransition {
   let queueEditOf = (edit: Edit, ifQueued: IfQueued): PageTransition => ({
-    state: state,
+    state,
     effects: [
       {
         kind: 'queueEdit',
-        edit: edit,
+        edit,
         ifQueued: {
           ...ifQueued,
           pasteChosen: paste,
         },
         ...(shownToThePerson !== undefined && {
-          shownToThePerson: shownToThePerson,
+          shownToThePerson,
         }),
       },
     ],
   });
   let {
-    cutToken: cutToken,
-    copiedCellsAsText: copiedCellsAsText,
-    ofAnotherProgram: ofAnotherProgram,
-    text: text,
-    isPlainText: isPlainText,
-    pastedTextIs: pastedTextIs,
+    cutToken,
+    copiedCellsAsText,
+    ofAnotherProgram,
+    text,
+    isPlainText,
+    pastedTextIs,
   } = paste;
   let area = state.mode.kind === 'navigating' ? selectedArea(state, workbook) : null;
   let topLeftInView = area === null ? null : pasteTopLeft(state, workbook);
   if (area === null || topLeftInView === null) return withNoEffects(state);
-  let { inView: inView, topLeft: topLeft } = topLeftInView;
+  let { inView, topLeft } = topLeftInView;
   let [{ base: rowBase, first: rowFirst }] = inView.rows;
   let pastesOverSelection = !hasOtherRanges(state) && area.rowCount * area.columnCount > 1;
   let oneCellLanding: CellBlock = {
@@ -181,7 +181,7 @@ export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, pa
       },
     );
   }
-  let { cutJustMoved: cutJustMoved } = state;
+  let { cutJustMoved } = state;
   if (cutJustMoved !== null && cutJustMoved.token === cutToken && isSameCell(cutJustMoved.toTopLeft, topLeft)) return withNoEffects(state);
   if (paste.valuesOfCopiedCells !== null)
     return queueLandingEdit(
@@ -203,13 +203,28 @@ export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, pa
         },
       },
     );
+  let ownRowOrder = paste.areFormulasLeftOut ? ownRowOrderOfSheet(workbook, state.sheetId) : null;
+  if (ownRowOrder !== null) {
+    let firstRow = ownRowOrder.seen.indexOf(topLeft.rowId) ?? area.topRowIndex;
+    let pastedRowCount = parseTsvCells(text).length;
+    let rowAfter = pastedRowCount === 1 && landing.selected === inView ? area.topRowIndex + area.rowCount : firstRow + pastedRowCount;
+    if (firstRow < ownRowOrder.firstIndex + ownRowOrder.count && ownRowOrder.firstIndex < rowAfter)
+      return withNoEffects({
+        ...state,
+        lastDone: null,
+        notice: {
+          kind: 'ownSortInTheWay',
+          act: 'paste',
+        },
+      });
+  }
   if (copiedCellsAsText !== null)
     return queueLandingEdit(
       null,
       {
         kind: 'pasteCopiedCells',
         ...landing,
-        copiedCellsAsText: copiedCellsAsText,
+        copiedCellsAsText,
         copiedColors: 'arePasted',
       },
       {
@@ -257,7 +272,7 @@ export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, pa
       },
     });
   let markdownTables = paste.markdownIs === undefined ? null : readMarkdownTables(text);
-  let rows: string[][] = (markdownTables?.map(({ cells: cells }: { cells: string[] }) => cells) ?? parseTsvCells(text)).map(
+  let rows: string[][] = (markdownTables?.map(({ cells }: { cells: string[] }) => cells) ?? parseTsvCells(text)).map(
     (row: string[]) => row.map((cellText: string) => sanitizeTypedCellInput(isPlainText ? unescapeClipboardText(cellText) : cellText)),
   );
   if (rows.length === 0) return withNoEffects(state);
@@ -284,7 +299,7 @@ export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, pa
           (row: string[], down: number) =>
             row.map((cellText: string, across: number) => textsWithoutSigns.get(`${down} ${across}`) ?? cellText),
         ),
-    pastedTextIs: pastedTextIs,
+    pastedTextIs,
     ...localeOfTextsOption(workbook, paste.localeOfTexts),
   };
   let ifQueued: IfQueued = {
@@ -294,22 +309,22 @@ export function pasteIntoSelection(state: PageState, workbook: WorkbookReads, pa
   };
   if (isPastedAsTyped || editsOfMarks!.length === 0) return queueLandingEdit(rows.length, edit, ifQueued);
   let editsThatGoAlong = editsOfMarks!.map(markEditByPage);
-  let result = queueLandingEdit(rows.length, edit, {
+  let pasteQueued = queueLandingEdit(rows.length, edit, {
     ...ifQueued,
     select: areaOfPastedTexts(workbook, edit) ?? 'placeChanged',
   });
-  let effects = result.effects.map(
+  let effects = pasteQueued.effects.map(
     (effect: PageEffect): PageEffect =>
       effect.kind === 'queueEdit'
         ? {
             ...effect,
-            editsThatGoAlong: editsThatGoAlong,
+            editsThatGoAlong,
           }
         : effect,
   );
   return {
-    ...result,
-    effects: effects,
+    ...pasteQueued,
+    effects,
   };
 }
 export function isMarkReadingTooMuch(rows: readonly string[][]): boolean {
@@ -338,9 +353,9 @@ export function marksOfPastedTexts(reads: WorkbookReads, topLeft: CellId, rows: 
       mixedCount += isOfOneLook(read) ? 0 : 1;
       if (isMarkdownRead && (cellId === null || mixedCount > MOST_MARKED_PASTED_CELLS)) return null;
       marked.push({
-        down: down,
-        across: across,
-        cellId: cellId,
+        down,
+        across,
+        cellId,
         text: read.text,
         looks: read.looks,
       });
@@ -349,12 +364,12 @@ export function marksOfPastedTexts(reads: WorkbookReads, topLeft: CellId, rows: 
 }
 export function editsOfPastedMarks(state: PageState, reads: WorkbookReads, marked: readonly MarkedText[]): Edit[] | null {
   let cellsInSheet = marked.flatMap(
-    ({ cellId: cellId, ...rest }: MarkedText): MarkedTextInSheet[] =>
+    ({ cellId, ...rest }: MarkedText): MarkedTextInSheet[] =>
       cellId === null
         ? []
         : [
             {
-              cellId: cellId,
+              cellId,
               ...rest,
             },
           ],
@@ -387,22 +402,22 @@ export function editsOfPastedMarks(state: PageState, reads: WorkbookReads, marke
             rows: blockRows,
           },
           format: {
-            font: font,
+            font,
           },
         },
       ];
     }),
-    ...mixedCells.map(({ cellId: cellId, text: text, looks: looks }: MarkedTextInSheet) => enterEntryEdit(cellId, richTextFromLooks(text, looks))),
+    ...mixedCells.map(({ cellId, text, looks }: MarkedTextInSheet) => enterEntryEdit(cellId, richTextFromLooks(text, looks))),
   ];
   return edits.length > MOST_MARKED_PASTED_CELLS ? null : edits;
 }
 export function areaOfPastedTexts(workbook: WorkbookReads, edit: Edit): CellArea | null {
   if (edit.kind !== 'pasteRowsOfTexts') return null;
-  let { selected: selected, rows: rows } = edit;
-  let { sheetId: sheetId } = selected;
+  let { selected, rows } = edit;
+  let { sheetId } = selected;
   let [{ base: rowBase, first: rowFirst }] = selected.rows;
   let position = workbook.positionOfCell({
-    sheetId: sheetId,
+    sheetId,
     rowId: `${rowBase}.${rowFirst}`,
     columnId: selected.oneColumn,
   });
@@ -427,18 +442,18 @@ export function copyChartNodesThen(
   return sources.length === 0
     ? then([])
     : {
-        state: state,
+        state,
         effects: [
           {
             kind: 'copyChartNodes',
-            sources: sources,
-            copiedFor: copiedFor,
+            sources,
+            copiedFor,
           },
         ],
       };
 }
 export function chartPastePosition(state: PageState, workbook: ReadsWithTextMeasurer) {
-  let { placementSelected: placementSelected } = state;
+  let { placementSelected } = state;
   let placement = placementSelected === null ? null : placementById(state, workbook, placementSelected);
   if (placement === null) {
     let landing = pasteTopLeft(state, workbook);
@@ -453,14 +468,14 @@ export function chartPastePosition(state: PageState, workbook: ReadsWithTextMeas
           },
         };
   }
-  let { rowEdges: rowEdges, columnEdges: columnEdges } = layoutOfView(state, workbook);
+  let { rowEdges, columnEdges } = layoutOfView(state, workbook);
   let offsetAnchor = (edges: LineSizes, anchor: ScrollPosition) =>
     scrollPositionAtPixel(edges, pixelOfScrollPosition(edges, anchor) + CHART_PASTE_OFFSET);
   return placementAnchorOf(offsetAnchor(columnEdges, columnAnchorOf(placement)), offsetAnchor(rowEdges, rowAnchorOf(placement)));
 }
 export function finishPasteOfChart(
   state: PageState,
-  { chart: chart, toSheetId: toSheetId, topLeft: topLeft, offsetFromAnchorCell: offsetFromAnchorCell }: PasteOfChart,
+  { chart, toSheetId, topLeft, offsetFromAnchorCell }: PasteOfChart,
   copiedNodes: ChartNodeCopies,
 ): PageTransition {
   if (typeof copiedNodes === 'string')
@@ -477,9 +492,9 @@ export function finishPasteOfChart(
     {
       kind: 'copyPlacedView',
       ...chart,
-      toSheetId: toSheetId,
-      topLeft: topLeft,
-      offsetFromAnchorCell: offsetFromAnchorCell,
+      toSheetId,
+      topLeft,
+      offsetFromAnchorCell,
       copiedWidgetNodes: [...copiedNodes],
     },
     {
@@ -498,7 +513,7 @@ export function pasteChart(state: PageState, workbook: ReadsWithTextMeasurer, ch
   if (chart === 'ofAnotherSheet' || placement === null) return withNoEffects(refusePasteOfChart(state, 'chartNotInWorkbook'));
   let paste: PasteOfChart = {
     kind: 'pasteOfChart',
-    chart: chart,
+    chart,
     toSheetId: state.sheetId,
     topLeft: cellRefOf(anchorCell),
     offsetFromAnchorCell: position.offsetFromAnchorCell,
@@ -533,14 +548,14 @@ export const localeOfTextsOption = (workbook: WorkbookReads, locale: string | nu
 export const MOST_MARKED_PASTED_CELLS = 30;
 export const MOST_MARK_READING_WORK = 5e6;
 export const MARK_SIGNS_PATTERN = new RegExp(`[${MARK_SIGN_CHARS}]`, 'g');
-export const isOfOneLook = ({ looks: looks }: Pick<MarkedText, 'looks'>): boolean => looks.stretches.length === 1;
+export const isOfOneLook = ({ looks }: Pick<MarkedText, 'looks'>): boolean => looks.stretches.length === 1;
 export const CHART_PASTE_OFFSET = 28;
 export const refusePasteOfChart = (state: PageState, why: ChartPasteRefusal): PageState => ({
   ...state,
   lastDone: null,
   notice: {
     kind: 'editRefused',
-    why: why,
+    why,
     asked: 'paste',
   },
 });

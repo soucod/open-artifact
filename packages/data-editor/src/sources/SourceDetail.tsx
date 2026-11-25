@@ -63,6 +63,8 @@ export interface SourceDetailProps {
   onRefresh: (dataset: Dataset) => void;
   onConnect: ConnectSource;
   onAskWhy?: (datasets: Dataset[]) => void;
+  /** Where focus goes when the failure notice clears while it holds focus. */
+  onNoticeGone?: () => void;
 }
 
 /** One source: its name and description, why it failed, its query, transform or formula, and its result. */
@@ -85,6 +87,7 @@ export function SourceDetail({
   onRefresh,
   onConnect,
   onAskWhy,
+  onNoticeGone,
 }: SourceDetailProps): ReactElement {
   const { source } = ds;
   const title = ds.title || ds.id;
@@ -201,6 +204,7 @@ export function SourceDetail({
           canAskAgent={canAskAgent}
           onConnect={onConnect}
           {...(onAskWhy === undefined ? {} : { onAskWhy })}
+          {...(onNoticeGone === undefined ? {} : { onGone: onNoticeGone })}
         />
       )}
       {waits.length > 0 ? <CalculationWaits inputs={waits} lookup={lookup} onSelect={onSelect} /> : null}

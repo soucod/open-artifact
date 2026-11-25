@@ -1,11 +1,15 @@
-import type { Dynamic } from '../dynamic.ts';
 import { withNoEffects } from '../state/transitions.ts';
 import { queueEdit, IF_QUEUED_DEFAULTS } from '../model/edit-effects.ts';
 import { MESSAGE_LOCALE, translateMessage } from '../i18n/messages.ts';
 import { sortByLabel } from '../messages/locale.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { LocaleSetDone, PageState, PickForWorkbook, TimeZoneSetDone } from '../state/initial-state.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function workbookSettingPick(workbook: WorkbookReads, asked?: Dynamic) {
+import type { PageTransition } from '../state/transitions.ts';
+import type { Edit } from '@open-artifact/sheets-core';
+import type { ComboboxOption } from '../kit/combobox.tsx';
+/** The workbook setting asked to be picked; a time zone is asked with the browser's own. */
+export type WorkbookSettingAsked = { of: 'locale' } | { of: 'timeZone'; nameInBrowser: string };
+export function workbookSettingPick(workbook: WorkbookReads, asked: WorkbookSettingAsked): PickForWorkbook | null {
   if (asked.of === 'locale') {
     let locales = workbook.locales();
     return locales === null
@@ -19,16 +23,16 @@ export function workbookSettingPick(workbook: WorkbookReads, asked?: Dynamic) {
   }
   let timeZones = workbook.timeZones();
   if (timeZones === null) return null;
-  let browserTimeZone2 = workbook.timeZoneNamed(asked.nameInBrowser);
+  let browserTimeZone = workbook.timeZoneNamed(asked.nameInBrowser);
   return {
     of: 'timeZone',
     picked: null,
     ofWorkbook: workbook.timeZone,
-    ofBrowser: browserTimeZone2,
+    ofBrowser: browserTimeZone,
     all: timeZones,
   };
 }
-export function openWorkbookSettingPick(state: PageState, workbook: WorkbookReads, asked?: Dynamic) {
+export function openWorkbookSettingPick(state: PageState, workbook: WorkbookReads, asked: WorkbookSettingAsked): PageTransition {
   let pick = workbookSettingPick(workbook, asked);
   if (pick === null) return withNoEffects(state);
   return withNoEffects({
@@ -40,7 +44,7 @@ export function openWorkbookSettingPick(state: PageState, workbook: WorkbookRead
     pickForWorkbook: pick,
   });
 }
-export function pickWorkbookSetting(state: PageState, pickKind?: Dynamic, picked?: Dynamic) {
+export function pickWorkbookSetting(state: PageState, pickKind: PickForWorkbook['of'], picked: string): PageTransition {
   let pickForWorkbook = state.pickForWorkbook;
   if (pickForWorkbook?.of !== pickKind) return withNoEffects(state);
   let pickedOrNone = picked === pickForWorkbook.ofWorkbook ? null : picked;
@@ -52,7 +56,7 @@ export function pickWorkbookSetting(state: PageState, pickKind?: Dynamic, picked
     },
   });
 }
-export function editOfWorkbookSettingPick(pickForWorkbook?: Dynamic) {
+export function editOfWorkbookSettingPick(pickForWorkbook: PickForWorkbook): [Edit, LocaleSetDone | TimeZoneSetDone] {
   let picked = pickedOrWorkbookSetting(pickForWorkbook);
   return pickForWorkbook.of === 'locale'
     ? [
@@ -76,7 +80,7 @@ export function editOfWorkbookSettingPick(pickForWorkbook?: Dynamic) {
         },
       ];
 }
-export function commitWorkbookSettingPick(state: PageState) {
+export function commitWorkbookSettingPick(state: PageState): PageTransition {
   let pickForWorkbook = state.pickForWorkbook;
   let closedState = {
     ...state,
@@ -87,10 +91,10 @@ export function commitWorkbookSettingPick(state: PageState) {
   return queueEdit(closedState, edit, {
     ...IF_QUEUED_DEFAULTS,
     select: null,
-    done: done,
+    done,
   });
 }
-export function syncWorkbookSettingPick(state: PageState, workbook?: Dynamic) {
+export function syncWorkbookSettingPick(state: PageState, workbook: Pick<WorkbookReads, 'locale' | 'timeZone'>): PageState {
   let pickForWorkbook = state.pickForWorkbook;
   if (pickForWorkbook === null || pickForWorkbook.ofWorkbook === workbook[pickForWorkbook.of]) return state;
   return {
@@ -107,25 +111,25 @@ export function syncWorkbookSettingPick(state: PageState, workbook?: Dynamic) {
           },
   };
 }
-export function longTimeZoneName(timeZone?: Dynamic) {
+export function longTimeZoneName(timeZone: string): string | null {
   let cached = longTimeZoneNameCache.get(timeZone);
   if (cached !== undefined) return cached;
-  let longName: Dynamic = null;
+  let longName: string | null = null;
   try {
     longName =
-      new (Intl.DateTimeFormat as Dynamic)(MESSAGE_LOCALE, {
-        timeZone: timeZone,
+      new Intl.DateTimeFormat(MESSAGE_LOCALE, {
+        timeZone,
         timeZoneName: 'longGeneric',
       })
         .formatToParts()
-        .find(({ type: type }: Dynamic) => type === 'timeZoneName')?.value ?? null;
+        .find(({ type }) => type === 'timeZoneName')?.value ?? null;
   } catch {
     longName = null;
   }
   longTimeZoneNameCache.set(timeZone, longName);
   return longName;
 }
-export function shortTimeZoneLabel(timeZone?: Dynamic) {
+export function shortTimeZoneLabel(timeZone: string | null): string {
   if (timeZone === null || timeZone === UTC_TIME_ZONE)
     return translateMessage({
       defaultMessage: 'UTC',
@@ -133,7 +137,7 @@ export function shortTimeZoneLabel(timeZone?: Dynamic) {
     });
   return longTimeZoneName(timeZone) ?? timeZone;
 }
-export function timeZoneLabel(timeZone?: Dynamic) {
+export function timeZoneLabel(timeZone: string): string {
   if (timeZone === UTC_TIME_ZONE)
     return translateMessage({
       defaultMessage: 'UTC (Coordinated Universal Time)',
@@ -153,14 +157,14 @@ export function timeZoneLabel(timeZone?: Dynamic) {
     },
   );
 }
-export function timeZoneOptions(timeZones?: Dynamic, browserTimeZone2?: Dynamic, workbookTimeZone?: Dynamic) {
-  let others = new (Set as Dynamic)([...(workbookTimeZone === null ? [] : [workbookTimeZone]), ...timeZones]);
-  if (browserTimeZone2 === null) return sortedTimeZoneOptions(others);
-  others.delete(browserTimeZone2);
+export function timeZoneOptions(timeZones: readonly string[], browserTimeZone: string | null, workbookTimeZone: string | null): ComboboxOption[] {
+  let others = new Set([...(workbookTimeZone === null ? [] : [workbookTimeZone]), ...timeZones]);
+  if (browserTimeZone === null) return sortedTimeZoneOptions(others);
+  others.delete(browserTimeZone);
   let [firstOther, ...restOthers] = sortedTimeZoneOptions(others);
   return [
     {
-      ...timeZoneOption(browserTimeZone2),
+      ...timeZoneOption(browserTimeZone),
       groupLabelBefore: timeZoneMessages.yourTimeZone(),
     },
     ...(firstOther === undefined
@@ -175,17 +179,17 @@ export function timeZoneOptions(timeZones?: Dynamic, browserTimeZone2?: Dynamic,
   ];
 }
 export const UTC_TIME_ZONE = 'UTC';
-export const isEtcTimeZone = (timeZone?: Dynamic) => timeZone.startsWith('Etc/');
-export const pickedOrWorkbookSetting = (pickForWorkbook?: Dynamic) =>
+export const isEtcTimeZone = (timeZone: string) => timeZone.startsWith('Etc/');
+export const pickedOrWorkbookSetting = (pickForWorkbook: PickForWorkbook): string =>
   pickForWorkbook.picked ??
   (pickForWorkbook.of === 'locale' ? pickForWorkbook.ofWorkbook : (pickForWorkbook.ofWorkbook ?? pickForWorkbook.ofBrowser ?? UTC_TIME_ZONE));
-export const isWorkbookSettingChanged = (pickForWorkbook?: Dynamic) =>
+export const isWorkbookSettingChanged = (pickForWorkbook: PickForWorkbook) =>
   pickedOrWorkbookSetting(pickForWorkbook) !== pickForWorkbook.ofWorkbook;
 export const timeZoneMessages = {
   timeZone: () =>
     translateMessage({
       defaultMessage: 'Time zone',
-      id: '91sDcgwHmb',
+      id: 'fQmcSvptdF',
     }),
   whatGoesByIt: () =>
     translateMessage({
@@ -203,9 +207,9 @@ export const timeZoneMessages = {
       id: 'dPC9M2UHPO',
     }),
 };
-export const longTimeZoneNameCache = new (Map as Dynamic)();
-export const cityOfTimeZone = (timeZone?: Dynamic) => timeZone.slice(timeZone.lastIndexOf('/') + 1).replaceAll('_', ' ');
-export const timeZoneSetText = (timeZone?: Dynamic) =>
+export const longTimeZoneNameCache = new Map<string, string | null>();
+export const cityOfTimeZone = (timeZone: string) => timeZone.slice(timeZone.lastIndexOf('/') + 1).replaceAll('_', ' ');
+export const timeZoneSetText = (timeZone: string) =>
   translateMessage(
     {
       defaultMessage: 'Time zone set to {timeZone}',
@@ -215,8 +219,8 @@ export const timeZoneSetText = (timeZone?: Dynamic) =>
       timeZone: timeZoneLabel(timeZone),
     },
   );
-export const timeZoneOption = (timeZone?: Dynamic) => ({
+export const timeZoneOption = (timeZone: string): ComboboxOption => ({
   value: timeZone,
   label: timeZoneLabel(timeZone),
 });
-export const sortedTimeZoneOptions = (timeZones?: Dynamic) => sortByLabel(Array.from<Dynamic, Dynamic>(timeZones, timeZoneOption));
+export const sortedTimeZoneOptions = (timeZones: Iterable<string>) => sortByLabel(Array.from(timeZones, timeZoneOption));

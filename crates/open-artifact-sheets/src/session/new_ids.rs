@@ -14,7 +14,7 @@
 
 use crate::formula::Reference;
 use crate::workbook::load::Op;
-use crate::workbook::objects::{RangeOnASheet, ViewElement};
+use crate::workbook::objects::RangeOnASheet;
 use crate::workbook::Input;
 
 /// Whether every id the operations bring in is well formed.
@@ -45,12 +45,17 @@ fn op_is_well_formed(op: &Op) -> bool {
         }
         Op::SetViews { views } => views.iter().all(|v| {
             is_id(&v.view_id, "viw")
-                && v.view.iter().flat_map(|v| &v.elements).all(|ViewElement::Widget { element_id, inputs, .. }| {
+                && v.view.iter().flat_map(|v| &v.elements).all(|element| {
+                    let (element_id, _, inputs) = element.parts();
                     is_id(element_id, "vel") && inputs.iter().all(|i| range_is_well_formed(&i.range))
                 })
         }),
         Op::SetPlacements { placements, .. } => placements.iter().all(|p| is_id(&p.placement_id, "plc")),
         Op::SetCellTables { cell_tables, .. } => cell_tables.iter().all(|t| is_id(&t.cell_table_id, "ctb")),
+        Op::SetNamedViews { named_views, .. } => named_views.iter().all(|entry| {
+            is_id(&entry.named_view_id, "nvw")
+                && entry.named_view.as_ref().is_none_or(|view| is_id(&view.cell_table_id, "ctb"))
+        }),
         _ => true,
     }
 }

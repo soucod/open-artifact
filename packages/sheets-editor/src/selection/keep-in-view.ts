@@ -45,7 +45,7 @@ export function shownExtentOfArea(area: CellArea, view: PageState, layout: GridL
     ...view,
     gridHeight: COLUMN_HEADER_HEIGHT + cellsHeightAboveFloats(withRoom),
   };
-  let { across: across, down: down } = rangeSpansOnScreen(area, view, layout, view);
+  let { across, down } = rangeSpansOnScreen(area, view, layout, view);
   return {
     across: shownLengthOf(across),
     down: shownLengthOf(down),
@@ -60,7 +60,7 @@ export function keepKeyedCellClearOfStuckHeaders(tablesBefore: PageState['tables
   };
   let active = book.positionOfCell(after.activeCell);
   let merged = mergedAreaOrCellOf(book, after.activeCell);
-  let { leftByKeyAt: leftByKeyAt } = after;
+  let { leftByKeyAt } = after;
   let isUnscrolledSinceKey = leftByKeyAt?.scrollTop === after.scrollTop && leftByKeyAt.scrollLeft === after.scrollLeft;
   if (active === null || merged === null || !isUnscrolledSinceKey || isAutoScrollHeld(after)) return after;
   let layout = layoutOfView(after, book);
@@ -82,17 +82,17 @@ export function keepKeyedCellClearOfStuckHeaders(tablesBefore: PageState['tables
     : after;
 }
 export function keepKeyedSelectionShown(view: PageState, book: ReadsWithTextMeasurer): PageState {
-  let { leftByKeyAt: leftByKeyAt, dragging: dragging } = view;
+  let { leftByKeyAt, dragging } = view;
   if (!(leftByKeyAt?.scrollTop === view.scrollTop && leftByKeyAt.scrollLeft === view.scrollLeft) || dragging !== null) return view;
   let shown = scrollToShowEnlargedEditor(scrollToShowSelection(view, book), book, 'key');
-  let { scrollLeft: scrollLeft, scrollTop: scrollTop } = shown;
+  let { scrollLeft, scrollTop } = shown;
   return {
     ...view,
-    scrollLeft: scrollLeft,
-    scrollTop: scrollTop,
+    scrollLeft,
+    scrollTop,
     leftByKeyAt: {
-      scrollLeft: scrollLeft,
-      scrollTop: scrollTop,
+      scrollLeft,
+      scrollTop,
     },
   };
 }
@@ -161,7 +161,7 @@ export function keepActiveCellInViewOnResize(before: PageState, after: PageState
     shownExtentOfArea(mergedAfter, after, layoutAfter),
   ];
   let { left: leftEdge, top: topEdge, right: rightEdge, bottom: bottomEdge } = boxOfCellRange(mergedAfter, layoutAfter);
-  let { across: across, down: down } = rangeSpansOnScreen(mergedAfter, after, layoutAfter, after);
+  let { across, down } = rangeSpansOnScreen(mergedAfter, after, layoutAfter, after);
   let axes = {
     columns:
       isNarrower &&
@@ -175,7 +175,7 @@ export function keepActiveCellInViewOnResize(before: PageState, after: PageState
   return scrollToShowPosition(after, book, active, axes, 'key');
 }
 export function scrollsForLessRoomStill(view: Pick<PageState, 'scrolledForLessRoom' | 'sheetId' | 'scrollLeft' | 'scrollTop' | 'gridWidth' | 'gridHeight'>): ScrollsForLessRoomStill {
-  let { across: across = null, down: down = null, sheetId: sheetId }: Partial<ScrollsForLessRoom> = view.scrolledForLessRoom ?? {};
+  let { across = null, down = null, sheetId }: Partial<ScrollsForLessRoom> = view.scrolledForLessRoom ?? {};
   let stillHolds = (scrolled: ScrollForLessRoom | null, scroll: number, room: number): ScrollForLessRoom | null =>
     scrolled !== null && sheetId === view.sheetId && scrolled.at === scroll && scroll <= scrollKeepingEndShown(scrolled, room) ? scrolled : null;
   return {
@@ -186,17 +186,17 @@ export function scrollsForLessRoomStill(view: Pick<PageState, 'scrolledForLessRo
 export function scrolledForLessRoomToKeep(
   view: Pick<PageState, 'scrolledForLessRoom' | 'sheetId' | 'scrollLeft' | 'scrollTop' | 'gridWidth' | 'gridHeight'>,
 ): ScrollsForLessRoom | null {
-  let { across: across, down: down } = scrollsForLessRoomStill(view);
+  let { across, down } = scrollsForLessRoomStill(view);
   return across === null && down === null
     ? null
     : {
         sheetId: view.sheetId,
-        across: across,
-        down: down,
+        across,
+        down,
       };
 }
 export function giveBackScrollForMoreRoom(before: PageState, after: PageState, book: ReadsWithTextMeasurer): PageState {
-  let { across: across, down: down } = scrollsForLessRoomStill(before);
+  let { across, down } = scrollsForLessRoomStill(before);
   if (isAutoScrollHeld(after) || (across === null && down === null)) return after;
   let givenBack = {
     ...after,
@@ -224,7 +224,7 @@ export function scrollForLessRoomOnAxis(scrolled: ScrollForLessRoom | null, scro
   let from = scrolled?.from ?? scrollBefore;
   if (scrollAfter <= from) return null;
   return {
-    from: from,
+    from,
     end: Math.max(scrolled?.end ?? 0, scrollAfter + room),
     at: scrollAfter,
   };
@@ -238,8 +238,8 @@ export function noteScrollForLessRoom(before: PageState, unscrolled: GridScroll,
       ...after,
       scrolledForLessRoom: {
         sheetId: after.sheetId,
-        across: across,
-        down: down,
+        across,
+        down,
       },
     };
   return before.scrolledForLessRoom?.sheetId === after.sheetId
@@ -293,14 +293,14 @@ export function keepActiveCellAboveCardAtFoot(before: PageState, after: PageStat
     ...after,
     gridHeight: after.gridHeight - withRoomUnderNoticesAtFoot(after, book).heightUnderWhatFloats,
   };
-  let { down: down } = rangeSpansOnScreen(merged, revealed, layoutOfView(after, book), roomAbove);
+  let { down } = rangeSpansOnScreen(merged, revealed, layoutOfView(after, book), roomAbove);
   return Math.min(down.end, down.showTo) - Math.max(down.start, down.showFrom) >= Math.min(DEFAULT_ROW_HEIGHT, down.end - down.start) / 2
     ? revealed
     : after;
 }
 export const canBeBroughtIntoView = (size: number, room: number, run: StartAndEnd & ShownStretch): boolean =>
   size <= room || (room > 0 && !isSpanInSight(run));
-export const shownLengthOf = ({ start: start, end: end, showFrom: showFrom, showTo: showTo }: StartAndEnd & ShownStretch): number =>
+export const shownLengthOf = ({ start, end, showFrom, showTo }: StartAndEnd & ShownStretch): number =>
   Math.max(0, Math.min(end, showTo) - Math.max(start, showFrom));
 export const isAutoScrollHeld = (view: PageState): boolean =>
   view.mode.kind === 'editing' ||
@@ -310,4 +310,4 @@ export const isAutoScrollHeld = (view: PageState): boolean =>
   (view.shownByAgent?.place ?? null) !== null ||
   view.placementSelected !== null ||
   view.caretAtEnd !== null;
-export const scrollKeepingEndShown = ({ from: from, end: end }: Pick<ScrollForLessRoom, 'from' | 'end'>, room: number): number => Math.max(from, end - room);
+export const scrollKeepingEndShown = ({ from, end }: Pick<ScrollForLessRoom, 'from' | 'end'>, room: number): number => Math.max(from, end - room);

@@ -13,8 +13,9 @@ use crate::workbook::objects::CellTable;
 use crate::workbook::{Sheet, Workbook};
 
 mod cell_tables;
-mod duplicate;
+pub(super) mod duplicate;
 mod import;
+mod move_columns;
 pub(crate) mod into_sheet;
 mod sort;
 
@@ -77,6 +78,15 @@ pub enum Edit {
         direction: Direction,
         #[serde(default)]
         then_by: Vec<FurtherKey>,
+    },
+    #[serde(rename_all = "camelCase")]
+    MoveColumnsOfCells {
+        cells: CellsBetween,
+        one_column: String,
+        other_column: String,
+        #[serde(deserialize_with = "crate::workbook::layout::written::maybe_null")]
+        after_column: Option<String>,
+        widths_go_along: bool,
     },
     #[serde(rename_all = "camelCase")]
     DeclareCellTable {
@@ -207,6 +217,9 @@ pub fn make(workbook: &Workbook, edit: Edit, context: &Context) -> Result<Made, 
         Edit::SortCells { cells, by_column, direction, then_by } => {
             let keys = keys(by_column, direction, then_by);
             sort::sort_cells(workbook, &cells.sheet_id, &cells.one_corner, &cells.other_corner, &keys, context.code)
+        }
+        Edit::MoveColumnsOfCells { cells, one_column, other_column, after_column, widths_go_along } => {
+            move_columns::make(workbook, &cells, &one_column, &other_column, after_column.as_deref(), widths_go_along)
         }
         Edit::DeclareCellTable { sheet_id, cell_table, .. } => {
             cell_tables::declare(workbook, sheet_id, cell_table, context.code)

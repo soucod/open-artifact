@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, type ReactNode } from 'react';
 import { Loader2, Plus, Presentation, TriangleAlert } from 'lucide-react';
-import { Button, EmptyState } from '@open-artifact/ui';
+import { Button, CrashBoundary, EmptyState } from '@open-artifact/ui';
 import { useDeck } from './state/deck.ts';
 import { useOrder } from './state/outline.ts';
 import { useView } from './state/view.ts';
@@ -29,6 +29,7 @@ import { startShellBridge } from './services/shell.ts';
 import { loadDeck } from './services/sync.ts';
 import { syncDeckFonts } from './render/fonts.ts';
 import { Banners, useRecoveryOffer } from './components/Banners.tsx';
+import { CrashCard } from './components/CrashCard.tsx';
 import { CreationAnnouncer, CreationStatus, CreationView } from './components/Creation.tsx';
 import { Dialogs } from './components/Dialogs.tsx';
 import { FindBar } from './components/FindBar.tsx';
@@ -36,6 +37,7 @@ import { Rail } from './components/Rail.tsx';
 import { Stage } from './components/Stage.tsx';
 import { StageChrome } from './components/StageChrome.tsx';
 import { TipGroup } from '@open-artifact/editor-kit/react';
+import { guardFileDrops } from '@open-artifact/editor-kit';
 import { CommentList } from './components/comments/CommentList.tsx';
 import { PropertiesPanel } from './components/properties/PropertiesPanel.tsx';
 import { Presenter } from './components/present/Presenter.tsx';
@@ -117,9 +119,11 @@ export function App(): ReactNode {
     }
     const keyboard = installKeyboard();
     const clipboard = installClipboard();
+    const drops = guardFileDrops(window);
     return () => {
       keyboard();
       clipboard();
+      drops();
     };
   }, []);
 
@@ -168,25 +172,27 @@ export function App(): ReactNode {
   const railShown = mode === 'edit' && showRail && !empty;
 
   return (
-    <TipGroup>
-      <div className="flex h-full bg-stage text-fg">
-        {railShown ? <Rail /> : null}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <Banners />
-          <main className="relative flex min-h-0 min-w-0 flex-1">
-            {mode === 'edit' ? empty ? <EmptyDeck /> : <Stage /> : mode === 'grid' ? <GridView /> : <CanvasView />}
-            <StageChrome onStage={onStage && !empty} startCard={!railShown} />
-            <FindBar />
-            <CreationStatus />
-            <CreationAnnouncer />
-          </main>
+    <CrashBoundary fallback={<CrashCard />}>
+      <TipGroup>
+        <div className="flex h-full bg-stage text-fg">
+          {railShown ? <Rail /> : null}
+          <div className="flex min-w-0 flex-1 flex-col">
+            <Banners />
+            <main className="relative flex min-h-0 min-w-0 flex-1">
+              {mode === 'edit' ? empty ? <EmptyDeck /> : <Stage /> : mode === 'grid' ? <GridView /> : <CanvasView />}
+              <StageChrome onStage={onStage && !empty} startCard={!railShown} />
+              <FindBar />
+              <CreationStatus />
+              <CreationAnnouncer />
+            </main>
+          </div>
+          {onStage && showProperties && !empty ? <PropertiesPanel /> : null}
+          <CommentList />
+          <Dialogs />
+          <HistoryDialog />
+          <Presenter />
         </div>
-        {onStage && showProperties && !empty ? <PropertiesPanel /> : null}
-        <CommentList />
-        <Dialogs />
-        <HistoryDialog />
-        <Presenter />
-      </div>
-    </TipGroup>
+      </TipGroup>
+    </CrashBoundary>
   );
 }

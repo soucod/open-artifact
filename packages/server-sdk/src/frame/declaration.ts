@@ -4,19 +4,19 @@
  * line comment `// artifact.json` and declares
  * `var key = "<type key>"; var capabilities = {...}; var monitoring = {...};`
  * in some order (a type may leave capabilities out). Only that block is read:
- * it ends at the next line comment. The literals are evaluated in an empty V8
- * context with a short timeout, never in this process's realm.
+ * it ends at the next line comment (`declarationSource` in the protocol, which
+ * `open-artifact types check` reads too). It is read as literal data
+ * (`parseLiteralDeclarations`), never run: nothing from a type folder is
+ * evaluated in Node, so an installed type's page is read the same way as a
+ * built-in one's.
  */
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import vm from 'node:vm';
+import { declarationSource, parseLiteralDeclarations, type CapabilityDecl } from '@open-artifact/protocol';
 
-const MARKER = '// artifact.json';
-const NAMES = ['key', 'capabilities', 'monitoring'] as const;
-
-/** A capability's declared config: `true`, or an object of options. */
-export type CapabilityDecl = boolean | Record<string, unknown>;
+export { DECLARATION_LINE } from '@open-artifact/protocol';
+export type { CapabilityDecl } from '@open-artifact/protocol';
 
 export interface Declaration {
   /** The type key, when the block names one. */
@@ -26,39 +26,30 @@ export interface Declaration {
   monitoring: Record<string, unknown>;
 }
 
-/** Whether `html` carries an inline declaration at all (a line of its own). */
-export const DECLARATION_LINE = /(^|\n)[ \t]*\/\/ artifact\.json[ \t]*\r?\n/;
-
-/** The declaration in a type's index.html, or null when the page carries none. Throws when the block does not evaluate. */
+/**
+ * The declaration in a type's index.html, or null when the page carries none. Only `var` bindings count (a `let` or
+ * `const` is not a global of the page, and `types check` flags it); the last initialized one of a name wins, as when the
+ * block runs. Throws when the block is not literal data.
+ */
 export function parseDeclaration(html: string): Declaration | null {
-  const at = html.indexOf(MARKER);
-  if (at < 0) return null;
-  const from = at + MARKER.length;
-  const next = /\n[ \t]*\/\/ /g;
-  next.lastIndex = from;
-  const stop = next.exec(html);
-  const block = html.slice(from, stop ? stop.index : Math.min(html.length, from + 64 * 1024));
-  const sandbox = Object.create(null) as Record<string, unknown>;
+  const found = declarationSource(html);
+  if (!found) return null;
+  const values = new Map<string, unknown>();
   try {
-    vm.runInNewContext(block, sandbox, { timeout: 250, displayErrors: false, contextCodeGeneration: { strings: false, wasm: false } });
-  } catch (error) {
-    throw new Error(`The artifact.json block of index.html does not evaluate: ${(error as Error)?.message ?? error}`);
-  }
-  const out: Record<string, unknown> = {};
-  for (const name of NAMES) {
-    let value = sandbox[name];
-    // Plain data only, in this realm.
-    try {
-      value = value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
-    } catch {
-      value = undefined;
+    for (const b of parseLiteralDeclarations(found.source, html.slice(0, found.offset))) {
+      if (b.kind !== 'var') continue;
+      if (b.initialized || !values.has(b.name)) values.set(b.name, b.value);
     }
-    out[name] = value;
+  } catch (error) {
+    throw new Error(`The artifact.json block of index.html is not literal data: ${(error as Error)?.message ?? error}`);
   }
+  const key = values.get('key');
+  const capabilities = values.get('capabilities');
+  const monitoring = values.get('monitoring');
   return {
-    key: typeof out.key === 'string' ? out.key : null,
-    capabilities: isObject(out.capabilities) ? (out.capabilities as Record<string, CapabilityDecl>) : {},
-    monitoring: isObject(out.monitoring) ? out.monitoring : {},
+    key: typeof key === 'string' ? key : null,
+    capabilities: isObject(capabilities) ? (capabilities as Record<string, CapabilityDecl>) : {},
+    monitoring: isObject(monitoring) ? monitoring : {},
   };
 }
 

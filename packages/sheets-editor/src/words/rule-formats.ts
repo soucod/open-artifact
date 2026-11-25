@@ -1,12 +1,36 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Color, FontOfACondition, FormatOfACondition, Hue, Shade } from '@open-artifact/sheets-core';
+import type { PhraseFound, TypedWord } from './tokens.ts';
 import { wordsMatchAt } from './tokens.ts';
 import { TABLE_SUBJECT_NOUNS, TASK_NOUNS, ROW_NOUNS } from './vocabulary.ts';
-export function readFormatPartAt(words?: Dynamic, at2?: Dynamic) {
-  let [word, nextWord] = [words[at2], words[at2 + 1]];
+export type FontStyle = 'bold' | 'italic' | 'underline' | 'strikethrough';
+/** A part of a format the words name: a font style, or a hue for the text, the fill, or both (`tint`). */
+export type FormatPart = { kind: FontStyle } | { kind: 'text' | 'fill' | 'tint'; hue: Hue };
+/** Format parts named at the start of the words, and where the words go on. */
+export interface FormatReadingAtStart {
+  from: number;
+  parts: FormatPart[];
+}
+/** Format parts named at the end of the words, and where they start. */
+export interface FormatReadingAtEnd {
+  to: number;
+  parts: FormatPart[];
+}
+/** Format parts named in the middle of the words, before a word like `where`, and the words that name them. */
+export interface FormatReadingInMiddle {
+  words: TypedWord[];
+  parts: FormatPart[];
+}
+/** Words that could not be read as a rule, and whether they may still be on their way to one. */
+export interface RuleWordsNotRead {
+  kind: 'notRead';
+  isOnItsWay: boolean;
+}
+export function readFormatPartAt(words: readonly TypedWord[], at: number): PhraseFound<FormatPart> | null {
+  const [word, nextWord] = [words[at], words[at + 1]];
   if (!isUnquotedWord(word)) return null;
-  for (let [phrase, style] of FONT_STYLE_PHRASES as Dynamic) {
-    let phraseWords = phrase.split(' ');
-    if (wordsMatchAt(words, at2, phraseWords) && phraseWords.length === 2)
+  for (const [phrase, style] of FONT_STYLE_PHRASES) {
+    const phraseWords = phrase.split(' ');
+    if (wordsMatchAt(words, at, phraseWords) && phraseWords.length === 2)
       return {
         meant: {
           kind: style,
@@ -14,7 +38,7 @@ export function readFormatPartAt(words?: Dynamic, at2?: Dynamic) {
         wordCount: 2,
       };
   }
-  let styleWord = FONT_STYLE_PHRASES.find(([phrase]: Dynamic) => phrase === word.plain);
+  const styleWord = FONT_STYLE_PHRASES.find(([phrase]) => phrase === word.plain);
   if (styleWord !== undefined)
     return {
       meant: {
@@ -22,41 +46,41 @@ export function readFormatPartAt(words?: Dynamic, at2?: Dynamic) {
       },
       wordCount: 1,
     };
-  let nextPlain = isUnquotedWord(nextWord) ? nextWord.plain : '';
+  const nextPlain = isUnquotedWord(nextWord) ? nextWord.plain : '';
   if (TEXT_COLOR_WORDS.has(word.plain) || FILL_WORDS.has(word.plain)) {
-    let phrase = HUE_WORDS.get(nextPlain);
-    let style = TEXT_COLOR_WORDS.has(word.plain) ? 'text' : 'fill';
-    return phrase === undefined
+    const hue = HUE_WORDS.get(nextPlain);
+    const colorKind = TEXT_COLOR_WORDS.has(word.plain) ? 'text' : 'fill';
+    return hue === undefined
       ? null
       : {
           meant: {
-            kind: style,
-            hue: phrase,
+            kind: colorKind,
+            hue,
           },
           wordCount: 2,
         };
   }
-  let paleWordCount = PALE_WORDS.has(word.plain) ? 1 : 0;
-  let hueWord = words[at2 + paleWordCount];
-  let hue = isUnquotedWord(hueWord) ? HUE_WORDS.get(hueWord.plain) : undefined;
+  const paleWordCount = PALE_WORDS.has(word.plain) ? 1 : 0;
+  const hueWord = words[at + paleWordCount];
+  const hue = isUnquotedWord(hueWord) ? HUE_WORDS.get(hueWord.plain) : undefined;
   if (hue === undefined) return null;
-  let wordAfterHue = words[at2 + paleWordCount + 1];
-  let plainAfterHue = isUnquotedWord(wordAfterHue) ? wordAfterHue.plain : '';
-  let kind = TEXT_COLOR_WORDS.has(plainAfterHue) ? 'text' : FILL_WORDS.has(plainAfterHue) ? 'fill' : 'tint';
+  const wordAfterHue = words[at + paleWordCount + 1];
+  const plainAfterHue = isUnquotedWord(wordAfterHue) ? wordAfterHue.plain : '';
+  const kind = TEXT_COLOR_WORDS.has(plainAfterHue) ? 'text' : FILL_WORDS.has(plainAfterHue) ? 'fill' : 'tint';
   return {
     meant: {
-      kind: kind,
-      hue: hue,
+      kind,
+      hue,
     },
     wordCount: paleWordCount + (kind === 'tint' ? 1 : 2),
   };
 }
-export function readFormatPartsAt(words?: Dynamic, from?: Dynamic) {
-  let readings: Dynamic = [];
-  let [at, parts]: Dynamic = [from, []];
+export function readFormatPartsAt(words: readonly TypedWord[], from: number): PhraseFound<FormatPart[]>[] {
+  const readings: PhraseFound<FormatPart[]>[] = [];
+  let [at, parts]: [number, FormatPart[]] = [from, []];
   for (;;) {
-    let partAt = parts.length > 0 && FORMAT_PART_JOINERS.has(words[at]?.plain ?? '') ? at + 1 : at;
-    let part = readFormatPartAt(words, partAt);
+    const partAt = parts.length > 0 && FORMAT_PART_JOINERS.has(words[at]?.plain ?? '') ? at + 1 : at;
+    const part = readFormatPartAt(words, partAt);
     if (part === null || parts.length === MOST_FORMAT_PARTS) return readings;
     [at, parts] = [partAt + part.wordCount, [...parts, part.meant]];
     readings.push({
@@ -65,23 +89,23 @@ export function readFormatPartsAt(words?: Dynamic, from?: Dynamic) {
     });
   }
 }
-export function formatOfParts(parts?: Dynamic) {
-  let fillColors = parts.flatMap(
-    (part?: Dynamic) => (part.kind === 'tint' || part.kind === 'fill' ? [standardFormatColor(part.hue, 100)] : []),
+export function formatOfParts(parts: FormatPart[]): FormatOfACondition | null {
+  const fillColors = parts.flatMap(
+    (part) => (part.kind === 'tint' || part.kind === 'fill' ? [standardFormatColor(part.hue, 100)] : []),
   );
-  let textColors = parts.flatMap(
-    (part?: Dynamic) =>
+  const textColors = parts.flatMap(
+    (part) =>
       part.kind === 'tint' ? [standardFormatColor(part.hue, 800)] : part.kind === 'text' ? [standardFormatColor(part.hue, 600)] : [],
   );
-  let hasPart = (kind?: Dynamic) => parts.some((part?: Dynamic) => part.kind === kind);
+  const hasPart = (kind: FormatPart['kind']) => parts.some((part) => part.kind === kind);
   if (
     fillColors.length > 1 ||
     textColors.length > 1 ||
-    new (Set as Dynamic)(parts.map(({ kind: kind }: Dynamic) => kind)).size < parts.length
+    new Set(parts.map(({ kind }) => kind)).size < parts.length
   )
     return null;
-  let [[fillColor], [textColor]] = [fillColors, textColors];
-  let font = {
+  const [[fillColor], [textColor]] = [fillColors, textColors];
+  const font: FontOfACondition = {
     ...(textColor !== undefined && {
       color: textColor,
     }),
@@ -100,32 +124,32 @@ export function formatOfParts(parts?: Dynamic) {
   };
   return {
     ...(fillColor !== undefined && {
-      fillColor: fillColor,
+      fillColor,
     }),
     ...(Object.keys(font).length > 0 && {
-      font: font,
+      font,
     }),
   };
 }
-export function formatPartsAtStart(words?: Dynamic) {
-  let start: Dynamic = 0;
-  for (let found: Dynamic; (found = POLITE_OPENINGS.find((phrase?: Dynamic) => wordsMatchAt(words, start, phrase))) !== undefined; )
-    start += found.length;
-  let readings = [
+export function formatPartsAtStart(words: readonly TypedWord[]): FormatReadingAtStart[] {
+  let start = 0;
+  for (let opening: string[] | undefined; (opening = POLITE_OPENINGS.find((phrase) => wordsMatchAt(words, start, phrase))) !== undefined; )
+    start += opening.length;
+  const readings: FormatReadingAtStart[] = [
     {
       from: start,
       parts: [],
     },
   ];
-  let addReading = (from?: Dynamic, parts?: Dynamic) => {
+  const addReading = (from: number, parts: FormatPart[]) => {
     readings.push({
-      from: from,
-      parts: parts,
+      from,
+      parts,
     });
     if (CONDITION_OPENERS.has(words[from]?.plain ?? ''))
       readings.push({
         from: from + 1,
-        parts: parts,
+        parts,
       });
   };
   if (CONDITION_OPENERS.has(words[start]?.plain ?? ''))
@@ -133,64 +157,64 @@ export function formatPartsAtStart(words?: Dynamic) {
       from: start + 1,
       parts: [],
     });
-  for (let { meant: found, wordCount: wordCount } of readFormatPartsAt(words, start) as Dynamic) addReading(start + wordCount, found);
-  for (let [found, wordCount] of FORMAT_VERB_PHRASES as Dynamic) if (wordsMatchAt(words, start, found)) addReading(start + found.length, [wordCount]);
-  let word = words[start];
+  for (const { meant: parts, wordCount } of readFormatPartsAt(words, start)) addReading(start + wordCount, parts);
+  for (const [verbPhrase, part] of FORMAT_VERB_PHRASES) if (wordsMatchAt(words, start, verbPhrase)) addReading(start + verbPhrase.length, [part]);
+  const word = words[start];
   if (isUnquotedWord(word) && (FORMAT_VERBS.has(word.plain) || word.plain === 'fill')) {
-    let found: Dynamic = start + 1;
-    while (['the', 'it', 'them', 'all'].includes(words[found]?.plain ?? '')) found += 1;
-    addReading(found, []);
-    for (let { meant: wordCount, wordCount: partsWordCount } of readFormatPartsAt(words, found) as Dynamic)
-      addReading(found + partsWordCount, wordCount);
+    let afterVerb = start + 1;
+    while (['the', 'it', 'them', 'all'].includes(words[afterVerb]?.plain ?? '')) afterVerb += 1;
+    addReading(afterVerb, []);
+    for (const { meant: parts, wordCount: partsWordCount } of readFormatPartsAt(words, afterVerb))
+      addReading(afterVerb + partsWordCount, parts);
   }
   return readings;
 }
-export function formatPartsAtEnd(words?: Dynamic) {
-  let end: Dynamic = words.length;
+export function formatPartsAtEnd(words: readonly TypedWord[]): FormatReadingAtEnd[] {
+  let end = words.length;
   while (end > 0 && words[end - 1]?.plain === 'please') end -= 1;
-  let readings = [
+  const readings: FormatReadingAtEnd[] = [
     {
       to: end,
       parts: [],
     },
   ];
-  for (let at: Dynamic = end - 1; at >= 0; at -= 1)
-    for (let { meant: parts, wordCount: wordCount } of readFormatPartsAt(words, at) as Dynamic) {
+  for (let at = end - 1; at >= 0; at -= 1)
+    for (const { meant: parts, wordCount } of readFormatPartsAt(words, at)) {
       if (at + wordCount !== end) continue;
       readings.push({
         to: at,
-        parts: parts,
+        parts,
       });
-      for (let leadIn of FORMAT_LEAD_INS as Dynamic)
+      for (const leadIn of FORMAT_LEAD_INS)
         if (at >= leadIn.length && wordsMatchAt(words, at - leadIn.length, leadIn))
           readings.push({
             to: at - leadIn.length,
-            parts: parts,
+            parts,
           });
     }
   return readings;
 }
-export function formatPartsInMiddle(words?: Dynamic) {
-  let readings = [
+export function formatPartsInMiddle(words: readonly TypedWord[]): FormatReadingInMiddle[] {
+  const readings: FormatReadingInMiddle[] = [
     {
       words: [],
       parts: [],
     },
   ];
-  for (let at: Dynamic = 1; at < words.length - 1; at += 1)
-    for (let { meant: parts, wordCount: wordCount } of readFormatPartsAt(words, at) as Dynamic)
+  for (let at = 1; at < words.length - 1; at += 1)
+    for (const { meant: parts, wordCount } of readFormatPartsAt(words, at))
       if (RELATIVE_PRONOUNS.has(words[at + wordCount]?.plain ?? ''))
         readings.push({
           words: words.slice(at, at + wordCount),
-          parts: parts,
+          parts,
         });
   return readings;
 }
-export const FORMAT_PARTS_NOT_READ = {
+export const FORMAT_PARTS_NOT_READ: RuleWordsNotRead = {
   kind: 'notRead',
   isOnItsWay: false,
 };
-export const HUE_WORDS = new (Map as Dynamic)([
+export const HUE_WORDS = new Map<string, Hue>([
   ['gray', 'gray'],
   ['grey', 'gray'],
   ['red', 'red'],
@@ -203,7 +227,7 @@ export const HUE_WORDS = new (Map as Dynamic)([
   ['magenta', 'magenta'],
   ['pink', 'magenta'],
 ]);
-export const FONT_STYLE_PHRASES = [
+export const FONT_STYLE_PHRASES: [phrase: string, style: FontStyle][] = [
   ['bold', 'bold'],
   ['bolded', 'bold'],
   ['italic', 'italic'],
@@ -215,22 +239,22 @@ export const FONT_STYLE_PHRASES = [
   ['struck through', 'strikethrough'],
   ['crossed out', 'strikethrough'],
 ];
-export const TEXT_COLOR_WORDS = new (Set as Dynamic)(['text', 'font', 'letters']);
-export const FILL_WORDS = new (Set as Dynamic)(['background', 'fill', 'highlight']);
-export const PALE_WORDS = new (Set as Dynamic)(['light', 'pale']);
-export const isUnquotedWord = (word?: Dynamic) => word !== undefined && !word.isInQuotes;
-export const FORMAT_PART_JOINERS = new (Set as Dynamic)(['and', ',', 'with']);
+export const TEXT_COLOR_WORDS = new Set<string>(['text', 'font', 'letters']);
+export const FILL_WORDS = new Set<string>(['background', 'fill', 'highlight']);
+export const PALE_WORDS = new Set<string>(['light', 'pale']);
+export const isUnquotedWord = (word: TypedWord | undefined): boolean => word !== undefined && !word.isInQuotes;
+export const FORMAT_PART_JOINERS = new Set<string>(['and', ',', 'with']);
 export const MOST_FORMAT_PARTS = 7;
-export const standardFormatColor = (hue?: Dynamic, shade?: Dynamic) => ({
+export const standardFormatColor = (hue: Hue, shade: Shade): Color => ({
   kind: 'standard',
-  hue: hue,
-  shade: shade,
+  hue,
+  shade,
 });
 export const POLITE_OPENINGS = ['please', 'can you', 'could you', 'i want', 'i need', 'id like'].map(
-  (phrase?: Dynamic) => phrase.split(' '),
+  (phrase) => phrase.split(' '),
 );
-export const FORMAT_VERBS = new (Set as Dynamic)('highlight color colour make turn mark flag shade paint format set'.split(' '));
-export const FORMAT_VERB_PHRASES = [
+export const FORMAT_VERBS = new Set<string>('highlight color colour make turn mark flag shade paint format set'.split(' '));
+export const FORMAT_VERB_PHRASES: [words: string[], part: FormatPart][] = [
   [
     ['bold'],
     {
@@ -282,7 +306,7 @@ export const FORMAT_VERB_PHRASES = [
     },
   ],
 ];
-export const CONDITION_OPENERS = new (Set as Dynamic)(['if', 'when', 'whenever', 'where', 'for', 'on']);
+export const CONDITION_OPENERS = new Set<string>(['if', 'when', 'whenever', 'where', 'for', 'on']);
 export const FORMAT_LEAD_INS = [
   'then',
   'in',
@@ -312,9 +336,9 @@ export const FORMAT_LEAD_INS = [
   'marked',
   'marked in',
   'filled with',
-].map((phrase?: Dynamic) => phrase.split(' '));
-export const RELATIVE_PRONOUNS = new (Set as Dynamic)(['where', 'whose', 'if', 'when', 'whenever', 'that', 'which']);
-export const WHOLE_WORDS = new (Set as Dynamic)(['whole', 'entire', 'full']);
-export const RECORD_KIND_NOUNS = new (Set as Dynamic)([...TABLE_SUBJECT_NOUNS, ...TASK_NOUNS]);
-export const CELL_NOUNS = new (Set as Dynamic)(['cell', 'cells', 'value', 'values']);
-export const RULE_PREAMBLE_WORDS = new (Set as Dynamic)([...ROW_NOUNS, ...WHOLE_WORDS, ...CONDITION_OPENERS, ...RELATIVE_PRONOUNS, 'the']);
+].map((phrase) => phrase.split(' '));
+export const RELATIVE_PRONOUNS = new Set<string>(['where', 'whose', 'if', 'when', 'whenever', 'that', 'which']);
+export const WHOLE_WORDS = new Set<string>(['whole', 'entire', 'full']);
+export const RECORD_KIND_NOUNS = new Set<string>([...TABLE_SUBJECT_NOUNS, ...TASK_NOUNS]);
+export const CELL_NOUNS = new Set<string>(['cell', 'cells', 'value', 'values']);
+export const RULE_PREAMBLE_WORDS = new Set<string>([...ROW_NOUNS, ...WHOLE_WORDS, ...CONDITION_OPENERS, ...RELATIVE_PRONOUNS, 'the']);

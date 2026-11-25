@@ -6,8 +6,8 @@
  *
  * Tracked changes are read as if accepted: what was inserted stays, what was deleted goes.
  */
-import { inflateRawSync } from 'node:zlib';
 import { type Block, blockHref, blocksFromJson, type IdSource, imageInfo, TEXT_COLORS, walk } from '@open-artifact/docs-core';
+import { readZip as readSharedZip, ZipError } from '../unzip.ts';
 import { ImportRefusal, type ImportedTab, type ImportImages, type ImportNotes, type Json } from './import.ts';
 
 // ---- the package ---------------------------------------------------------------------------------------------------
@@ -15,26 +15,24 @@ import { ImportRefusal, type ImportedTab, type ImportImages, type ImportNotes, t
 /** The most one entry may expand to, against a file that is mostly a compression trick. */
 const MAX_ENTRY = 256 * 1024 * 1024;
 
+/** The package's parts, each read on demand; the shared zip reader's refusals in a Word import's words. */
 function readZip(bytes: Uint8Array): Map<string, () => Buffer> {
-  const zip = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let parts: Map<string, () => Buffer>;
+  try {
+    parts = readSharedZip(bytes, MAX_ENTRY);
+  } catch (error) {
+    if (error instanceof ZipError) throw new ImportRefusal('not_docx', "This file isn't a Word document: it can't be opened as one.");
+    throw error;
+  }
   const entries = new Map<string, () => Buffer>();
-  let end = zip.length - 22;
-  while (end >= 0 && zip.readUInt32LE(end) !== 0x06054b50) end--;
-  if (end < 0) throw new ImportRefusal('not_docx', "This file isn't a Word document: it can't be opened as one.");
-  const count = zip.readUInt16LE(end + 10);
-  let at = zip.readUInt32LE(end + 16);
-  for (let index = 0; index < count && at + 46 <= zip.length && zip.readUInt32LE(at) === 0x02014b50; index++) {
-    const method = zip.readUInt16LE(at + 10);
-    const packed = zip.readUInt32LE(at + 20);
-    const nameLength = zip.readUInt16LE(at + 28);
-    const local = zip.readUInt32LE(at + 42);
-    const name = zip.toString('utf8', at + 46, at + 46 + nameLength);
-    at += 46 + nameLength + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
+  for (const [name, read] of parts) {
     entries.set(name, () => {
-      if (local + 30 > zip.length || zip.readUInt32LE(local) !== 0x04034b50) throw new ImportRefusal('not_docx', 'This Word file is damaged: one of its parts is missing.');
-      const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
-      const data = zip.subarray(start, start + packed);
-      return method === 0 ? Buffer.from(data) : inflateRawSync(data, { maxOutputLength: MAX_ENTRY });
+      try {
+        return read();
+      } catch (error) {
+        if (error instanceof ZipError) throw new ImportRefusal('not_docx', 'This Word file is damaged: one of its parts is missing.');
+        throw error;
+      }
     });
   }
   return entries;

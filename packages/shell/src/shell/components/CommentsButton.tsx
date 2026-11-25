@@ -11,10 +11,11 @@ import { actionOf, countText, showsComments } from '../model.ts';
  * comments wait ("N open comments"); and a caret whose menu shows the
  * comments list ("Show all comments N") or hides it ("Hide comments").
  */
-export function CommentsButton({ comments, command, readOnly = false }: {
+export function CommentsButton({ comments, command, readOnly = false, disabled = false }: {
   comments: ChromeReport['comments'];
   command: (command: ChromeCommand) => void;
   readOnly?: boolean;
+  disabled?: boolean;
 }) {
   const selection = useShell(state => actionOf(state.report, 'comment_selection'));
   if (!comments || !showsComments({ comments })) return null;
@@ -28,6 +29,7 @@ export function CommentsButton({ comments, command, readOnly = false }: {
         <button
           type="button"
           aria-label={t('comments')}
+          disabled={disabled}
           aria-pressed={readOnly ? comments.open : on}
           className={cn(
             'inline-flex size-8 shrink-0 items-center justify-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg',
@@ -48,6 +50,7 @@ export function CommentsButton({ comments, command, readOnly = false }: {
           <button
             type="button"
             aria-label={t('commentOptions')}
+            disabled={disabled}
             title={t('commentOptions')}
             className="-ml-0.5 inline-flex h-8 w-5 shrink-0 items-center justify-center rounded-control text-fg-muted hover:bg-hover hover:text-fg focus-visible:outline-2 focus-visible:outline-accent data-[popup-open]:bg-hover"
           >

@@ -17,6 +17,7 @@ export function eventEffectOnDrag(message: PageEvent): EffectOnDrag {
     case 'menuClosed':
     case 'costsInMenuAsked':
     case 'tableToSortAsked':
+    case 'whomSortsAreForAsked':
     case 'calendarClosed':
     case 'dropdownShut':
     case 'linkFormShut':
@@ -30,6 +31,9 @@ export function eventEffectOnDrag(message: PageEvent): EffectOnDrag {
     case 'conditionalFormatsActedIn':
     case 'sortPaneAsked':
     case 'sortPaneActedIn':
+    case 'pivotTableAsked':
+    case 'pivotTableUpdateAsked':
+    case 'pivotTablePaneActedIn':
     case 'agentRepliedAboutConditionalFormats':
     case 'agentForConditionalFormatsChecked':
     case 'versionHistoryAsked':
@@ -170,6 +174,8 @@ export function eventEffectOnDrag(message: PageEvent): EffectOnDrag {
     case 'ownFilterLineRemoved':
     case 'ownSortRemoved':
     case 'ownSortMadeForEveryone':
+    case 'namedViewPicked':
+    case 'namedViewsChanged':
     case 'ownFiltersCleared':
     case 'formatAsTableChosen':
     case 'ownFiltersRefreshed':
@@ -197,6 +203,9 @@ export function eventEffectOnDrag(message: PageEvent): EffectOnDrag {
     case 'cellFormatChosen':
     case 'bordersChosen':
     case 'gridlinesToggled':
+    case 'interactiveWrote':
+    case 'interactiveResetChosen':
+    case 'interactiveSaveAsDefaultChosen':
     case 'customNumberFormatTyped':
     case 'typedInListOfNumberFormats':
     case 'customNumberFormatEntered':
@@ -240,6 +249,7 @@ export function eventEffectOnDrag(message: PageEvent): EffectOnDrag {
     case 'figureChosen':
     case 'sheetChosen':
     case 'cellsGoneTo':
+    case 'cellsLinkedTo':
     case 'sheetAddChosen':
     case 'fileToImportRead':
     case 'fileToImportNotRead':

@@ -259,7 +259,7 @@ pub fn of_ops(before: &Workbook, after: &Workbook, ops: &[Op]) -> Place {
         if let Some(sheet_id) = lines_of_sheet(op).filter(|id| forgotten.contains(id)) {
             here = Place::sheet(sheet_id);
         }
-        if matches!(op, Op::MoveRows { .. } | Op::MoveColumns { .. }) {
+        if matches!(op, Op::MoveRows { .. } | Op::ReorderRows { .. } | Op::MoveColumns { .. }) {
             moved = moved.and(here);
             continue;
         }
@@ -391,6 +391,18 @@ fn of_op(before: &Workbook, after: &Workbook, op: &Op) -> Place {
                 None => Place::sheet(sheet_id),
             }
         }
+        Op::ReorderRows { sheet_id, rows, .. } => {
+            let Some(sheet) = sheet_after(sheet_id) else { return Place::Gone(sheet_id.to_string()) };
+            let runs: Vec<IdRun> = rows
+                .ids
+                .iter()
+                .flat_map(|b| b.runs.iter().map(|&(first, count)| IdRun { base: b.base.clone(), first, count }))
+                .collect();
+            match span(lines_of(after, &runs.iter().collect::<Vec<_>>()).into_iter().map(|l| sheet.rows.position(l))) {
+                Some(r) => whole_rows(sheet, r, sheet_id),
+                None => Place::sheet(sheet_id),
+            }
+        }
         Op::MoveColumns { sheet_id, moves } => {
             let Some(sheet) = sheet_after(sheet_id) else { return Place::Gone(sheet_id.to_string()) };
             let runs: Vec<&IdRun> = moves.iter().flat_map(|m| &m.columns).collect();
@@ -489,7 +501,7 @@ fn of_op(before: &Workbook, after: &Workbook, op: &Op) -> Place {
                 .fold(Place::Nowhere, Place::and)
                 .or_sheet(sheet_id)
         }
-        Op::SetDropdowns { sheet_id, .. } => Place::sheet(sheet_id),
+        Op::SetDropdowns { sheet_id, .. } | Op::SetNamedViews { sheet_id, .. } => Place::sheet(sheet_id),
         Op::DeleteSheet { sheet_id } if after.sheet_index(sheet_id).is_none() => Place::Gone(sheet_id.clone()),
         Op::DeleteSheet { .. }
         | Op::SetViews { .. }

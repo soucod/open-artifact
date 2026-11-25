@@ -80,6 +80,7 @@ function ThreadCard({ data, thread, t, openThread }: { data: CardData; thread: C
         )}
       </div>
       <div className="oac-body">{thread.text}</div>
+      <From data={data} t={t} />
       {meta && open && (
         <div className="oac-meta">
           {thread.where && <div className="oac-where">{thread.where}</div>}
@@ -95,7 +96,28 @@ function ThreadCard({ data, thread, t, openThread }: { data: CardData; thread: C
   );
 }
 
-function RequestCard({ title, request, t }: { title: string; request: CardRequest; t: Translate }) {
+/** Who sent it, when it is not the owner. */
+function From({ data, t }: { data: CardData; t: Translate }) {
+  return data.from ? <div className="oac-where oac-from">{t('card.from', { name: data.from.name, role: data.from.role })}</div> : null;
+}
+
+/** A task's result. */
+function TaskCard({ data, t }: { data: CardData; t: Translate }) {
+  const { title, task } = data;
+  const key = task!.ok ? 'card.task' : 'card.taskFailed';
+  const action = task!.action || t('card.requestLabel');
+  return (
+    <div className="oac-card" data-task={task!.action}>
+      <div className="oac-head">
+        <RequestIcon />
+        <Heading text={t(key, { title, action })} title={title} parts={t(key, { title: TITLE_MARK, action }).split(TITLE_MARK)} />
+      </div>
+    </div>
+  );
+}
+
+function RequestCard({ data, request, t }: { data: CardData; request: CardRequest; t: Translate }) {
+  const { title } = data;
   const message = isShellMessage(request);
   const label = request.label || t('card.requestLabel');
   const key = message ? 'card.message' : 'card.request';
@@ -106,6 +128,7 @@ function RequestCard({ title, request, t }: { title: string; request: CardReques
         <Heading text={t(key, { title, label })} title={title} parts={t(key, { title: TITLE_MARK, label }).split(TITLE_MARK)} />
       </div>
       <div className="oac-body">{request.text}</div>
+      <From data={data} t={t} />
     </div>
   );
 }
@@ -126,8 +149,9 @@ export function EventCards({ node, t, openThread }: EventCardsProps) {
         <ThreadCard key={thread.id} data={data} thread={thread} t={t} openThread={openThread} />
       ))}
       {data.requests.map((request) => (
-        <RequestCard key={request.id} title={data.title} request={request} t={t} />
+        <RequestCard key={request.id} data={data} request={request} t={t} />
       ))}
+      {data.task && data.threads.length === 0 && data.requests.length === 0 && <TaskCard data={data} t={t} />}
     </div>
   );
 }

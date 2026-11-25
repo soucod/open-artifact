@@ -1,6 +1,7 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { Check, ChevronRight } from 'lucide-react';
 import type { ReactElement, ReactNode } from 'react';
+import { swallowFollowUpClicks } from './clicks.ts';
 import { cn } from './cn.ts';
 import { preventRepeatedActivation } from './keys.ts';
 
@@ -50,13 +51,16 @@ export interface MenuItemProps {
   danger?: boolean;
 }
 
-/** One action row. */
+/** One action row. The rest of a double click on it does not reach what the closed menu uncovers. */
 export function MenuItem({ children, onSelect, icon, shortcut, disabled, danger }: MenuItemProps) {
   return (
     <BaseMenu.Item
       className={cn(ITEM_CLASS, danger && 'text-danger')}
       disabled={disabled}
-      onClick={onSelect}
+      onClick={(event) => {
+        swallowFollowUpClicks(event.nativeEvent);
+        onSelect?.();
+      }}
       onKeyDown={preventRepeatedActivation}
     >
       <span className="flex size-4 items-center justify-center text-fg-muted">{icon}</span>

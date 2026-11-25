@@ -2,18 +2,20 @@
  * Collaboration drawings in board units, inside the camera layer: the
  * agent's claim frames, other people's selections, the pen strokes and
  * arrows they are drawing (`PeerSketches`), outlines previewing an idea's
- * option, the area being picked to ask about, areas of comments and the
- * areas of requests in flight.
+ * option, the area being picked to ask about, areas of comments, the
+ * marks of requests in flight and the area the Ask panel is about.
  *
  * One SVG that never takes pointer events; strokes keep their screen width
  * at any zoom (`vector-effect: non-scaling-stroke`).
  */
 
 import { useMemo } from 'react';
-import { CLAIM_FADE_MS, elementBounds, type BoardElement, type Box, type ElementMeasures } from '@open-artifact/whiteboard-core';
+import { CLAIM_FADE_MS, elementBounds, unionBounds, type BoardElement, type Box, type ElementMeasures } from '@open-artifact/whiteboard-core';
+import { useAsk } from '../state/ask.ts';
 import { useBoard } from '../state/board.ts';
 import { useMeasures } from '../state/measures.ts';
 import { useShownById } from '../state/shown.ts';
+import { visibleAskMarks, type AskMark } from './ask-marks.ts';
 import { isAskPending } from './ask-status.ts';
 import { useAsks } from './asks.ts';
 import { anchorPlace, isCommentDraft, useCommentDrag, useComments } from './comments.ts';
@@ -25,6 +27,9 @@ import { PeerSketches } from './PeerSketches.tsx';
 
 /** Most elements of one peer's selection drawn. */
 const MAX_PEER_RINGS = 60;
+
+/** Most items a request's mark is fitted around (as many as a request names). */
+const MAX_MARKED_ITEMS = 50;
 
 /** Gap between an element and a peer's selection ring (board units). */
 const RING_GAP = 4;
@@ -112,23 +117,40 @@ function IdeaPreview() {
   );
 }
 
-/** Areas of requests in flight: this page's and those others share. */
+/**
+ * Marks of requests in flight, this page's and those others share, on their
+ * area or selection, until the agent frames a claim there
+ * (`ask-marks.ts`); and the area the Ask panel is about while it is open.
+ */
 function AskAreas() {
   const asks = useAsks((state) => state.asks);
   const peers = useCollabPeers((state) => state.peers);
+  const panelOpen = useAsk((state) => state.open);
+  const scope = useAsk((state) => state.scope);
+  const byId = useShownById();
+  const measures = useMeasures((state) => state.measures);
+  const claims = useClaimViews();
   const myColor = useMyColor();
-  const areas: Array<{ key: string; box: Box; color: string }> = [];
+  const marks: AskMark[] = [];
+  const mark = (key: string, claimKey: string, color: string, rect: Box | undefined, ids: readonly string[] | undefined): void => {
+    const box = rect ?? (ids && ids.length > 0 ? unionBounds(boundsOf(ids, byId, measures, MAX_MARKED_ITEMS)) : undefined);
+    if (box) marks.push({ key, claimKey, box, color });
+  };
   for (const ask of asks.values()) {
-    if (ask.target.kind === 'area' && isAskPending(ask.status)) areas.push({ key: ask.key, box: ask.target.rect, color: myColor });
+    if (!isAskPending(ask.status)) continue;
+    if (ask.target.kind === 'area') mark(ask.key, ask.key, myColor, ask.target.rect, undefined);
+    else if (ask.target.kind === 'selection') mark(ask.key, ask.key, myColor, undefined, ask.target.ids);
   }
   for (const peer of peers.values()) {
-    for (const ask of peer.asks) if (ask.rect && isAskPending(ask.status)) areas.push({ key: `${peer.id}:${ask.key}`, box: ask.rect, color: peer.color });
+    for (const ask of peer.asks) if (isAskPending(ask.status)) mark(`${peer.id}:${ask.key}`, ask.key, peer.color, ask.rect, ask.ids);
   }
+  const scopeArea = panelOpen && scope.kind === 'area' ? scope.rect : undefined;
   return (
     <>
-      {areas.map((area) => (
+      {visibleAskMarks(marks, claims).map((area) => (
         <Rect key={area.key} box={area.box} className="wb-ask-area" color={area.color} radius={8} />
       ))}
+      {scopeArea ? <Rect box={scopeArea} className="wb-ask-area wb-ask-scope" color={myColor} radius={8} /> : null}
     </>
   );
 }

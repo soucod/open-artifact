@@ -10,7 +10,7 @@ import type { Rect } from '../lib/camera.ts';
 /** What text is being edited in place. */
 export type TextEditTarget =
   /** An element's main text (note, shape, text, section title, link title). */
-  | { kind: 'element'; id: ElementId; /** Select all on start (typing over a new element). */ selectAll?: boolean; /** Character to type first. */ initial?: string }
+  | { kind: 'element'; id: ElementId; /** Select all on start (typing over a new element). */ selectAll?: boolean; /** Character to type first. */ initial?: string; /** Started by a whole-text format button (a placeholder text then still gets the typing bar). */ formatted?: boolean }
   /** An arrow's label. */
   | { kind: 'arrow-label'; id: ElementId }
   /** One table cell. */

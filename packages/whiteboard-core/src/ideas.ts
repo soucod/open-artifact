@@ -219,7 +219,9 @@ export const VERSION_EDIT_FIELDS = [
 export const VERSION_NEW_TYPES = ['note', 'shape', 'container', 'text', 'arrow', 'sticker', 'image', 'table', 'stroke'] as const;
 
 /** Fields a version may set on an element it creates. */
-export const VERSION_NEW_ELEMENT_FIELDS = [...VERSION_EDIT_FIELDS, 'type', 'by', 'points', 'src', 'crop', 'cols', 'rows', 'glyph', 'art', 'title'] as const;
+export const VERSION_NEW_ELEMENT_FIELDS = [
+  ...VERSION_EDIT_FIELDS, 'type', 'by', 'points', 'src', 'style', 'crop', 'cols', 'rows', 'fills', 'heat', 'placeholder', 'glyph', 'art', 'title',
+] as const;
 
 /** Fields a version may set on a web embed it creates. */
 export const VERSION_NEW_EMBED_FIELDS = [...VERSION_NEW_ELEMENT_FIELDS, 'html', 'state'] as const;

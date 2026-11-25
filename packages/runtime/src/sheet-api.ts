@@ -31,24 +31,40 @@ export const SHEET_API = {
 /** The server-sent event name the frames arrive under on `_api/events`. */
 export const SHEET_EVENT = 'sheet';
 
+/**
+ * The server-sent event a walkthrough arrives under on `_api/events`. The agent sends one with the read
+ * `{"kind": "showGuide", "guide": {"stops": […]}}`; the server gives it to one page of the owner's, the one they used
+ * last, and to no one else.
+ */
+export const SHEET_WALKTHROUGH_EVENT = 'sheetWalkthrough';
+
+/**
+ * One stop of a walkthrough: `at` is a cell link, the part of the page's address after `#` (`sheet-<sheetId>~A2-D2~B1`,
+ * the `#` may lead), and `say` is plain text, what the page shows beside those cells.
+ */
+export type WalkthroughStop = { at: string; say: string };
+
+/** A walkthrough: 1 to 30 stops, which the page steps the person through in order. A new one replaces the last. */
+export type SheetWalkthrough = { stops: WalkthroughStop[] };
+
 /** Who made an edit, as pages show them. */
-export interface EditActor {
+export type EditActor = {
   /** The id the engine knows the person by (`u_` and 22 letters and digits). */
   personId: string;
   /** True for the agent's edits (made for the owner). */
   isAgent: boolean;
-}
+};
 
 /** A person as the page names them in cells (people chips) and history. */
-export interface SheetPerson {
+export type SheetPerson = {
   personId: string;
   name: string;
   /** Present only for the owner and the people viewing now. */
   color?: string;
-}
+};
 
 /** The first frame of a stream: where the log stands and who the page's person is. */
-export interface SnapshotFrame {
+export type SnapshotFrame = {
   phase: 'snapshot';
   /** The workbook's id (a UUID). */
   workbookId: string;
@@ -59,7 +75,7 @@ export interface SnapshotFrame {
   newestFormatVersion: number;
   widgets: WidgetVersion[];
   viewer: { personId: string; canEdit: boolean };
-}
+};
 
 /** An edit saved to the log (anyone's, the page's own among them). */
 export interface EditFrame {
@@ -89,10 +105,10 @@ export interface WidgetFrame {
 export type SheetFrame = SnapshotFrame | EditFrame | ClockFrame | WidgetFrame;
 
 /** A widget and its published version. */
-export interface WidgetVersion {
+export type WidgetVersion = {
   id: string;
   pub: number;
-}
+};
 
 /** `POST send`: one of the page's edits, as the engine recorded it. */
 export interface SheetOpsRequest {
@@ -126,45 +142,45 @@ export type SheetSendResponse =
 export type SendRefusal = 'changedSince' | 'pageIsBehind' | 'unknownFormatVersion' | 'unreadableEdit' | 'tooLarge' | 'notWriter' | (string & {});
 
 /** The workbook's operations from a revision on, one page (the engine's `receiveLoadPage`). */
-export interface LoadPage {
+export type LoadPage = {
   kind: 'loadPage';
   from: number;
   revision: number;
   v: number;
   ops: Json[];
   next: number | null;
-}
+};
 
 /** A version of the history pane: the edits from `firstRevision` to `revision`, newest first. */
-export interface VersionRow {
+export type VersionRow = {
   revision: number;
   firstRevision: number;
   /** When its last edit was made, ISO 8601. */
   at: string;
   authors: EditActor[];
-}
+};
 
 /** Edits a page saves as one edit to take others back (restoring a version, undoing an agent's turn). */
-export interface EditsToTakeBack {
+export type EditsToTakeBack = {
   kind: 'editsToTakeBack';
   revision: number;
   edits: JsonObject[];
-}
+};
 
 /** What a cell or a row held after an edit that changed it, newest first. */
-export interface CellHistoryRow {
+export type CellHistoryRow = {
   revision: number;
   at: string;
   actor: EditActor;
   [held: string]: Json | EditActor;
-}
+};
 
-export interface CellHistory {
+export type CellHistory = {
   kind: 'cellHistory';
   rows: CellHistoryRow[];
   /** Earlier changes were left out. */
   truncated: boolean;
-}
+};
 
 /** A revision range of edits, both ends included. */
 export interface RevisionRange {
@@ -198,22 +214,22 @@ export interface SheetReadAnswers {
   rowHistory: CellHistory;
   people: { kind: 'people'; people: SheetPerson[] };
   sheets: SheetsList;
-  xlsxCharts: { kind: 'xlsxCharts'; descriptions: Json[] };
+  xlsxCharts: { kind: 'xlsxCharts'; descriptions: { viewId: string; description: JsonObject }[] };
 }
 
 /** The workbook's sheets as the engine lists them (`readSheets`), with its locale. */
-export interface SheetsList {
+export type SheetsList = {
   kind: 'sheets';
   revision: number;
   locale: string;
   sheets: JsonObject[];
-}
+};
 
 /** A read the server turned away. */
-export interface SheetReadRefusal {
+export type SheetReadRefusal = {
   kind: 'refused';
   refusal: string;
-}
+};
 
 /** `POST widget`: a chart widget's node. */
 export type WidgetRequest =
@@ -223,13 +239,13 @@ export type WidgetRequest =
   | { verb: 'draft'; id: string; basePub: number; code: string }
   | { verb: 'delete'; id: string };
 
-export interface WidgetState {
+export type WidgetState = {
   id: string;
   code: string;
   pub: number;
   /** Why the newest code is not published (it is staged), empty when it is. */
   errors: string[];
-}
+};
 
 export type WidgetResponse =
   | { kind: 'widget'; widget: WidgetState }

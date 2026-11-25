@@ -1,4 +1,4 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { Entry, ListLine } from '@open-artifact/sheets-core';
 import { isOverByteLimit } from '../agent/prompt-text.ts';
 import {
   doLooksFitText,
@@ -43,13 +43,81 @@ import { isMentionText } from '../chips/people-typing.ts';
 import { TEXT_PREFIX_QUOTE } from '../model/cell-text.ts';
 import { readsWithUnansweredEntries } from './unanswered-entries.ts';
 import { listLinesOfCell } from '../model/cell-values.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-import type { PageState } from '../state/initial-state.ts';
-export function doMarksCrossBrackets(text: Dynamic, { from: from, wordsFrom: wordsFrom, wordsTo: wordsTo, to: to }: Dynamic) {
-  let [start, end]: Dynamic = [from, to];
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { EntryLooks, EntryLooksKept, FontMark, FormattedDone, PageState } from '../state/initial-state.ts';
+import type { EditingMode, PageMode } from '../state/transitions.ts';
+import type { CaretInEntry, EditTextChanged } from '../state/event-reducer.ts';
+import type { CaretSpan, EntryListKey } from '../keys/key-acts.ts';
+import type { CellFormatChoice } from '../i18n/change-labels.ts';
+import type { LineInList, ListKind, Look, StepInLooksHistory } from './text-looks.ts';
+/** Where a mark typed with signs (`**bold**`) runs: its opening signs from `from` to `wordsFrom`, its closing ones from `wordsTo` to `to`. */
+export interface TypedMarkSpan {
+  from: number;
+  wordsFrom: number;
+  wordsTo: number;
+  to: number;
+}
+/** A mark typed with signs, and where it runs. */
+export interface TypedMark extends TypedMarkSpan {
+  mark: FontMark;
+}
+/** Whether a position of a text lies within backticks; it reads on from where it last stopped while the text is the same. */
+export type InCodeCheck = (text: string, position: number) => boolean;
+/** The line of a text around a position, and where it starts. */
+export interface LineAround {
+  start: number;
+  line: string;
+}
+/** A text with its marks typed with signs read: the signs gone, their marks on the words, and where the typed text now ends. */
+export interface TypedMarksRead {
+  text: string;
+  looks: EntryLooks;
+  to: number;
+}
+/**
+ * The marks the next text typed in an entry takes: typed at `from`, with `after` characters of the text behind it.
+ * `marksAfterSigns` are the marks the caret had before a mark was set to type in after signs were read;
+ * `isAfterSignsRead` says these marks come from signs just read.
+ */
+export interface MarksToTypeIn {
+  from: number;
+  after: number;
+  marks: FontMark[];
+  marksAfterSigns?: FontMark[];
+  isAfterSignsRead?: true;
+}
+/** The text of an entry selected in its box, and the entry. */
+export interface EntrySelection extends CaretSpan {
+  mode: EditingMode;
+}
+/** What the box of an entry says of a change of its text: the looks it shows, a step through their history, where the caret went. */
+export interface EntryTextChange {
+  looks?: EntryLooks;
+  stepInHistory?: StepInLooksHistory;
+  caretAt?: number;
+  caretAfterSignsRead?: number;
+}
+/** The texts of an entry that its looks are read from: the text now and at the start, and whether the cell was typed over. */
+export interface EntryTexts {
+  text: string;
+  textAtStart: string;
+  isTypedOverCell?: boolean;
+}
+/** A list sign typed at the start of a cell (`- `, `1. `), and the list it starts. */
+export interface ListStarterTyped {
+  sign: string;
+  list: LineInList;
+}
+/** A font mark that the marks to type in turn on or off. */
+export interface MarkChange {
+  mark: FontMark;
+  isOn: boolean;
+}
+export function doMarksCrossBrackets(text: string, { from, wordsFrom, wordsTo, to }: TypedMarkSpan): boolean {
+  let [start, end] = [from, to];
   while ('*~'.includes(text[start - 1] ?? ' ')) start -= 1;
   while ('*~'.includes(text[end] ?? ' ')) end += 1;
-  let [depth, lowestDepth]: Dynamic = [0, 0];
+  let [depth, lowestDepth] = [0, 0];
   for (let char of text.slice(wordsFrom, wordsTo)) {
     if (OPENING_BRACKET.test(char)) depth += 1;
     else if (CLOSING_BRACKET.test(char)) depth -= 1;
@@ -61,16 +129,16 @@ export function doMarksCrossBrackets(text: Dynamic, { from: from, wordsFrom: wor
     (openersUnmatched > 0 && (end === text.length || CLOSING_BRACKET.test(charStartingAt(text, end))))
   );
 }
-export function makeInCodeCheck() {
-  let [textSeen, checkedUpTo, backticks]: Dynamic = ['', 0, 0];
-  return (text?: Dynamic, position?: Dynamic) => {
+export function makeInCodeCheck(): InCodeCheck {
+  let [textSeen, checkedUpTo, backticks] = ['', 0, 0];
+  return (text, position) => {
     if (text !== textSeen || position < checkedUpTo) [textSeen, checkedUpTo, backticks] = [text, 0, 0];
     for (let index = text.indexOf('`', checkedUpTo); index !== -1 && index < position; index = text.indexOf('`', index + 1)) backticks += 1;
     return ((checkedUpTo = position), backticks % 2 === 1);
   };
 }
-export function typedMarkEndingAt(line?: Dynamic, to?: Dynamic, isInCode?: Dynamic) {
-  for (let [sign, mark] of TYPED_MARK_SIGNS as Dynamic) {
+export function typedMarkEndingAt(line: string, to: number, isInCode: InCodeCheck): TypedMark | null {
+  for (let [sign, mark] of TYPED_MARK_SIGNS) {
     let [signChar = sign] = sign;
     let closingAt = to - sign.length;
     if (line.slice(closingAt, to) !== sign) continue;
@@ -100,23 +168,23 @@ export function typedMarkEndingAt(line?: Dynamic, to?: Dynamic, isInCode?: Dynam
       LETTER_OR_DIGIT.test(line.slice(wordsFrom, closingAt)) &&
       !isInCode(line, from) &&
       !doMarksCrossBrackets(line, {
-        from: from,
-        wordsFrom: wordsFrom,
+        from,
+        wordsFrom,
         wordsTo: closingAt,
-        to: to,
+        to,
       })
     )
       return {
-        from: from,
-        wordsFrom: wordsFrom,
+        from,
+        wordsFrom,
         wordsTo: closingAt,
-        to: to,
-        mark: mark,
+        to,
+        mark,
       };
   }
   return null;
 }
-export function lineAround(text?: Dynamic, position?: Dynamic) {
+export function lineAround(text: string, position: number): LineAround {
   let start =
     text.lastIndexOf(
       `
@@ -129,11 +197,18 @@ export function lineAround(text?: Dynamic, position?: Dynamic) {
     position,
   );
   return {
-    start: start,
+    start,
     line: text.slice(start, end === -1 ? undefined : end),
   };
 }
-export function typedMarkInLine(text: Dynamic, { start: start, line: line }: Dynamic, to: Dynamic, isInCode: Dynamic) {
+export function typedMarkAtCaret(text: string, caret: number): TypedMark | null {
+  if (!MARK_SIGN_CHARS.includes(text[caret - 1] ?? ' ') || isTextWithoutMarks(text)) return null;
+  let around = lineAround(text, caret);
+  let mark = typedMarkInLine(text, around, caret, makeInCodeCheck());
+  if (!(mark !== null && mark.to - mark.wordsTo === 1) || ANY_LETTER.test(text.slice(mark.wordsFrom, mark.wordsTo))) return mark;
+  return ONLY_MARK_SIGNS.test(around.line.slice(caret - around.start)) ? null : mark;
+}
+export function typedMarkInLine(text: string, { start, line }: LineAround, to: number, isInCode: InCodeCheck): TypedMark | null {
   let inLine = typedMarkEndingAt(line, to - start, isInCode);
   if (inLine === null) return null;
   let typedMark = {
@@ -145,10 +220,10 @@ export function typedMarkInLine(text: Dynamic, { start: start, line: line }: Dyn
   };
   return typedMark.from === 0 && isTextWithoutMarks(withoutMarkSigns(text, typedMark)) ? null : typedMark;
 }
-export function looksWithRangeCut({ stretches: stretches, lists: lists }: Dynamic, from?: Dynamic, to?: Dynamic) {
-  let position: Dynamic = 0;
+export function looksWithRangeCut({ stretches, lists }: EntryLooks, from: number, to: number): EntryLooks {
+  let position = 0;
   return {
-    stretches: stretches.flatMap((stretch?: Dynamic) => {
+    stretches: stretches.flatMap((stretch) => {
       let cut = Math.max(0, Math.min(position + stretch.length, to) - Math.max(position, from));
       return (
         (position += stretch.length),
@@ -162,26 +237,26 @@ export function looksWithRangeCut({ stretches: stretches, lists: lists }: Dynami
             ]
       );
     }),
-    lists: lists,
+    lists,
   };
 }
-export function doesRichTextFit(text: Dynamic, { stretches: stretches }: Dynamic) {
+export function doesRichTextFit(text: string, { stretches }: EntryLooks): boolean {
   let lineBreaks =
     text.split(`
 `).length - 1;
   let linkLength = stretches.reduce(
-    (total?: Dynamic, { link: link }: Dynamic = {}) => total + (link?.length ?? 0) * (lineBreaks + 1),
+    (total, { link }: Partial<Look> = {}) => total + (link?.length ?? 0) * (lineBreaks + 1),
     0,
   );
   let overhead = (stretches.length + 2 * lineBreaks + 1) * 128;
   return !isOverByteLimit(text, RICH_TEXT_BYTE_LIMIT - linkLength * 3 - overhead);
 }
-export function readTypedMarks(text?: Dynamic, looks?: Dynamic, from?: Dynamic, to?: Dynamic, isMarked: Dynamic = true) {
+export function readTypedMarks(text: string, looks: EntryLooks, from: number, to: number, isMarked: boolean = true): TypedMarksRead | null {
   if (!doLooksFitText(looks, text) || isTextWithoutMarks(text)) return null;
   if (isOverByteLimit(text, RICH_TEXT_BYTE_LIMIT + 4 * MAX_TYPED_MARKS)) return null;
   let isInCode = makeInCodeCheck();
-  let [textNow, looksNow, toNow, signsLookedAt, marksRead]: Dynamic = [text, looks, to, 0, 0];
-  let line: Dynamic = lineAround(textNow, from + 1);
+  let [textNow, looksNow, toNow, signsLookedAt, marksRead]: [string, EntryLooks, number, number, number] = [text, looks, to, 0, 0];
+  let line = lineAround(textNow, from + 1);
   for (let position = from + 1; position <= toNow; position += 1) {
     if (
       textNow[position - 1] ===
@@ -210,16 +285,16 @@ export function readTypedMarks(text?: Dynamic, looks?: Dynamic, from?: Dynamic, 
         to: toNow,
       };
 }
-export function textWithMarkSignsRead(before?: Dynamic, written?: Dynamic, after?: Dynamic) {
+export function textWithMarkSignsRead(before: string, written: string, after: string): string {
   let text = before + written + after;
   let [from, to] = [before.length, before.length + written.length];
   let read = readTypedMarks(text, plainLooks(text, []), from, to, false);
   return read === null ? written : read.text.slice(from, read.to);
 }
-export function withListNumbersOfEntry(stateBefore: Dynamic, state: PageState, reads: WorkbookReads) {
-  let { mode: mode } = state;
+export function withListNumbersOfEntry(stateBefore: PageState, state: PageState, reads: WorkbookReads): PageState {
+  let { mode } = state;
   if (mode.kind !== 'editing') return state;
-  let { numbersOfLines: numbersOfLines, ...modeWithoutNumbers } = mode;
+  let { numbersOfLines, ...modeWithoutNumbers } = mode;
   if (mode.looks === undefined || !hasLists(mode.looks))
     return numbersOfLines === undefined
       ? state
@@ -246,22 +321,22 @@ export function withListNumbersOfEntry(stateBefore: Dynamic, state: PageState, r
       ...mode,
       looks: {
         ...mode.looks,
-        lists: listLines.map(({ list: list }: Dynamic) => list),
+        lists: listLines.map(({ list }) => list),
       },
-      numbersOfLines: listLines.map(({ number: number }: Dynamic) => number),
+      numbersOfLines: listLines.map(({ number }) => number),
     },
   };
 }
-export function looksOfRichCellText(reads: WorkbookReads, cell?: Dynamic, text?: Dynamic) {
+export function looksOfRichCellText(reads: WorkbookReads, cell: CellId, text: string): EntryLooks | undefined {
   let cellHeld = reads.cellOf(cell);
   if (cellHeld?.input.kind !== 'richText' || cellHeld.value?.kind !== 'text') return;
   let prefixLength = text.length - cellHeld.value.value.length;
   if (prefixLength < 0 || !text.endsWith(cellHeld.value.value)) return;
   return looksFromRichText(cellHeld.input, fontMarksOfCell(reads, cell), prefixLength);
 }
-export function marksToTypeInKept({ text: text, marksToTypeIn: marksToTypeIn }: Dynamic, newText?: Dynamic) {
+export function marksToTypeInKept({ text, marksToTypeIn }: EditingMode, newText: string): MarksToTypeIn | undefined {
   if (marksToTypeIn === undefined) return;
-  let { from: from, after: after, isAfterSignsRead: isAfterSignsRead } = marksToTypeIn;
+  let { from, after, isAfterSignsRead } = marksToTypeIn;
   if (isAfterSignsRead !== true && !isWordyText(newText, newText.length - after)) return;
   return newText.length - after >= from &&
     newText.slice(0, from) === text.slice(0, from) &&
@@ -270,31 +345,33 @@ export function marksToTypeInKept({ text: text, marksToTypeIn: marksToTypeIn }: 
     : undefined;
 }
 export function looksOfEntry(
-  mode: Dynamic,
+  mode: PageMode,
   reads: WorkbookReads,
-  cell: Dynamic,
-  { text: text, textAtStart: textAtStart, isTypedOverCell: isTypedOverCell }: Dynamic,
-  { looks: looksInBox, stepInHistory: stepInHistory, caretAt: caretAt, caretAfterSignsRead: caretAfterSignsRead }: Dynamic,
-) {
+  cell: CellId,
+  { text, textAtStart, isTypedOverCell }: EntryTexts,
+  { looks: looksInBox, stepInHistory, caretAt, caretAfterSignsRead }: EntryTextChange,
+): Pick<EditingMode, 'looks' | 'looksInHistory' | 'marksToTypeIn'> {
   let isEditing = mode.kind === 'editing';
   let looksOfCell = isEditing || isTypedOverCell === true ? undefined : looksOfRichCellText(reads, cell, textAtStart);
-  let [textBefore, looksBefore] = isEditing ? [mode.text, mode.looks] : [textAtStart, looksOfCell];
+  let [textBefore, looksBefore]: [string, EntryLooks | undefined] = isEditing
+    ? [(mode as EditingMode).text, (mode as EditingMode).looks]
+    : [textAtStart, looksOfCell];
   let looksKept = textBefore === '' && !(looksBefore !== undefined && hasLists(looksBefore)) ? undefined : looksBefore;
-  let entryBefore =
+  let entryBefore: EntryLooksKept | undefined =
     looksKept === undefined
       ? undefined
       : {
           text: textBefore,
           looks: looksKept,
         };
-  let history2 = isEditing ? mode.looksInHistory : undefined;
+  let historyBefore = isEditing ? (mode as EditingMode).looksInHistory : undefined;
   let stepped =
-    stepInHistory !== undefined && looksInBox === undefined && text !== textBefore && (history2 !== undefined || entryBefore !== undefined)
-      ? stepLooksHistory(history2, stepInHistory, entryBefore, text)
+    stepInHistory !== undefined && looksInBox === undefined && text !== textBefore && (historyBefore !== undefined || entryBefore !== undefined)
+      ? stepLooksHistory(historyBefore, stepInHistory, entryBefore, text)
       : undefined;
-  let looksInHistory = stepped?.history ?? (text === textBefore ? history2 : pushLooksHistory(history2, entryBefore));
+  let looksInHistory = stepped?.history ?? (text === textBefore ? historyBefore : pushLooksHistory(historyBefore, entryBefore));
   let doesBoxFit = looksInBox !== undefined && doLooksFitText(looksInBox, text);
-  let looksOfBox = isEditing && doesBoxFit && (looksKept !== undefined || !isWholeLookMarked(looksInBox, [])) ? looksInBox : undefined;
+  let looksOfBox = isEditing && doesBoxFit && (looksKept !== undefined || !isWholeLookMarked(looksInBox!, [])) ? looksInBox : undefined;
   let looksTyped =
     looksKept === undefined ? undefined : looksAfterTyping(looksKept, textBefore, text, caretAt, fontMarksOfCell(reads, cell));
   let looksChosen =
@@ -308,14 +385,14 @@ export function looksOfEntry(
         }
       : (looksOfBox ?? stepped?.looks ?? looksTyped);
   let looks = text === '' && !(looksChosen !== undefined && hasLists(looksChosen)) ? undefined : looksChosen;
-  let marksToTypeIn = isEditing && looksInBox === undefined && stepInHistory === undefined ? marksToTypeInKept(mode, text) : undefined;
+  let marksToTypeIn = isEditing && looksInBox === undefined && stepInHistory === undefined ? marksToTypeInKept(mode as EditingMode, text) : undefined;
   let looksWithMarks =
     marksToTypeIn === undefined || looks === undefined
       ? looks
       : withMarksToTypeIn(
           {
-            text: text,
-            looks: looks,
+            text,
+            looks,
           },
           marksToTypeIn,
         );
@@ -324,18 +401,18 @@ export function looksOfEntry(
       looks: looksWithMarks,
     }),
     ...(looksInHistory !== undefined && {
-      looksInHistory: looksInHistory,
+      looksInHistory,
     }),
     ...(marksToTypeIn !== undefined && {
-      marksToTypeIn: marksToTypeIn,
+      marksToTypeIn,
     }),
   };
 }
-export function entryListsOf(mode?: Dynamic) {
+export function entryListsOf(mode: PageMode): ListLine[] | undefined {
   let looks = entryLooksOf(mode);
   return looks !== undefined && hasLists(looks) ? looks.lists : undefined;
 }
-export function selectedSpanInEntry(mode?: Dynamic, selectedInBox?: Dynamic) {
+export function selectedSpanInEntry(mode: PageMode, selectedInBox: CaretInEntry | undefined): EntrySelection | null {
   if (mode.kind !== 'editing' || isFormulaText(mode.text)) return null;
   if (mode.isInBoxOfOneLine === true) return null;
   if (selectedInBox === undefined || selectedInBox.text !== mode.text || selectedInBox.isComposing) return null;
@@ -343,42 +420,42 @@ export function selectedSpanInEntry(mode?: Dynamic, selectedInBox?: Dynamic) {
     ? {
         start: selectedInBox.start,
         end: selectedInBox.end,
-        mode: mode,
+        mode,
       }
     : null;
 }
-export function caretInWordyEntry(mode: Dynamic, reads: WorkbookReads, selectedInBox?: Dynamic) {
+export function caretInWordyEntry(mode: PageMode, reads: WorkbookReads, selectedInBox: CaretInEntry | undefined): number | null {
   if (mode.kind !== 'editing' || selectedInBox === undefined) return null;
   if (selectedInBox.text !== mode.text || selectedInBox.isComposing || selectedInBox.start !== selectedInBox.end) return null;
   if (!isWordyText(mode.text, selectedInBox.start)) return null;
   if (reads.dayTypedAs(mode.text) !== null) return null;
   return mode.isInBoxOfOneLine === true ? null : selectedInBox.start;
 }
-export function setMarkToTypeIn(state: PageState, reads: WorkbookReads, mark?: Dynamic, selectedInBox?: Dynamic) {
-  let { mode: mode } = state;
+export function setMarkToTypeIn(state: PageState, reads: WorkbookReads, mark: FontMark, selectedInBox: CaretInEntry | undefined): PageState {
+  let { mode } = state;
   let caret = caretInWordyEntry(mode, reads, selectedInBox);
   if (caret === null || mode.kind !== 'editing') return state;
   let looks = mode.looks ?? plainLooks(mode.text, fontMarksOfCell(reads, activeAnchorCell(state, reads)));
   let marksAtCaretNow = marksToTypeAt(mode, looks, caret);
-  let marksToType = FONT_MARKS.filter((fontMark?: Dynamic) => (fontMark === mark) !== marksAtCaretNow.includes(fontMark));
+  let marksToType = FONT_MARKS.filter((fontMark) => (fontMark === mark) !== marksAtCaretNow.includes(fontMark));
   let marksOfLooks = marksAtCaretImported(looks, caret);
-  let isSameAsLooks = FONT_MARKS.every((fontMark?: Dynamic) => marksToType.includes(fontMark) === marksOfLooks.includes(fontMark));
-  let { marksToTypeIn: marksToTypeIn, ...modeWithoutMarks } = mode;
+  let isSameAsLooks = FONT_MARKS.every((fontMark) => marksToType.includes(fontMark) === marksOfLooks.includes(fontMark));
+  let { marksToTypeIn, ...modeWithoutMarks } = mode;
   let marksAfterSigns =
     marksToTypeIn?.from !== caret ? undefined : marksToTypeIn.isAfterSignsRead === true ? marksToTypeIn.marks : marksToTypeIn.marksAfterSigns;
-  let newMarksToTypeIn = {
+  let newMarksToTypeIn: MarksToTypeIn = {
     from: caret,
     after: mode.text.length - caret,
     marks: marksToType,
     ...(marksAfterSigns !== undefined && {
-      marksAfterSigns: marksAfterSigns,
+      marksAfterSigns,
     }),
   };
   return {
     ...state,
     mode: {
       ...modeWithoutMarks,
-      looks: looks,
+      looks,
       ...((!isSameAsLooks || marksAfterSigns !== undefined) && {
         marksToTypeIn: newMarksToTypeIn,
       }),
@@ -389,16 +466,16 @@ export function setMarkToTypeIn(state: PageState, reads: WorkbookReads, mark?: D
     },
     lastDone: {
       what: 'markSetToTypeIn',
-      mark: mark,
+      mark,
       isOn: marksToType.includes(mark),
     },
   };
 }
-export function setMarkOnEntrySelection(state: PageState, reads: WorkbookReads, mark?: Dynamic, selectedInBox?: Dynamic) {
+export function setMarkOnEntrySelection(state: PageState, reads: WorkbookReads, mark: FontMark, selectedInBox: CaretInEntry | undefined): PageState {
   let selected = selectedSpanInEntry(state.mode, selectedInBox);
   if (selected === null) return state;
-  let { start: start, end: end } = selected;
-  let { marksToTypeIn: marksToTypeIn, ...mode } = selected.mode;
+  let { start, end } = selected;
+  let { marksToTypeIn, ...mode } = selected.mode;
   let looks = mode.looks ?? plainLooks(mode.text, fontMarksOfCell(reads, activeAnchorCell(state, reads)));
   let newLooks = toggleMarkInLooks(looks, mode.text, start, end, mark);
   let isOn = marksAcross(newLooks, mode.text, start, end).includes(mark);
@@ -408,47 +485,47 @@ export function setMarkOnEntrySelection(state: PageState, reads: WorkbookReads, 
       ...mode,
       looks: newLooks,
       selectedInEntry: {
-        start: start,
-        end: end,
+        start,
+        end,
       },
     },
     lastDone: {
       what: 'markSetInEntry',
-      mark: mark,
-      isOn: isOn,
+      mark,
+      isOn,
     },
   };
 }
-export function selectionInRichEntry(mode?: Dynamic, selectedInBox?: Dynamic) {
+export function selectionInRichEntry(mode: PageMode, selectedInBox: CaretInEntry | undefined): EntrySelection | null {
   if (mode.kind !== 'editing' || isFormulaText(mode.text) || isOneLineEditor(mode)) return null;
   if (selectedInBox === undefined || selectedInBox.text !== mode.text || selectedInBox.isComposing) return null;
   return {
     start: selectedInBox.start,
     end: selectedInBox.end,
-    mode: mode,
+    mode,
   };
 }
-export function withEntryTextAt(mode?: Dynamic, text?: Dynamic, caret?: Dynamic) {
+export function withEntryTextAt(mode: EditingMode, text: string, caret: number): EditingMode {
   let withText = {
     ...withEntryText(mode, text, caret),
     caretToPut: {
-      text: text,
+      text,
       at: caret,
     },
   };
   if (mode.marksToTypeIn === undefined) return withText;
-  let { from: from, to: to, written: written } = diffTexts(mode.text, text, caret);
-  let positionAfter = (position?: Dynamic) => (position <= from ? position : Math.max(from, position + written.length - (to - from)));
-  let marksToTypeIn = {
+  let { from, to, written } = diffTexts(mode.text, text, caret);
+  let positionAfter = (position: number) => (position <= from ? position : Math.max(from, position + written.length - (to - from)));
+  let marksToTypeIn: MarksToTypeIn = {
     ...mode.marksToTypeIn,
     from: positionAfter(mode.marksToTypeIn.from),
   };
   return {
     ...withText,
-    marksToTypeIn: marksToTypeIn,
+    marksToTypeIn,
   };
 }
-export function withListTextNotFormula(mode?: Dynamic, caret?: Dynamic) {
+export function withListTextNotFormula(mode: EditingMode, caret: number): EditingMode {
   let [firstList = NO_LIST] = mode.looks?.lists ?? [];
   if (firstList.kind === 'none' || !isFormulaText(mode.text)) return mode;
   let withPrefix = withEntryTextAt(mode, LIST_TEXT_PREFIX + mode.text, LIST_TEXT_PREFIX.length);
@@ -460,15 +537,15 @@ export function withListTextNotFormula(mode?: Dynamic, caret?: Dynamic) {
     },
   };
 }
-export function toggleListInEntry(state: PageState, reads: WorkbookReads, kind?: Dynamic, selectedInBox?: Dynamic) {
+export function toggleListInEntry(state: PageState, reads: WorkbookReads, kind: ListKind, selectedInBox: CaretInEntry | undefined): PageState {
   let selection = selectionInRichEntry(state.mode, selectedInBox);
   if (selection === null) return state;
-  let { start: start, end: end, mode: mode } = selection;
+  let { start, end, mode } = selection;
   let changed = withEntryLooksChanged(
     state,
     reads,
     selection,
-    (looks?: Dynamic) => toggleListKind(looks, mode.text, start, end, kind),
+    (looks) => toggleListKind(looks, mode.text, start, end, kind),
   );
   let isOn = listKindAcross(changed.mode.looks, mode.text, start, end) === kind;
   return {
@@ -476,11 +553,11 @@ export function toggleListInEntry(state: PageState, reads: WorkbookReads, kind?:
     lastDone: {
       what: 'listSetInEntry',
       list: kind,
-      isOn: isOn,
+      isOn,
     },
   };
 }
-export function listStarterTypedInCell(selection?: Dynamic) {
+export function listStarterTypedInCell(selection: EntrySelection | null): ListStarterTyped | null {
   if (selection === null || selection.mode.typingIn !== 'cell') return null;
   if (
     selection.mode.text.includes(`
@@ -493,17 +570,17 @@ export function listStarterTypedInCell(selection?: Dynamic) {
   if (list?.kind !== 'bullet' && list?.kind !== 'numbered') return null;
   return selection.start >= sign.length
     ? {
-        sign: sign,
-        list: list,
+        sign,
+        list,
       }
     : null;
 }
-export function doesEntryListTakeKey(mode?: Dynamic, key?: Dynamic, selectedInBox?: Dynamic) {
+export function doesEntryListTakeKey(mode: PageMode, key: EntryListKey, selectedInBox: CaretInEntry | undefined): boolean {
   let selection = selectionInRichEntry(mode, selectedInBox);
   if (key === 'lineBreak' && listStarterTypedInCell(selection) !== null) return true;
   let looks = selection?.mode.looks;
   if (selection === null || looks === undefined) return false;
-  let { start: start, end: end } = selection;
+  let { start, end } = selection;
   if (key === 'tab' || key === 'shiftTab') {
     if (
       !selection.mode.text.includes(`
@@ -512,25 +589,25 @@ export function doesEntryListTakeKey(mode?: Dynamic, key?: Dynamic, selectedInBo
     )
       return false;
     let [firstLine, lastLine] = lineRangeOf(selection.mode.text, start, end);
-    return looks.lists.slice(firstLine, lastLine + 1).some(({ kind: kind }: Dynamic) => kind !== 'none');
+    return looks.lists.slice(firstLine, lastLine + 1).some(({ kind }) => kind !== 'none');
   }
-  let { list: list, isAtStart: isAtStart, isEmpty: isEmpty } = listAtCaret(looks, selection.mode.text, start);
+  let { list, isAtStart, isEmpty } = listAtCaret(looks, selection.mode.text, start);
   if (start !== end || list.kind === 'none') return false;
   return key === 'backspace' ? isAtStart : isEmpty;
 }
-export function isCaretInEntryList(mode?: Dynamic, selectedInBox?: Dynamic) {
+export function isCaretInEntryList(mode: PageMode, selectedInBox: CaretInEntry | undefined): boolean {
   let selection = selectionInRichEntry(mode, selectedInBox);
   let looks = selection?.mode.looks;
   if (selection === null || looks === undefined) return false;
   return listAtCaret(looks, selection.mode.text, selection.start).list.kind !== 'none';
 }
-export function pressListKeyInEntry(state: PageState, reads: WorkbookReads, key?: Dynamic, selectedInBox?: Dynamic) {
+export function pressListKeyInEntry(state: PageState, reads: WorkbookReads, key: EntryListKey, selectedInBox: CaretInEntry | undefined): PageState {
   let selection = selectionInRichEntry(state.mode, selectedInBox);
   if (selection === null || !doesEntryListTakeKey(state.mode, key, selectedInBox)) return state;
-  let { start: start, end: end, mode: mode } = selection;
+  let { start, end, mode } = selection;
   let starter = key === 'lineBreak' ? listStarterTypedInCell(selection) : null;
   if (starter !== null) {
-    let { sign: sign, list: list } = starter;
+    let { sign, list } = starter;
     let caret = start - sign.length + 1;
     let textWithLines = `${mode.text.slice(sign.length, start)}
 ${mode.text.slice(end)}`;
@@ -544,7 +621,7 @@ ${mode.text.slice(end)}`;
         end: caret,
         mode: withLines,
       },
-      (looks?: Dynamic) => ({
+      (looks) => ({
         ...looks,
         lists: [list, list],
       }),
@@ -559,25 +636,25 @@ ${mode.text.slice(end)}`;
       },
     };
   }
-  return withEntryLooksChanged(state, reads, selection, (looks?: Dynamic) => {
+  return withEntryLooksChanged(state, reads, selection, (looks) => {
     if (key === 'tab') return indentLists(looks, mode.text, start, end, 1);
     if (key === 'shiftTab') return indentLists(looks, mode.text, start, end, -1);
-    let { list: list } = listAtCaret(looks, mode.text, start);
+    let { list } = listAtCaret(looks, mode.text, start);
     return key === 'lineBreak' && list.kind !== 'none' && list.level > 0
       ? indentLists(looks, mode.text, start, end, -1)
       : clearListAt(looks, mode.text, start);
   });
 }
-export function readListStarterTyped(modeBefore: Dynamic, state: PageState, reads: WorkbookReads, caret?: Dynamic) {
-  let { mode: mode } = state;
+export function readListStarterTyped(modeBefore: EditingMode, state: PageState, reads: WorkbookReads, caret: number): PageState {
+  let { mode } = state;
   if (mode.kind !== 'editing') return state;
-  let caretOnly = {
+  let caretOnly: CaretInEntry = {
     start: caret,
     end: caret,
     text: mode.text,
     isComposing: false,
   };
-  let { text: text } = mode;
+  let { text } = mode;
   if (selectionInRichEntry(mode, caretOnly) === null) return state;
   if (modeBefore.text !== text.slice(0, caret - 1) + text.slice(caret)) return state;
   let lineStart =
@@ -613,7 +690,7 @@ export function readListStarterTyped(modeBefore: Dynamic, state: PageState, read
       end: lineStart,
       mode: withoutStarter,
     },
-    (looks?: Dynamic) => setListAt(looks, withoutStarter.text, lineStart, list),
+    (looks) => setListAt(looks, withoutStarter.text, lineStart, list),
   );
   return {
     ...changed,
@@ -626,12 +703,12 @@ export function readListStarterTyped(modeBefore: Dynamic, state: PageState, read
   };
 }
 export function readListSignsTyped(
-  modeBefore: Dynamic,
+  modeBefore: PageMode,
   state: PageState,
   reads: WorkbookReads,
-  { typingIn: typingIn, caretAt: caretAt, isNotTyped: isNotTyped, isOfHistory: isOfHistory }: Dynamic,
-) {
-  let { mode: mode } = state;
+  { typingIn, caretAt, isNotTyped, isOfHistory }: Pick<EditTextChanged, 'typingIn' | 'caretAt' | 'isNotTyped' | 'isOfHistory'>,
+): PageState {
+  let { mode } = state;
   if (modeBefore.kind !== 'editing' || mode.kind !== 'editing') return state;
   if (typingIn !== 'cell' || caretAt === undefined || isOfHistory === true) return state;
   if (isFormulaText(mode.text))
@@ -643,8 +720,8 @@ export function readListSignsTyped(
         };
   return isNotTyped === true ? state : readListStarterTyped(modeBefore, state, reads, caretAt);
 }
-export function toggleEntryCheckbox(state: PageState, selectedInBox?: Dynamic, line?: Dynamic) {
-  let { mode: mode } = state;
+export function toggleEntryCheckbox(state: PageState, selectedInBox: CaretInEntry | undefined, line: number | undefined): PageState {
+  let { mode } = state;
   let looks = entryLooksOf(mode);
   if (mode.kind !== 'editing' || looks === undefined) return state;
   let lineToggled = line ?? (selectedInBox?.text === mode.text ? listAtCaret(looks, mode.text, selectedInBox.start).line : null);
@@ -662,7 +739,7 @@ export function toggleEntryCheckbox(state: PageState, selectedInBox?: Dynamic, l
     },
   };
 }
-export function toggleCellCheckboxLine(state: PageState, reads: WorkbookReads, paragraph?: Dynamic) {
+export function toggleCellCheckboxLine(state: PageState, reads: WorkbookReads, paragraph: number) {
   let cell = activeAnchorCell(state, reads);
   let input = state.mode.kind === 'navigating' ? cellShownAtAnchor(state, reads)?.input : undefined;
   let list = input?.kind === 'richText' ? input.paragraphs[paragraph]?.list : undefined;
@@ -674,45 +751,45 @@ export function toggleCellCheckboxLine(state: PageState, reads: WorkbookReads, p
       kind: 'setListLineChecked',
       sheetId: cell.sheetId,
       cell: cellRefOf(cell),
-      paragraph: paragraph,
-      isChecked: isChecked,
+      paragraph,
+      isChecked,
     },
     {
       ...IF_QUEUED_DEFAULTS,
       select: null,
       done: {
         what: 'boxOfLineSet',
-        isChecked: isChecked,
+        isChecked,
       },
     },
   );
 }
 export function applyTogglesToEntry(
   state: PageState,
-  { bold: bold, italic: italic, underline: underline, strikethrough: strikethrough }: Dynamic,
-) {
-  let { mode: mode } = state;
+  { bold, italic, underline, strikethrough }: Pick<CellFormatChoice, FontMark>,
+): PageState {
+  let { mode } = state;
   if (mode.kind !== 'editing') return state;
   let toggles = {
-    bold: bold,
-    italic: italic,
+    bold,
+    italic,
     underline: underline === undefined ? undefined : underline !== 'none',
-    strikethrough: strikethrough,
+    strikethrough,
   };
-  let withToggles = (looks2?: Dynamic) =>
+  let withToggles = (looksBefore: EntryLooks) =>
     FONT_MARKS.reduce(
-      (marked?: Dynamic, mark?: Dynamic) => (toggles[mark] === undefined ? marked : withMarkSetEverywhere(marked, mark, toggles[mark])),
-      looks2,
+      (marked, mark) => (toggles[mark] === undefined ? marked : withMarkSetEverywhere(marked, mark, toggles[mark])),
+      looksBefore,
     );
-  let entriesWithToggles = (entries?: Dynamic) =>
+  let entriesWithToggles = (entries: EntryLooksKept[]) =>
     entries.map(
-      (entry?: Dynamic) => ({
+      (entry) => ({
         text: entry.text,
         looks: withToggles(entry.looks),
       }),
     );
-  let { marksToTypeIn: marksToTypeIn, ...modeWithoutMarks } = mode;
-  let { looks: looks, looksInHistory: looksInHistory } = modeWithoutMarks;
+  let { marksToTypeIn, ...modeWithoutMarks } = mode;
+  let { looks, looksInHistory } = modeWithoutMarks;
   if (looks === undefined && looksInHistory === undefined) return state;
   return {
     ...state,
@@ -730,14 +807,14 @@ export function applyTogglesToEntry(
     },
   };
 }
-export function togglesOfEntry({ mode: mode }: Dynamic) {
+export function togglesOfEntry({ mode }: Pick<PageState, 'mode'>): Record<FontMark, boolean> | null {
   let looks = entryLooksOf(mode);
   if (mode.kind !== 'editing' || looks === undefined) return null;
   let caretAtEnd = {
     start: mode.text.length,
     end: mode.text.length,
   };
-  let { start: start, end: end } = mode.selectedInEntry ?? caretAtEnd;
+  let { start, end } = mode.selectedInEntry ?? caretAtEnd;
   let isPlainEntry = mode.isInBoxOfOneLine === true || !isWordyText(mode.text, start);
   if (start === end && isPlainEntry) return null;
   let marks = start === end ? marksToTypeAt(mode, looks, start) : marksAcross(looks, mode.text, start, end);
@@ -748,7 +825,7 @@ export function togglesOfEntry({ mode: mode }: Dynamic) {
     strikethrough: marks.includes('strikethrough'),
   };
 }
-export function formatOfSelectionWithEntry(state: PageState, isOutsideEntry?: Dynamic) {
+export function formatOfSelectionWithEntry(state: PageState, isOutsideEntry: boolean): PageState['formatOfSelection'] {
   let toggles = isOutsideEntry ? null : togglesOfEntry(state);
   return toggles === null
     ? state.formatOfSelection
@@ -757,45 +834,45 @@ export function formatOfSelectionWithEntry(state: PageState, isOutsideEntry?: Dy
         togglesOn: toggles,
       };
 }
-export function isSelectionInMarksSpan({ from: from, after: after }: Dynamic, text: Dynamic, { start: start, end: end }: Dynamic) {
+export function isSelectionInMarksSpan({ from, after }: MarksToTypeIn, text: string, { start, end }: CaretSpan): boolean {
   let marksEnd = text.length - after;
   return end <= marksEnd && (start < end ? start >= from : start > from || end === marksEnd);
 }
-export function selectInEntry(state: PageState, { start: start, end: end }: Dynamic) {
-  let { mode: mode } = state;
+export function selectInEntry(state: PageState, { start, end }: CaretSpan): PageState {
+  let { mode } = state;
   if (mode.kind !== 'editing' || mode.looks === undefined) return state;
   let selectedInEntry = mode.selectedInEntry;
   if (start === selectedInEntry?.start && end === selectedInEntry.end) return state;
-  let { marksToTypeIn: marksToTypeIn, ...modeWithoutMarks } = mode;
+  let { marksToTypeIn, ...modeWithoutMarks } = mode;
   let keepsMarks =
     marksToTypeIn !== undefined &&
     isSelectionInMarksSpan(marksToTypeIn, mode.text, {
-      start: start,
-      end: end,
+      start,
+      end,
     });
   return {
     ...state,
     mode: {
       ...(keepsMarks ? mode : modeWithoutMarks),
       selectedInEntry: {
-        start: start,
-        end: end,
+        start,
+        end,
       },
     },
   };
 }
 export function marksToTypeAfterSigns(
-  { mode: modeBefore }: Dynamic,
+  { mode: modeBefore }: Pick<PageState, 'mode'>,
   state: PageState,
   reads: WorkbookReads,
-  caret: Dynamic,
-  isSignsDropped: Dynamic,
-) {
+  caret: number,
+  isSignsDropped: boolean,
+): PageState {
   if (state.mode.kind !== 'editing' || modeBefore.kind !== 'editing') return state;
-  let { areSignsLeftAsTyped: areSignsLeftAsTyped, ...modeWithoutFlag } = state.mode;
+  let { areSignsLeftAsTyped, ...modeWithoutFlag } = state.mode;
   let mode = isSignsDropped || areSignsLeftAsTyped === undefined ? modeWithoutFlag : state.mode;
   let looksBefore = modeBefore.looks ?? plainLooks(modeBefore.text, fontMarksOfCell(reads, activeAnchorCell(state, reads)));
-  let marksToTypeIn = {
+  let marksToTypeIn: MarksToTypeIn = {
     from: caret,
     after: mode.text.length - caret,
     marks: marksAtCaretImported(looksBefore, caret + modeBefore.text.length - mode.text.length),
@@ -805,7 +882,7 @@ export function marksToTypeAfterSigns(
     ...state,
     mode: {
       ...mode,
-      marksToTypeIn: marksToTypeIn,
+      marksToTypeIn,
       selectedInEntry: {
         start: caret,
         end: caret,
@@ -813,45 +890,46 @@ export function marksToTypeAfterSigns(
     },
   };
 }
-export function setEntryLooks(state: PageState, looks?: Dynamic) {
-  let { mode: mode } = state;
+export function setEntryLooks(state: PageState, looks: EntryLooks): PageState {
+  let { mode } = state;
   if (mode.kind !== 'editing' || entryLooksOf(mode) === undefined) return state;
   if (!doLooksFitText(looks, mode.text)) return state;
-  let { marksToTypeIn: marksToTypeIn } = mode;
+  let { marksToTypeIn } = mode;
   if (marksToTypeIn !== undefined && mode.text.length - marksToTypeIn.after > marksToTypeIn.from) return state;
   return {
     ...state,
     mode: {
       ...mode,
-      looks: looks,
+      looks,
     },
   };
 }
-export function entryLooksWithMarksToType(mode?: Dynamic) {
+export function entryLooksWithMarksToType(mode: PageMode): EntryLooks | undefined {
   let looks = entryLooksOf(mode);
   if (mode.kind !== 'editing' || looks === undefined) return looks;
   return marksToTypeChanges(mode, looks).reduce(
-    (marked?: Dynamic, { mark: mark, isOn: isOn }: Dynamic = {}) => withMarkSet(marked, 0, mode.text.length, mark, isOn),
+    // The default is never taken: every change of the list is passed.
+    (marked, { mark, isOn }: MarkChange = {} as MarkChange) => withMarkSet(marked, 0, mode.text.length, mark, isOn),
     looks,
   );
 }
-export function marksToTypeChanges({ text: text, marksToTypeIn: marksToTypeIn }: Dynamic, looks?: Dynamic) {
+export function marksToTypeChanges({ text, marksToTypeIn }: EditingMode, looks: EntryLooks): MarkChange[] {
   if (marksToTypeIn === undefined || marksToTypeIn.isAfterSignsRead === true) return [];
   if (text.length - marksToTypeIn.after !== marksToTypeIn.from) return [];
   let marksAtCaret = marksAtCaretImported(looks, marksToTypeIn.from);
   let marksEverywhere = marksAcross(looks, text, 0, text.length);
   let marksAfterSigns = marksToTypeIn.marksAfterSigns ?? marksAtCaret;
   return FONT_MARKS.map(
-    (mark?: Dynamic) => ({
-      mark: mark,
+    (mark) => ({
+      mark,
       isOn: marksToTypeIn.marks.includes(mark),
     }),
   ).filter(
-    ({ mark: mark, isOn: isOn }: Dynamic) =>
+    ({ mark, isOn }) =>
       isOn !== marksAtCaret.includes(mark) && isOn !== marksAfterSigns.includes(mark) && (isOn || marksEverywhere.includes(mark)),
   );
 }
-export function formatDoneByMarksToType(mode?: Dynamic, cellEnteredIn?: Dynamic) {
+export function formatDoneByMarksToType(mode: PageMode, cellEnteredIn: string): Omit<FormattedDone, 'cells'> | null {
   let looks = entryLooksOf(mode);
   if (mode.kind !== 'editing' || looks === undefined) return null;
   let [change] = marksToTypeChanges(mode, looks);
@@ -860,27 +938,27 @@ export function formatDoneByMarksToType(mode?: Dynamic, cellEnteredIn?: Dynamic)
     : {
         what: 'formatted',
         format: fontMarkFormat(change.mark, change.isOn),
-        cellEnteredIn: cellEnteredIn,
+        cellEnteredIn,
       };
 }
 export function areEntryLooksUnchanged(state: PageState, reads: WorkbookReads) {
-  let { mode: mode } = state;
+  let { mode } = state;
   let looks = entryLooksOf(mode);
   if (mode.kind !== 'editing' || looks === undefined) return true;
   let cell = activeAnchorCell(state, reads);
   let looksOfCell = looksOfRichCellText(reads, cell, mode.textAtStart);
   return looksOfCell === undefined ? isWholeLookMarked(looks, fontMarksOfCell(reads, cell)) : areSameLookLines(looksOfCell, looks);
 }
-export function richTextOfEntry(text?: Dynamic, looks?: Dynamic) {
+export function richTextOfEntry(text: string, looks: EntryLooks): Extract<Entry, { kind: 'textWithLooks' }> {
   if (!hasLists(looks) || text === '' || text.startsWith(LIST_TEXT_PREFIX)) return richTextFromLooks(text, looks);
   let prefixed = LIST_TEXT_PREFIX + text;
   return richTextFromLooks(prefixed, looksAfterTyping(looks, text, prefixed, LIST_TEXT_PREFIX.length));
 }
-export function entryInputWithLooks(state: PageState, reads: WorkbookReads, cell?: Dynamic, text?: Dynamic, readsSigns?: Dynamic) {
-  let { mode: mode } = state;
+export function entryInputWithLooks(state: PageState, reads: WorkbookReads, cell: CellId, text: string, readsSigns: boolean): Entry {
+  let { mode } = state;
   let looks = entryLooksWithMarksToType(mode);
   if (readsSigns && mode.kind === 'editing' && mode.areSignsLeftAsTyped !== true) {
-    let { from: from, written: written } = diffTexts(textAtStartOfEntry(mode), text);
+    let { from, written } = diffTexts(textAtStartOfEntry(mode), text);
     let read = readTypedMarks(
       text,
       looks !== undefined && doLooksFitText(looks, mode.text)
@@ -891,16 +969,16 @@ export function entryInputWithLooks(state: PageState, reads: WorkbookReads, cell
     );
     if (read !== null) return richTextOfEntry(read.text, read.looks);
   }
-  let plainInput = {
+  let plainInput: Entry = {
     kind: 'text',
-    text: text,
+    text,
   };
   if (mode.kind !== 'editing' || looks === undefined || isFormulaText(text)) return plainInput;
   if (!doLooksFitText(looks, mode.text)) return plainInput;
   if (reads.cellOf(cell)?.input.kind !== 'richText' && isWholeLookMarked(looks, fontMarksOfCell(reads, cell))) return plainInput;
   return richTextOfEntry(text, looksAfterTyping(looks, mode.text, text));
 }
-export const TYPED_MARK_SIGNS = [
+export const TYPED_MARK_SIGNS: readonly (readonly [sign: string, mark: FontMark])[] = [
   ['**', 'bold'],
   ['~~', 'strikethrough'],
   ['*', 'italic'],
@@ -914,18 +992,16 @@ export const PATH_SIGNS = '/\\.,';
 export const OPENING_BRACKET = /(?![„‚])\p{Ps}/u;
 export const CLOSING_BRACKET = /\p{Pe}/u;
 export const QUOTE_SIGN = /["'＂＇„‚\p{Pi}\p{Pf}]/u;
-export const charBefore = (text?: Dynamic, position?: Dynamic) =>
+export const ANY_LETTER = /\p{L}/u;
+export const ONLY_MARK_SIGNS = /^[*~]*$/;
+export const charBefore = (text: string, position: number): string =>
   /[\uDC00-\uDFFF]/.test(text[position - 1] ?? '') ? text.slice(position - 2, position) : (text[position - 1] ?? '');
-export const charStartingAt = (text?: Dynamic, position?: Dynamic) => String.fromCodePoint(text.codePointAt(position) ?? 32);
-export const isSpaceOrNothing = (char?: Dynamic) => char === '' || /\s/.test(char);
-export const withoutMarkSigns = (text: Dynamic, { from: from, wordsFrom: wordsFrom, wordsTo: wordsTo, to: to }: Dynamic) =>
+export const charStartingAt = (text: string, position: number): string => String.fromCodePoint(text.codePointAt(position) ?? 32);
+export const isSpaceOrNothing = (char: string): boolean => char === '' || /\s/.test(char);
+export const withoutMarkSigns = (text: string, { from, wordsFrom, wordsTo, to }: TypedMarkSpan): string =>
   text.slice(0, from) + text.slice(wordsFrom, wordsTo) + text.slice(to);
-export const isTextWithoutMarks = (text?: Dynamic) =>
+export const isTextWithoutMarks = (text: string): boolean =>
   isFormulaText(text) || isMentionText(text) || text.startsWith(TEXT_PREFIX_QUOTE);
-export const typedMarkAtCaret = (text?: Dynamic, caret?: Dynamic) =>
-  !MARK_SIGN_CHARS.includes(text[caret - 1] ?? ' ') || isTextWithoutMarks(text)
-    ? null
-    : typedMarkInLine(text, lineAround(text, caret), caret, makeInCodeCheck());
 export const MAX_TYPED_MARKS = 100;
 export const MAX_MARK_SIGNS_LOOKED_AT = 2000;
 export const RICH_TEXT_BYTE_LIMIT = 32767;
@@ -933,35 +1009,35 @@ export const DATE_LIKE_WORDS =
   'january february march april may june july august september october november december monday tuesday wednesday thursday friday saturday sunday am pm e st nd rd th true false r s'.split(
     ' ',
   );
-export const isDateLikeWord = (word?: Dynamic, isWordDone?: Dynamic) =>
-  DATE_LIKE_WORDS.some((dateWord?: Dynamic) => dateWord.startsWith(word) && (!isWordDone || word.length >= 3 || dateWord === word));
-export const isWordyText = (text?: Dynamic, caret?: Dynamic) =>
+export const isDateLikeWord = (word: string, isWordDone: boolean): boolean =>
+  DATE_LIKE_WORDS.some((dateWord) => dateWord.startsWith(word) && (!isWordDone || word.length >= 3 || dateWord === word));
+export const isWordyText = (text: string, caret: number): boolean =>
   !isFormulaText(text) &&
-  [...text.matchAll(/\p{L}+/gu)].some(({ 0: word, index: index }: Dynamic) => {
+  [...text.matchAll(/\p{L}+/gu)].some(({ 0: word, index }) => {
     let isCaretOutside = caret < index || caret > index + word.length;
     let isAfterDigit = /\d/.test(text.slice(0, index));
     return !isDateLikeWord(word.toLowerCase(), isCaretOutside && !isAfterDigit);
   });
-export const fontMarksOfCell = (reads: WorkbookReads, cell?: Dynamic) => fontMarksOfStyle(reads.formatOf(cell));
-export const withMarksToTypeIn = ({ text: text, looks: looks }: Dynamic, { from: from, after: after, marks: marks }: Dynamic) =>
+export const fontMarksOfCell = (reads: WorkbookReads, cell: CellId): FontMark[] => fontMarksOfStyle(reads.formatOf(cell));
+export const withMarksToTypeIn = ({ text, looks }: EntryLooksKept, { from, after, marks }: MarksToTypeIn): EntryLooks =>
   FONT_MARKS.reduce(
-    (withMarks?: Dynamic, mark?: Dynamic) => withMarkSet(withMarks, from, text.length - after, mark, marks.includes(mark)),
+    (withMarks, mark) => withMarkSet(withMarks, from, text.length - after, mark, marks.includes(mark)),
     looks,
   );
-export const entryLooksOf = (mode?: Dynamic) => (mode.kind === 'editing' && !isFormulaText(mode.text) ? mode.looks : undefined);
-export const hasEntryLists = (mode?: Dynamic) => entryListsOf(mode) !== undefined;
-export const canSetMarkToTypeIn = ({ mode: mode }: Dynamic, reads: WorkbookReads, selectedInBox?: Dynamic) =>
+export const entryLooksOf = (mode: PageMode): EntryLooks | undefined => (mode.kind === 'editing' && !isFormulaText(mode.text) ? mode.looks : undefined);
+export const hasEntryLists = (mode: PageMode): boolean => entryListsOf(mode) !== undefined;
+export const canSetMarkToTypeIn = ({ mode }: Pick<PageState, 'mode'>, reads: WorkbookReads, selectedInBox: CaretInEntry | undefined): boolean =>
   caretInWordyEntry(mode, reads, selectedInBox) !== null;
-export const marksToTypeAt = ({ text: text, marksToTypeIn: marksToTypeIn }: Dynamic, looks?: Dynamic, caret?: Dynamic) =>
+export const marksToTypeAt = ({ text, marksToTypeIn }: EditingMode, looks: EntryLooks, caret: number): FontMark[] =>
   marksToTypeIn !== undefined && caret === text.length - marksToTypeIn.after ? marksToTypeIn.marks : marksAtCaretImported(looks, caret);
-export const canSetMarkOnEntrySelection = ({ mode: mode }: Dynamic, selectedInBox?: Dynamic) =>
+export const canSetMarkOnEntrySelection = ({ mode }: Pick<PageState, 'mode'>, selectedInBox: CaretInEntry | undefined): boolean =>
   selectedSpanInEntry(mode, selectedInBox) !== null;
-export const canChangeEntryLists = (mode?: Dynamic, selectedInBox?: Dynamic) => selectionInRichEntry(mode, selectedInBox) !== null;
+export const canChangeEntryLists = (mode: PageMode, selectedInBox: CaretInEntry | undefined): boolean => selectionInRichEntry(mode, selectedInBox) !== null;
 export const withEntryLooksChanged = (
   state: PageState,
   reads: WorkbookReads,
-  { start: start, end: end, mode: mode }: Dynamic,
-  change: Dynamic,
+  { start, end, mode }: EntrySelection,
+  change: (looks: EntryLooks) => EntryLooks,
 ) => {
   let looks = mode.looks ?? plainLooks(mode.text, fontMarksOfCell(reads, activeAnchorCell(state, reads)));
   return {
@@ -970,21 +1046,21 @@ export const withEntryLooksChanged = (
       ...mode,
       looks: change(looks),
       selectedInEntry: {
-        start: start,
-        end: end,
+        start,
+        end,
       },
     },
   };
 };
 export const LIST_TEXT_PREFIX = "'";
-export const isFormulaTypedAfterText = (modeBefore?: Dynamic, text?: Dynamic, caret?: Dynamic) =>
+export const isFormulaTypedAfterText = (modeBefore: PageMode, text: string, caret: number | undefined): boolean =>
   modeBefore.kind === 'editing' && modeBefore.text !== '' && isFormulaText(text) && caret === text.length;
 export const cellShownAtAnchor = (state: PageState, reads: WorkbookReads) =>
   readsWithUnansweredEntries(reads, state).cellOf(activeAnchorCell(state, reads));
-export const checkboxLinesOfCell = (state: PageState, reads: WorkbookReads) =>
+export const checkboxLinesOfCell = (state: PageState, reads: WorkbookReads): number[] =>
   listLinesOfCell(cellShownAtAnchor(state, reads)).flatMap(
-    ({ list: list }: Dynamic, line: Dynamic) => (list.kind === 'checkbox' ? [line] : []),
+    ({ list }, line) => (list.kind === 'checkbox' ? [line] : []),
   );
-export const textAtStartOfEntry = (mode?: Dynamic) =>
+export const textAtStartOfEntry = (mode: PageMode): string =>
   mode.kind !== 'editing' || mode.isTypedOverCell === true ? '' : mode.textAtStart;
 export { MARK_SIGN_CHARS } from './entry-looks-values.ts';

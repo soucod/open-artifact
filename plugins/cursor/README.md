@@ -1,7 +1,7 @@
 # Open Artifact for Cursor
 
-Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs and design systems as folders of files that open in one local page where you view, edit
-and comment. Type `/open-artifact slides …`, `design …`, `whiteboard …`, `sheets …`, `data …` or `docs …` in the agent chat.
+Slide decks, design canvases, whiteboards, spreadsheets, data dashboards, docs, animated films and design systems as folders of files that open in one local page where you view, edit
+and comment. Type `/open-artifact slides …`, `design …`, `whiteboard …`, `sheets …`, `data …`, `docs …`, `motion …` or `page …` in the agent chat.
 
 ## Install
 
@@ -26,6 +26,14 @@ the installed folder name `open-artifact`. Run **Developer: Reload Window**.
 - `mcp.json`: the `Artifact`, `ArtifactData` and `ArtifactComments` tools (stdio, through the local daemon);
 - `skills/open-artifact/`: the skill, carrying the daemon;
 - `hooks/hooks.json`: `sessionStart`, `postToolUse` and `stop`.
+
+## Publish to a server
+
+A team admin can set the plugin's **Open Artifact server** variable (`OPEN_ARTIFACT_SERVER`) in the Cursor dashboard.
+Otherwise `mcp.json` forwards `OPEN_ARTIFACT_REMOTE`, `OPEN_ARTIFACT_REMOTE_NAME`, `OPEN_ARTIFACT_REMOTE_TOKEN`,
+`OPEN_ARTIFACT_PUBLISH` and `OPEN_ARTIFACT_REMOTE_INSECURE_HTTP` from the environment Cursor starts in (Cursor passes
+no other variables to MCP servers), and `~/.agents/open-artifact/preset.json` works however Cursor was started. See
+[the plugins README](../README.md#use-a-server-instead-of-this-computer).
 
 ## Send to agent
 

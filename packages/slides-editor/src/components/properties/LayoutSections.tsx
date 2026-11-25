@@ -4,7 +4,7 @@
  * - Size: for pinned elements their box, position, rotation and alignment
  *   to the slide (or to each other); for flow children each dimension's
  *   size and how it is sized (Hug / Fixed / Fill), a grid child's spans,
- *   and the min / max limits "+" adds. Grow, shrink, basis, the aspect
+ *   the min / max limits "+" adds, and the margin. Grow, shrink, basis, the aspect
  *   ratio and self-alignment are in Advanced.
  * - Containers (a `<div>` or the slide's flow root): Stack, Grid or Layered,
  *   with direction and wrapping, justify / align / distribute, gap and
@@ -384,7 +384,44 @@ export function SizeSection({ target }: { target: Target }): ReactNode {
           </Row>
         </>
       ) : null}
+      <MarginRow target={target} />
     </Section>
+  );
+}
+
+/** The four sides of a margin as written: px numbers, or `auto`. */
+function marginSides(value: string | undefined): [Side, Side, Side, Side] {
+  const parts = (value ?? '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return [0, 0, 0, 0];
+  const [t, r = t, b = t, l = r] = parts.map((part): Side => (part === 'auto' ? 'auto' : (pxOf(part) ?? 0)));
+  return [t!, r!, b!, l!];
+}
+
+type Side = number | 'auto';
+
+const sideNumber = (side: Side): number => (side === 'auto' ? 0 : side);
+
+/** Margin of a flow child: one value, or one per side; an `auto` side stays `auto` until it is typed over. */
+function MarginRow({ target }: { target: Target }): ReactNode {
+  const shared = sharedStyle(target, 'margin');
+  const sides = shared.mixed ? null : marginSides(shared.value);
+  const shown: Quad | null = sides ? [sideNumber(sides[0]), sideNumber(sides[1]), sideNumber(sides[2]), sideNumber(sides[3])] : null;
+  const commit = (next: Quad): void => {
+    const written = next.map((v, i) => (sides?.[i] === 'auto' && v === shown?.[i] ? 'auto' : `${v}px`));
+    commitCss(target, 'margin', written.every((v) => v === '0px') ? '' : written.join(' '), 'Margin', 'margin');
+  };
+  return (
+    <QuadRow
+      label="Margin"
+      kind="sides"
+      values={shown}
+      unit="px"
+      min={-1920}
+      max={1920}
+      title="Space outside the element, between it and its neighbours."
+      onCommit={commit}
+      onReset={shared.value && !shared.mixed ? () => commitCss(target, 'margin', '', 'Margin') : undefined}
+    />
   );
 }
 
@@ -628,7 +665,7 @@ function PaddingRow({ target }: { target: Target }): ReactNode {
       values={shared.mixed ? null : paddingSides(shared.value)}
       unit="px"
       min={0}
-      max={256}
+      max={1920}
       onCommit={commit}
       onReset={shared.value && !shared.mixed ? () => commitCss(target, 'padding', '', 'Padding') : undefined}
     />

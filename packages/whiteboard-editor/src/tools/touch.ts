@@ -9,7 +9,9 @@
  *   selected and drawn lifted ({@link TOUCH_LIFT_FEEDBACK}), and dragging
  *   then moves it; lifting the finger without moving opens the context
  *   menu instead (see `ui/ContextMenu.tsx`);
- * - a quick tap selects (or, on empty board, clears the selection).
+ * - a tap selects (or, on empty board, clears the selection); a quick one
+ *   ({@link isQuickTap}) on a text showing only its placeholder also starts
+ *   typing into it, as a click does.
  *
  * Two fingers always zoom and pan (`services/viewport.ts`).
  *
@@ -31,6 +33,14 @@ export const TOUCH_LIFT_FEEDBACK = { scale: 1.1, opacity: 0.75, ms: 140, easing:
 /** True once a finger moved past {@link TOUCH_MOVE_SLOP_PX} from `start`. */
 export function movedPastTouchSlop(start: Point, point: Point): boolean {
   return Math.abs(point.x - start.x) + Math.abs(point.y - start.y) >= TOUCH_MOVE_SLOP_PX;
+}
+
+/** The longest (ms) and farthest (screen pixels) a quick tap lasts and drifts. */
+export const TOUCH_QUICK_TAP = { ms: 400, px: 10 } as const;
+
+/** True when a tap that went down at `start` (`startMs`) and lifted at `end` (`endMs`) is quick. */
+export function isQuickTap(start: Point, startMs: number, end: Point, endMs: number): boolean {
+  return endMs - startMs <= TOUCH_QUICK_TAP.ms && Math.hypot(end.x - start.x, end.y - start.y) <= TOUCH_QUICK_TAP.px;
 }
 
 /** A one-finger press still deciding what it is. */

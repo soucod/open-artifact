@@ -2,7 +2,8 @@
  * The chrome around the canvas:
  *
  * - top left: the page switcher (and, outside a Shell, the title);
- * - top right: Play, the properties toggle, the zoom readout and save status;
+ * - top right: the artboards' errors, Play, the properties toggle, the zoom
+ *   readout and save status;
  * - bottom center: the tools and "Ask <agent>".
  *
  * Cards sit 12px from the window edges; top controls are 28px, foot
@@ -25,7 +26,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { boardsOnPage } from '@open-artifact/design-core';
-import { Button, CommitInput, Dialog, cn } from '@open-artifact/ui';
+import { Button, CommitInput, Dialog, cn, isComposingKey } from '@open-artifact/ui';
 import { useDocument, type SaveState } from '../state/document.ts';
 import { PEN_WEIGHTS, useView, type PenStyle, type Tool } from '../state/view.ts';
 import { useAgent } from '../services/agent.ts';
@@ -34,6 +35,7 @@ import { addPage, deletePage, redo, renamePage, undo } from '../services/command
 import { ZOOM_PRESETS, zoomStep, zoomTo, zoomToBoards, zoomToFit } from '../services/viewport.ts';
 import { MAX_ZOOM, MIN_ZOOM } from '../state/view.ts';
 import { Card, ChromeButton, ChromeDivider, ChromeMenu, ChromeMenuItem, ChromeMenuLabel, ChromeMenuSeparator, MOD, Tip, useShellDraw } from '@open-artifact/editor-kit/react';
+import { ErrorsList } from './BoardErrors.tsx';
 import { ArrowIcon, CursorIcon, FrameIcon, LineIcon, NoteIcon, OvalIcon, PencilIcon, RectIcon, TextIcon } from './tool-icons.tsx';
 
 /* ================================ top left ================================ */
@@ -246,7 +248,7 @@ function RenameDialog({ id, onClose }: { id: string | null; onClose: () => void 
         value={name}
         onChange={(event) => setName(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') commit();
+          if (event.key === 'Enter' && !isComposingKey(event.nativeEvent)) commit();
         }}
       />
     </Dialog>
@@ -255,12 +257,13 @@ function RenameDialog({ id, onClose }: { id: string | null; onClose: () => void 
 
 /* ================================ top right =============================== */
 
-/** Top-right card: Play, the properties toggle, zoom and save status. */
+/** Top-right card: the artboards' errors, Play, the properties toggle, zoom and save status. */
 export function EndCard() {
   const panelOpen = useView((s) => s.panelOpen);
   const togglePanel = useView((s) => s.togglePanel);
   return (
     <Card className="h-9 px-1 py-px">
+      <ErrorsList />
       <PlayMenu />
       <Tip label={panelOpen ? 'Hide the properties panel' : 'Show the properties panel'} shortcut={`${MOD}\\`}>
         <ChromeButton square className="mx-0.5" pressed={panelOpen} aria-label={panelOpen ? 'Hide the properties panel' : 'Show the properties panel'} onClick={togglePanel}>

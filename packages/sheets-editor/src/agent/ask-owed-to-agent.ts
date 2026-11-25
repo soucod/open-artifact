@@ -1,31 +1,36 @@
-import type { Dynamic } from '../dynamic.ts';
 import { canTellAgentSelection } from './view-context.ts';
 import { hasOtherRanges } from '../selection/several-ranges.ts';
 import { isSameCell } from '../selection/model.ts';
 import type { PageState } from '../state/initial-state.ts';
-export function settleAskOwedToAgent({ state: state, effects: effects }: Dynamic, workbook?: Dynamic, event?: Dynamic) {
-  let canTellNow = canTellAgentSelection(state, workbook);
-  if (effects.some(({ kind: kind }: Dynamic) => kind === 'askAgentAboutSelection')) {
+import type { PageContext, PageEvent } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+export function settleAskOwedToAgent(
+  { state, effects }: PageTransition,
+  context: Pick<PageContext, 'revisionHeld'>,
+  event: PageEvent,
+): PageTransition {
+  let canTellNow = canTellAgentSelection(state, context);
+  if (effects.some(({ kind }) => kind === 'askAgentAboutSelection')) {
     if (canTellNow)
       return {
         state: {
           ...state,
           askOwedToAgent: null,
         },
-        effects: effects,
+        effects,
       };
-    let { activeCell: activeCell, selectionCorner: selectionCorner, rangeWalked: rangeWalked } = state;
+    let { activeCell, selectionCorner, rangeWalked } = state;
     return {
       state: {
         ...state,
         askOwedToAgent: {
-          activeCell: activeCell,
-          selectionCorner: selectionCorner,
-          rangeWalked: rangeWalked,
+          activeCell,
+          selectionCorner,
+          rangeWalked,
         },
       },
       effects: effects.map(
-        (effect?: Dynamic) =>
+        (effect) =>
           effect.kind === 'askAgentAboutSelection'
             ? {
                 kind: 'oweAgentAnAsk',
@@ -36,14 +41,14 @@ export function settleAskOwedToAgent({ state: state, effects: effects }: Dynamic
   }
   if (state.askOwedToAgent === null)
     return {
-      state: state,
-      effects: effects,
+      state,
+      effects,
     };
   let stateWithoutAsk = {
     ...state,
     askOwedToAgent: null,
   };
-  let isGivenUp = event.kind === 'askOwedToAgentGivenUp';
+  const isGivenUp = event.kind === 'askOwedToAgentGivenUp';
   if (isAskOwedToAgentStale(state) || (isGivenUp && event.by === 'person') || (isGivenUp && !canTellNow))
     return {
       state: stateWithoutAsk,
@@ -65,11 +70,11 @@ export function settleAskOwedToAgent({ state: state, effects: effects }: Dynamic
         ],
       }
     : {
-        state: state,
-        effects: effects,
+        state,
+        effects,
       };
 }
-export const isAskOwedToAgentStale = (state: PageState) =>
+export const isAskOwedToAgentStale = (state: PageState): boolean =>
   state.askOwedToAgent === null ||
   state.mode.kind !== 'navigating' ||
   state.menu !== null ||

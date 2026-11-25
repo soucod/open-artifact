@@ -1,0 +1,49 @@
+// The Open Artifact cloud host on Cloudflare: the product Worker (packages/host-cloudflare/src/worker.ts), bundled by
+// build.mjs into dist/site/. See README.md. This committed file is a template: the D1 id below is a
+// placeholder. To deploy, copy it to wrangler.local.jsonc (git-ignored), put your account and database ids and origins
+// there, and run wrangler with -c wrangler.local.jsonc.
+{
+  "name": "open-artifact",
+  "main": "dist/site/worker.js",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: node:http, node:stream, node:crypto… for the type server. enable_request_signal and
+  // request_signal_passthrough: request.signal aborts when the client goes (event streams end at once).
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal", "request_signal_passthrough"],
+  // build.mjs bundles; workerd compiles the Sheets engine (dist/site/sheets.wasm) at upload. With no_bundle, wrangler
+  // uploads every file under base_dir that a rule matches (find_additional_modules): dist/site holds only the bundle and
+  // its wasm, the static assets are a sibling folder (`npx wrangler deploy --dry-run` lists the modules).
+  "no_bundle": true,
+  "base_dir": "dist/site",
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false }],
+  // dist/assets/_open-artifact/** (the editors, the Shell's and home page's files, support.js) is served by the platform
+  // before the Worker runs, with dist/assets/_headers. The Shell's index.html is a template: the Worker answers it 404
+  // (the Shell is served with its boot at /a/<id>), so it runs first for that path.
+  "assets": {
+    "directory": "dist/assets",
+    "binding": "ASSETS",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "run_worker_first": ["/_open-artifact/shell/index.html"]
+  },
+  // The catalog. Create it with `wrangler d1 create open-artifact` and put its id here before a deploy.
+  "d1_databases": [{ "binding": "DB", "database_name": "open-artifact", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  // ROOMS: one ArtifactObject per artifact (its folder in the object's SQLite). HUB: the one SiteHubObject (events,
+  // the Library streams, presence).
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "ArtifactObject" },
+      { "name": "HUB", "class_name": "SiteHubObject" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ArtifactObject", "SiteHubObject"] }],
+  // The hourly upkeep: expired sessions and device codes.
+  "triggers": { "crons": ["17 * * * *"] },
+  // The origins for `npm run dev` (port 8787). For a deployment: your https origins (see README.md). The secrets
+  // (OA_SIGNING_KEYS, OA_OWNER_KEY, sign-in client secrets) go in .dev.vars locally and `wrangler secret put` deployed.
+  // OA_PLUGINS (the host plugin list, JSON) can sit here or be a secret; each entry's "use" must be a module bundled
+  // from plugins.mjs (build.mjs), so adding a plugin means editing plugins.mjs and building again.
+  "vars": {
+    "OA_APP_ORIGIN": "http://localhost:8787",
+    "OA_CONTENT_ORIGIN": "http://{id}.content.localhost:8787"
+  }
+}

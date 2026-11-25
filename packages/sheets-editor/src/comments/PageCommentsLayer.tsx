@@ -22,7 +22,7 @@ interface ViewFrame {
   scrollY: number;
 }
 
-const frameOf = (win: Window): ViewFrame => ({ width: win.innerWidth, height: win.innerHeight, scrollX: win.scrollX, scrollY: win.scrollY });
+const frameOf = (view: Window): ViewFrame => ({ width: view.innerWidth, height: view.innerHeight, scrollX: view.scrollX, scrollY: view.scrollY });
 
 function useViewFrame(): ViewFrame {
   const [frame, setFrame] = useState(() => frameOf(window));
@@ -40,8 +40,12 @@ function useViewFrame(): ViewFrame {
 
 const inView = (at: PagePoint, frame: ViewFrame): PagePoint => ({ x: at.x - frame.scrollX, y: at.y - frame.scrollY });
 
+interface CardFrameProps {
+  children: ReactNode;
+}
+
 /** The open card's frame: tells its height and whether the mouse is on it. */
-function CardFrame({ children }: { children: ReactNode }): ReactNode {
+function CardFrame({ children }: CardFrameProps): ReactNode {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = ref.current;
@@ -73,17 +77,17 @@ function CardFrame({ children }: { children: ReactNode }): ReactNode {
 export function PageCommentsLayer(): ReactNode {
   const toasts = useToasts();
   useEffect(() => setCommentNotifier((notice) => void toasts.add(notice)), [toasts]);
-  const available = useComments((s) => s.available);
-  const active = useComments((s) => s.active);
-  const threads = useComments((s) => s.threads);
-  const draft = useComments((s) => s.draft);
-  const place = useCommentCards((s) => (active === null ? undefined : s.places[active]));
-  const cardShownAt = useCommentCards((s) => s.cardShownAt);
-  const composerShownAt = useCommentCards((s) => s.composerShownAt);
-  const agent = useCommentCards((s) => s.agent);
+  const available = useComments((state) => state.available);
+  const active = useComments((state) => state.active);
+  const threads = useComments((state) => state.threads);
+  const draft = useComments((state) => state.draft);
+  const place = useCommentCards((cards) => (active === null ? undefined : cards.places[active]));
+  const cardShownAt = useCommentCards((cards) => cards.cardShownAt);
+  const composerShownAt = useCommentCards((cards) => cards.composerShownAt);
+  const agent = useCommentCards((cards) => cards.agent);
   const frame = useViewFrame();
   if (!available) return null;
-  const thread = active === null ? undefined : threads.find((t) => t.id === active);
+  const thread = active === null ? undefined : threads.find((listed) => listed.id === active);
   const cardAt = place ?? cardShownAt;
   const viewport = { width: frame.width, height: frame.height };
   const closeTop = (): boolean => {

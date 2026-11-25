@@ -1,4 +1,12 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { CaretInEntry, KeyPress, RefusalOfEveryEdit } from '../state/event-reducer.ts';
+import type { PointedReference, PageState } from '../state/initial-state.ts';
+import type { EditingMode, PageMode, PageTransition } from '../state/transitions.ts';
+import type { EscapeInCells } from '../state/escape.ts';
+import type { PopupOverEntry } from '../state/list-cards.ts';
+import type { KeyMove } from '../selection/keyboard.ts';
+import type { Jump } from '../selection/jumps.ts';
+import type { sheetsToPointInFor } from '../formulas/sheet-pointed-in.ts';
+import type { AltCommandAct } from './key-press.ts';
 import { isFormulaText } from '../chips/dropdown-pane-edits.ts';
 import { shouldArrowsMoveText, cycleReferenceDollars, caretOrEnd } from '../formulas/reference-pointing.ts';
 import { doesEntryListTakeKey, isCaretInEntryList } from '../editor/entry-looks.ts';
@@ -8,12 +16,123 @@ import { altCommandActOf } from './key-press.ts';
 import { fontMarkOfShortcut } from '../editor/text-looks.ts';
 import { isEntryExpanded } from '../editor/expanded-entry.ts';
 import { MODIFIER_KEYS } from '../state/escape.ts';
-export function focusMoveOfKey(keyEvent?: Dynamic) {
+
+/** A key press, with the caret of the entry when the key came in one. */
+export interface KeyPressWithCaret extends KeyPress {
+  caretInEntry?: CaretInEntry;
+}
+/** A step down or up a list, or to the sheet after or before. */
+export type KeyStep = 1 | -1;
+/** Where a key moves the focus: to the part before, to the next part, or back to the cells. */
+export type FocusMove = 'partBefore' | 'nextPart' | 'cells';
+/** A key that acts on the list the caret of the entry is in. */
+export type EntryListKey = 'lineBreak' | 'tab' | 'shiftTab' | 'backspace';
+/** A number format set by a key. */
+export type NumberFormatOfKey = 'number' | 'time' | 'date' | 'currency' | 'percent' | 'scientific';
+/** A horizontal alignment set by a key. */
+export type AlignmentOfKey = 'left' | 'center';
+/** What a key does to the groups of rows or columns at the selection. */
+export type OutlineGroupAct = 'group' | 'ungroup' | 'expand' | 'collapse';
+/** Where a key steps among the people of a cell: to the one before or after, to the first, or back to the caret. */
+export type FieldStep = 'before' | 'after' | 'first' | 'caret';
+/** A kind of list started in a cell by a key. */
+export type ListKindOfKey = 'numbered' | 'bullet' | 'checkbox';
+/** A font mark a key turns on or off: one of `FONT_MARKS` (editor/text-looks.ts). */
+export type FontMarkOfKey = NonNullable<ReturnType<typeof fontMarkOfShortcut>>;
+/** For each way, whether there is a sheet before or after to point at: the entry's own sheet, another one, or none. */
+export type SheetsToPointIn = ReturnType<typeof sheetsToPointInFor>;
+/** The start and end of the caret in an entry. */
+export type CaretSpan = Pick<CaretInEntry, 'start' | 'end'>;
+/** A format a key sets on the selected cells. */
+export type FormatChoiceOfKey =
+  | { toggle: FontMarkOfKey }
+  | { numberFormatChoice: NumberFormatOfKey }
+  | { horizontalAlignment: AlignmentOfKey }
+  | { list: ListKindOfKey }
+  | { clearsFormatting: true };
+/** What a key press does on the page. */
+export type KeyAct =
+  | (KeyMove & { kind: 'pointAtCells'; isToEdgeOfData: boolean; isStretching: boolean })
+  | (KeyMove & { kind: 'move' | 'extendSelection' | 'takeCardRow' | 'takeDropdownListRow' | 'takePeopleListRow' | 'enterFormulaRead' })
+  | (KeyMove & { kind: 'commitEdit'; isKeep?: true })
+  | { kind: 'writeInEntry'; text: string; caretAt: number; typingIn: EditingMode['typingIn'] }
+  | { kind: 'actOnLists'; key: EntryListKey }
+  | {
+      kind:
+        | 'showSheetBeside'
+        | 'goOnOutOfGrid'
+        | 'moveInCard'
+        | 'moveInDropdownList'
+        | 'moveInPeopleList'
+        | 'moveInTimeList'
+        | 'moveInFunctionList'
+        | 'moveInFormulaOffer';
+      by: KeyStep;
+    }
+  | { kind: 'jump'; to: Jump; isExtending: boolean }
+  | { kind: 'actOnGroups'; act: OutlineGroupAct }
+  | { kind: 'insertOrDeleteLines'; what: keyof typeof LINE_EDITS_OF_COMMAND }
+  | { kind: 'formatCells'; choice: FormatChoiceOfKey }
+  | { kind: 'undoOrRedo'; direction: 'undo' | 'redo' }
+  | { kind: 'fill'; toward: 'down' | 'right' }
+  | { kind: 'selectWhole'; what: 'rows' | 'columns' }
+  | { kind: 'removeFromField'; atCaret: 'theLast' | 'everyone' }
+  | { kind: 'stepInField'; step: FieldStep }
+  | { kind: 'startEditing'; text: string | null }
+  | { kind: 'switchArrows' }
+  | {
+      kind:
+        | 'addSheet'
+        | 'sumUp'
+        | 'pressBoxOfLine'
+        | 'askForLinkForm'
+        | 'collapseEntry'
+        | 'expandEntry'
+        | 'takeFunctionListRow'
+        | 'takeFormulaOfferRow'
+        | 'waitForFormula'
+        | 'goBackToWords'
+        | 'commitEditToSelection'
+        | 'stayInField'
+        | 'selectTableOrAll'
+        | 'showOrHideFormulas'
+        | 'enterToday'
+        | 'selectAll'
+        | 'shutCard'
+        | 'goIntoCard'
+        | 'stayInCard'
+        | 'openCardOfOption'
+        | 'shutList'
+        | 'shutFunctionList'
+        | 'waveFormulaOfferOff'
+        | 'stopAskingForFormula'
+        | 'cancelEdit'
+        | 'goIntoCalendar'
+        | 'openCell'
+        | 'askForMenu'
+        | 'letGo'
+        | 'stepOutOfCells'
+        | 'clearCells';
+    };
+/** A key act on the formula in the entry. */
+export type FormulaKeyAct = Extract<KeyAct, { kind: 'pointAtCells' | 'switchArrows' | 'writeInEntry' }>;
+/** What the page holds that changes what a key does. */
+export interface KeyActSettings {
+  sheetsToPointIn: SheetsToPointIn;
+  pointedReference: PointedReference | null;
+  /** Why the page is only viewed, or `null` when it can be edited. */
+  viewOnlyBecause: RefusalOfEveryEdit;
+  doesEntryTakeLineBreaks: boolean;
+  hasCellsToFill: boolean;
+  isSteppedOutOfCells?: boolean;
+  doesKeyOpenLinkForm?: boolean;
+}
+export function focusMoveOfKey(keyEvent: KeyPress): FocusMove | null {
   if (keyEvent.isAltHeld || keyEvent.isRepeat) return null;
   if (keyEvent.key === 'F6') return keyEvent.isShiftHeld ? 'partBefore' : 'nextPart';
   return keyEvent.key === 'Escape' ? 'cells' : null;
 }
-export function jumpOfKey({ key: key, isModifierHeld: isModifierHeld, isAltHeld: isAltHeld }: Dynamic) {
+export function jumpOfKey({ key, isModifierHeld, isAltHeld }: Pick<KeyPress, 'key' | 'isModifierHeld' | 'isAltHeld'>): Jump | null {
   if (isAltHeld) return null;
   if (key === 'Home')
     return {
@@ -43,11 +162,11 @@ export function jumpOfKey({ key: key, isModifierHeld: isModifierHeld, isAltHeld:
       }
     : null;
 }
-export function listKeyOf({ key: key, isShiftHeld: isShiftHeld }: Dynamic) {
+export function listKeyOf({ key, isShiftHeld }: Pick<KeyPress, 'key' | 'isShiftHeld'>): Exclude<EntryListKey, 'lineBreak'> | null {
   if (key === 'Tab') return isShiftHeld ? 'shiftTab' : 'tab';
   return key === 'Backspace' && !isShiftHeld ? 'backspace' : null;
 }
-export function formulaKeyActOf(mode?: Dynamic, keyEvent?: Dynamic, pointedReference?: Dynamic) {
+export function formulaKeyActOf(mode: PageMode, keyEvent: KeyPressWithCaret, pointedReference: PointedReference | null): FormulaKeyAct | null {
   if (mode.kind !== 'editing' || !isFormulaText(mode.text) || keyEvent.isAltHeld) return null;
   if (mode.isBegunToListFunctions === true) return null;
   if (keyEvent.caretInEntry?.isComposing === true) return null;
@@ -74,36 +193,36 @@ export function formulaKeyActOf(mode?: Dynamic, keyEvent?: Dynamic, pointedRefer
         typingIn: mode.typingIn,
       };
 }
-export function popupForKey(popup: Dynamic, { key: key, isAltHeld: isAltHeld }: Dynamic) {
+export function popupForKey(popup: PopupOverEntry | null, { key, isAltHeld }: Pick<KeyPress, 'key' | 'isAltHeld'>): PopupOverEntry | null {
   if (popup === null || !isFormulaPopupYetToRest(popup)) return popup;
   if (key !== 'Enter' || isAltHeld) return null;
   return popup === 'formulaOfferYetToRest' ? 'formulaOffer' : 'formulaRead';
 }
 export function keyActOf(
-  mode?: Dynamic,
-  keyEvent?: Dynamic,
-  popupOpen?: Dynamic,
-  escapeDoes?: Dynamic,
+  mode: PageMode,
+  keyEvent: KeyPressWithCaret,
+  popupOpen: PopupOverEntry | null,
+  escapeDoes: EscapeInCells,
   {
-    sheetsToPointIn: sheetsToPointIn,
-    pointedReference: pointedReference,
-    viewOnlyBecause: viewOnlyBecause,
+    sheetsToPointIn,
+    pointedReference,
+    viewOnlyBecause,
     doesEntryTakeLineBreaks: entryTakesLineBreaks,
-    hasCellsToFill: hasCellsToFill,
+    hasCellsToFill,
     isSteppedOutOfCells = false,
     doesKeyOpenLinkForm = false,
-  }: Dynamic = {
+  }: KeyActSettings = {
     sheetsToPointIn: ANY_SHEETS_TO_POINT_IN,
     pointedReference: null,
     viewOnlyBecause: null,
     doesEntryTakeLineBreaks: false,
     hasCellsToFill: false,
   },
-) {
+): KeyAct | null {
   let popup = popupForKey(popupOpen, keyEvent);
   let formulaAct = viewOnlyBecause === null ? formulaKeyActOf(mode, keyEvent, pointedReference) : null;
   let isPopupNoteOrNone = popup === null || popup === 'formulaNote';
-  let lineBreakActOf = (allowsInList: Dynamic = false) => {
+  let lineBreakActOf = (allowsInList = false): KeyAct | null => {
     if (!(mode.kind === 'editing' && entryTakesLineBreaks && doesPopupLetLineBreak(popup, allowsInList) && viewOnlyBecause === null)) return null;
     return doesEntryListTakeKey(mode, 'lineBreak', entryAtCaretOf(mode, keyEvent))
       ? {
@@ -122,14 +241,14 @@ export function keyActOf(
   let isTimeList = popup === 'timeList';
   let isUpOrDown = keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp';
   if (keyEvent.isAltHeld && !keyEvent.isShiftHeld && isUpOrDown) {
-    let directionOrKey = keyEvent.key === 'ArrowDown' ? 1 : -1;
-    let pickedForKey = directionOrKey === 1 ? sheetsToPointIn.after : sheetsToPointIn.before;
-    let keyCondition =
-      (pickedForKey !== null || keyEvent.isRepeat) && canSwitchSheetWhileEditing(mode, keyEvent.caretInEntry, pickedForKey === 'entrysOwn', true);
-    if (keyEvent.isModifierHeld || (mode.kind === 'editing' && !keyCondition)) return null;
+    let step: KeyStep = keyEvent.key === 'ArrowDown' ? 1 : -1;
+    let sheetThatWay = step === 1 ? sheetsToPointIn.after : sheetsToPointIn.before;
+    let canSwitchSheet =
+      (sheetThatWay !== null || keyEvent.isRepeat) && canSwitchSheetWhileEditing(mode, keyEvent.caretInEntry, sheetThatWay === 'entrysOwn', true);
+    if (keyEvent.isModifierHeld || (mode.kind === 'editing' && !canSwitchSheet)) return null;
     return {
       kind: 'showSheetBeside',
-      by: directionOrKey,
+      by: step,
     };
   }
   let groupAct = keyEvent.isAltHeld && keyEvent.isShiftHeld && !keyEvent.isModifierHeld ? OUTLINE_GROUP_SHORTCUTS[keyEvent.key] : undefined;
@@ -164,30 +283,30 @@ export function keyActOf(
       isExtending: keyEvent.isShiftHeld,
     };
   if (keyEvent.isModifierHeld) {
-    let directionOrKey = keyEvent.key.toLowerCase();
-    let pickedForKey = fontMarkOfShortcut(keyEvent);
-    if (pickedForKey !== undefined)
+    let lowerKey = keyEvent.key.toLowerCase();
+    let fontMark = fontMarkOfShortcut(keyEvent);
+    if (fontMark !== undefined)
       return {
         kind: 'formatCells',
         choice: {
-          toggle: pickedForKey,
+          toggle: fontMark,
         },
       };
-    let keyCondition = keyEvent.isShiftHeld && !keyEvent.isAltHeld;
-    let numberFormatChoice = keyCondition ? NUMBER_FORMAT_SHORTCUTS[keyEvent.key] : undefined;
+    let isShiftWithoutAlt = keyEvent.isShiftHeld && !keyEvent.isAltHeld;
+    let numberFormatChoice = isShiftWithoutAlt ? NUMBER_FORMAT_SHORTCUTS[keyEvent.key] : undefined;
     if (numberFormatChoice !== undefined)
       return {
         kind: 'formatCells',
         choice: {
-          numberFormatChoice: numberFormatChoice,
+          numberFormatChoice,
         },
       };
-    let alignmentOrMove = keyCondition ? ALIGNMENT_SHORTCUTS[directionOrKey] : undefined;
-    if (alignmentOrMove !== undefined)
+    let alignment = isShiftWithoutAlt ? ALIGNMENT_SHORTCUTS[lowerKey] : undefined;
+    if (alignment !== undefined)
       return {
         kind: 'formatCells',
         choice: {
-          horizontalAlignment: alignmentOrMove,
+          horizontalAlignment: alignment,
         },
       };
     let listKind = listKindOfShortcut(keyEvent);
@@ -204,11 +323,11 @@ export function keyActOf(
             kind: 'pressBoxOfLine',
           }
         : null;
-    if (directionOrKey === 'k' && !keyEvent.isShiftHeld && !keyEvent.isAltHeld && doesKeyOpenLinkForm && popup === null)
+    if (lowerKey === 'k' && !keyEvent.isShiftHeld && !keyEvent.isAltHeld && doesKeyOpenLinkForm && popup === null)
       return {
         kind: 'askForLinkForm',
       };
-    if (keyEvent.key === 'Enter' && keyCondition) {
+    if (keyEvent.key === 'Enter' && isShiftWithoutAlt) {
       if (isEntryExpanded(mode))
         return {
           kind: 'collapseEntry',
@@ -278,11 +397,11 @@ export function keyActOf(
       );
     }
     if (mode.kind !== 'navigating') return null;
-    if (isPeopleList && (directionOrKey === 'a' || keyEvent.key === ' '))
+    if (isPeopleList && (lowerKey === 'a' || keyEvent.key === ' '))
       return {
         kind: 'stayInField',
       };
-    if (directionOrKey === 'a')
+    if (lowerKey === 'a')
       return {
         kind: 'selectTableOrAll',
       };
@@ -290,23 +409,23 @@ export function keyActOf(
       return {
         kind: 'showOrHideFormulas',
       };
-    if (directionOrKey === 'z' && !keyEvent.isAltHeld)
+    if (lowerKey === 'z' && !keyEvent.isAltHeld)
       return {
         kind: 'undoOrRedo',
         direction: keyEvent.isShiftHeld ? 'redo' : 'undo',
       };
-    if (directionOrKey === 'y' && !keyEvent.isAltHeld && !keyEvent.isShiftHeld)
+    if (lowerKey === 'y' && !keyEvent.isAltHeld && !keyEvent.isShiftHeld)
       return {
         kind: 'undoOrRedo',
         direction: 'redo',
       };
     let isNoShiftNoAlt = !keyEvent.isShiftHeld && !keyEvent.isAltHeld;
-    if (directionOrKey === 'd' && isNoShiftNoAlt)
+    if (lowerKey === 'd' && isNoShiftNoAlt)
       return {
         kind: 'fill',
         toward: 'down',
       };
-    if (directionOrKey === 'r' && isNoShiftNoAlt)
+    if (lowerKey === 'r' && isNoShiftNoAlt)
       return {
         kind: 'fill',
         toward: 'right',
@@ -366,8 +485,8 @@ export function keyActOf(
       return {
         kind: 'goIntoCard',
       };
-    let directionOrKey = mode.kind === 'navigating' && (keyEvent.key === 'Delete' || keyEvent.key === 'Backspace');
-    if (popup === 'cardOfOption' && directionOrKey)
+    let isClearKeyInCells = mode.kind === 'navigating' && (keyEvent.key === 'Delete' || keyEvent.key === 'Backspace');
+    if (popup === 'cardOfOption' && isClearKeyInCells)
       return {
         kind: 'stayInCard',
       };
@@ -429,11 +548,11 @@ export function keyActOf(
           kind: 'removeFromField',
           atCaret: 'everyone',
         };
-      let pickedForKey = !keyEvent.isShiftHeld && !keyEvent.isAltHeld ? FIELD_STEP_KEYS[keyEvent.key] : undefined;
-      if (pickedForKey !== undefined)
+      let fieldStep = !keyEvent.isShiftHeld && !keyEvent.isAltHeld ? FIELD_STEP_KEYS[keyEvent.key] : undefined;
+      if (fieldStep !== undefined)
         return {
           kind: 'stepInField',
-          step: pickedForKey,
+          step: fieldStep,
         };
       if (keyEvent.key === ' ')
         return {
@@ -462,12 +581,12 @@ export function keyActOf(
           kind: 'shutFunctionList',
         };
     }
-    let directionOrKey = keyEvent.key === 'ArrowDown' ? 1 : -1;
+    let step: KeyStep = keyEvent.key === 'ArrowDown' ? 1 : -1;
     if (popup === 'formulaOffer' || popup === 'formulaRead') {
       if (isUpOrDown && !keyEvent.isShiftHeld)
         return {
           kind: 'moveInFormulaOffer',
-          by: directionOrKey,
+          by: step,
         };
       if (keyEvent.key === 'Escape')
         return {
@@ -501,17 +620,17 @@ export function keyActOf(
       return {
         kind: 'waitForFormula',
       };
-    let keyCondition = popup === 'formulaArriving' || popup === 'formulaProposed' || popup === 'formulaToDiscard';
-    if (keyCondition && isUpOrDown && !keyEvent.isShiftHeld)
+    let isFormulaOfAgentUp = popup === 'formulaArriving' || popup === 'formulaProposed' || popup === 'formulaToDiscard';
+    if (isFormulaOfAgentUp && isUpOrDown && !keyEvent.isShiftHeld)
       return {
         kind: 'moveInFormulaOffer',
-        by: directionOrKey,
+        by: step,
       };
     if (popup === 'formulaToDiscard' && commitMove !== null)
       return {
         kind: 'goBackToWords',
       };
-    if (keyCondition && keyEvent.key === 'Escape')
+    if (isFormulaOfAgentUp && keyEvent.key === 'Escape')
       return {
         kind: 'goBackToWords',
       };
@@ -559,7 +678,7 @@ export function keyActOf(
       return {
         kind: 'goIntoCalendar',
       };
-    let alignmentOrMove =
+    let arrowMove =
       !isFormulaText(mode.text) &&
       !mode.text.includes(`
 `) &&
@@ -569,10 +688,10 @@ export function keyActOf(
       !keyEvent.isAltHeld
         ? ARROW_KEY_MOVES[keyEvent.key]
         : undefined;
-    if (alignmentOrMove !== undefined)
+    if (arrowMove !== undefined)
       return {
         kind: 'commitEdit',
-        ...alignmentOrMove,
+        ...arrowMove,
       };
     return keyEvent.key === 'Escape'
       ? {
@@ -625,15 +744,15 @@ export function keyActOf(
       }
     : null;
 }
-export const withDropWhatIsHeld = (state?: Dynamic) => ({
-  state: state,
+export const withDropWhatIsHeld = (state: PageState): PageTransition => ({
+  state,
   effects: [
     {
       kind: 'dropWhatIsHeld',
     },
   ],
 });
-export const ARROW_KEY_MOVES = {
+export const ARROW_KEY_MOVES: Partial<Record<string, KeyMove>> = {
   ArrowUp: {
     rowDelta: -1,
     columnDelta: 0,
@@ -651,7 +770,7 @@ export const ARROW_KEY_MOVES = {
     columnDelta: 1,
   },
 };
-export const NUMBER_FORMAT_SHORTCUTS = {
+export const NUMBER_FORMAT_SHORTCUTS: Partial<Record<string, NumberFormatOfKey>> = {
   '1': 'number',
   '2': 'time',
   '3': 'date',
@@ -659,17 +778,17 @@ export const NUMBER_FORMAT_SHORTCUTS = {
   '5': 'percent',
   '6': 'scientific',
 };
-export const ALIGNMENT_SHORTCUTS = {
+export const ALIGNMENT_SHORTCUTS: Partial<Record<string, AlignmentOfKey>> = {
   l: 'left',
   e: 'center',
 };
-export const OUTLINE_GROUP_SHORTCUTS = {
+export const OUTLINE_GROUP_SHORTCUTS: Partial<Record<string, OutlineGroupAct>> = {
   ArrowRight: 'group',
   ArrowLeft: 'ungroup',
   ArrowDown: 'expand',
   ArrowUp: 'collapse',
 };
-export const COMMAND_KEY_ACTS = {
+export const COMMAND_KEY_ACTS: Record<AltCommandAct, KeyAct> = {
   insertRowsOrColumns: {
     kind: 'insertOrDeleteLines',
     what: 'insert',
@@ -697,36 +816,36 @@ export const LINE_EDITS_OF_COMMAND = {
     rows: 'deleteRows',
     columns: 'deleteColumns',
   },
-};
-export const isActLeftToCtrlAlt = (key?: Dynamic, act?: Dynamic) =>
+} as const;
+export const isActLeftToCtrlAlt = (key: string, act: KeyAct): boolean =>
   act.kind === 'jump' ||
   act.kind === 'goIntoCalendar' ||
   act.kind === 'pointAtCells' ||
   act.kind === 'switchArrows' ||
   (act.kind === 'writeInEntry' && key !== 'Enter') ||
   (ARROW_KEY_MOVES[key] !== undefined && (act.kind === 'move' || act.kind === 'extendSelection' || act.kind === 'commitEdit'));
-export const movesCaretInEntry = ({ key: key, isModifierHeld: isModifierHeld }: Dynamic) =>
+export const movesCaretInEntry = ({ key, isModifierHeld }: Pick<KeyPress, 'key' | 'isModifierHeld'>): boolean =>
   (isModifierHeld && !MODIFIER_KEYS.has(key)) || ARROW_KEY_MOVES[key] !== undefined || /^(?:Home|End|PageUp|PageDown|F2)$/.test(key);
-export const isSumKey = ({ key: key, isAltHeld: isAltHeld, isModifierHeld: isModifierHeld }: Dynamic) =>
+export const isSumKey = ({ key, isAltHeld, isModifierHeld }: Pick<KeyPress, 'key' | 'isAltHeld' | 'isModifierHeld'>): boolean =>
   isAltHeld && !isModifierHeld && (key === '=' || key === '≠');
-export const ANY_SHEETS_TO_POINT_IN = {
+export const ANY_SHEETS_TO_POINT_IN: SheetsToPointIn = {
   before: 'another',
   after: 'another',
 };
-export const FIELD_STEP_KEYS = {
+export const FIELD_STEP_KEYS: Partial<Record<string, FieldStep>> = {
   ArrowLeft: 'before',
   ArrowRight: 'after',
   Home: 'first',
   End: 'caret',
 };
-export const caretInEntryOf = (mode: Dynamic, { caretInEntry: caretInEntry }: Dynamic) =>
+export const caretInEntryOf = (mode: PageMode, { caretInEntry }: Pick<KeyPressWithCaret, 'caretInEntry'>): CaretSpan =>
   caretOrEnd(mode.kind === 'editing' ? mode.text : '', caretInEntry);
-export const entryAtCaretOf = (mode: Dynamic, keyEvent: Dynamic) => ({
+export const entryAtCaretOf = (mode: PageMode, keyEvent: Pick<KeyPressWithCaret, 'caretInEntry'>): CaretInEntry => ({
   ...caretInEntryOf(mode, keyEvent),
   text: mode.kind === 'editing' ? mode.text : '',
   isComposing: keyEvent.caretInEntry?.isComposing === true,
 });
-export const LIST_KIND_OF_DIGIT_KEY = {
+export const LIST_KIND_OF_DIGIT_KEY: Partial<Record<string, ListKindOfKey>> = {
   '7': 'numbered',
   Digit7: 'numbered',
   '8': 'bullet',
@@ -735,13 +854,14 @@ export const LIST_KIND_OF_DIGIT_KEY = {
   Digit9: 'checkbox',
 };
 export const listKindOfShortcut = ({
-  key: key,
-  isModifierHeld: isModifierHeld,
-  isShiftHeld: isShiftHeld,
-  isAltHeld: isAltHeld,
-}: Dynamic) => (isModifierHeld && isShiftHeld && !isAltHeld ? LIST_KIND_OF_DIGIT_KEY[key] : undefined);
-export const isKeyWritingInEntry = (mode?: Dynamic, keyEvent?: Dynamic) =>
+  key,
+  isModifierHeld,
+  isShiftHeld,
+  isAltHeld,
+}: Pick<KeyPress, 'key' | 'isModifierHeld' | 'isShiftHeld' | 'isAltHeld'>): ListKindOfKey | undefined =>
+  isModifierHeld && isShiftHeld && !isAltHeld ? LIST_KIND_OF_DIGIT_KEY[key] : undefined;
+export const isKeyWritingInEntry = (mode: PageMode, keyEvent: KeyPressWithCaret): boolean =>
   formulaKeyActOf(mode, keyEvent, null)?.kind === 'writeInEntry';
-export const doesPopupLetLineBreak = (popup?: Dynamic, allowsInList?: Dynamic) =>
+export const doesPopupLetLineBreak = (popup: PopupOverEntry | null, allowsInList: boolean): boolean =>
   popup === null || popup === 'formulaNote' || (allowsInList && (popup === 'functionList' || isFormulaPopupYetToRest(popup)));
-export const isFormulaPopupYetToRest = (popup?: Dynamic) => popup === 'formulaOfferYetToRest' || popup === 'formulaReadYetToRest';
+export const isFormulaPopupYetToRest = (popup: PopupOverEntry | null): boolean => popup === 'formulaOfferYetToRest' || popup === 'formulaReadYetToRest';

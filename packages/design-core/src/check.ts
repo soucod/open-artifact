@@ -10,7 +10,7 @@ import {
   ID_PATTERN,
   MAX_BOARD_SIZE,
   MAX_GUIDES,
-  MAX_NOTES,
+  MAX_INDEX_BYTES,
   MAX_NOTE_GROUPS,
   MAX_PAGES,
   MIN_BOARD_SIZE,
@@ -54,6 +54,8 @@ export function checkDesignProject(files: ReadonlyMap<string, string>, options: 
     add('canvas.json', 'error', 'project/canvas.json is missing.');
     return out;
   }
+  const indexBytes = new TextEncoder().encode(canvasText).length;
+  if (indexBytes >= MAX_INDEX_BYTES) add('canvas.json', 'error', `canvas.json is ${indexBytes} bytes; keep the index under 1 MiB.`);
 
   let raw: Record<string, unknown>;
   try {
@@ -142,7 +144,6 @@ export function checkDesignProject(files: ReadonlyMap<string, string>, options: 
 
   // Notes.
   const noteIds = Object.keys(notes);
-  if (noteIds.length > MAX_NOTES) add('canvas.json', 'error', `At most ${MAX_NOTES} notes.`);
   for (const id of noteIds) {
     const note = notes[id];
     if (!ID_PATTERN.test(id)) add('canvas.json', 'error', `Note id "${id}" must match [A-Za-z0-9_-]{1,40}.`);

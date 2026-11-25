@@ -3,6 +3,8 @@
 //! each row of its body plays; then its columns' names and kinds. The modules go from the sheet as the guess reads
 //! it (`grid`) up to the table around a cell (`around`) and its columns (`columns`).
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value as Json};
 
 use super::live::Role;
@@ -21,20 +23,74 @@ mod runs;
 mod table;
 
 pub(super) use cell_tables::{cell_table_at, cell_table_declared_as, cell_tables};
-pub(in crate::session::reads) use cell_tables::{declared_tables, DeclaredRecords};
-pub(super) use recognize::tables_of_sheet;
+pub(in crate::session::reads) use recognize::tables_of_sheet;
 use grid::Grid;
-use runs::Table;
+use recognize::Basis;
+use runs::{HeaderRows, Table};
 
 /// The table guessed around a cell, with its columns: null when there is none.
 pub(super) fn read_at(workbook: &Workbook, sheet: &Sheet, row: usize, column: usize) -> Json {
     let grid = Grid::of(workbook, sheet);
-    let Some(table) = grid.table_at(row, column) else { return Json::Null };
-    let columns = columns_in_ids(workbook, sheet, &grid, &table);
-    // The row under the body, when it shows something across the table's columns.
-    let under = table.to.saturating_add(1);
-    let under = grid.row_has_any(under, table.first_column, table.last_column).then_some(under);
-    json!({"table": table_in_ids(workbook, sheet, &table, under), "columns": columns})
+    let tables = recognize::found_tables(&grid, sheet);
+    let Some(found) = tables.iter().find(|t| t.area().holds(row, column)) else { return Json::Null };
+    let Some(table) = found.reading(&grid) else { return Json::Null };
+    read_table(workbook, sheet, &grid, &found.basis, &table, found.row_under_reading(&grid, Some(&table)))
+}
+
+fn read_table(workbook: &Workbook, sheet: &Sheet, grid: &Grid, basis: &Basis, table: &Table, under: Option<usize>) -> Json {
+    let columns = columns_in_ids(workbook, sheet, grid, table);
+    json!({"basis": basis.in_json(), "table": table_in_ids(workbook, sheet, table, under), "columns": columns})
+}
+
+type Span = (usize, usize);
+type Area = (usize, usize, usize, usize);
+
+/// The classified table around a conditional-format selection.
+pub(in crate::session::reads) struct TableForFormatting {
+    pub cells: Area,
+    pub records: Option<Area>,
+    pub assumed: bool,
+    pub footer: Option<Span>,
+    pub non_records: Vec<(Span, &'static str)>,
+    pub names: BTreeMap<usize, String>,
+}
+
+pub(in crate::session::reads) fn tables_for_formatting(
+    workbook: &Workbook,
+    sheet: &Sheet,
+    (top, left, bottom, right): Area,
+    adjacent: bool,
+) -> Vec<TableForFormatting> {
+    let grid = Grid::of(workbook, sheet);
+    recognize::found_tables(&grid, sheet).into_iter().filter_map(|found| {
+        let area = found.area();
+        let near = usize::from(adjacent);
+        if top > area.bottom.saturating_add(near) || area.top > bottom.saturating_add(near)
+            || left > area.right || area.left > right
+        {
+            return None;
+        }
+        let table = found.reading(&grid);
+        let non_records = table.as_ref().into_iter().flat_map(|t| &t.runs).filter_map(|r| {
+            match r.role {
+                Role::Spacer => Some(((r.first, r.last), "blank")),
+                Role::Section | Role::HeaderAgain => Some(((r.first, r.last), "sectionLabel")),
+                Role::Subtotal => Some(((r.first, r.last), "subtotal")),
+                Role::Record => None,
+            }
+        }).collect();
+        let names = table.as_ref().into_iter().flat_map(|t| grid.columns(t)).filter_map(|c| Some((c.column, c.name?))).collect();
+        Some(TableForFormatting {
+            cells: (area.top, area.left, area.bottom, area.right),
+            // The records run to the last of them: titles at the end, which the table read at a cell leaves out,
+            // are among them here.
+            records: table.map(|t| (t.from, area.left, found.last_record().map_or(t.to, |last| last.max(t.to)), area.right)),
+            assumed: matches!(found.basis, Basis::Assumed(_)),
+            footer: found.footer,
+            non_records,
+            names,
+        })
+    }).collect()
 }
 
 /// A table's columns by ids, each with its name and kind.

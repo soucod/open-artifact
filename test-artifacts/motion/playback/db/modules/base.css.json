@@ -1,0 +1,1 @@
+{"kind":"css","text":":root {\n  --ground: #f5efe6;\n  --main: #1c2430;\n  --second: #4f8a5b;\n  --accent: #d98a3d;\n}\n.wrap {\n  width: 100%;\n  height: 100%;\n  display: grid;\n  place-content: center;\n  justify-items: center;\n  background: var(--ground);\n  color: var(--main);\n  font: 600 28px system-ui;\n}\n.headline { margin: 12px; }"}

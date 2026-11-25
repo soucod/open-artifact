@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { BoardEntry, CanvasNote } from '@open-artifact/design-core';
-import { boardItem, boardItemId, fromEngineCamera, itemTarget, noteItem, noteItemId, noteRect, smallSnapshot, toEngineCamera } from '../src/lib/scene.ts';
+import { boardItem, boardItemId, fromEngineCamera, itemTarget, noteItem, noteItemId, noteRect, smallSnapshot, snapshotScale, toEngineCamera } from '../src/lib/scene.ts';
 
 const entry: BoardEntry = { x: 100, y: 50, w: 1280, h: 800 } as BoardEntry;
 
@@ -23,6 +23,20 @@ describe('scene ids and cameras', () => {
   it('draws an artboard from the small snapshot only while it is small on screen', () => {
     assert.equal(smallSnapshot(entry, 0.1, 2), true);
     assert.equal(smallSnapshot(entry, 0.5, 1), false);
+  });
+
+  it('takes a snapshot large enough to stay sharp until the frames take over', () => {
+    const sizes = { side: 1024, limit: 2048, sharpZoom: 0.3 };
+    // A small artboard is taken at its own size, never larger.
+    assert.equal(snapshotScale({ w: 880, h: 560 }, { ...sizes, dpr: 2 }), 1);
+    // A large one: as many pixels as it covers at 30 % on the display, where that is more than 1024.
+    assert.equal(snapshotScale({ w: 3840, h: 2160 }, { ...sizes, dpr: 1 }), 0.3);
+    assert.equal(snapshotScale({ w: 3840, h: 2160 }, { ...sizes, dpr: 2 }), 2048 / 3840);
+    assert.equal(snapshotScale({ w: 1920, h: 1080 }, { ...sizes, dpr: 2 }), 0.6);
+    assert.equal(snapshotScale({ w: 1920, h: 1080 }, { ...sizes, dpr: 3 }), 0.6);
+    assert.equal(snapshotScale({ w: 1080, h: 1440 }, { ...sizes, dpr: 1 }), 1024 / 1440);
+    // Never past the limit, however long the artboard.
+    assert.equal(snapshotScale({ w: 400, h: 20000 }, { ...sizes, dpr: 2 }), 2048 / 20000);
   });
 });
 

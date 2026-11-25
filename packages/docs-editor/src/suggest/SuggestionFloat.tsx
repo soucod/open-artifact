@@ -18,9 +18,8 @@ export function SuggestionFloat(): ReactNode {
   const focused = useDocs(state => state.focusedSuggestion);
   const hoveredText = useSuggest(state => state.hoveredText);
   const margin = useSuggest(state => state.margin);
-  const rewriting = useDocs(state => state.rewriting);
   const column = useMarginColumn(state => state.mode !== 'off');
-  if (margin || column || !tab || !cards.length || rewriting) return null;
+  if (margin || column || !tab || !cards.length) return null;
   const active = hoveredText ?? focused;
   const index = active ? cards.findIndex(card => card.id === active) : -1;
   const card = index >= 0 ? cards[index]! : null;

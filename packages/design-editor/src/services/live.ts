@@ -16,8 +16,15 @@
  *   snapshot and let go again.
  *
  * Every other artboard shows its snapshot: an image of its page taken from
- * its live frame. A snapshot is keyed by the source, size and tweaks it was
+ * its live frame, once its web fonts loaded, and carrying them (see
+ * `pageImage`). A snapshot is keyed by the source, size and tweaks it was
  * taken with; when they change, the artboard is warmed again.
+ *
+ * An artboard that stops being live keeps its frame for a while, hidden
+ * behind its snapshot ("resting", at most `MAX_RESTING`, the most recently
+ * shown first). Zooming out past `LIVE_MIN_ZOOM` and back in, or panning
+ * between two groups of artboards, then shows the frames at once instead of
+ * loading every page and its fonts again.
  *
  * `?open_artifact_live=all` turns this off: every artboard is live, as before (for
  * comparing in benchmarks, and as a way out).
@@ -26,7 +33,9 @@
  */
 
 import { create } from 'zustand';
+import { fontEmbedStats } from '@open-artifact/export-kit';
 import { boardsOnPage } from '@open-artifact/design-core';
+import { snapshotScale } from '../lib/scene.ts';
 import { useDocument } from '../state/document.ts';
 import { useView } from '../state/view.ts';
 import { frameOf } from './frames.ts';
@@ -39,14 +48,31 @@ export const LIVE_MIN_ZOOM = 0.3;
 export const MAX_LIVE = 16;
 /** The camera counts as still after this long without moving. */
 const IDLE_MS = 150;
-/** A booted artboard is captured once it has been quiet this long (fonts, images, first effects). */
+/** A booted artboard is captured once it has been quiet this long (images, first effects). */
 const SETTLE_MS = 400;
+/** Web fonts still loading hold an artboard's snapshot back, this long at most. */
+const FONT_WAIT_MS = 8_000;
 /** Artboards warmed at the same time. */
 const WARM_CONCURRENCY = 3;
 /** A warming artboard that has not booted by then is given up on (until its source changes). */
 const WARM_TIMEOUT_MS = 10_000;
-/** Longest side of a snapshot in image pixels. */
-const SNAPSHOT_MAX_SIDE = 768;
+/** Longest side of a snapshot in image pixels, unless the artboard needs more to stay sharp (lib/scene.ts `snapshotScale`). */
+const SNAPSHOT_MAX_SIDE = 1024;
+/** No snapshot is larger than this on its longest side. */
+const SNAPSHOT_LIMIT_SIDE = 2048;
+/**
+ * Most web font data one snapshot carries, characters of `data:` URL. The
+ * browser reads the fonts again for every snapshot, about 30 ms of main
+ * thread a megabyte. A TrueType font is inlined as a subset holding only the
+ * ideographs and Hangul the artboard uses (export-kit font-subset.ts), so a
+ * big CJK font costs a few megabytes; CFF (OpenType-CFF) fonts, variable
+ * fonts with `gvar`, WOFF and WOFF2 files, TrueType collections and AAT
+ * (`morx`) fonts are still inlined whole. Families that do not fit are left
+ * out: their text shows in a fallback font and the snapshot is marked `rough`.
+ */
+const SNAPSHOT_FONT_BYTES = 8 * 1024 * 1024;
+/** Frames kept, hidden, after their artboards stopped being live. */
+const MAX_RESTING = 16;
 
 /** `?open_artifact_live=all`: every artboard live, no snapshots. */
 export const liveAll = (() => {
@@ -62,15 +88,19 @@ export interface Snapshot {
   url: string | null;
   /** What it was taken from (see {@link snapshotKey}). */
   key: string;
+  /** Some web fonts were too large to carry: its text is in fallback fonts, so it never stands in for a frame that could show. */
+  rough?: boolean;
 }
 
 interface LiveState {
   /** Artboards that have a frame. */
   live: ReadonlySet<string>;
+  /** Those of `live` whose frame is only kept for later: they show their snapshot (once they have one). */
+  resting: ReadonlySet<string>;
   snapshots: Readonly<Record<string, Snapshot>>;
 }
 
-export const useLive = create<LiveState>(() => ({ live: new Set(), snapshots: {} }));
+export const useLive = create<LiveState>(() => ({ live: new Set(), resting: new Set(), snapshots: {} }));
 
 /** Whether an artboard has a frame on the canvas. */
 export const isLive = (path: string, live: ReadonlySet<string>): boolean => liveAll || live.has(path);
@@ -121,8 +151,12 @@ export function startLive(motion?: MotionSource): () => void {
   const failed = new Map<string, string>();
   /** When each live artboard last booted or changed. */
   const changedAt = new Map<string, number>();
+  /** Since when each artboard's snapshot has waited for web fonts. */
+  const fontWait = new Map<string, number>();
+  /** When each artboard was last live for itself (on screen or worked with, not only warmed). */
+  const shownAt = new Map<string, number>();
 
-  /** The artboards that should be live now. */
+  /** The artboards that should be live now for themselves (those warming come on top). */
   const wanted = (): Set<string> => {
     const view = useView.getState();
     const { canvas } = useDocument.getState();
@@ -135,7 +169,6 @@ export function startLive(motion?: MotionSource): () => void {
     if (view.hover && exists(view.hover.board)) out.add(view.hover.board);
     if (view.playing && exists(view.playing)) out.add(view.playing);
     if (view.peek && exists(view.peek)) out.add(view.peek);
-    for (const path of warming.keys()) if (exists(path)) out.add(path);
     const camera = view.camera;
     if (camera.zoom >= LIVE_MIN_ZOOM && viewportSize.width > 0) {
       const rect = visibleRect(camera);
@@ -154,18 +187,46 @@ export function startLive(motion?: MotionSource): () => void {
     return out;
   };
 
-  /** Applies `wanted()`; while the camera moves, only adds what the person works with (nothing mounts mid-motion). */
+  /**
+   * Applies `wanted()`. While the camera moves, only what the person works
+   * with is added (nothing mounts mid-motion) and nothing is let go. Once it
+   * is still, frames no longer wanted rest, the most recently shown first,
+   * and the others are let go.
+   */
   const recompute = (): void => {
     if (stopped) return;
-    const current = useLive.getState().live;
-    let next = wanted();
+    const current = useLive.getState();
+    const { canvas } = useDocument.getState();
+    const want = wanted();
+    const live = new Set<string>();
+    const resting = new Set<string>();
     if (moving) {
-      const { canvas } = useDocument.getState();
-      const keep = new Set([...current].filter((p) => canvas.boards[p]));
-      for (const p of next) if (isPinned(p) || warming.has(p)) keep.add(p);
-      next = keep;
+      for (const p of current.live) {
+        if (!canvas.boards[p]) continue;
+        live.add(p);
+        if (current.resting.has(p) && !isPinned(p)) resting.add(p);
+      }
+      for (const p of want) if (isPinned(p)) live.add(p);
+      for (const p of warming.keys()) if (canvas.boards[p]) live.add(p);
+    } else {
+      const now = performance.now();
+      for (const p of shownAt.keys()) if (!canvas.boards[p]) shownAt.delete(p);
+      for (const p of want) {
+        live.add(p);
+        shownAt.set(p, now);
+      }
+      for (const p of warming.keys()) if (canvas.boards[p]) live.add(p);
+      const page = new Set(boardsOnPage(canvas, useView.getState().page));
+      const kept = [...current.live]
+        .filter((p) => !live.has(p) && page.has(p) && shownAt.has(p))
+        .sort((a, b) => shownAt.get(b)! - shownAt.get(a)!)
+        .slice(0, MAX_RESTING);
+      for (const p of kept) {
+        live.add(p);
+        resting.add(p);
+      }
     }
-    if (!sameSet(current, next)) useLive.setState({ live: next });
+    if (!sameSet(current.live, live) || !sameSet(current.resting, resting)) useLive.setState({ live, resting });
   };
 
   const isPinned = (path: string): boolean => {
@@ -204,6 +265,15 @@ export function startLive(motion?: MotionSource): () => void {
         }
         continue;
       }
+      // A face still loading is not in the page yet: its text would be captured in a fallback font.
+      if (frameOf(path)?.contentDocument?.fonts?.status === 'loading') {
+        const since = fontWait.get(path) ?? now;
+        fontWait.set(path, since);
+        if (now - since < FONT_WAIT_MS) {
+          waitMs = Math.min(waitMs, 200);
+          continue;
+        }
+      } else if (fontWait.delete(path)) changedAt.set(path, now); // the fonts arrived: let the layout settle with them
       const quiet = now - (changedAt.get(path) ?? 0);
       if (quiet < SETTLE_MS) {
         waitMs = Math.min(waitMs, SETTLE_MS - quiet);
@@ -246,11 +316,12 @@ export function startLive(motion?: MotionSource): () => void {
       const doc = frameOf(path)?.contentDocument;
       const entry = useDocument.getState().canvas.boards[path];
       if (!doc || !entry) return;
-      const scale = Math.min(1, SNAPSHOT_MAX_SIDE / Math.max(entry.w, entry.h));
+      const scale = snapshotScale(entry, { side: SNAPSHOT_MAX_SIDE, limit: SNAPSHOT_LIMIT_SIDE, sharpZoom: LIVE_MIN_ZOOM, dpr: window.devicePixelRatio || 1 });
       let url: string | null = null;
+      let rough = false;
       const started = performance.now();
       try {
-        url = URL.createObjectURL(await pageImage(doc, entry.w, entry.h, { scale, type: 'image/jpeg' }));
+        url = URL.createObjectURL(await pageImage(doc, entry.w, entry.h, { scale, type: 'image/jpeg', fontBytes: SNAPSHOT_FONT_BYTES, onSkippedFonts: () => (rough = true) }));
       } catch {
         failed.set(path, key);
       }
@@ -266,10 +337,11 @@ export function startLive(motion?: MotionSource): () => void {
       const old = useLive.getState().snapshots[path];
       if (url || !old) {
         if (old?.url) URL.revokeObjectURL(old.url);
-        useLive.setState({ snapshots: { ...useLive.getState().snapshots, [path]: { url, key } } });
+        useLive.setState({ snapshots: { ...useLive.getState().snapshots, [path]: { url, key, ...(rough ? { rough } : {}) } } });
       }
     } finally {
       capturing = false;
+      fontWait.delete(path);
       if (warming.delete(path)) recompute();
       schedule(0);
     }
@@ -322,6 +394,7 @@ export function startLive(motion?: MotionSource): () => void {
   // For benchmarks and debugging (e2e/bench/canvas.mjs).
   (globalThis as { __openArtifactLive?: unknown }).__openArtifactLive = () => ({
     live: [...useLive.getState().live],
+    resting: [...useLive.getState().resting],
     warming: [...warming.keys()],
     moving,
     pointerDown,
@@ -333,6 +406,7 @@ export function startLive(motion?: MotionSource): () => void {
     captures: stats.captures,
     meanCaptureMs: stats.captures ? Math.round(stats.captureMs / stats.captures) : 0,
     worstCaptureMs: Math.round(stats.worstCaptureMs),
+    fonts: fontEmbedStats(),
   });
   return () => {
     stopped = true;
@@ -345,5 +419,6 @@ export function startLive(motion?: MotionSource): () => void {
     window.removeEventListener('pointerup', onUp, true);
     window.removeEventListener('pointercancel', onUp, true);
     warming.clear();
+    useLive.setState({ resting: new Set() });
   };
 }

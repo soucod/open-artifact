@@ -6,7 +6,7 @@ import { docComments } from '../comments/store.ts';
 import { selectionCommentable } from '../comments/actions.ts';
 import { useEditor } from '../editor/format.ts';
 import { followDocLink } from '../selbar/navigate.ts';
-import { exportDoc } from '../topbar/export.ts';
+import { exportDoc, mayExportDoc } from '../topbar/export.ts';
 import { setTabsUi, getTabsUi } from '../tabs/state.ts';
 import { getTopBar, setTopBar, useTopBar } from '../topbar/store.ts';
 import { defaultPaper } from '../topbar/words.ts';
@@ -22,7 +22,7 @@ const labels: Record<DocExportFormat, string> = {
 };
 
 function formats(): ChromeFormat[] {
-  if (maybeSession()?.viewer.role !== 'owner') return [];
+  if (!maybeSession() || !mayExportDoc()) return [];
   const several = (getDocs().project?.files.length ?? 0) > 1;
   const scopes = [{ id: 'tab', label: 'This tab' }];
   if (several) scopes.push({ id: 'doc', label: 'Whole document' });
@@ -47,7 +47,7 @@ export function startDocShell(): void {
     bridge.setShellReport({
       title: project?.name,
       comments: { available, on: comments !== 'hidden', open: comments === 'all', count: openCount(threads), pageButton: false },
-      share: true, history: true, exports: maybeSession()?.viewer.role === 'owner', formats: formats(), hasContent: !!project?.files.length,
+      share: true, history: true, exports: !!maybeSession() && mayExportDoc(), formats: formats(), hasContent: !!project?.files.length,
       saved: dirty ? 'unsaved' : states.includes('reconnecting') ? 'reconnecting' : states.includes('saving') || states.includes('syncing') ? 'saving' : !writable ? 'readonly' : 'saved',
       leaveLosesWork: dirty || states.includes('saving'),
       actions: [{ id: 'open_find' }, { id: 'open_page_list' }, ...(writable ? [{ id: 'rename_doc', label: 'Rename' }] : []), ...(selectionCommentable(useEditor.getState().state) ? [{ id: 'comment_selection' }] : [])],

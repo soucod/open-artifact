@@ -7,3 +7,4 @@ export * from './anchors.ts';
 export * from './decisions.ts';
 export * from './history.ts';
 export * from './export-source.ts';
+export * from './chip-text.ts';

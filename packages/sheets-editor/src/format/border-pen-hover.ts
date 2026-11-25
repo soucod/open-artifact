@@ -1,32 +1,54 @@
-import type { Dynamic } from '../dynamic.ts';
 import { createHoverOpenTimer, MOUSE_STILL_SLOP } from '../comments/mouse-around.ts';
-export function createPenPickerHoverIntent(options?: Dynamic) {
-  let current: Dynamic = null;
-  let rowUnderPointer: Dynamic = null;
-  let rowShutByPress: Dynamic = null;
-  let firstPointerPlace: Dynamic = null;
-  let nearestDistance: Dynamic = null;
-  let wasHeldBefore: Dynamic = false;
-  let setCurrent = (input?: Dynamic) => {
-    current = input;
-    if (input !== null) wasHeldBefore = input.isHeld;
-    options.onChanged(input);
+/** The two pickers of the border pen: its color and its line style. */
+export type PenPicker = 'color' | 'style';
+/** The pen picker that is open, and whether it is held open (pressed, focused or opened by a key) rather than open while the pointer rests. */
+export interface OpenPenPicker {
+  picker: PenPicker;
+  isHeld: boolean;
+}
+/** A timer that can be cancelled before it runs. */
+export interface CancelableTimer {
+  cancel: () => void;
+}
+/** Runs `run` after `ms` milliseconds. */
+export type RunAfter = (ms: number, run: () => void) => CancelableTimer;
+/** How a pen row is about to open its picker. */
+export type PenRowOpenedBy = 'pressOrClick' | 'arrowKey';
+export interface PenPickerHoverHandlers {
+  onChanged: (open: OpenPenPicker | null) => void;
+  after: RunAfter;
+}
+interface PointerPlace {
+  x: number;
+  y: number;
+}
+export function createPenPickerHoverIntent(handlers: PenPickerHoverHandlers) {
+  let current: OpenPenPicker | null = null;
+  let rowUnderPointer: PenPicker | null = null;
+  let rowShutByPress: PenPicker | null = null;
+  let firstPointerPlace: PointerPlace | 'hasMoved' | null = null;
+  let nearestDistance: number | null = null;
+  let wasHeldBefore = false;
+  let setCurrent = (open: OpenPenPicker | null) => {
+    current = open;
+    if (open !== null) wasHeldBefore = open.isHeld;
+    handlers.onChanged(open);
   };
-  let createPickerTimer = (input?: Dynamic) =>
+  let createPickerTimer = (picker: PenPicker) =>
     createHoverOpenTimer({
       open() {
         if (current?.isHeld === true) return;
         stopTimers();
         nearestDistance = null;
         setCurrent({
-          picker: input,
+          picker,
           isHeld: false,
         });
       },
-      shut: () => (current?.picker === input && !current.isHeld ? setCurrent(null) : undefined),
+      shut: () => (current?.picker === picker && !current.isHeld ? setCurrent(null) : undefined),
       restMs: PEN_PICKER_REST_MS,
       leaveMs: PEN_PICKER_LEAVE_MS,
-      after: options.after,
+      after: handlers.after,
     });
   let timers = {
     color: createPickerTimer('color'),
@@ -36,69 +58,69 @@ export function createPenPickerHoverIntent(options?: Dynamic) {
     timers.color.stop();
     timers.style.stop();
   };
-  let hasPointerMoved2 = (input?: Dynamic, options2?: Dynamic) => {
+  let hasPointerMoved = (clientX: number, clientY: number) => {
     if (firstPointerPlace === 'hasMoved') return true;
-    if (firstPointerPlace !== null && (firstPointerPlace.x !== input || firstPointerPlace.y !== options2)) {
+    if (firstPointerPlace !== null && (firstPointerPlace.x !== clientX || firstPointerPlace.y !== clientY)) {
       firstPointerPlace = 'hasMoved';
       return true;
     }
     firstPointerPlace = {
-      x: input,
-      y: options2,
+      x: clientX,
+      y: clientY,
     };
     return false;
   };
-  let pointerOnPicker = (input?: Dynamic, options2?: Dynamic) => {
-    nearestDistance = options2 ? null : 1 / 0;
-    if (options2) timers[input].entered();
-    else timers[input].left();
+  let pointerOnPicker = (picker: PenPicker, isOnPicker: boolean) => {
+    nearestDistance = isOnPicker ? null : 1 / 0;
+    if (isOnPicker) timers[picker].entered();
+    else timers[picker].left();
   };
-  let shutPicker = (input?: Dynamic) => {
+  let shutPicker = (picker: PenPicker) => {
     stopTimers();
-    if (rowUnderPointer === input) rowShutByPress = input;
+    if (rowUnderPointer === picker) rowShutByPress = picker;
     if (current !== null) setCurrent(null);
   };
   return {
-    pointerOnRow(input?: Dynamic, options2?: Dynamic, context?: Dynamic) {
-      rowUnderPointer = input;
-      if (!hasPointerMoved2(options2, context) || rowShutByPress === input) return;
-      if (current?.picker === input) pointerOnPicker(input, true);
-      else timers[input].restedOn(options2, context);
+    pointerOnRow(picker: PenPicker, clientX: number, clientY: number) {
+      rowUnderPointer = picker;
+      if (!hasPointerMoved(clientX, clientY) || rowShutByPress === picker) return;
+      if (current?.picker === picker) pointerOnPicker(picker, true);
+      else timers[picker].restedOn(clientX, clientY);
     },
-    pointerOffRow(input?: Dynamic) {
+    pointerOffRow(picker: PenPicker) {
       rowUnderPointer = null;
       rowShutByPress = null;
-      if (current?.picker === input) pointerOnPicker(input, false);
-      else timers[input].movedOff();
+      if (current?.picker === picker) pointerOnPicker(picker, false);
+      else timers[picker].movedOff();
     },
-    pointerOnPicker: (input?: Dynamic) => (current?.picker === input ? pointerOnPicker(input, true) : undefined),
-    pointerOffPicker: (input?: Dynamic) => (current?.picker === input ? pointerOnPicker(input, false) : undefined),
-    pointerDistanceFromPicker(input?: Dynamic) {
+    pointerOnPicker: (picker: PenPicker) => (current?.picker === picker ? pointerOnPicker(picker, true) : undefined),
+    pointerOffPicker: (picker: PenPicker) => (current?.picker === picker ? pointerOnPicker(picker, false) : undefined),
+    pointerDistanceFromPicker(distanceAway: number) {
       if (current === null || current.isHeld || nearestDistance === null) return;
-      if (input > nearestDistance - MOUSE_STILL_SLOP) return;
-      nearestDistance = input;
+      if (distanceAway > nearestDistance - MOUSE_STILL_SLOP) return;
+      nearestDistance = distanceAway;
       timers[current.picker].entered();
       timers[current.picker].left();
     },
-    held(input?: Dynamic) {
-      if (current?.picker === input && !current.isHeld)
+    held(picker: PenPicker) {
+      if (current?.picker === picker && !current.isHeld)
         setCurrent({
-          picker: input,
+          picker,
           isHeld: true,
         });
     },
-    openedByPressOrKey(input?: Dynamic) {
+    openedByPressOrKey(picker: PenPicker) {
       stopTimers();
       setCurrent({
-        picker: input,
+        picker,
         isHeld: true,
       });
     },
-    shutByDesignSystem(input?: Dynamic) {
-      if (current?.picker === input) shutPicker(input);
+    shutByDesignSystem(picker: PenPicker) {
+      if (current?.picker === picker) shutPicker(picker);
     },
-    rowAboutToOpenIt(input?: Dynamic, options2?: Dynamic) {
-      if (options2 === 'arrowKey' || current?.isHeld !== true) shutPicker(input);
+    rowAboutToOpenIt(picker: PenPicker, openedBy: PenRowOpenedBy) {
+      if (openedBy === 'arrowKey' || current?.isHeld !== true) shutPicker(picker);
     },
     wasHeld: () => wasHeldBefore,
     stop: stopTimers,

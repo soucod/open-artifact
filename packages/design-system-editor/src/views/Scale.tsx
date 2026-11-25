@@ -11,6 +11,7 @@ import { CommentBadge } from '../components/Comments.tsx';
 import { anchorId } from '../state/view.ts';
 import { editTokens } from '../services/edit.ts';
 import { AddTokenButton, InlineText, PageHeader, TokenMenu, TokenNotes, useEditable, useFocusProps } from './common.tsx';
+import { titleWhenCut } from '../lib/cut-title.ts';
 
 /** How a family's values are pictured. */
 type Visual = 'spacing' | 'radius' | 'shadow' | 'plain';
@@ -87,7 +88,7 @@ function TokenRow({ family, visual, token, editable }: { family: string; visual:
         </div>
       )}
       <div className="flex min-w-0 items-center gap-1">
-        <span className="truncate font-mono text-[13px] text-fg">--{token.name}</span>
+        <span onPointerEnter={(event) => titleWhenCut(event.currentTarget)} className="truncate font-mono text-[13px] text-fg">--{token.name}</span>
         <CommentBadge focus={{ kind: 'token', family, name: token.name }} />
       </div>
       {visual === 'shadow' ? (

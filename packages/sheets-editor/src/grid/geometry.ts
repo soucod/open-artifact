@@ -106,6 +106,11 @@ export interface GridPane extends ShownStretch {
 export interface SpanOnScreen extends StartAndEnd, ShownStretch {
   isEndUnderFrozenLines: boolean;
 }
+/** Where an area of cells is on screen, across and down. */
+export interface AreaSpansOnScreen {
+  across: SpanOnScreen;
+  down: SpanOnScreen;
+}
 /** The edges of cells in the sheet, in pixels. */
 export interface EdgesOfCells {
   left: number;
@@ -138,7 +143,7 @@ export function lastShownLineWhere(indices: readonly number[], edges: LineSizes,
 }
 export function pointPastColumnEnd<P extends GridPoint>(
   point: P,
-  { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'> = {} as Pick<GridScroll, 'scrollLeft'>,
+  { scrollLeft }: Pick<GridScroll, 'scrollLeft'> = {} as Pick<GridScroll, 'scrollLeft'>,
   layout: ColumnLines,
   view: Pick<PageState, 'gridWidth'>,
 ): P {
@@ -153,22 +158,22 @@ export function pointPastColumnEnd<P extends GridPoint>(
       }
     : point;
 }
-export function frozenPartOf(index: number, { frozenCount: frozenCount }: Pick<GridAxis, 'frozenCount'>): FrozenPart | null {
+export function frozenPartOf(index: number, { frozenCount }: Pick<GridAxis, 'frozenCount'>): FrozenPart | null {
   if (frozenCount === 0) return null;
   return index < frozenCount ? 'someFrozenLine' : 'onlyLinesThatScroll';
 }
 export function scrolledLinesUnderFrozen(scroll: number, axis: GridAxis): LinesUnderFrozen {
-  let { edges: edges, frozenCount: frozenCount } = axis;
+  let { edges, frozenCount } = axis;
   if (frozenCount === 0 || scroll === 0)
     return {
-      frozenCount: frozenCount,
+      frozenCount,
       under: 0,
     };
   let position = frozenSizeOf(axis) + scroll;
   let index = edges.indexAt(position);
   let isPartlyScrolled = edges.startOf(index) < position;
   return {
-    frozenCount: frozenCount,
+    frozenCount,
     under: index - frozenCount + (isPartlyScrolled ? 1 : 0),
   };
 }
@@ -222,7 +227,7 @@ export function withRoomBesideFootNotices<V extends Pick<PageState, 'noticesAtFo
   scrollLeft: number,
   layout: ColumnLines,
 ): V {
-  let { noticesAtFoot: noticesAtFoot } = view;
+  let { noticesAtFoot } = view;
   return noticesAtFoot !== null && ROW_HEADER_WIDTH + lineEndOnScreen(columnIndex, scrollLeft, columnAxisOf(layout)) <= noticesAtFoot.left
     ? {
         ...view,
@@ -235,7 +240,7 @@ export function scrollToShowCell(
   cell: CellToShow,
   layout: GridLayout,
   view: GridRoom & Pick<PageState, 'noticesAtFoot'>,
-  foundBy: CellFoundBy,
+  foundBy: CellFoundBy | undefined,
   withRoomPastEnd: boolean = false,
   box?: BoxAlongLine,
 ): GridScroll {
@@ -248,7 +253,7 @@ export function scrollToShowCell(
     withRoomPastEnd ? ROOM_RIGHT_OF_LAST_COLUMN : 0,
   );
   return {
-    scrollLeft: scrollLeft,
+    scrollLeft,
     scrollTop: scrollToShowLine(
       scroll.scrollTop,
       cell.rowIndex,
@@ -261,9 +266,9 @@ export function scrollToShowCell(
   };
 }
 export function scrollToShowBoxInCell(
-  { scrollLeft: scrollLeft, scrollTop: scrollTop }: GridScroll,
-  { rowIndex: rowIndex, columnIndex: columnIndex, heightCovered: heightCovered }: CellToShow,
-  { left: left, top: top, width: width, height: height, around: around, heightShownUnder: heightShownUnder }: BoxInCell,
+  { scrollLeft, scrollTop }: GridScroll,
+  { rowIndex, columnIndex, heightCovered }: CellToShow,
+  { left, top, width, height, around, heightShownUnder }: BoxInCell,
   layout: GridLayout,
   view: GridRoom,
 ): GridScroll {
@@ -271,12 +276,12 @@ export function scrollToShowBoxInCell(
     {
       pastStart: left,
       length: width,
-      around: around,
+      around,
     },
     {
       pastStart: top,
       length: height + heightShownUnder,
-      around: around,
+      around,
     },
   ];
   let scroll = {
@@ -319,17 +324,17 @@ export function hitTestGrid(point: GridPoint, scroll: GridScroll, layout: GridLa
   if (inRowHeader)
     return {
       kind: 'rowHeader',
-      rowIndex: rowIndex,
+      rowIndex,
     };
   return inColumnHeader
     ? {
         kind: 'columnHeader',
-        columnIndex: columnIndex,
+        columnIndex,
       }
     : {
         kind: 'cell',
-        rowIndex: rowIndex,
-        columnIndex: columnIndex,
+        rowIndex,
+        columnIndex,
       };
 }
 export function resizeGripOfLine(index: number, scroll: number, axis: GridAxis): ResizeGrip | null {
@@ -339,13 +344,13 @@ export function resizeGripOfLine(index: number, scroll: number, axis: GridAxis):
   if (edge <= frozenSize) return null;
   let isLastFrozen = index === lastFrozenLineIndex(axis);
   return {
-    edge: edge,
+    edge,
     start: isLastFrozen ? edge : Math.max(frozenSize, edge - resizeGripReach(index, axis)),
     end: edge + resizeGripReach(shownLineAtOrAfter(axis.edges, index + 1), axis),
   };
 }
 export function resizeLineAt(offset: number, scroll: number, axis: GridAxis): number | null {
-  let { edges: edges, count: count } = axis;
+  let { edges, count } = axis;
   let index = edges.indexAt(contentOffsetAt(offset, scroll, axis));
   let hasGripHere = (lineIndex: number) => {
     let grip = isInSpan(lineIndex, 0, count) ? resizeGripOfLine(lineIndex, scroll, axis) : null;
@@ -354,11 +359,11 @@ export function resizeLineAt(offset: number, scroll: number, axis: GridAxis): nu
   let previousIndex = shownLineAtOrBefore(edges, index - 1);
   return [lastFrozenLineIndex(axis), index, previousIndex].find(hasGripHere) ?? null;
 }
-export function columnResizeLineAt(point: GridPoint, { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number | null {
+export function columnResizeLineAt(point: GridPoint, { scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number | null {
   if (point.y >= COLUMN_HEADER_HEIGHT || point.x < ROW_HEADER_WIDTH) return null;
   return resizeLineAt(point.x - ROW_HEADER_WIDTH, scrollLeft, columnAxisOf(layout));
 }
-export function rowResizeLineAt(point: GridPoint, { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): number | null {
+export function rowResizeLineAt(point: GridPoint, { scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): number | null {
   if (point.x >= ROW_HEADER_WIDTH || point.y < COLUMN_HEADER_HEIGHT) return null;
   return resizeLineAt(point.y - COLUMN_HEADER_HEIGHT, scrollTop, rowAxisOf(layout));
 }
@@ -380,7 +385,7 @@ export function freezeGripAt(point: GridPoint, layout: GridLayout): LinesAxisNam
   return point.y < COLUMN_HEADER_HEIGHT && isInStartEnd(point.x - ROW_HEADER_WIDTH, columnFreezeGripSpan(layout)) ? 'columns' : null;
 }
 export function lineIndexUnderPointer(offset: number, scroll: number, room: number, axis: GridAxis, frozenPart: FrozenPart | null): number {
-  let { edges: edges } = axis;
+  let { edges } = axis;
   let index = edges.indexAt(contentOffsetAt(offset, scroll, axis, frozenPart));
   let frozenSize = frozenSizeOf(axis);
   let step = !(
@@ -399,17 +404,17 @@ export function lineIndexUnderPointer(offset: number, scroll: number, room: numb
   return nearestShownLine(edges, axis.count, clamped, step);
 }
 export function scrollingPaneOf(scroll: number, room: number, axis: GridAxis, reach: ExtraReach): GridPane {
-  let { edges: edges, count: count } = axis;
+  let { edges, count } = axis;
   let frozenSize = frozenSizeOf(axis);
   let first = Math.max(axis.frozenCount, edges.indexAt(Math.max(0, scroll + frozenSize - reach.before)));
   let end = scroll + room + reach.after;
   let endIndex = edges.indexAt(end);
   let last = endIndex < count && edges.startOf(endIndex) < end ? endIndex + 1 : endIndex;
   return {
-    first: first,
+    first,
     count: Math.max(0, last - first),
     areFrozen: false,
-    scroll: scroll,
+    scroll,
     showFrom: frozenSize,
     showTo: room,
   };
@@ -418,7 +423,7 @@ export function panesOfAxis(scroll: number, room: number, axis: GridAxis, reach:
   let paneAxis = unfreezeWhenUnscrolled(axis, scroll);
   let scrollingPane = scrollingPaneOf(scroll, room, paneAxis, reach);
   if (paneAxis.frozenCount === 0) return [scrollingPane];
-  let { frozenCount: frozenCount } = paneAxis;
+  let { frozenCount } = paneAxis;
   return [
     {
       first: 0,
@@ -431,7 +436,7 @@ export function panesOfAxis(scroll: number, room: number, axis: GridAxis, reach:
     scrollingPane,
   ];
 }
-export function shownIndicesInPane({ first: first, count: count }: Pick<GridPane, 'first' | 'count'>, edges: LineSizes): number[] {
+export function shownIndicesInPane({ first, count }: Pick<GridPane, 'first' | 'count'>, edges: LineSizes): number[] {
   let indices: number[] = [];
   for (let index = shownLineAtOrAfter(edges, first); index < first + count; index = shownLineAtOrAfter(edges, index + 1))
     indices.push(index);
@@ -442,7 +447,7 @@ export function dropIndexAtPointer(point: GridPoint, scroll: GridScroll, layout:
     axisName === 'rows'
       ? [point.y - COLUMN_HEADER_HEIGHT, scroll.scrollTop, cellsAreaHeight(view), rowAxisOf(layout)]
       : [point.x - ROW_HEADER_WIDTH, scroll.scrollLeft, cellsAreaWidth(view), columnAxisOf(layout)];
-  let { edges: edges, count: count, frozenCount: frozenCount } = axis;
+  let { edges, count, frozenCount } = axis;
   let contentOffset = contentOffsetAt(offset, scrollPosition, axis);
   let index = clampBetween(edges.indexAt(contentOffset), 0, count - 1);
   let dropIndex = contentOffset < edges.startOf(index) + edges.sizeOf(index) / 2 ? index : index + 1;
@@ -474,7 +479,7 @@ export function edgeBeforeLineOnScreen(index: number, scroll: number, room: numb
   return edge >= frozenSize && edge <= room ? edge : null;
 }
 export function resizedLineEndOnScreen(
-  { index: index, sizeInPixels: sizeInPixels }: Pick<LineResize, 'index' | 'sizeInPixels'>,
+  { index, sizeInPixels }: Pick<LineResize, 'index' | 'sizeInPixels'>,
   scroll: number,
   room: number,
   axis: GridAxis,
@@ -518,7 +523,7 @@ export function autoscrollPointPastEdge<P extends GridPoint>(
       }
     : null;
 }
-export function boxOfCellRange(range: CellArea, { rowEdges: rowEdges, columnEdges: columnEdges }: Pick<GridLayout, 'rowEdges' | 'columnEdges'>): EdgesOfCells {
+export function boxOfCellRange(range: CellArea, { rowEdges, columnEdges }: Pick<GridLayout, 'rowEdges' | 'columnEdges'>): EdgesOfCells {
   return {
     left: columnEdges.startOf(range.leftColumnIndex),
     top: rowEdges.startOf(range.topRowIndex),
@@ -532,8 +537,8 @@ export function lineSpanOnScreen(first: number, count: number, scroll: number, r
   let start = lineStartOnScreen(first, scroll, paneAxis);
   let end = count === 0 ? start : lineEndOnScreen(first + count - 1, scroll, paneAxis);
   let span = {
-    start: start,
-    end: end,
+    start,
+    end,
     isEndUnderFrozenLines: false,
   };
   if (first >= paneAxis.frozenCount)
@@ -555,7 +560,7 @@ export function lineSpanOnScreen(first: number, count: number, scroll: number, r
         showTo: room,
       }
     : {
-        start: start,
+        start,
         end: frozenSize,
         isEndUnderFrozenLines: true,
         showFrom: 0,
@@ -563,12 +568,12 @@ export function lineSpanOnScreen(first: number, count: number, scroll: number, r
       };
 }
 export function isRangeInSight(range: CellArea, scroll: GridScroll, layout: GridLayout, view: Pick<PageState, 'gridWidth' | 'gridHeight'>): boolean {
-  let { across: across, down: down } = rangeSpansOnScreen(range, scroll, layout, view);
+  let { across, down } = rangeSpansOnScreen(range, scroll, layout, view);
   return isSpanInSight(across) && isSpanInSight(down);
 }
 export const NO_BOXES_AT_FOOT: BoxAtFoot[] = [];
-export const cellsAreaWidth = ({ gridWidth: gridWidth }: Pick<PageState, 'gridWidth'>): number => Math.max(0, gridWidth - ROW_HEADER_WIDTH);
-export const cellsAreaHeight = ({ gridHeight: gridHeight }: Pick<PageState, 'gridHeight'>): number => Math.max(0, gridHeight - COLUMN_HEADER_HEIGHT);
+export const cellsAreaWidth = ({ gridWidth }: Pick<PageState, 'gridWidth'>): number => Math.max(0, gridWidth - ROW_HEADER_WIDTH);
+export const cellsAreaHeight = ({ gridHeight }: Pick<PageState, 'gridHeight'>): number => Math.max(0, gridHeight - COLUMN_HEADER_HEIGHT);
 export const cellsHeightAboveFloats = (view: Pick<PageState, 'gridHeight' | 'heightUnderWhatFloats'>): number =>
   Math.max(cellsAreaHeight(view) - view.heightUnderWhatFloats, Math.min(cellsAreaHeight(view), DEFAULT_ROW_HEIGHT));
 export const layoutForNarrowTouch = <V extends Pick<PageState, 'isNarrowByTouch' | 'gridHeight' | 'heightUnderWhatFloats'>>(view: V): V =>
@@ -580,21 +585,21 @@ export const layoutForNarrowTouch = <V extends Pick<PageState, 'isNarrowByTouch'
       }
     : view;
 export const clampBetween = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
-export const rowAxisOf = ({ rowEdges: rowEdges, rowCount: rowCount, frozenRowCount: frozenRowCount }: RowLines): GridAxis => ({
+export const rowAxisOf = ({ rowEdges, rowCount, frozenRowCount }: RowLines): GridAxis => ({
   edges: rowEdges,
   count: rowCount,
   frozenCount: frozenRowCount,
 });
 export const columnAxisOf = ({
-  columnEdges: columnEdges,
-  columnCount: columnCount,
-  frozenColumnCount: frozenColumnCount,
+  columnEdges,
+  columnCount,
+  frozenColumnCount,
 }: ColumnLines): GridAxis => ({
   edges: columnEdges,
   count: columnCount,
   frozenCount: frozenColumnCount,
 });
-export const frozenSizeOf = ({ edges: edges, frozenCount: frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number => edges.startOf(frozenCount);
+export const frozenSizeOf = ({ edges, frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number => edges.startOf(frozenCount);
 export const frozenRowsHeight = (layout: RowLines): number => frozenSizeOf(rowAxisOf(layout));
 export const frozenColumnsWidth = (layout: ColumnLines): number => frozenSizeOf(columnAxisOf(layout));
 export const MIN_SCROLLING_ROWS_HEIGHT = 3 * DEFAULT_ROW_HEIGHT;
@@ -603,7 +608,7 @@ export const frozenCountThatFits = (edges: LineSizes, frozenCount: number, room:
   clampBetween(edges.indexAt(room), 0, frozenCount);
 export const frozenCountsThatFit = (
   frozen: Pick<GridLayout, 'frozenRowCount' | 'frozenColumnCount'>,
-  { rowEdges: rowEdges, columnEdges: columnEdges }: Pick<GridLayout, 'rowEdges' | 'columnEdges'>,
+  { rowEdges, columnEdges }: Pick<GridLayout, 'rowEdges' | 'columnEdges'>,
   view: Pick<PageState, 'gridWidth' | 'gridHeight' | 'find' | 'heightUnderCardAtFoot'>,
 ): Pick<GridLayout, 'frozenRowCount' | 'frozenColumnCount'> => ({
   frozenRowCount: frozenCountThatFits(
@@ -613,7 +618,7 @@ export const frozenCountsThatFit = (
   ),
   frozenColumnCount: frozenCountThatFits(columnEdges, frozen.frozenColumnCount, cellsAreaWidth(view) - MIN_SCROLLING_COLUMNS_WIDTH),
 });
-export const lineStartOnScreen = (index: number, scroll: number, { edges: edges, frozenCount: frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number =>
+export const lineStartOnScreen = (index: number, scroll: number, { edges, frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number =>
   edges.startOf(index) - (index < frozenCount ? 0 : scroll);
 export const lineEndOnScreen = (index: number, scroll: number, axis: Pick<GridAxis, 'edges' | 'frozenCount'>): number =>
   lineStartOnScreen(index, scroll, axis) + axis.edges.sizeOf(index);
@@ -635,11 +640,11 @@ export const maxScrollLeft = (layout: ColumnLines, view: Pick<PageState, 'gridWi
   let roomRight = clampBetween(scrollingWidth - ROOM_RIGHT_OF_LAST_COLUMN, 0, ROOM_RIGHT_OF_LAST_COLUMN);
   return layout.columnEdges.totalSize + roomRight - cellsAreaWidth(view);
 };
-export const rowsEndOnScreen = ({ scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): number =>
+export const rowsEndOnScreen = ({ scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): number =>
   lineStartOnScreen(layout.rowCount, scrollTop, rowAxisOf(layout));
-export const columnsEndOnScreen = ({ scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number =>
+export const columnsEndOnScreen = ({ scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number =>
   lineStartOnScreen(layout.columnCount, scrollLeft, columnAxisOf(layout));
-export const columnEndOnScreen = (index: number, { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number =>
+export const columnEndOnScreen = (index: number, { scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): number =>
   lineEndOnScreen(index, scrollLeft, columnAxisOf(layout));
 export const maxScrollWithFloats = (layout: GridLayout, view: GridRoom): GridScroll => {
   let { across = 0, down = 0 }: Partial<ReachOfWhatFloats> = layout.reachOfWhatFloats ?? {};
@@ -654,21 +659,21 @@ export const contentPointAt = (point: GridPoint, scroll: GridScroll, layout: Gri
 });
 export const isInSpan = (value: number, start: number, length: number): boolean => value >= start && value < start + length;
 export const RESIZE_GRIP_REACH = 4;
-export const resizeGripReach = (index: number, { edges: edges, count: count }: Pick<GridAxis, 'edges' | 'count'>): number =>
+export const resizeGripReach = (index: number, { edges, count }: Pick<GridAxis, 'edges' | 'count'>): number =>
   index < count ? Math.min(RESIZE_GRIP_REACH, edges.sizeOf(index) / 4) : RESIZE_GRIP_REACH;
-export const isInStartEnd = (value: number, { start: start, end: end }: StartAndEnd): boolean => value >= start && value < end;
-export const lastFrozenLineIndex = ({ edges: edges, frozenCount: frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number =>
+export const isInStartEnd = (value: number, { start, end }: StartAndEnd): boolean => value >= start && value < end;
+export const lastFrozenLineIndex = ({ edges, frozenCount }: Pick<GridAxis, 'edges' | 'frozenCount'>): number =>
   shownLineAtOrBefore(edges, frozenCount - 1);
-export const columnResizeGrip = (index: number, { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): ResizeGrip | null =>
+export const columnResizeGrip = (index: number, { scrollLeft }: Pick<GridScroll, 'scrollLeft'>, layout: ColumnLines): ResizeGrip | null =>
   resizeGripOfLine(index, scrollLeft, columnAxisOf(layout));
-export const rowResizeGrip = (index: number, { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): ResizeGrip | null =>
+export const rowResizeGrip = (index: number, { scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines): ResizeGrip | null =>
   resizeGripOfLine(index, scrollTop, rowAxisOf(layout));
 export const FREEZE_GRIP_HALF_REACH = 4;
 export const rowFreezeGripSpan = (layout: RowLines): StartAndEnd => freezeGripSpan(rowAxisOf(layout));
 export const columnFreezeGripSpan = (layout: ColumnLines): StartAndEnd => freezeGripSpan(columnAxisOf(layout));
 export const clampColumnWidth = (width: number): number => clampBetween(Math.round(width), MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
 export const clampRowHeight = (height: number): number => clampBetween(Math.round(height), MIN_ROW_HEIGHT, MAX_ROW_HEIGHT);
-export const clampPointToCells = ({ x: x, y: y }: GridPoint, view: Pick<PageState, 'gridWidth' | 'gridHeight'>): GridPoint => ({
+export const clampPointToCells = ({ x, y }: GridPoint, view: Pick<PageState, 'gridWidth' | 'gridHeight'>): GridPoint => ({
   x: clampBetween(x, ROW_HEADER_WIDTH, ROW_HEADER_WIDTH + cellsAreaWidth(view) - 1),
   y: clampBetween(y, COLUMN_HEADER_HEIGHT, COLUMN_HEADER_HEIGHT + cellsAreaHeight(view) - 1),
 });
@@ -677,8 +682,8 @@ export const lineIndexInSight = (index: number, scroll: number, axis: GridAxis):
     ? index
     : Math.max(index, Math.min(axis.edges.indexAt(frozenSizeOf(axis) + scroll), shownLineAtOrBefore(axis.edges, axis.count - 1)));
 export const cellInSight = (
-  { rowIndex: rowIndex, columnIndex: columnIndex }: CellPosition,
-  { scrollLeft: scrollLeft, scrollTop: scrollTop }: GridScroll,
+  { rowIndex, columnIndex }: CellPosition,
+  { scrollLeft, scrollTop }: GridScroll,
   layout: GridLayout,
 ): CellPosition => ({
   rowIndex: lineIndexInSight(rowIndex, scrollTop, rowAxisOf(layout)),
@@ -721,42 +726,42 @@ export const extraReachOfShift = (shift: number): ExtraReach => ({
   before: Math.max(0, -shift),
   after: Math.max(0, shift),
 });
-export const shownRowIndicesInPane = (pane: Pick<GridPane, 'first' | 'count'>, { rowEdges: rowEdges }: Pick<GridLayout, 'rowEdges'>): number[] => shownIndicesInPane(pane, rowEdges);
-export const shownColumnIndicesInPane = (pane: Pick<GridPane, 'first' | 'count'>, { columnEdges: columnEdges }: Pick<GridLayout, 'columnEdges'>): number[] =>
+export const shownRowIndicesInPane = (pane: Pick<GridPane, 'first' | 'count'>, { rowEdges }: Pick<GridLayout, 'rowEdges'>): number[] => shownIndicesInPane(pane, rowEdges);
+export const shownColumnIndicesInPane = (pane: Pick<GridPane, 'first' | 'count'>, { columnEdges }: Pick<GridLayout, 'columnEdges'>): number[] =>
   shownIndicesInPane(pane, columnEdges);
 export const rowPanes = (
-  { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>,
+  { scrollTop }: Pick<GridScroll, 'scrollTop'>,
   layout: RowLines,
   view: Pick<PageState, 'gridHeight'>,
   reach: ExtraReach = NO_EXTRA_REACH,
 ): GridPane[] =>
   panesOfAxis(scrollTop, cellsAreaHeight(view), rowAxisOf(layout), reach);
 export const columnPanes = (
-  { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
+  { scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
   layout: ColumnLines,
   view: Pick<PageState, 'gridWidth'>,
   reach: ExtraReach = NO_EXTRA_REACH,
 ): GridPane[] => panesOfAxis(scrollLeft, cellsAreaWidth(view), columnAxisOf(layout), reach);
 export const FREEZE_DRAG_SLACK = 8;
-export const rowEdgeOnScreen = (index: number, { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines, view: Pick<PageState, 'gridHeight'>): number | null =>
+export const rowEdgeOnScreen = (index: number, { scrollTop }: Pick<GridScroll, 'scrollTop'>, layout: RowLines, view: Pick<PageState, 'gridHeight'>): number | null =>
   edgeBeforeLineOnScreen(index, scrollTop, cellsAreaHeight(view), rowAxisOf(layout));
 export const columnEdgeOnScreen = (
   index: number,
-  { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
+  { scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
   layout: ColumnLines,
   view: Pick<PageState, 'gridWidth'>,
 ): number | null =>
   edgeBeforeLineOnScreen(index, scrollLeft, cellsAreaWidth(view), columnAxisOf(layout));
 export const resizedRowEndOnScreen = (
   resize: Pick<LineResize, 'index' | 'sizeInPixels'>,
-  { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>,
+  { scrollTop }: Pick<GridScroll, 'scrollTop'>,
   layout: RowLines,
   view: Pick<PageState, 'gridHeight'>,
 ): number | null =>
   resizedLineEndOnScreen(resize, scrollTop, cellsAreaHeight(view), rowAxisOf(layout));
 export const resizedColumnEndOnScreen = (
   resize: Pick<LineResize, 'index' | 'sizeInPixels'>,
-  { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
+  { scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
   layout: ColumnLines,
   view: Pick<PageState, 'gridWidth'>,
 ): number | null =>
@@ -773,14 +778,14 @@ export const paneRect = (across: ShownStretch, down: ShownStretch): PaneRect => 
   height: down.showTo - down.showFrom,
 });
 export const rowRunSpanOnScreen = (
-  { firstIndex: firstIndex, count: count }: LineSpan,
-  { scrollTop: scrollTop }: Pick<GridScroll, 'scrollTop'>,
+  { firstIndex, count }: LineSpan,
+  { scrollTop }: Pick<GridScroll, 'scrollTop'>,
   layout: RowLines,
   view: Pick<PageState, 'gridHeight'>,
 ): SpanOnScreen => lineSpanOnScreen(firstIndex, count, scrollTop, cellsAreaHeight(view), rowAxisOf(layout));
 export const columnRunSpanOnScreen = (
-  { firstIndex: firstIndex, count: count }: LineSpan,
-  { scrollLeft: scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
+  { firstIndex, count }: LineSpan,
+  { scrollLeft }: Pick<GridScroll, 'scrollLeft'>,
   layout: ColumnLines,
   view: Pick<PageState, 'gridWidth'>,
 ): SpanOnScreen => lineSpanOnScreen(firstIndex, count, scrollLeft, cellsAreaWidth(view), columnAxisOf(layout));
@@ -789,22 +794,22 @@ export const rangeSpansOnScreen = (
   scroll: GridScroll,
   layout: GridLayout,
   view: Pick<PageState, 'gridWidth' | 'gridHeight'>,
-): { across: SpanOnScreen; down: SpanOnScreen } => ({
+): AreaSpansOnScreen => ({
   across: lineSpanOnScreen(range.leftColumnIndex, range.columnCount, scroll.scrollLeft, cellsAreaWidth(view), columnAxisOf(layout)),
   down: lineSpanOnScreen(range.topRowIndex, range.rowCount, scroll.scrollTop, cellsAreaHeight(view), rowAxisOf(layout)),
 });
-export const isSpanInSight = ({ start: start, end: end, showFrom: showFrom, showTo: showTo }: StartAndEnd & ShownStretch): boolean =>
+export const isSpanInSight = ({ start, end, showFrom, showTo }: StartAndEnd & ShownStretch): boolean =>
   end > start && end > showFrom && start < showTo;
 export const isSpanFullyInSight = ({
-  start: start,
-  end: end,
-  showFrom: showFrom,
-  showTo: showTo,
-  isEndUnderFrozenLines: isEndUnderFrozenLines,
+  start,
+  end,
+  showFrom,
+  showTo,
+  isEndUnderFrozenLines,
 }: SpanOnScreen): boolean => !isEndUnderFrozenLines && start >= showFrom && end <= showTo;
 export const isSpanEndInSight = ({
-  end: end,
-  showFrom: showFrom,
-  showTo: showTo,
-  isEndUnderFrozenLines: isEndUnderFrozenLines,
+  end,
+  showFrom,
+  showTo,
+  isEndUnderFrozenLines,
 }: Omit<SpanOnScreen, 'start'>): boolean => !isEndUnderFrozenLines && end > showFrom && end <= showTo;

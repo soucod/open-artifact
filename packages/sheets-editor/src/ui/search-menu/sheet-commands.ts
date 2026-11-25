@@ -1,36 +1,81 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { sheetCommandSynonyms, blankSheetWord, sheetWord } from '../../messages/sheet-command-words.ts';
 import { shortcutActionLabel } from '../../messages/shortcut-labels.ts';
 import { shortcutKeysFor } from '../../keys/shortcut-list.ts';
 import { sheetMessages } from '../../i18n/sheet-messages.ts';
 import { versionHistoryMessages } from '../../history/version-text.ts';
 import { functionListLabel } from '../../messages/formula-autocomplete.ts';
-import { FILE_UPLOAD_ICON, IMPORT_FILE_SOURCES, type ImportFileSource } from '../../import/file-sources.ts';
-import { importFileChoices } from '../../import/csv-file.ts';
+import { FILE_UPLOAD_ICON, IMPORT_FILE_SOURCES, type ImportFileSource } from '../../import/file-sources.tsx';
+import { importFileChoices } from '../../import/csv-file.tsx';
 import { shortcutFor } from '../../keys/key-press.ts';
 import { copiedSheetNameAffixes } from '../../i18n/sheet-names.ts';
 import { toolLabelWithValue } from '../../tools/search-words.ts';
-export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
-  let { sheetId: sheetId, canBeDeleted: canBeDeleted } = state.sheet;
+import type { IconName } from '../../kit/icon.tsx';
+import type { MenuCommand } from './matching.ts';
+import type { ImportFileChoice } from '../../import/csv-file.tsx';
+import type { ListedSheet, PageView } from '../../view/page-view.ts';
+import type {
+  KeyPressed,
+  SheetDeleteChosen,
+  SheetDuplicateChosen,
+  SheetLinkCopyChosen,
+  SheetMoveChosen,
+  SheetRenameChosen,
+} from '../../state/event-reducer.ts';
+/** What the sheet commands of the search menu read of the page. */
+export interface SheetSearchState {
+  sheet: Pick<ListedSheet, 'sheetId' | 'canBeDeleted'>;
+  isOnlySheet: boolean;
+  placeAmongTabs: { index: number; count: number };
+  viewOnlyBecause: PageView['viewOnlyBecause'];
+  isVersionHistoryOpen: boolean;
+  filesForAgent: readonly ImportFileSource[];
+  whyNoToolForCells: string | null;
+}
+/** An event a sheet command of the search menu sends. */
+export type SheetSearchEvent =
+  | SheetMoveChosen
+  | SheetLinkCopyChosen
+  | SheetRenameChosen
+  | SheetDuplicateChosen
+  | SheetDeleteChosen
+  | KeyPressed;
+/** What the sheet commands of the search menu do when they are taken. */
+export interface SheetSearchActions {
+  dispatch: (event: SheetSearchEvent) => void;
+  onBlankChosen: () => void;
+  onImportChosen: (choices: ImportFileChoice[]) => void;
+  onFileForAgentChosen: (source: ImportFileSource) => void;
+  onVersionHistoryAsked: () => void;
+  onAllFunctionsAsked: () => void;
+  onAllSheetsAsked: (() => void) | null;
+}
+/** A fill done by a key, offered in the search menu. */
+export interface FillCommand {
+  id: string;
+  does: 'fillDown' | 'fillRight';
+  key: string;
+}
+export function sheetSearchCommands(state: SheetSearchState, actions: SheetSearchActions): MenuCommand[] {
+  let { sheetId, canBeDeleted } = state.sheet;
   let { index: tabIndex, count: tabCount } = state.placeAmongTabs;
-  let { onAllSheetsAsked: onAllSheetsAsked } = actions;
+  let { onAllSheetsAsked } = actions;
   let canEdit = state.viewOnlyBecause === null;
-  let moveCommand = (id?: Dynamic, label?: Dynamic, icon?: Dynamic, toIndex?: Dynamic) => ({
-    id: id,
+  let moveCommand = (id: string, label: string, icon: IconName, toIndex: number): MenuCommand => ({
+    id,
     label: sheetCommandLabel(label),
     otherWords: sheetCommandSynonyms('move'),
-    icon: icon,
+    icon,
     actsOn: 'file',
     whyNot: null,
     isWeighty: true,
     run: () =>
       actions.dispatch({
         kind: 'sheetMoveChosen',
-        sheetId: sheetId,
-        toIndex: toIndex,
+        sheetId,
+        toIndex,
       }),
   });
-  let copyLinkCommand = {
+  let copyLinkCommand: MenuCommand = {
     id: 'sheet.tab.copyLink',
     label: sheetCommandLabel(shortcutActionLabel('copyLinkToSheet')),
     otherWords: sheetCommandSynonyms('copyLink'),
@@ -41,10 +86,10 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
     run: () =>
       actions.dispatch({
         kind: 'sheetLinkCopyChosen',
-        sheetId: sheetId,
+        sheetId,
       }),
   };
-  let allSheetsCommands =
+  let allSheetsCommands: MenuCommand[] =
     onAllSheetsAsked === null
       ? []
       : [
@@ -82,7 +127,7 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
       run: actions.onAllFunctionsAsked,
     },
     ...allSheetsCommands,
-    ...((state.filesForAgent ?? []) as readonly ImportFileSource[]).map((source) => ({
+    ...(state.filesForAgent ?? []).map((source): MenuCommand => ({
       id: `sheet.add.${source}`,
       label: addSheetCommandLabel(IMPORT_FILE_SOURCES[source].name()),
       otherWords: sheetCommandSynonyms('addFromFile'),
@@ -93,15 +138,15 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
       run: () => actions.onFileForAgentChosen(source),
     })),
     ...importFileChoices.map(
-      (input?: Dynamic, options?: Dynamic) => ({
-        id: options === 0 ? 'sheet.add.importCsv' : `sheet.add.import${options}`,
-        label: addSheetCommandLabel(input.inMenu()),
+      (choice, index): MenuCommand => ({
+        id: index === 0 ? 'sheet.add.importCsv' : `sheet.add.import${index}`,
+        label: addSheetCommandLabel(choice.inMenu()),
         otherWords: sheetCommandSynonyms('addFromFile'),
         icon: FILE_UPLOAD_ICON,
         actsOn: 'opens',
         isWeighty: true,
         whyNot: null,
-        run: () => actions.onImportChosen([input]),
+        run: () => actions.onImportChosen([choice]),
       }),
     ),
     {
@@ -126,7 +171,7 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
       run: () =>
         actions.dispatch({
           kind: 'sheetRenameChosen',
-          sheetId: sheetId,
+          sheetId,
         }),
     },
     {
@@ -140,7 +185,7 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
       run: () =>
         actions.dispatch({
           kind: 'sheetDuplicateChosen',
-          sheetId: sheetId,
+          sheetId,
           wordsAroundName: copiedSheetNameAffixes(),
         }),
     },
@@ -160,14 +205,14 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
             run: () =>
               actions.dispatch({
                 kind: 'sheetDeleteChosen',
-                sheetId: sheetId,
+                sheetId,
               }),
           },
-        ]
+        ] satisfies MenuCommand[]
       : []),
     ...FILL_COMMANDS.map(
-      ({ id: id, does: does, key: key }: Dynamic) => ({
-        id: id,
+      ({ id, does, key }): MenuCommand => ({
+        id,
         label: shortcutActionLabel(does),
         otherWords: sheetCommandSynonyms('fill'),
         icon: null,
@@ -180,17 +225,17 @@ export function sheetSearchCommands(state?: Dynamic, actions?: Dynamic) {
     ),
   ];
 }
-export const modifierKeyPressedAction = (key?: Dynamic) => ({
+export const modifierKeyPressedAction = (key: string): KeyPressed => ({
   kind: 'keyPressed',
-  key: key,
+  key,
   isShiftHeld: false,
   isModifierHeld: true,
   isAltHeld: false,
   isRepeat: false,
 });
-export const sheetCommandLabel = (label?: Dynamic) => toolLabelWithValue(sheetWord(), label);
-export const addSheetCommandLabel = (label?: Dynamic) => toolLabelWithValue(sheetMessages.addSheet(), label);
-export const FILL_COMMANDS = [
+export const sheetCommandLabel = (label: string | undefined) => toolLabelWithValue(sheetWord(), label);
+export const addSheetCommandLabel = (label: string) => toolLabelWithValue(sheetMessages.addSheet(), label);
+export const FILL_COMMANDS: FillCommand[] = [
   {
     id: 'sheet.fillDown',
     does: 'fillDown',

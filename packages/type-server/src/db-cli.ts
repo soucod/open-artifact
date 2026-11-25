@@ -23,7 +23,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { IDEA_DOCUMENT_PATTERN, ideaDocumentProblem } from '@open-artifact/whiteboard-core';
 import { DbStore, mergePatch, splitPath } from '@open-artifact/server-sdk/db';
-import { resetEdits } from './agent.ts';
+import { clearAsking, resetEdits } from './agent.ts';
 import { detectType } from './server.ts';
 import { TYPES, contentDirOf, type TypeName } from './types.ts';
 
@@ -73,11 +73,14 @@ export async function cmdReadDb(positional: string[], options: { text?: boolean 
       if (typeof text !== 'string') return fail(`${doc.path} has no text field.`);
       process.stdout.write(text);
       resetEdits(root);
+      clearAsking(root);
       return 0;
     }
     console.log(JSON.stringify(read, null, 2));
-    // The agent has read the content: people's edits are counted again from here (the view context's `edits`).
+    // The agent has read the content: people's edits are counted again from here (the view context's `edits`), and
+    // it no longer waits on an answer.
     resetEdits(root);
+    clearAsking(root);
     return 0;
   } catch (error) {
     return fail((error as Error).message);

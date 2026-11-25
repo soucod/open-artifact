@@ -5,5 +5,21 @@
   "level": "L3",
   "entry": "harness-api",
   "plugin": "dsh-open-artifact",
-  "wake": ["live", "inbox"]
+  "wake": [
+    "live",
+    "inbox"
+  ],
+  "caps": {
+    "tools": "native",
+    "commands": {
+      "names": [
+        "open-artifact"
+      ]
+    },
+    "open": true,
+    "wake": {
+      "resume": true
+    },
+    "library": "own"
+  }
 }

@@ -10,7 +10,8 @@
  * The frame and the board keep in touch over the bootstrap's private port
  *:
  * - the keyboard: the frame may hold it after a press inside it or Enter
- *   on it (`embed-control.ts`); Escape inside it comes back to the board
+ *   on it (`embed-control.ts`), and only then does its page get typing,
+ *   paste and drops; Escape inside it comes back to the board
  *   (keeping it selected when Enter had entered it). Focus it takes
  *   otherwise is taken back, and the third time the embed is stopped, with
  *   a "Run it again" button;
@@ -44,12 +45,12 @@ import {
   isEmbedPortOffer,
   isEmbedSaveMessage,
   readEmbedPortMessage,
-  type EmbedPingMessage,
+  type EmbedBoardMessage,
   type EmbedStateMessage,
   type EmbedStopReason,
 } from './embed.ts';
 import { embedStopFor, focusBoardHome, registerEmbedFrame, runEmbedAgain, stopEmbed, useEmbedStops } from './embed-control.ts';
-import { AgentChip, useItemProps } from './item.tsx';
+import { useItemProps } from './item.tsx';
 import { rotationStyle, type ViewStyle } from './style.ts';
 import { TextEditor, useEditing, writeElementText } from './TextEditor.tsx';
 
@@ -102,7 +103,6 @@ export const HtmlView = memo(function HtmlView({ element }: { element: HtmlEleme
           <EmbedFrame element={element} title={title} />
         )}
       </div>
-      <AgentChip element={element} />
     </div>
   );
 });
@@ -168,6 +168,13 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
 
     const holds = (): boolean => document.activeElement === node;
 
+    /** Tells the frame it was entered or left: typing, paste and drops reach its page only while entered. */
+    const tellEntered = (enter: boolean): void => {
+      if (ended || port === null) return;
+      const message: EmbedBoardMessage = { enter };
+      port.postMessage(message);
+    };
+
     /** Takes the keyboard back: to what had it, else the board, or the host page when this page did not have it. */
     const takeBack = (previous: HTMLElement | SVGElement | null, wasInPage: boolean): void => {
       if (!holds()) return;
@@ -223,6 +230,7 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
     /** Escape inside the frame: back to the board (still selected when Enter had entered it). */
     const leave = (): void => {
       guard.release();
+      tellEntered(false);
       const selection = useSelection.getState();
       if (!enteredByKey && selection.ids.length === 1 && selection.ids[0] === id) selection.clear();
       enteredByKey = false;
@@ -273,6 +281,7 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
     // A press on the board ends the frame's hold on the keyboard.
     const onPressBoard = (): void => {
       guard.release();
+      tellEntered(false);
       enteredByKey = false;
       if (holds()) focusBoardHome();
     };
@@ -280,6 +289,7 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
       const target = event.target;
       if ((target instanceof HTMLElement || target instanceof SVGElement) && target.tagName !== 'IFRAME') {
         guard.release();
+        tellEntered(false);
         enteredByKey = false;
       }
     };
@@ -303,9 +313,10 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
       if (verdict === 'silent') {
         setSilent(true);
         guard.release();
+        tellEntered(false);
         if (holds()) focusBoardHome();
       }
-      const message: EmbedPingMessage = { ping };
+      const message: EmbedBoardMessage = { ping };
       port.postMessage(message);
     }, EMBED_HEARTBEAT_MS);
 
@@ -313,6 +324,7 @@ function EmbedFrame({ element, title }: { element: HtmlElement; title: string })
       use() {
         if (ended) return;
         guard.allow(performance.now());
+        tellEntered(true);
         enteredByKey = true;
         const active = document.activeElement;
         if ((active instanceof HTMLElement || active instanceof SVGElement) && active.tagName !== 'IFRAME') active.blur();

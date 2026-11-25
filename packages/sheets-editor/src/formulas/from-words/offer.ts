@@ -1,4 +1,3 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { isFormulaWrittenInWords } from '../fix-prompt.ts';
 import { cellKeyOf } from '../error-tells.ts';
 import { isFormulaText } from '../../chips/dropdown-pane-edits.ts';
@@ -11,26 +10,38 @@ import { headedColumnsMatchingWord } from '../column-headings.ts';
 import { highlightedReferences } from '../reference-pointing.ts';
 import { findFormulaReferences } from '../references.ts';
 import { withNoEffects } from '../../state/transitions.ts';
+import type { EditingMode, PageEffect, PageTransition } from '../../state/transitions.ts';
 import { layoutOfView } from '../../grid/layout.ts';
 import { formulaFromWordsWhereAt } from './where.ts';
 import { isLineShown } from '../../model/line-sizes.ts';
 import { formulaOfWords, otherFormulaOfWords } from './rules.ts';
 import { proposedFormulaResult } from '../proposed-result.ts';
 import { isAreaWithin } from '../../selection/several-ranges.ts';
-import type { PageState } from '../../state/initial-state.ts';
-import type { WorkbookReads } from '../../model/workbook.ts';
+import type {
+  AgentOfFormulaFromWords,
+  FormulaFromWords,
+  FormulaFromWordsStage,
+  FormulaOffered,
+  FormulaOfferRow,
+  FormulaToWorkOut,
+  FormulaWithResult,
+  PageState,
+  ReferenceInEntry,
+} from '../../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../../model/workbook.ts';
+import type { CellArea } from '../../selection/model.ts';
 import type { ReadsWithTextMeasurer } from '../../state/controller.ts';
-export function rememberOwnWords({ mode: mode }: Dynamic, { state: state, effects: effects }: Dynamic, workbook: WorkbookReads) {
+export function rememberOwnWords({ mode }: PageState, { state, effects }: PageTransition, workbook: WorkbookReads): PageState {
   if (mode.kind !== 'editing' || !isEntryFreshForWords(mode) || mode.holdsWhatWasNotTyped === true) return state;
-  for (let effect of effects as Dynamic) {
+  for (const effect of effects) {
     if (effect.kind !== 'queueEdit' || effect.edit.kind !== 'enter') continue;
-    let { sheetId: sheetId, cell: cell, entry: entry } = effect.edit;
+    let { sheetId, cell, entry } = effect.edit;
     if (entry.kind !== 'text' || !entry.text.startsWith(mode.text)) continue;
     if (!isFormulaWrittenInWords(workbook, entry.text)) continue;
-    let ownWords = new (Map as Dynamic)(state.formulaFromWords.ownWords);
+    let ownWords = new Map<string, string>(state.formulaFromWords.ownWords);
     ownWords.set(
       cellKeyOf({
-        sheetId: sheetId,
+        sheetId,
         rowId: cell.r,
         columnId: cell.c,
       }),
@@ -40,19 +51,19 @@ export function rememberOwnWords({ mode: mode }: Dynamic, { state: state, effect
       ...state,
       formulaFromWords: {
         ...state.formulaFromWords,
-        ownWords: ownWords,
+        ownWords,
       },
     };
   }
   return state;
 }
-export function checkAgentWhenEntryStarts(step?: Dynamic) {
-  let { mode: mode, formulaFromWords: formulaFromWords } = step.state;
-  let withAgent = (agent?: Dynamic) => ({
+export function checkAgentWhenEntryStarts(step: PageTransition): PageTransition {
+  const { mode, formulaFromWords } = step.state;
+  let withAgent = (agent: AgentOfFormulaFromWords): PageState => ({
     ...step.state,
     formulaFromWords: {
       ...formulaFromWords,
-      agent: agent,
+      agent,
     },
   });
   if (mode.kind !== 'editing')
@@ -73,8 +84,8 @@ export function checkAgentWhenEntryStarts(step?: Dynamic) {
     ],
   };
 }
-export function checkAgentForFormulas(step?: Dynamic) {
-  let { formulaFromWords: formulaFromWords } = step.state;
+export function checkAgentForFormulas(step: PageTransition): PageTransition {
+  let { formulaFromWords } = step.state;
   if (formulaFromWords.agent !== 'unchecked') return step;
   return {
     state: {
@@ -92,8 +103,8 @@ export function checkAgentForFormulas(step?: Dynamic) {
     ],
   };
 }
-export function shouldOfferFormula(state: PageState, workbook: WorkbookReads) {
-  let { mode: mode, formulaFromWords: formulaFromWords } = state;
+export function shouldOfferFormula(state: PageState, workbook: WorkbookReads): boolean {
+  const { mode, formulaFromWords } = state;
   if (mode.kind !== 'editing' || formulaFromWords.isWavedOff) return false;
   if (workbook.calculationTookTooLong) return false;
   if (mode.text.length > MAX_FORMULA_FROM_WORDS_TEXT_LENGTH) return false;
@@ -102,14 +113,19 @@ export function shouldOfferFormula(state: PageState, workbook: WorkbookReads) {
   if (workbook.dropdownOf(activeAnchorCell(state, workbook)) !== null) return false;
   return formulaReadsAsWords(
     mode.text,
-    workbook.listSheets().map(({ name: name }: Dynamic) => name),
+    workbook.listSheets().map(({ name }) => name),
     workbook.decimalSign,
   );
 }
-export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: ReadsWithTextMeasurer, isOfferShut?: Dynamic) {
-  let { state: state, effects: effects } = step;
-  let { mode: mode, formulaFromWords: formulaFromWords } = state;
-  let { stage: stage, isWavedOff: isWavedOff } = formulaFromWords;
+export function updateFormulaOffer(
+  before: PageState,
+  step: PageTransition,
+  workbook: ReadsWithTextMeasurer,
+  isOfferShut: boolean,
+): PageTransition {
+  const { state, effects } = step;
+  const { mode, formulaFromWords } = state;
+  const { stage, isWavedOff } = formulaFromWords;
   let effectsStoppingAsk = stage?.kind === 'asked' ? [...effects, ...STOP_ASKING_AGENT_EFFECTS] : effects;
   if (mode.kind !== 'editing' || isOfferShut)
     return stage === null && !isWavedOff && formulaFromWords.notOfferedWhileShut === null
@@ -134,7 +150,7 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
     isListOpenBelowEntry(state) === isListOpenBelowEntry(before)
   )
     return step;
-  let isStageForThisText =
+  const isStageForThisText =
     stage !== null && stage.kind !== 'offered' && mode.text === (stage.kind === 'proposed' ? stage.formula : stage.words);
   if (isStageForThisText && stage.kind === 'proposed' && !isWorkbookUnchanged)
     return {
@@ -154,9 +170,9 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
         isWavedOff: false,
       }),
     };
-  let shouldOffer = shouldOfferFormula(state, workbook);
-  let isAgentLeftOut = !canAskAgentForFormula(state);
-  let isOfferStanding = stage?.kind === 'offered' && !(stage.hasCallFailed && mode !== before.mode);
+  const shouldOffer = shouldOfferFormula(state, workbook);
+  const isAgentLeftOut = !canAskAgentForFormula(state);
+  const isOfferStanding = stage?.kind === 'offered' && !(stage.hasCallFailed && mode !== before.mode);
   if (shouldOffer && isOfferStanding && (stage.isAgentLeftOut === true) !== isAgentLeftOut) {
     let { isAgentLeftOut: wasAgentLeftOut, ...stageWithAgent } = stage;
     return {
@@ -166,7 +182,7 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
         isAgentLeftOut
           ? {
               ...stage,
-              isAgentLeftOut: isAgentLeftOut,
+              isAgentLeftOut,
             }
           : stageWithAgent,
       ),
@@ -181,7 +197,7 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
     };
   if (shouldOffer ? isOfferStanding : stage === null) return step;
   let stageBefore = before.formulaFromWords.stage;
-  let { notOfferedWhileShut: notOfferedWhileShut } = formulaFromWords;
+  let { notOfferedWhileShut } = formulaFromWords;
   let notOfferedFields =
     notOfferedWhileShut === null
       ? {}
@@ -195,12 +211,12 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
       shouldOffer
         ? {
             ...FRESH_FORMULA_OFFER,
-            isDrawn: isDrawn,
+            isDrawn,
             ...(isDrawn && {
               hasRested: true,
             }),
             ...(isAgentLeftOut && {
-              isAgentLeftOut: isAgentLeftOut,
+              isAgentLeftOut,
               ...notOfferedFields,
             }),
           }
@@ -212,25 +228,25 @@ export function updateFormulaOffer(before: Dynamic, step: Dynamic, workbook: Rea
     effects: effectsStoppingAsk,
   };
 }
-export function columnsNamedInWords(state: PageState, workbook: WorkbookReads, words?: Dynamic) {
+export function columnsNamedInWords(state: PageState, workbook: WorkbookReads, words: string): string[] {
   let activeCell = activeAnchorCell(state, workbook);
-  let cellsNamed = [...words.matchAll(HEADING_WORD_PATTERN)].flatMap(({ 0: word, index: index }: Dynamic) => {
+  let cellsNamed = [...words.matchAll(HEADING_WORD_PATTERN)].flatMap(({ 0: word, index }) => {
     let isWordFinished = index + word.length < words.length;
     return headedColumnsMatchingWord(word, activeCell, workbook)
       .filter(
-        ({ heading: heading }: Dynamic) =>
+        ({ heading }) =>
           (isWordFinished && word.length >= MIN_HEADING_WORD_LENGTH) ||
           heading.toLowerCase().match(HEADING_WORD_PATTERN)?.includes(word.toLowerCase()) === true,
       )
-      .map(({ cells: cells }: Dynamic) => cells);
+      .map(({ cells }) => cells);
   });
-  return [...new (Set as Dynamic)(cellsNamed)];
+  return [...new Set(cellsNamed)];
 }
-export function withReferencesNamedInWords(before: Dynamic, state: PageState, workbook: WorkbookReads, isForced: Dynamic = false) {
-  let { mode: mode, formulaFromWords: formulaFromWords, activeCell: activeCell } = state;
+export function withReferencesNamedInWords(before: PageState, state: PageState, workbook: WorkbookReads, isForced = false): PageState {
+  const { mode, formulaFromWords, activeCell } = state;
   let stageKind = formulaFromWords.stage?.kind;
   if (mode.kind !== 'editing' || (stageKind !== 'offered' && stageKind !== 'asked')) {
-    let typedReferences = state.referencesInEntry.filter(({ isNamedInWords: isNamedInWords }: Dynamic) => isNamedInWords !== true);
+    let typedReferences = state.referencesInEntry.filter(({ isNamedInWords }) => isNamedInWords !== true);
     return typedReferences.length === state.referencesInEntry.length
       ? state
       : {
@@ -249,37 +265,37 @@ export function withReferencesNamedInWords(before: Dynamic, state: PageState, wo
   if (cellsNamed.length === 0) return state;
   let typedReferenceCount = highlightedReferences(mode.text, activeCell.sheetId, workbook).length;
   let isQuoteOpen = findFormulaReferences(mode.text, workbook.decimalSign).quoted.some(
-    ({ isClosed: isClosed }: Dynamic) => !isClosed,
+    ({ isClosed }) => !isClosed,
   );
   let textWithNames = `${mode.text}${isQuoteOpen ? '"' : ''} ${cellsNamed.join(' ')}`;
-  let references = highlightedReferences(textWithNames, activeCell.sheetId, workbook);
+  let references: ReferenceInEntry[] = highlightedReferences(textWithNames, activeCell.sheetId, workbook);
   return {
     ...state,
     referencesInEntry: [
       ...references.slice(0, typedReferenceCount),
       ...references.slice(typedReferenceCount).map(
-        ({ sheetId: sheetId, area: area, pieces: pieces, hue: hue }: Dynamic) =>
+        ({ sheetId, area, pieces, hue }): ReferenceInEntry =>
           pieces === undefined
             ? {
-                sheetId: sheetId,
-                area: area,
-                hue: hue,
+                sheetId,
+                area,
+                hue,
                 isNamedInWords: true,
               }
             : {
-                sheetId: sheetId,
-                area: area,
-                pieces: pieces,
-                hue: hue,
+                sheetId,
+                area,
+                pieces,
+                hue,
                 isNamedInWords: true,
               },
       ),
     ],
   };
 }
-export function readFormulaForOffer(before: Dynamic, state: PageState, workbook: ReadsWithTextMeasurer) {
-  let { mode: mode, formulaFromWords: formulaFromWords } = state;
-  let { stage: stage } = formulaFromWords;
+export function readFormulaForOffer(before: PageState, state: PageState, workbook: ReadsWithTextMeasurer): PageTransition {
+  const { mode, formulaFromWords } = state;
+  const { stage } = formulaFromWords;
   if (mode.kind !== 'editing' || stage?.kind !== 'offered') return withNoEffects(state);
   let stageBefore = before.formulaFromWords.stage;
   let isWorkbookUnchanged =
@@ -294,11 +310,11 @@ export function readFormulaForOffer(before: Dynamic, state: PageState, workbook:
   )
     return withNoEffects(state);
   let activeCell = activeAnchorCell(state, workbook);
-  let { rowEdges: rowEdges } = layoutOfView(state, workbook);
+  let { rowEdges } = layoutOfView(state, workbook);
   let where = formulaFromWordsWhereAt(
     workbook,
     activeCell,
-    (rowIndex?: Dynamic) => isLineShown(rowEdges, rowIndex),
+    (rowIndex) => isLineShown(rowEdges, rowIndex),
     state.sheetPointedIn === null,
   );
   let formula = where === null ? null : formulaOfWords(mode.text.slice(1), where);
@@ -309,18 +325,18 @@ export function readFormulaForOffer(before: Dynamic, state: PageState, workbook:
   if (formula === formulaBefore && other === otherBefore && isWorkbookUnchanged) return withNoEffects(state);
   let isTextChanged = mode.text !== (before.mode.kind === 'editing' ? before.mode.text : null);
   let {
-    formulaNotOffered: formulaNotOffered,
-    otherNotOffered: otherNotOffered,
+    formulaNotOffered,
+    otherNotOffered,
     toWorkOut: toWorkOutBefore,
-    isLightMovedByPerson: isLightMovedByPerson,
-    readOtherwise: readOtherwise,
+    isLightMovedByPerson,
+    readOtherwise,
     ...offered
   } = stage;
   let isLightKept = isLightMovedByPerson === true && !isTextChanged;
   let offeredKeepingLight = isLightKept
     ? {
         ...offered,
-        isLightMovedByPerson: isLightMovedByPerson,
+        isLightMovedByPerson,
       }
     : offered;
   let litIfItGoes = isReadingHighlighted(stage.highlighted) ? (stage.toWorkOut?.litIfItGoes ?? 'write') : stage.highlighted;
@@ -345,16 +361,16 @@ export function readFormulaForOffer(before: Dynamic, state: PageState, workbook:
   let isLitIfAlone = isOtherToLight || (other !== null && stage.toWorkOut?.isLitIfAlone === true);
   let wasOtherLit = stage.highlighted === 'readOtherwise' && !isOtherUnchanged;
   let isOtherTheirs = isOtherNew && !isTextChanged && ((wasOtherLit && isLightKept) || stage.toWorkOut?.isOtherTheirs === true);
-  let toWorkOut = {
-    formula: formula,
-    leavesLitRow: leavesLitRow,
-    isKeptOutOfRow: isKeptOutOfRow,
-    litIfItGoes: litIfItGoes,
-    other: other,
+  let toWorkOut: FormulaToWorkOut = {
+    formula,
+    leavesLitRow,
+    isKeptOutOfRow,
+    litIfItGoes,
+    other,
     mustOtherStandToo: otherRead?.mustStandToo === true,
-    isRowHeldForOther: isRowHeldForOther,
-    isLitIfAlone: isLitIfAlone,
-    isOtherTheirs: isOtherTheirs,
+    isRowHeldForOther,
+    isLitIfAlone,
+    isOtherTheirs,
   };
   let highlighted = wasOtherLit ? litIfItGoes : stage.highlighted;
   return {
@@ -365,51 +381,51 @@ export function readFormulaForOffer(before: Dynamic, state: PageState, workbook:
       }),
       ...(isOtherUnchanged &&
         readOtherwise !== undefined && {
-          readOtherwise: readOtherwise,
+          readOtherwise,
         }),
       ...(isOtherUnchanged &&
         otherNotOffered !== undefined && {
-          otherNotOffered: otherNotOffered,
+          otherNotOffered,
         }),
-      toWorkOut: toWorkOut,
+      toWorkOut,
       highlighted: isOtherToLight ? litIfItGoes : isReadToLight ? 'read' : highlighted,
     }),
     effects: [
       {
         kind: 'workOutFormulaRead',
-        formula: formula,
+        formula,
       },
     ],
   };
 }
-export function takeWorkedOutFormula(state: PageState, workbook: WorkbookReads, formula?: Dynamic) {
-  let { stage: stage } = state.formulaFromWords;
+export function takeWorkedOutFormula(state: PageState, workbook: WorkbookReads, formula: string): PageState {
+  const { stage } = state.formulaFromWords;
   if (stage?.kind !== 'offered' || stage.toWorkOut?.formula !== formula) return state;
-  let result = proposedFormulaResult(workbook, activeAnchorCell(state, workbook), formula);
-  let read =
-    result !== null && typeof result !== 'string' && result.fillsOtherCells !== true
+  let comesTo = proposedFormulaResult(workbook, activeAnchorCell(state, workbook), formula);
+  let read: FormulaWithResult | null =
+    comesTo !== null && typeof comesTo !== 'string' && comesTo.fillsOtherCells !== true
       ? {
-          formula: formula,
-          value: result,
+          formula,
+          value: comesTo,
         }
       : null;
   let {
-    other: other,
-    mustOtherStandToo: mustOtherStandToo,
-    isLitIfAlone: isLitIfAlone,
-    isOtherTheirs: isOtherTheirs,
-    litIfItGoes: litIfItGoes,
+    other,
+    mustOtherStandToo,
+    isLitIfAlone,
+    isOtherTheirs,
+    litIfItGoes,
   } = stage.toWorkOut;
-  let otherResult = read === null || other === null ? null : proposedFormulaResult(workbook, activeAnchorCell(state, workbook), other);
-  let readOtherwise =
+  let otherComesTo = read === null || other === null ? null : proposedFormulaResult(workbook, activeAnchorCell(state, workbook), other);
+  let readOtherwise: FormulaWithResult | null =
     other !== null &&
-    otherResult !== null &&
-    typeof otherResult !== 'string' &&
-    otherResult.fillsOtherCells !== true &&
-    otherResult.shown !== read?.value.shown
+    otherComesTo !== null &&
+    typeof otherComesTo !== 'string' &&
+    otherComesTo.fillsOtherCells !== true &&
+    otherComesTo.shown !== read?.value.shown
       ? {
           formula: other,
-          value: otherResult,
+          value: otherComesTo,
         }
       : null;
   let readKept = mustOtherStandToo && readOtherwise === null ? null : read;
@@ -421,10 +437,10 @@ export function takeWorkedOutFormula(state: PageState, workbook: WorkbookReads, 
   let isLightToMove = readOtherwise !== null && stage.highlighted === 'read' && !isLightMovedByPerson;
   let highlighted = isLitRowGone || isLightToMove ? litIfItGoes : stage.highlighted;
   let {
-    toWorkOut: toWorkOut,
+    toWorkOut,
     isLightMovedByPerson: lightMoved,
     readOtherwise: readOtherwiseBefore,
-    otherNotOffered: otherNotOffered,
+    otherNotOffered,
     ...offered
   } = stage;
   return withFormulaFromWordsStage(state, {
@@ -434,7 +450,7 @@ export function takeWorkedOutFormula(state: PageState, workbook: WorkbookReads, 
     }),
     read: readKept,
     ...(readOtherwise !== null && {
-      readOtherwise: readOtherwise,
+      readOtherwise,
     }),
     highlighted: isOtherToLight ? 'readOtherwise' : isReadToLight ? 'read' : highlighted,
     ...(readKept === null && {
@@ -446,27 +462,27 @@ export function takeWorkedOutFormula(state: PageState, workbook: WorkbookReads, 
       }),
   });
 }
-export function formulaReadForOffer(stage?: Dynamic) {
+export function formulaReadForOffer(stage: FormulaFromWordsStage | null): string | null {
   if (stage?.kind !== 'offered') return null;
   return stage.toWorkOut !== undefined && !stage.toWorkOut.isKeptOutOfRow && !stage.toWorkOut.isRowHeldForOther
     ? stage.toWorkOut.formula
     : (stage.read?.formula ?? null);
 }
-export function formulaOfOfferRow(stage?: Dynamic, highlighted?: Dynamic) {
+export function formulaOfOfferRow(stage: FormulaFromWordsStage | null, highlighted: FormulaOfferRow): string | null {
   if (stage?.kind !== 'offered') return null;
   if (highlighted === 'read') return formulaReadForOffer(stage);
   return highlighted === 'readOtherwise' ? (stage.readOtherwise?.formula ?? null) : null;
 }
-export function shutEmptyOffer(state: PageState) {
-  let { stage: stage } = state.formulaFromWords;
+export function shutEmptyOffer(state: PageState): PageState {
+  const { stage } = state.formulaFromWords;
   return isOfferEmptyWithoutAgent(stage) && stage?.kind === 'offered' && stage.toWorkOut === undefined
     ? withFormulaFromWordsStage(state, null, {
         notOfferedWhileShut: stage.formulaNotOffered ?? null,
       })
     : state;
 }
-export function moveLightOffWrite(state: PageState) {
-  let { stage: stage } = state.formulaFromWords;
+export function moveLightOffWrite(state: PageState): PageState {
+  const { stage } = state.formulaFromWords;
   return stage?.kind === 'offered' && stage.isAgentLeftOut === true && stage.highlighted === 'write'
     ? withFormulaFromWordsStage(state, {
         ...stage,
@@ -474,12 +490,12 @@ export function moveLightOffWrite(state: PageState) {
       })
     : state;
 }
-export function withReferencesOfHighlightedFormula(before: Dynamic, state: PageState, workbook: WorkbookReads) {
-  let { mode: mode, activeCell: activeCell } = state;
+export function withReferencesOfHighlightedFormula(before: PageState, state: PageState, workbook: WorkbookReads): PageState {
+  const { mode, activeCell } = state;
   let [formula, formulaBefore] = [highlightedOfferFormula(state), highlightedOfferFormula(before)];
   if (mode.kind !== 'editing' || (formula === null && formulaBefore === null)) return state;
   if (formula === formulaBefore && mode === before.mode && state.workbookChangeCount === before.workbookChangeCount) return state;
-  let typedReferences = isFormulaText(mode.text) ? highlightedReferences(mode.text, activeCell.sheetId, workbook) : [];
+  let typedReferences: ReferenceInEntry[] = isFormulaText(mode.text) ? highlightedReferences(mode.text, activeCell.sheetId, workbook) : [];
   if (formula === null)
     return withReferencesNamedInWords(
       before,
@@ -490,35 +506,35 @@ export function withReferencesOfHighlightedFormula(before: Dynamic, state: PageS
       workbook,
       true,
     );
-  let formulaReferences = highlightedReferences(formula, activeCell.sheetId, workbook);
-  let smallestCovering = ({ area: area }: Dynamic) =>
+  let formulaReferences: ReferenceInEntry[] = highlightedReferences(formula, activeCell.sheetId, workbook);
+  let smallestCovering = ({ area }: ReferenceInEntry) =>
     formulaReferences
-      .filter(({ area: formulaArea }: Dynamic) => isAreaWithin(area, formulaArea))
-      .reduce(
-        (smallest?: Dynamic, reference?: Dynamic) =>
+      .filter(({ area: formulaArea }) => isAreaWithin(area, formulaArea))
+      .reduce<ReferenceInEntry | undefined>(
+        (smallest, reference) =>
           smallest === undefined || cellCountOfArea(reference.area) < cellCountOfArea(smallest.area) ? reference : smallest,
         undefined,
       );
-  let typedKept = typedReferences.flatMap((reference?: Dynamic) => {
+  let typedKept = typedReferences.flatMap((reference): ReferenceInEntry[] => {
     let covering = smallestCovering(reference);
-    let { sheetId: sheetId, writtenAt: writtenAt } = reference;
+    let { sheetId, writtenAt } = reference;
     if (covering === undefined || writtenAt === undefined) return [];
     return [
       {
-        sheetId: sheetId,
+        sheetId,
         area: covering.area,
         hue: covering.hue,
-        writtenAt: writtenAt,
+        writtenAt,
       },
     ];
   });
   let namedInWords = formulaReferences
-    .filter((reference?: Dynamic) => !typedReferences.some((typed?: Dynamic) => smallestCovering(typed) === reference))
+    .filter((reference) => !typedReferences.some((typed) => smallestCovering(typed) === reference))
     .map(
-      ({ sheetId: sheetId, area: area, hue: hue }: Dynamic) => ({
-        sheetId: sheetId,
-        area: area,
-        hue: hue,
+      ({ sheetId, area, hue }): ReferenceInEntry => ({
+        sheetId,
+        area,
+        hue,
         isNamedInWords: true,
       }),
     );
@@ -527,7 +543,12 @@ export function withReferencesOfHighlightedFormula(before: Dynamic, state: PageS
     referencesInEntry: [...typedKept, ...namedInWords],
   };
 }
-export function stepFormulaFromWords(before: Dynamic, step: Dynamic, workbook: ReadsWithTextMeasurer, isOfferShut?: Dynamic) {
+export function stepFormulaFromWords(
+  before: PageState,
+  step: PageTransition,
+  workbook: ReadsWithTextMeasurer,
+  isOfferShut: boolean,
+): PageTransition {
   let withOwnWords = {
     ...step,
     state: rememberOwnWords(before, step, workbook),
@@ -545,8 +566,9 @@ export function stepFormulaFromWords(before: Dynamic, step: Dynamic, workbook: R
     effects: [...offerUpdated.effects, ...read.effects],
   };
 }
-export const isReadingHighlighted = (highlighted?: Dynamic) => highlighted === 'read' || highlighted === 'readOtherwise';
-export const FORMULA_FROM_WORDS_START = {
+export const isReadingHighlighted = (highlighted: FormulaOfferRow): highlighted is 'read' | 'readOtherwise' =>
+  highlighted === 'read' || highlighted === 'readOtherwise';
+export const FORMULA_FROM_WORDS_START: FormulaFromWords = {
   agent: 'unchecked',
   hasAgentBeenMissed: false,
   askCount: 0,
@@ -554,55 +576,59 @@ export const FORMULA_FROM_WORDS_START = {
   actsHeld: 0,
   stage: null,
   notOfferedWhileShut: null,
-  ownWords: new (Map as Dynamic)(),
+  ownWords: new Map<string, string>(),
   fixThatCameToNothing: null,
 };
-export const withFormulaFromWordsStage = (state: PageState, stage?: Dynamic, fields: Dynamic = {}) => ({
+export const withFormulaFromWordsStage = (
+  state: PageState,
+  stage: FormulaFromWordsStage | null,
+  fields: Partial<FormulaFromWords> = {},
+): PageState => ({
   ...state,
   formulaFromWords: {
     ...state.formulaFromWords,
     ...fields,
-    stage: stage,
+    stage,
   },
 });
-export const FRESH_FORMULA_OFFER = {
+export const FRESH_FORMULA_OFFER: FormulaOffered = {
   kind: 'offered',
   highlighted: 'write',
   read: null,
   hasCallFailed: false,
   isDrawn: false,
 };
-export const STOP_ASKING_AGENT_EFFECTS = [
+export const STOP_ASKING_AGENT_EFFECTS: PageEffect[] = [
   {
     kind: 'stopAskingAgentForAFormula',
   },
 ];
-export const isEntryFreshForWords = (mode?: Dynamic) =>
+export const isEntryFreshForWords = (mode: EditingMode): boolean =>
   mode.mayHoldTextOfOthers !== true &&
   mode.formulaOfAgent !== 'mayBeHeld' &&
   (mode.isTypedOverCell === true || mode.wasEmptied === true || mode.textAtStart === '') &&
   !mode.text.includes('!');
-export const areOwnWordsOfCell = ({ formulaFromWords: { ownWords: ownWords } }: Dynamic, cellId?: Dynamic, text?: Dynamic) =>
+export const areOwnWordsOfCell = ({ formulaFromWords: { ownWords } }: PageState, cellId: CellId, text: string): boolean =>
   ownWords.get(cellKeyOf(cellId))?.toUpperCase() === text.toUpperCase();
-export const isListOpenBelowEntry = (state: PageState) =>
+export const isListOpenBelowEntry = (state: PageState): boolean =>
   state.menu !== null ||
   state.peopleList !== null ||
   state.timeList !== null ||
   state.dropdown !== null ||
   state.calendar !== null ||
   state.formulaHelp.list !== null;
-export const canAskAgentForFormula = ({ mode: mode, formulaFromWords: formulaFromWords }: Dynamic) =>
+export const canAskAgentForFormula = ({ mode, formulaFromWords }: PageState): boolean =>
   mode.kind === 'editing' && formulaFromWords.agent === 'available' && isEntryFreshForWords(mode);
 export const HEADING_WORD_PATTERN = /\p{L}[\p{L}\p{N}]*/gu;
 export const MIN_HEADING_WORD_LENGTH = 3;
-export const isOfferLitOnItsOwn = (stage?: Dynamic) =>
+export const isOfferLitOnItsOwn = (stage: FormulaFromWordsStage | null): boolean =>
   stage?.kind === 'offered' &&
   stage.toWorkOut?.isLitIfAlone === true &&
   !stage.toWorkOut.mustOtherStandToo &&
   stage.isLightMovedByPerson !== true &&
   !isReadingHighlighted(stage.highlighted);
-export const isOfferEmptyWithoutAgent = (stage?: Dynamic) =>
+export const isOfferEmptyWithoutAgent = (stage: FormulaFromWordsStage | null): boolean =>
   stage?.kind === 'offered' && stage.isAgentLeftOut === true && formulaReadForOffer(stage) === null;
-export const cellCountOfArea = ({ rowCount: rowCount, columnCount: columnCount }: Dynamic) => rowCount * columnCount;
-export const highlightedOfferFormula = ({ formulaFromWords: { stage: stage } }: Dynamic) =>
+export const cellCountOfArea = ({ rowCount, columnCount }: CellArea): number => rowCount * columnCount;
+export const highlightedOfferFormula = ({ formulaFromWords: { stage } }: PageState): string | null =>
   stage?.kind === 'offered' && stage.isDrawn ? formulaOfOfferRow(stage, stage.highlighted) : null;

@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { selectedArea, activeAnchorCell, isSameArea, isSameCell, scrollToShowSelection, selectionAtCell } from '../selection/model.ts';
 import { areasOverlap } from '../model/workbook.ts';
 import {
@@ -39,42 +38,89 @@ import { columnLetters } from '../model/a1-references.ts';
 import { rowsFromWordsPrompt, ROWS_FROM_WORDS_INSTRUCTIONS, readRowsAnswer } from './rows-from-words.ts';
 import { cleanTextForAgent } from '../agent/prompt-text.ts';
 import { openSortPane } from './sort-pane.ts';
+import { pickNamedView } from './named-view-actions.ts';
+import { namedViewsOfOwnFilter } from './named-view-model.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function filterCornerCellsInSelection(state: PageState, workbook: ReadsWithTextMeasurer) {
+import type { CellAt, ColumnId, Filter, SheetId, SortDirection } from '@open-artifact/sheets-core';
+import type { CellId } from '../model/workbook.ts';
+import type {
+  AgentForRowsAsk,
+  RowsAskAheadStands,
+  RowsAskedFor,
+  RowsAskTable,
+  SelectionPlace,
+  SuggestedAsk,
+  TableHolds,
+  WhyAgentIsNotAskedWhichRows,
+  WordsReadAsFilter,
+} from '../state/initial-state.ts';
+import type { AgentRepliedWhichRowsAreAskedFor, RowsAsked, RowsAskedForAct } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+import type { CellArea } from '../selection/model.ts';
+import type { FilterTable, HeldOwnFilterSnapshot, OwnFilter } from './own-filters.ts';
+import type { FilteredTableArea } from './finding.ts';
+import type { FilterLine } from './filter-model.ts';
+import type { FactsToldOfRows, TableToldOfRows } from './rows-from-words.ts';
+import type { SortFilterCard } from './sort-filter-card.tsx';
+/** The first cell on show of an area, with the index of its row. */
+export interface ShownCellOfArea extends CellId {
+  rowIndex: number;
+}
+/** What is taken of the rows asked for: what they ask, and whether their sort is left out. */
+export interface RowsToTake {
+  asked: RowsAsked;
+  isSortLeftOut: boolean;
+}
+/** The table and the day the agent is told of when asked which rows. */
+export interface RowsAskToTell {
+  table: RowsAskTable;
+  today: string;
+}
+/** What is kept with the agent's answer: the words read, and why the agent is asked only at Enter from now on. */
+interface AgentAnswerKept {
+  read?: WordsReadAsFilter | null;
+  whyNot?: WhyAgentIsNotAskedWhichRows | null;
+}
+/** The own filters of the sheets as they stood before a try, and the filters they were worked out of. */
+interface OwnFiltersKept {
+  of: Map<SheetId, OwnFilter[]>;
+  kept: Map<SheetId, OwnFilter[]>;
+}
+export function filterCornerCellsInSelection(state: PageState, workbook: ReadsWithTextMeasurer): CellId[] {
   let area = selectedArea(state, workbook);
   if (area === null) return [];
   let corners = filterAreasOfSheet(state, workbook)
-    .filter((input?: Dynamic) => areasOverlap(input, area))
+    .filter((filterArea) => areasOverlap(filterArea, area))
     .map(
-      (input?: Dynamic) => ({
-        rowIndex: Math.max(area.topRowIndex, input.topRowIndex),
-        columnIndex: Math.max(area.leftColumnIndex, input.leftColumnIndex),
+      (filterArea) => ({
+        rowIndex: Math.max(area.topRowIndex, filterArea.topRowIndex),
+        columnIndex: Math.max(area.leftColumnIndex, filterArea.leftColumnIndex),
       }),
     );
   corners.sort(
-    (input?: Dynamic, options?: Dynamic) =>
-      input.rowIndex === options.rowIndex ? input.columnIndex - options.columnIndex : input.rowIndex - options.rowIndex,
+    (corner, otherCorner) =>
+      corner.rowIndex === otherCorner.rowIndex ? corner.columnIndex - otherCorner.columnIndex : corner.rowIndex - otherCorner.rowIndex,
   );
   return corners.flatMap(
-    ({ rowIndex: rowIndex, columnIndex: columnIndex }: Dynamic) => workbook.cellIdAt(state.sheetId, rowIndex, columnIndex) ?? [],
+    ({ rowIndex, columnIndex }) => workbook.cellIdAt(state.sheetId, rowIndex, columnIndex) ?? [],
   );
 }
-export function isSortAndFilterOnBar(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function isSortAndFilterOnBar(state: PageState, workbook: ReadsWithTextMeasurer): boolean {
   if (state.rowsAskedFor !== null) return state.rowsAskedFor.isToolOnBar;
-  let { shape: shape } = state.selectionSeen;
+  let { shape } = state.selectionSeen;
   if (shape === 'columns') return true;
   if (shape === 'cell' || shape === 'mergedOnly') return false;
   return filterCornerCellsInSelection(state, workbook).length > 0;
 }
-export function firstShownCellOfArea({ sheetId: sheetId }: Dynamic, workbook: WorkbookReads, area?: Dynamic) {
+export function firstShownCellOfArea({ sheetId }: Pick<PageState, 'sheetId'>, workbook: WorkbookReads, area: CellArea): ShownCellOfArea | null {
   let shownArea = workbook.areaOnShowIn(sheetId, area);
   if (shownArea === null) return null;
-  let { topRowIndex: topRowIndex, leftColumnIndex: leftColumnIndex, columnCount: columnCount } = shownArea;
+  let { topRowIndex, leftColumnIndex, columnCount } = shownArea;
   let columnIndex = workbook
     .columnIndexesOnShowIn(sheetId, topRowIndex)
-    .find((input?: Dynamic) => input >= leftColumnIndex && input < leftColumnIndex + columnCount);
+    .find((shownIndex) => shownIndex >= leftColumnIndex && shownIndex < leftColumnIndex + columnCount);
   let cellId = columnIndex === undefined ? null : workbook.cellIdAt(sheetId, topRowIndex, columnIndex);
   return cellId === null
     ? null
@@ -83,66 +129,66 @@ export function firstShownCellOfArea({ sheetId: sheetId }: Dynamic, workbook: Wo
         rowIndex: topRowIndex,
       };
 }
-export function filterTableEndingAbove(workbook: WorkbookReads, cellId?: Dynamic) {
+export function filterTableEndingAbove(workbook: WorkbookReads, cellId: CellId): FilterTable | null {
   let position = workbook.positionOfCell(cellId);
   let cellAbove = position === null ? null : workbook.cellIdAt(cellId.sheetId, position.rowIndex - 1, position.columnIndex);
   let filterTable = cellAbove === null ? null : filterTableAtCell(workbook, cellAbove);
   return filterTable?.table.rowUnderTheBody === cellId.rowId ? filterTable : null;
 }
-export function filterTableAroundCell(state: PageState, workbook: ReadsWithTextMeasurer, cellId?: Dynamic) {
+export function filterTableAroundCell(state: PageState, workbook: ReadsWithTextMeasurer, cellId: CellId): FilterTable | null {
   let position = workbook.positionOfCell(cellId);
   let tableOutlined =
     position === null
       ? undefined
       : tablesToOutline(state, workbook).find(
-          ({ area: area }: Dynamic) =>
+          ({ area }) =>
             isInSpan(position.rowIndex, area.topRowIndex, area.rowCount) && isInSpan(position.columnIndex, area.leftColumnIndex, area.columnCount),
         );
   if (tableOutlined === undefined) return filterTableAtCell(workbook, cellId);
-  let { sheetId: sheetId } = tableOutlined;
-  let { headerRows: headerRows, firstColumn: firstColumn, lastColumn: lastColumn, body: body } = tableOutlined.table;
-  let headerCell = [headerRows.firstRow, cellId.rowId, ...body.slice(0, 1).map(({ firstRow: firstRow }: Dynamic) => firstRow)]
+  let { sheetId } = tableOutlined;
+  let { headerRows, firstColumn, lastColumn, body } = tableOutlined.table;
+  let headerCell = [headerRows.firstRow, cellId.rowId, ...body.slice(0, 1).map(({ firstRow }) => firstRow)]
     .map(
-      (input?: Dynamic) => ({
-        sheetId: sheetId,
-        rowId: input,
+      (rowId) => ({
+        sheetId,
+        rowId,
         columnId: firstColumn,
       }),
     )
-    .find((input?: Dynamic) => workbook.cellOnShowIn(input) !== null);
+    .find((cell) => workbook.cellOnShowIn(cell) !== null);
   let filterTableOfHeader = headerCell === undefined ? null : filterTableAtCell(workbook, headerCell);
   if (filterTableOfHeader?.table.firstColumn === firstColumn && filterTableOfHeader.table.lastColumn === lastColumn) return filterTableOfHeader;
   return (
     filterTableAtCell(workbook, cellId) ?? (filterTableOfHeader !== null && filterTableOfHeader.cellTableId !== null ? filterTableOfHeader : null)
   );
 }
-export function guessFilterTableOfSelection(state: PageState, workbook: ReadsWithTextMeasurer) {
-  let { shape: shape } = state.selectionSeen;
+export function guessFilterTableOfSelection(state: PageState, workbook: ReadsWithTextMeasurer): FilterTable | null {
+  let { shape } = state.selectionSeen;
   if (shape !== 'columns' && shape !== 'rows')
     return filterTableForSelection(state, workbook) ?? filterTableEndingAbove(workbook, activeAnchorCell(state, workbook));
-  let unsureFound: Dynamic = null;
-  let tryCell = (cellId?: Dynamic) => {
+  let unsureFound: FilterTable | null = null;
+  let tryCell = (cellId: CellId) => {
     let filterTable = filterTableAtCell(workbook, cellId) ?? filterTableEndingAbove(workbook, cellId);
     let isUnsure = filterTable !== null && filterTable.columns.length === 1 && !filterTable.table.header.isSure;
     if (isUnsure) unsureFound ??= filterTable;
     return isUnsure ? null : filterTable;
   };
-  for (let value of filterCornerCellsInSelection(state, workbook) as Dynamic) {
-    let value2 = tryCell(value);
-    if (value2 !== null) return value2;
+  for (let cornerCell of filterCornerCellsInSelection(state, workbook)) {
+    let found = tryCell(cornerCell);
+    if (found !== null) return found;
   }
-  let area: Dynamic = selectedArea(state, workbook);
-  for (let index: Dynamic = 0; area !== null && index < MAX_TABLE_GUESS_STEPS; index += 1) {
-    let value = firstShownCellOfArea(state, workbook, area);
-    if (value === null) break;
-    let value2 = tryCell(value);
-    if (value2 !== null) return value2;
-    let filterTable = filterTableAtCell(workbook, value);
+  let area = selectedArea(state, workbook);
+  for (let index = 0; area !== null && index < MAX_TABLE_GUESS_STEPS; index += 1) {
+    let shownCell = firstShownCellOfArea(state, workbook, area);
+    if (shownCell === null) break;
+    let found = tryCell(shownCell);
+    if (found !== null) return found;
+    let filterTable = filterTableAtCell(workbook, shownCell);
     let tableArea = filterTable === null ? null : areaOfFilteredTable(workbook, filterTable);
-    let nextTopRowIndex = tableArea === null ? value.rowIndex + 1 : tableArea.topRowIndex + tableArea.rowCount;
+    let nextTopRowIndex = tableArea === null ? shownCell.rowIndex + 1 : tableArea.topRowIndex + tableArea.rowCount;
     let rowsLeft = area.topRowIndex + area.rowCount - nextTopRowIndex;
     area =
-      nextTopRowIndex > value.rowIndex && rowsLeft > 0
+      nextTopRowIndex > shownCell.rowIndex && rowsLeft > 0
         ? {
             ...area,
             topRowIndex: nextTopRowIndex,
@@ -152,42 +198,42 @@ export function guessFilterTableOfSelection(state: PageState, workbook: ReadsWit
   }
   return unsureFound;
 }
-export function rowCountOfTableRuns(workbook: WorkbookReads, { table: table }: Dynamic) {
+export function rowCountOfTableRuns(workbook: WorkbookReads, { table }: Pick<FilterTable, 'table'>): number {
   return table.runs
-    .map(({ firstRow: firstRow, lastRow: lastRow }: Dynamic) => {
+    .map(({ firstRow, lastRow }) => {
       let firstIndex = workbook.rowIndexOf(table.sheetId, firstRow);
       let lastIndex = workbook.rowIndexOf(table.sheetId, lastRow);
       return firstIndex === null || lastIndex === null ? 0 : lastIndex - firstIndex + 1;
     })
-    .reduce((input?: Dynamic, options?: Dynamic) => input + options, 0);
+    .reduce((count, rowCount) => count + rowCount, 0);
 }
-export function holdsOfFilterTable(workbook: WorkbookReads, filterTable?: Dynamic, blankRows?: Dynamic) {
+export function holdsOfFilterTable(workbook: WorkbookReads, filterTable: FilterTable, blankRows: number): TableHolds {
   return {
     records: (ownFilterRecordsArea(workbook, filterTable)?.rowCount ?? 0) - blankRows,
-    columns: filterTable.columns.map((input?: Dynamic) => columnHoldsOf(workbook, filterTable, input)),
+    columns: filterTable.columns.map((column) => columnHoldsOf(workbook, filterTable, column)),
   };
 }
-export function tableOfRowsAsk(state: PageState, workbook: WorkbookReads, filterTable?: Dynamic, leavesOutCurrent?: Dynamic) {
-  let blankRows = rowCountOfTableRuns(workbook, filterTable);
-  let holds = holdsOfFilterTable(workbook, filterTable, blankRows);
+export function tableOfRowsAsk(state: PageState, workbook: WorkbookReads, ownFilter: OwnFilter, leavesOutCurrent: boolean): RowsAskTable {
+  let rowsThatAreNoRecords = rowCountOfTableRuns(workbook, ownFilter);
+  let holds = holdsOfFilterTable(workbook, ownFilter, rowsThatAreNoRecords);
   let suggested = suggestedAsksOf(holds, state.viewerId);
-  let shownSuggested = leavesOutCurrent ? suggestionsBeyondFilter(filterTable.filter, suggested) : suggested;
+  let shownSuggested = leavesOutCurrent ? suggestionsBeyondFilter(ownFilter.filter, suggested) : suggested;
   let { columnId: activeColumnId } = activeAnchorCell(state, workbook);
   let isActiveColumnInTable =
-    filterTable.table.header.isSure && filterTable.columns.some(({ c: c }: Dynamic) => c === activeColumnId);
+    ownFilter.table.header.isSure && ownFilter.columns.some(({ c }) => c === activeColumnId);
   return {
-    key: filterTable.key,
-    holds: holds,
+    key: ownFilter.key,
+    holds,
     suggested: shownSuggested,
     columnAtCell: isActiveColumnInTable ? activeColumnId : null,
-    sorts: isOwnFilterSortable(workbook, filterTable) ? 'forOneself' : isFilterTableEmpty(filterTable) ? 'forEveryone' : null,
-    blankRows: blankRows,
-    isRead: holds.records > 0 && holds.columns.every(({ values: values }: Dynamic) => values.length > 0),
+    sorts: isOwnFilterSortable(workbook, ownFilter) ? 'forOneself' : isFilterTableEmpty(ownFilter) ? 'forEveryone' : null,
+    rowsThatAreNoRecords,
+    isRead: holds.records > 0 && holds.columns.every(({ values }) => values.length > 0),
   };
 }
-export function ownFilterOverSelection(state: PageState, workbook: WorkbookReads) {
+export function ownFilterOverSelection(state: PageState, workbook: WorkbookReads): OwnFilter | null {
   let area = selectedArea(state, workbook);
-  let overlapping = ownFiltersOfSheet(state, state.sheetId).flatMap((ownFilter?: Dynamic) => {
+  let overlapping = ownFiltersOfSheet(state, state.sheetId).flatMap((ownFilter) => {
     let filterArea = areaOfFilteredTable(workbook, ownFilter);
     return area !== null && filterArea !== null && areasOverlap(filterArea, area)
       ? [
@@ -198,20 +244,20 @@ export function ownFilterOverSelection(state: PageState, workbook: WorkbookReads
         ]
       : [];
   });
-  overlapping.sort((input?: Dynamic, options?: Dynamic) => input.top - options.top);
-  return (overlapping.find(({ held: held }: Dynamic) => !isOwnFilterUnused(held)) ?? overlapping[0])?.held ?? null;
+  overlapping.sort((one, other) => one.top - other.top);
+  return (overlapping.find(({ held }) => !isOwnFilterUnused(held)) ?? overlapping[0])?.held ?? null;
 }
-export function ownFilterOverlappingTable(state: Dynamic, workbook: WorkbookReads, filterTable?: Dynamic) {
+export function ownFilterOverlappingTable(state: PageState, workbook: WorkbookReads, filterTable: FilterTable): OwnFilter | null {
   let area = areaOfFilteredTable(workbook, filterTable);
   if (area === null) return null;
   return (
-    ownFiltersOfSheet(state, filterTable.table.sheetId).find((input?: Dynamic) => {
-      let value = areaOfFilteredTable(workbook, input);
-      return value !== null && areasOverlap(value, area);
+    ownFiltersOfSheet(state, filterTable.table.sheetId).find((ownFilter) => {
+      let ownFilterArea = areaOfFilteredTable(workbook, ownFilter);
+      return ownFilterArea !== null && areasOverlap(ownFilterArea, area);
     }) ?? null
   );
 }
-export function openRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, asked: Dynamic = null) {
+export function openRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, asked: string | CellAt | null = null): PageState {
   let shownState = refreshStaleOwnFilters(
     {
       ...state,
@@ -220,7 +266,7 @@ export function openRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, a
     workbook,
     state.sheetId,
   );
-  let rowsAskedFor = {
+  let rowsAskedFor: RowsAskedFor = {
     table: null,
     placeBefore: rowsAskPlaceOf(shownState),
     placeBeforeAsOf: lookStampOfWorkbook(shownState),
@@ -265,22 +311,22 @@ export function openRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, a
           (guessesTable ? ownFilterOverSelection(shownState, workbook) : null) ??
           guessFilterTableOfSelection(shownState, workbook) ??
           ownFilterOverSelection(shownState, workbook))
-        : (ownFiltersOfSheet(shownState, shownState.sheetId).find(({ key: key }: Dynamic) => key === asked) ?? null);
+        : (ownFiltersOfSheet(shownState, shownState.sheetId).find(({ key }) => key === asked) ?? null);
   let found = filterTable === null ? null : (ownFilterOverlappingTable(shownState, workbook, filterTable) ?? filterTable);
   if (found === null)
     return {
       ...shownState,
-      rowsAskedFor: rowsAskedFor,
+      rowsAskedFor,
     };
   let withFilter =
     'key' in found ? shownState : keepActiveCellClearOfStuckHeaders(state, addOwnFilterForTable(shownState, workbook, found), workbook);
   let ownFilter = ownFiltersOfSheet(withFilter, found.table.sheetId).find(
-    (input?: Dynamic) => input === found || input.table === found.table,
+    (ownFilterOfSheet) => ownFilterOfSheet === found || ownFilterOfSheet.table === found.table,
   );
   if (ownFilter === undefined)
     return {
       ...shownState,
-      rowsAskedFor: rowsAskedFor,
+      rowsAskedFor,
     };
   let ownFilterArea = areaOfFilteredTable(workbook, ownFilter);
   let tableUnderLetters =
@@ -300,66 +346,66 @@ export function openRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, a
     filterKeptOnForColumnsCard: isKeptOnForColumns ? null : withFilter.filterKeptOnForColumnsCard,
     rowsAskedFor: {
       ...rowsAskedFor,
-      isOfFilterBar: isOfFilterBar,
-      hasTurnedFilterOn: hasTurnedFilterOn,
-      isFilterNotDrawnYet: isFilterNotDrawnYet,
+      isOfFilterBar,
+      hasTurnedFilterOn,
+      isFilterNotDrawnYet,
       isTableGuessed: guessesTable,
-      tableUnderLetters: tableUnderLetters,
+      tableUnderLetters,
       placeBefore: rowsAskPlaceOf(withFilter),
-      table: table,
+      table,
     },
   };
 }
-export function filterBeforeRowsTry({ ownFilters: ownFilters, rowsAskedFor: rowsAskedFor }: Dynamic) {
+export function filterBeforeRowsTry({ ownFilters, rowsAskedFor }: Pick<PageState, 'ownFilters' | 'rowsAskedFor'>): Filter | null {
   if (rowsAskedFor === null || rowsAskedFor.table === null) return null;
   if (rowsAskedFor.beforeTry !== null) return rowsAskedFor.beforeTry.held.filter;
   return (
     ownFilterByKey(
       {
-        ownFilters: ownFilters,
+        ownFilters,
       },
       rowsAskedFor.table.key,
     )?.filter ?? null
   );
 }
-export function mergeFilterConditions(filterBefore?: Dynamic, filter?: Dynamic) {
-  let columnsAsked = new (Set as Dynamic)(filter.allOf.map(columnsKeyOfCondition));
-  let keptConditions = filterBefore.allOf.filter((input?: Dynamic) => !columnsAsked.has(columnsKeyOfCondition(input)));
+export function mergeFilterConditions(filterBefore: Filter, filter: Filter): Filter {
+  let columnsAsked = new Set(filter.allOf.map(columnsKeyOfCondition));
+  let keptConditions = filterBefore.allOf.filter((line) => !columnsAsked.has(columnsKeyOfCondition(line)));
   return filterOfEntries([...keptConditions, ...filter.allOf]) ?? filter;
 }
-export function suggestionsBeyondFilter(filter?: Dynamic, suggested?: Dynamic) {
+export function suggestionsBeyondFilter(filter: Filter | null, suggested: readonly SuggestedAsk[]): SuggestedAsk[] {
   let conditions = filter?.allOf ?? [];
   return suggested.flatMap(
-    (input?: Dynamic) =>
-      input.asked.filter?.allOf.every(
-        (input2?: Dynamic) => conditions.some((input3?: Dynamic) => areFilterConditionsSame(input3, input2)),
+    (suggestion) =>
+      suggestion.asked.filter?.allOf.every(
+        (line) => conditions.some((lineInForce) => areFilterConditionsSame(lineInForce, line)),
       ) === true
         ? []
         : [
             {
-              ...input,
+              ...suggestion,
               records: null,
             },
           ],
   );
 }
-export function filterToTryForAsk({ filter: filter, sortBy: sortBy }: Dynamic, state: PageState) {
+export function filterToTryForAsk({ filter, sortBy }: RowsAsked, state: PageState): Filter | null {
   let filterBefore = filterBeforeRowsTry(state);
   if (filter === null) return sortBy.length > 0 ? filterBefore : null;
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor?.isOfFilterBar !== true || rowsAskedFor.table === null || filterBefore === null) return filter;
   let merged = mergeFilterConditions(filterBefore, filter);
   let filterNow = ownFilterByKey(state, rowsAskedFor.table.key)?.filter ?? null;
-  return [filterBefore, filterNow].find((input?: Dynamic) => areFilterConditionsSame(input, merged)) ?? merged;
+  return [filterBefore, filterNow].find((held) => areFilterConditionsSame(held, merged)) ?? merged;
 }
-export function restorePlaceBeforeRowsTry(state: PageState, workbook: ReadsWithTextMeasurer, target: Dynamic = state) {
-  let { placeBefore: placeBefore, placeAfterTry = null } = state.rowsAskedFor ?? {};
+export function restorePlaceBeforeRowsTry(state: PageState, workbook: ReadsWithTextMeasurer, target: PageState = state): PageState {
+  let { placeBefore, placeAfterTry = null } = state.rowsAskedFor ?? {};
   if (placeBefore === undefined || placeAfterTry === null) return target;
   if (!(workbook.positionOfCell(placeBefore.activeCell) !== null && workbook.positionOfCell(placeBefore.selectionCorner) !== null)) return target;
   if (state.sheetId !== placeBefore.sheetId)
     return {
       ...target,
-      placesLeft: target.placesLeft.map((place?: Dynamic, index?: Dynamic) => {
+      placesLeft: target.placesLeft.map((place, index) => {
         let placeNow = state.placesLeft[index];
         return placeNow?.sheetId === placeAfterTry.sheetId &&
           isSameCell(placeNow.activeCell, placeAfterTry.activeCell) &&
@@ -377,13 +423,13 @@ export function restorePlaceBeforeRowsTry(state: PageState, workbook: ReadsWithT
   let restored = {
     ...target,
     ...placeBefore,
-    scrollTop: scrollTop,
+    scrollTop,
   };
   return !isScrollUnchanged || state.rowsAskedFor?.placeBeforeAsOf === lookStampOfWorkbook(state)
     ? restored
     : scrollToShowSelection(restored, workbook);
 }
-export function undoRowsTry(state: PageState, workbook: ReadsWithTextMeasurer) {
+export function undoRowsTry(state: PageState, workbook: ReadsWithTextMeasurer): PageState {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.table === null) return state;
   if (rowsAskedFor.beforeTry === null && rowsAskedFor.placeAfterTry === null) return state;
@@ -397,18 +443,18 @@ export function undoRowsTry(state: PageState, workbook: ReadsWithTextMeasurer) {
     },
   };
 }
-export function scrollToFilterButtonsRow(state: PageState, workbook: ReadsWithTextMeasurer, ownFilter?: Dynamic) {
+export function scrollToFilterButtonsRow(state: PageState, workbook: ReadsWithTextMeasurer, ownFilter: OwnFilter): PageState {
   let area = areaOfFilteredTable(workbook, ownFilter);
   let activeCellPosition = workbook.positionOfCell(state.activeCell);
   if (area === null || activeCellPosition === null || ownFilter.table.sheetId !== state.sheetId) return state;
   let layout = layoutOfView(state, workbook);
   let isBodyShown = rowPanes(state, layout, state)
-    .flatMap((input?: Dynamic) => shownRowIndicesInPane(input, layout))
-    .some((input?: Dynamic) => input > area.rowIndexOfButtons && input < area.topRowIndex + area.rowCount);
+    .flatMap((pane) => shownRowIndicesInPane(pane, layout))
+    .some((rowIndex) => rowIndex > area.rowIndexOfButtons && rowIndex < area.topRowIndex + area.rowCount);
   let buttonsRowIndex = Math.max(area.rowIndexOfButtons, layout.frozenRowCount);
   let cellAtButtons = workbook.cellIdAt(state.sheetId, buttonsRowIndex, activeCellPosition.columnIndex);
   if (isBodyShown || cellAtButtons === null) return state;
-  let { scrollTop: scrollTop } = scrollToShowSelection(
+  let { scrollTop } = scrollToShowSelection(
     {
       ...state,
       ...selectionAtCell(cellAtButtons),
@@ -418,11 +464,11 @@ export function scrollToFilterButtonsRow(state: PageState, workbook: ReadsWithTe
   return scrollTop < state.scrollTop
     ? {
         ...state,
-        scrollTop: scrollTop,
+        scrollTop,
       }
     : state;
 }
-export function tryRowsFilter(state: PageState, workbook: ReadsWithTextMeasurer, filter?: Dynamic) {
+export function tryRowsFilter(state: PageState, workbook: ReadsWithTextMeasurer, filter: Filter | null): PageState {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.table === null) return state;
   let ownFilter = ownFilterByKey(state, rowsAskedFor.table.key);
@@ -443,18 +489,18 @@ export function tryRowsFilter(state: PageState, workbook: ReadsWithTextMeasurer,
     ...scrolled,
     rowsAskedFor: {
       ...rowsAskedFor,
-      beforeTry: beforeTry,
+      beforeTry,
       placeAfterTry: rowsAskPlaceOf(scrolled),
     },
   };
 }
-export function tryAskedRows(state: PageState, workbook: ReadsWithTextMeasurer, asked?: Dynamic) {
+export function tryAskedRows(state: PageState, workbook: ReadsWithTextMeasurer, asked: RowsAsked): PageState {
   let filter = filterToTryForAsk(asked, state);
   let tried = tryRowsFilter(state, workbook, filter);
-  let { rowsAskedFor: rowsAskedFor, holdOnRowsFilteredByAgent: hold } = tried;
+  let { rowsAskedFor, holdOnRowsFilteredByAgent: hold } = tried;
   if (rowsAskedFor?.agent?.kind !== 'hasRead' || hold?.stands !== 'awaited') return tried;
-  let filterOf = (input?: Dynamic) =>
-    rowsAskedFor.table === null ? null : (ownFilterByKey(input, rowsAskedFor.table.key)?.filter ?? null);
+  let filterOf = (stateOfFilters: PageState) =>
+    rowsAskedFor.table === null ? null : (ownFilterByKey(stateOfFilters, rowsAskedFor.table.key)?.filter ?? null);
   if (filterOf(tried) !== filter) return tried;
   let isNewFilter = filter !== filterBeforeRowsTry(state) && filter !== filterOf(state);
   return {
@@ -462,7 +508,7 @@ export function tryAskedRows(state: PageState, workbook: ReadsWithTextMeasurer, 
     holdOnRowsFilteredByAgent: isNewFilter ? asLandedHold(hold) : null,
   };
 }
-export function areaFromButtonsRow(area?: Dynamic) {
+export function areaFromButtonsRow(area: FilteredTableArea): FilteredTableArea {
   let rowIndexOfButtons = area.rowIndexOfButtons;
   return {
     ...area,
@@ -470,27 +516,27 @@ export function areaFromButtonsRow(area?: Dynamic) {
     rowCount: area.topRowIndex + area.rowCount - rowIndexOfButtons,
   };
 }
-export function ownFilterAreaFromButtons(workbook: WorkbookReads, ownFilter?: Dynamic) {
+export function ownFilterAreaFromButtons(workbook: WorkbookReads, ownFilter: OwnFilter): FilteredTableArea | null {
   let area = areaOfFilteredTable(workbook, ownFilter);
   return area === null ? null : areaFromButtonsRow(area);
 }
 export function takeRowsAsk(
   state: PageState,
   workbook: ReadsWithTextMeasurer,
-  table?: Dynamic,
-  asked?: Dynamic,
-  isWithoutKeyboard?: Dynamic,
-  canSort?: Dynamic,
-) {
+  table: RowsAskTable,
+  asked: RowsAsked,
+  isWithoutKeyboard: boolean,
+  canSort: boolean,
+): PageTransition {
   let ownFilter = ownFilterByKey(refreshStaleOwnFilters(state, workbook, state.sheetId), table.key);
-  let isColumnInFilter = (input?: Dynamic) => ownFilter?.columns.some((input2?: Dynamic) => input2.c === input) === true;
+  let isColumnInFilter = (columnId: ColumnId) => ownFilter?.columns.some((column) => column.c === columnId) === true;
   if (
     ![
-      ...(asked.filter?.allOf ?? []).flatMap(({ anyOf: anyOf }: Dynamic) => anyOf.flatMap(columnsOfFilterItem)),
-      ...asked.sortBy.map(({ c: c }: Dynamic) => c),
+      ...(asked.filter?.allOf ?? []).flatMap(({ anyOf }) => anyOf.flatMap(columnsOfFilterItem)),
+      ...asked.sortBy.map(({ c }) => c),
     ].every(isColumnInFilter)
   ) {
-    let { words: value = '', today: value2 = null } = state.rowsAskedFor ?? {};
+    let { words = '', today = null } = state.rowsAskedFor ?? {};
     let tableKey = state.rowsAskedFor?.isOfFilterBar === true ? table.key : null;
     let reopened = openRowsAsk(undoRowsTry(state, workbook), workbook, tableKey);
     let hasTurnedFilterOn = state.rowsAskedFor?.hasTurnedFilterOn === true;
@@ -504,21 +550,21 @@ export function takeRowsAsk(
             ...reopened,
             rowsAskedFor: {
               ...reopened.rowsAskedFor,
-              isOfFilterBar: isOfFilterBar,
-              hasTurnedFilterOn: hasTurnedFilterOn,
-              isFilterNotDrawnYet: isFilterNotDrawnYet,
-              isTableGuessed: isTableGuessed,
+              isOfFilterBar,
+              hasTurnedFilterOn,
+              isFilterNotDrawnYet,
+              isTableGuessed,
             },
           };
-    return value2 === null
+    return today === null
       ? withNoEffects(reopenedState)
       : actOnRowsAsk(
           reopenedState,
           workbook,
           {
             kind: 'type',
-            words: value,
-            today: value2,
+            words,
+            today,
           },
           canSort,
         );
@@ -546,17 +592,17 @@ export function takeRowsAsk(
   let tableUnderLetters = state.rowsAskedFor?.tableUnderLetters ?? null;
   if (tableUnderLetters === null) return sortOwnFilterTableForEveryone(stateAfter, workbook, ownFilterNow, asked.sortBy, isWithoutKeyboard);
   let keys = asked.sortBy.map(
-    ({ c: c, direction: direction }: Dynamic) => ({
+    ({ c, direction }) => ({
       columnId: c,
-      direction: direction,
+      direction,
     }),
   );
   return sortTableOfColumns(stateAfter, workbook, tableUnderLetters, keys, isWithoutKeyboard);
 }
-export function reuseHeldFilter(read?: Dynamic, filters?: Dynamic) {
+export function reuseHeldFilter(read: WordsReadAsFilter, filters: readonly (Filter | null)[]): WordsReadAsFilter {
   if (read.kind !== 'read') return read;
   let filterText = JSON.stringify(read.asked.filter);
-  let sameFilter = filters.find((input?: Dynamic) => JSON.stringify(input) === filterText);
+  let sameFilter = filters.find((filter) => JSON.stringify(filter) === filterText);
   return sameFilter === undefined
     ? read
     : {
@@ -567,18 +613,18 @@ export function reuseHeldFilter(read?: Dynamic, filters?: Dynamic) {
         },
       };
 }
-export function readRowsAskWords(state: PageState, workbook: WorkbookReads, table?: Dynamic, words?: Dynamic, today2?: Dynamic) {
+export function readRowsAskWords(state: PageState, workbook: WorkbookReads, table: RowsAskTable, words: string, today: string): WordsReadAsFilter {
   let read = readWordsAsFilter(words, table.holds, state.viewerId, {
-    today: today2,
+    today,
     signsOfNumbers: workbook.signsOfNumbers,
     isMonthFirst: workbook.locale === 'en-US',
   });
   let ownFilter = ownFilterByKey(state, table.key);
   return reuseHeldFilter(read, [filterBeforeRowsTry(state), ownFilter?.filter ?? null]);
 }
-export function rowsAskToTake({ read: read, table: table }: Dynamic, canSort?: Dynamic) {
+export function rowsAskToTake({ read, table }: Pick<RowsAskedFor, 'read' | 'table'>, canSort: boolean): RowsToTake | null {
   if (read?.kind !== 'read' || table === null) return null;
-  let { filter: filter, sortBy: sortBy } = read.asked;
+  let { filter, sortBy } = read.asked;
   if (sortBy.length === 0 || canSortRowsAskTable(table, canSort))
     return {
       asked: read.asked,
@@ -588,22 +634,23 @@ export function rowsAskToTake({ read: read, table: table }: Dynamic, canSort?: D
     ? null
     : {
         asked: {
-          filter: filter,
+          filter,
           sortBy: [],
         },
         isSortLeftOut: true,
       };
 }
-export function doesRowsActionSort({ rowsAskedFor: rowsAskedFor }: Dynamic, action?: Dynamic, canSort?: Dynamic) {
+export function doesRowsActionSort({ rowsAskedFor }: Pick<PageState, 'rowsAskedFor'>, action: RowsAskedForAct, canSort: boolean): boolean {
   if (action.kind === 'take') return action.asked.sortBy.length > 0;
+  if (action.kind === 'takeNamedView') return true;
   if (action.kind !== 'takeAnswer' || rowsAskedFor === null) return false;
   return (rowsAskToTake(rowsAskedFor, canSort)?.asked.sortBy.length ?? 0) > 0;
 }
-export function rowsAskPromptInput(state: Dynamic, workbook: WorkbookReads, { table: table, today: today2 }: Dynamic) {
+export function rowsAskPromptInput(state: PageState, workbook: WorkbookReads, { table, today }: RowsAskToTell): [TableToldOfRows, FactsToldOfRows] {
   let ownFilter = ownFilterByKey(state, table.key);
   return [
     {
-      columns: table.holds.columns.flatMap((column?: Dynamic) => {
+      columns: table.holds.columns.flatMap((column) => {
         let columnIndex = ownFilter === null ? null : workbook.columnIndexOf(ownFilter.table.sheetId, column.c);
         return columnIndex === null
           ? []
@@ -617,22 +664,22 @@ export function rowsAskPromptInput(state: Dynamic, workbook: WorkbookReads, { ta
       records: table.holds.records,
     },
     {
-      today: today2,
+      today,
       decimalSign: workbook.decimalSign,
       isMonthFirst: workbook.locale === 'en-US',
     },
   ];
 }
-export function askAgentAheadWhichRows(state: PageState, workbook: WorkbookReads) {
+export function askAgentAheadWhichRows(state: PageState, workbook: WorkbookReads): PageTransition {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.table === null || rowsAskedFor.today === null) return withNoEffects(state);
   if (rowsAskedFor.askAhead !== null || state.whyAgentIsAskedWhichRowsOnlyAtEnter !== null) return withNoEffects(state);
-  let { table: table, today: today2 } = rowsAskedFor;
-  let [tableHolds, options] = rowsAskPromptInput(state, workbook, {
-    table: table,
-    today: today2,
+  let { table, today } = rowsAskedFor;
+  let [tableHolds, factsOfTable] = rowsAskPromptInput(state, workbook, {
+    table,
+    today,
   });
-  if (tableHolds.columns.length === 0 || rowsFromWordsPrompt(rowsAskedFor.words, tableHolds, options) === null)
+  if (tableHolds.columns.length === 0 || rowsFromWordsPrompt(rowsAskedFor.words, tableHolds, factsOfTable) === null)
     return withNoEffects({
       ...state,
       rowsAskedFor: {
@@ -653,34 +700,34 @@ export function askAgentAheadWhichRows(state: PageState, workbook: WorkbookReads
     effects: [
       {
         kind: 'askAgentAheadWhichRowsAreAskedFor',
-        askId: askId,
+        askId,
         words: ROWS_FROM_WORDS_INSTRUCTIONS,
       },
     ],
   };
 }
-export function holdBackRowsAskAhead(state: PageState) {
+export function holdBackRowsAskAhead(state: PageState): PageState {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.askAhead === null || rowsAskedFor.askAhead === 'isHeldBack') return state;
-  let askAhead = rowsAskedFor.askAhead === 'hasFailed' ? null : 'isHeldBack';
+  let askAhead: RowsAskAheadStands | null = rowsAskedFor.askAhead === 'hasFailed' ? null : 'isHeldBack';
   return {
     ...state,
     rowsAskedFor: {
       ...rowsAskedFor,
-      askAhead: askAhead,
+      askAhead,
     },
   };
 }
-export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isAtEnter?: Dynamic) {
+export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isAtEnter: boolean): PageTransition {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.table === null || rowsAskedFor.today === null) return withNoEffects(state);
   if (!(rowsAskedFor.agent === null || (isAtEnter && rowsAskedFor.agent.kind === 'hasFailed'))) return withNoEffects(state);
-  let withAgent = (agent?: Dynamic, askAhead: Dynamic = null) => ({
+  let withAgent = (agent: AgentForRowsAsk | null, askAhead: RowsAskAheadStands | null = null) => ({
     ...state,
     rowsAskedFor: {
       ...rowsAskedFor,
-      agent: agent,
-      askAhead: askAhead,
+      agent,
+      askAhead,
     },
   });
   let whyOnlyAtEnter = isAtEnter ? null : state.whyAgentIsAskedWhichRowsOnlyAtEnter;
@@ -693,13 +740,13 @@ export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isA
         isRateLimited: whyOnlyAtEnter === 'rateLimited',
       }),
     );
-  let { table: table, today: today2, askAhead: askAhead } = rowsAskedFor;
-  let [tableHolds, options] = rowsAskPromptInput(state, workbook, {
-    table: table,
-    today: today2,
+  let { table, today, askAhead } = rowsAskedFor;
+  let [tableHolds, factsOfTable] = rowsAskPromptInput(state, workbook, {
+    table,
+    today,
   });
-  let { columns: columns } = tableHolds;
-  let asked = rowsFromWordsPrompt(rowsAskedFor.words, tableHolds, options);
+  let { columns } = tableHolds;
+  let asked = rowsFromWordsPrompt(rowsAskedFor.words, tableHolds, factsOfTable);
   if (asked === null || columns.length === 0)
     return withNoEffects(
       withAgent(
@@ -709,11 +756,11 @@ export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isA
         'isHeldBack',
       ),
     );
-  let askedState = (askId?: Dynamic) => ({
+  let askedState = (askId: number) => ({
     ...withAgent({
       kind: 'isAsked',
-      askId: askId,
-      columns: columns,
+      askId,
+      columns,
     }),
     holdOnRowsFilteredByAgent: newAwaitedHold(askId),
   });
@@ -728,7 +775,7 @@ export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isA
         {
           kind: 'tellAgentWhichRowsAreAskedFor',
           askId: askAhead,
-          rest: rest,
+          rest,
         },
       ],
     };
@@ -742,23 +789,28 @@ export function askAgentWhichRows(state: PageState, workbook: WorkbookReads, isA
     effects: [
       {
         kind: 'askAgentWhichRowsAreAskedFor',
-        askId: askId,
-        asked: asked,
-        isAtEnter: isAtEnter,
+        askId,
+        asked,
+        isAtEnter,
       },
     ],
   };
 }
-export function askIdOfRowsAgentCall({ rowsAskedFor: rowsAskedFor }: Dynamic) {
+export function askIdOfRowsAgentCall({ rowsAskedFor }: Pick<PageState, 'rowsAskedFor'>): number | null {
   if (rowsAskedFor?.agent?.kind === 'isAsked') return rowsAskedFor.agent.askId;
   return typeof rowsAskedFor?.askAhead === 'number' ? rowsAskedFor.askAhead : null;
 }
-export function takeAgentRowsAnswer(state: PageState, workbook: ReadsWithTextMeasurer, askId?: Dynamic, outcome?: Dynamic) {
+export function takeAgentRowsAnswer(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  askId: number,
+  outcome: AgentRepliedWhichRowsAreAskedFor['reply'],
+): PageState {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.table === null || rowsAskedFor.today === null) return state;
   let isRateLimited = outcome.kind === 'failed' && outcome.isRateLimited === true;
   if (rowsAskedFor.askAhead === askId) {
-    let whyNot = outcome.kind === 'notToBeHad' ? outcome.kind : isRateLimited ? 'rateLimited' : null;
+    let whyNot: WhyAgentIsNotAskedWhichRows | null = outcome.kind === 'notToBeHad' ? outcome.kind : isRateLimited ? 'rateLimited' : null;
     let isHeldBack = outcome.kind === 'isYetToBeAllowed' || outcome.kind === 'stopped';
     return {
       ...state,
@@ -770,13 +822,13 @@ export function takeAgentRowsAnswer(state: PageState, workbook: ReadsWithTextMea
     };
   }
   if (rowsAskedFor.agent?.kind !== 'isAsked' || rowsAskedFor.agent.askId !== askId) return state;
-  let withAgent = (agent?: Dynamic, { read: read2 = rowsAskedFor.read, whyNot = null }: Dynamic = {}) => ({
+  let withAgent = (agent: AgentForRowsAsk | null, { read: wordsRead = rowsAskedFor.read, whyNot = null }: AgentAnswerKept = {}) => ({
     ...state,
     whyAgentIsAskedWhichRowsOnlyAtEnter: whyNot,
     rowsAskedFor: {
       ...rowsAskedFor,
-      agent: agent,
-      read: read2,
+      agent,
+      read: wordsRead,
     },
   });
   if (outcome.kind === 'isYetToBeAllowed') return withAgent(null);
@@ -793,8 +845,8 @@ export function takeAgentRowsAnswer(state: PageState, workbook: ReadsWithTextMea
     return withAgent(
       {
         kind: 'hasFailed',
-        askId: askId,
-        isRateLimited: isRateLimited,
+        askId,
+        isRateLimited,
       },
       {
         whyNot: isRateLimited ? 'rateLimited' : null,
@@ -814,7 +866,7 @@ export function takeAgentRowsAnswer(state: PageState, workbook: ReadsWithTextMea
   let read = reuseHeldFilter(
     {
       kind: 'read',
-      asked: asked,
+      asked,
     },
     [filterBeforeRowsTry(state), ownFilter?.filter ?? null],
   );
@@ -822,15 +874,15 @@ export function takeAgentRowsAnswer(state: PageState, workbook: ReadsWithTextMea
   let answeredState = withAgent(
     {
       kind: 'hasRead',
-      askId: askId,
+      askId,
     },
     {
-      read: read,
+      read,
     },
   );
   return read.kind !== 'read' || hasTried ? answeredState : tryAskedRows(answeredState, workbook, read.asked);
 }
-export function actOnRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, action?: Dynamic, canSort?: Dynamic) {
+export function actOnRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, action: RowsAskedForAct, canSort: boolean): PageTransition {
   let outcome = reduceRowsAsk(state, workbook, action, canSort);
   return askIdOfRowsAgentCall(state) !== null && askIdOfRowsAgentCall(outcome.state) === null
     ? {
@@ -844,30 +896,36 @@ export function actOnRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, 
       }
     : outcome;
 }
-export function reduceRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer, action?: Dynamic, canSort?: Dynamic, isAtEnter: Dynamic = false) {
+export function reduceRowsAsk(
+  state: PageState,
+  workbook: ReadsWithTextMeasurer,
+  action: RowsAskedForAct,
+  canSort: boolean,
+  isAtEnter: boolean = false,
+): PageTransition {
   let rowsAskedFor = state.rowsAskedFor;
   if (action.kind === 'giveUp') {
-    let value = state.contextBarMenu === 'sort' ? null : state.contextBarMenu;
-    let state2 = {
+    let contextBarMenu = state.contextBarMenu === 'sort' ? null : state.contextBarMenu;
+    let givenUpState = {
       ...undoRowsTry(state, workbook),
-      contextBarMenu: value,
+      contextBarMenu,
       rowsAskedFor: null,
     };
-    let value2 = rowsAskedFor?.table?.key;
-    let value3 =
-      action.leavesFilterOn !== true && value2 !== undefined && shouldTurnFilterBackOff(rowsAskedFor, ownFilterByKey(state2, value2));
+    const tableKey = rowsAskedFor?.table?.key;
+    const turnsFilterOff =
+      action.leavesFilterOn !== true && tableKey !== undefined && shouldTurnFilterBackOff(rowsAskedFor, ownFilterByKey(givenUpState, tableKey));
     return withNoEffects(
-      value3
-        ? clearOwnFilters(state2, workbook, {
-            tableKey: value2,
+      turnsFilterOff
+        ? clearOwnFilters(givenUpState, workbook, {
+            tableKey,
           })
-        : state2,
+        : givenUpState,
     );
   }
   if (action.kind === 'customSort') {
-    let value = rowsAskedFor?.isOfFilterBar === true && rowsAskedFor.table !== null ? ownFilterByKey(state, rowsAskedFor.table.key) : null;
-    let value2 = value === null ? null : ownFilterAreaFromButtons(workbook, value);
-    let state2 = reduceRowsAsk(
+    let ownFilter = rowsAskedFor?.isOfFilterBar === true && rowsAskedFor.table !== null ? ownFilterByKey(state, rowsAskedFor.table.key) : null;
+    let areaFromButtons = ownFilter === null ? null : ownFilterAreaFromButtons(workbook, ownFilter);
+    let givenUpState = reduceRowsAsk(
       state,
       workbook,
       {
@@ -875,62 +933,62 @@ export function reduceRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer,
       },
       canSort,
     ).state;
-    return withNoEffects(openSortPane(state2, workbook, action.of, value2));
+    return withNoEffects(openSortPane(givenUpState, workbook, action.of, areaFromButtons));
   }
   if (rowsAskedFor === null || rowsAskedFor.table === null) return withNoEffects(state);
   switch (action.kind) {
     case 'type': {
       if (action.words === rowsAskedFor.words && action.today === rowsAskedFor.today) return withNoEffects(state);
-      let value = ownFilterByKey(state, rowsAskedFor.table.key);
-      let value2 =
-        !rowsAskedFor.table.isRead && rowsAskedFor.words === '' && value !== null
-          ? tableOfRowsAsk(state, workbook, value, rowsAskedFor.isOfFilterBar)
+      let ownFilter = ownFilterByKey(state, rowsAskedFor.table.key);
+      let table =
+        !rowsAskedFor.table.isRead && rowsAskedFor.words === '' && ownFilter !== null
+          ? tableOfRowsAsk(state, workbook, ownFilter, rowsAskedFor.isOfFilterBar)
           : rowsAskedFor.table;
-      let value3 = action.words.trim() === '' ? null : readRowsAskWords(state, workbook, value2, action.words, action.today);
-      let { words: words, today: today2 } = action;
+      let read = action.words.trim() === '' ? null : readRowsAskWords(state, workbook, table, action.words, action.today);
+      let { words, today } = action;
       let typedState = {
         ...state,
         rowsAskedFor: {
           ...rowsAskedFor,
-          table: value2,
-          words: words,
-          today: today2,
-          read: value3,
+          table,
+          words,
+          today,
+          read,
           hasStopped: false,
           agent: null,
         },
       };
-      if (value3?.kind === 'read') return withNoEffects(tryRowsFilter(typedState, workbook, filterToTryForAsk(value3.asked, typedState)));
+      if (read?.kind === 'read') return withNoEffects(tryRowsFilter(typedState, workbook, filterToTryForAsk(read.asked, typedState)));
       let shownState =
-        value3?.isOnItsWay === true && action.words.startsWith(rowsAskedFor.words) ? typedState : undoRowsTry(typedState, workbook);
-      return value3?.kind === 'notRead' && value3.wordsNotPlaced.length > 0 && !value3.isOnItsWay
+        read?.isOnItsWay === true && action.words.startsWith(rowsAskedFor.words) ? typedState : undoRowsTry(typedState, workbook);
+      return read?.kind === 'notRead' && read.wordsNotPlaced.length > 0 && !read.isOnItsWay
         ? askAgentAheadWhichRows(shownState, workbook)
         : withNoEffects(shownState);
     }
     case 'rest': {
       if (rowsAskedFor.read?.kind !== 'notRead') return withNoEffects(holdBackRowsAskAhead(state));
-      let state2 = {
+      let stoppedState = {
         ...state,
         rowsAskedFor: {
           ...rowsAskedFor,
           hasStopped: true,
         },
       };
-      let value =
+      let read =
         rowsAskedFor.today === null ? null : readRowsAskWords(state, workbook, rowsAskedFor.table, `${rowsAskedFor.words} `, rowsAskedFor.today);
-      if (action.isRowPointedAt && value?.kind === 'read') return withNoEffects(holdBackRowsAskAhead(state2));
-      if (value?.kind !== 'read') {
-        let value2 = action.isRowPointedAt ? state2 : undoRowsTry(state2, workbook);
-        return action.isColumnFound === true ? withNoEffects(holdBackRowsAskAhead(value2)) : askAgentWhichRows(value2, workbook, isAtEnter);
+      if (action.isRowPointedAt && read?.kind === 'read') return withNoEffects(holdBackRowsAskAhead(stoppedState));
+      if (read?.kind !== 'read') {
+        let shownState = action.isRowPointedAt ? stoppedState : undoRowsTry(stoppedState, workbook);
+        return action.isColumnFound === true ? withNoEffects(holdBackRowsAskAhead(shownState)) : askAgentWhichRows(shownState, workbook, isAtEnter);
       }
-      let state3 = holdBackRowsAskAhead({
+      let readState = holdBackRowsAskAhead({
         ...state,
         rowsAskedFor: {
           ...rowsAskedFor,
-          read: value,
+          read,
         },
       });
-      return withNoEffects(tryRowsFilter(state3, workbook, filterToTryForAsk(value.asked, state3)));
+      return withNoEffects(tryRowsFilter(readState, workbook, filterToTryForAsk(read.asked, readState)));
     }
     case 'pointAt': {
       if (action.asked !== null) return withNoEffects(tryRowsFilter(state, workbook, filterToTryForAsk(action.asked, state)));
@@ -940,11 +998,29 @@ export function reduceRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer,
     }
     case 'take':
       return takeRowsAsk(state, workbook, rowsAskedFor.table, action.asked, action.isWithNoKeyboard === true, canSort);
+    case 'takeNamedView': {
+      let { key: tableKey } = rowsAskedFor.table;
+      let { picked, told } = pickNamedView(undoRowsTry(state, workbook), workbook, tableKey, action.namedViewId);
+      if (picked === null) return withNoEffects(told);
+      let stateAfter = {
+        ...picked,
+        contextBarMenu: null,
+        rowsAskedFor: null,
+      };
+      let ownFilter = ownFilterByKey(stateAfter, tableKey);
+      if (shouldTurnFilterBackOff(rowsAskedFor, ownFilter))
+        return withNoEffects(
+          clearOwnFilters(stateAfter, workbook, {
+            tableKey,
+          }),
+        );
+      return withNoEffects(ownFilter === null ? stateAfter : scrollToFilterButtonsRow(stateAfter, workbook, ownFilter));
+    }
     case 'takeAnswer': {
-      let value = rowsAskedFor.agent?.kind === 'hasRead' || rowsAskedFor.agent?.kind === 'hasFailed' ? rowsAskedFor.agent : null;
-      if (value !== null && action.askOnShow !== value.askId) return withNoEffects(state);
-      if (value?.kind === 'hasFailed') return askAgentWhichRows(state, workbook, true);
-      let value2 = reduceRowsAsk(
+      let agentDone = rowsAskedFor.agent?.kind === 'hasRead' || rowsAskedFor.agent?.kind === 'hasFailed' ? rowsAskedFor.agent : null;
+      if (agentDone !== null && action.askOnShow !== agentDone.askId) return withNoEffects(state);
+      if (agentDone?.kind === 'hasFailed') return askAgentWhichRows(state, workbook, true);
+      let rested = reduceRowsAsk(
         state,
         workbook,
         {
@@ -954,27 +1030,27 @@ export function reduceRowsAsk(state: PageState, workbook: ReadsWithTextMeasurer,
         canSort,
         true,
       );
-      if (value2.state.rowsAskedFor?.agent !== rowsAskedFor.agent) return value2;
-      let state2 = value2.state;
-      let value3 = state2.rowsAskedFor === null ? null : rowsAskToTake(state2.rowsAskedFor, canSort);
-      let isReadAgain = state2.rowsAskedFor?.read !== rowsAskedFor.read;
-      if (value3 === null || (isReadAgain && value3.asked.sortBy.length > 0)) {
-        let askAhead = state2.rowsAskedFor?.askAhead ?? null;
+      if (rested.state.rowsAskedFor?.agent !== rowsAskedFor.agent) return rested;
+      let restedState = rested.state;
+      let toTake = restedState.rowsAskedFor === null ? null : rowsAskToTake(restedState.rowsAskedFor, canSort);
+      let isReadAgain = restedState.rowsAskedFor?.read !== rowsAskedFor.read;
+      if (toTake === null || (isReadAgain && toTake.asked.sortBy.length > 0)) {
+        let askAhead = restedState.rowsAskedFor?.askAhead ?? null;
         return withNoEffects({
           ...state,
           rowsAskedFor: {
             ...rowsAskedFor,
             hasStopped: true,
-            askAhead: askAhead,
+            askAhead,
           },
         });
       }
-      return takeRowsAsk(state2, workbook, rowsAskedFor.table, value3.asked, action.isWithNoKeyboard === true, canSort);
+      return takeRowsAsk(restedState, workbook, rowsAskedFor.table, toTake.asked, action.isWithNoKeyboard === true, canSort);
     }
   }
 }
-export function dropUnneededAgentRowsHold(state: PageState) {
-  let { rowsAskedFor: rowsAskedFor, holdOnRowsFilteredByAgent: hold } = state;
+export function dropUnneededAgentRowsHold(state: PageState): PageState {
+  let { rowsAskedFor, holdOnRowsFilteredByAgent: hold } = state;
   if (hold === null) return state;
   let agent = rowsAskedFor?.agent ?? null;
   let isAgentAtWork = agent?.kind === 'isAsked' || agent?.kind === 'hasRead';
@@ -986,7 +1062,7 @@ export function dropUnneededAgentRowsHold(state: PageState) {
         holdOnRowsFilteredByAgent: null,
       };
 }
-export function settlePlaceAfterRowsTry(before: Dynamic, state: PageState, dropsPlaceAfterTry?: Dynamic) {
+export function settlePlaceAfterRowsTry(before: Pick<PageState, 'rowsAskedFor'>, state: PageState, dropsPlaceAfterTry: boolean): PageState {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null || rowsAskedFor.placeAfterTry === null) return state;
   if (dropsPlaceAfterTry)
@@ -1007,183 +1083,187 @@ export function settlePlaceAfterRowsTry(before: Dynamic, state: PageState, drops
       }
     : state;
 }
-export function shouldEndRowsAsk(state: PageState) {
+export function shouldEndRowsAsk(state: PageState): boolean {
   let rowsAskedFor = state.rowsAskedFor;
   if (rowsAskedFor === null) return false;
   let isTableGone = rowsAskedFor.table !== null && ownFilterByKey(state, rowsAskedFor.table.key) === null;
   return state.contextBarMenu !== 'sort' || isTableGone;
 }
-export function onlyOwnFilterKeyOfSheet(state: PageState) {
+export function onlyOwnFilterKeyOfSheet(state: PageState): string | null {
   let [onlyFilter, ...otherFilters] = drawnOwnFiltersOfSheet(state, state.sheetId);
   return onlyFilter === undefined || otherFilters.length > 0 ? null : onlyFilter.key;
 }
-export function drawnRowsAsk(state: PageState, workbook: WorkbookReads, canSort?: Dynamic) {
-  let rowsAskedFor = state.contextBarMenu === 'sort' ? state.rowsAskedFor : null;
+export function drawnRowsAsk(state: PageState, workbook: WorkbookReads, canSort: boolean): SortFilterCard | null {
+  const rowsAskedFor: Readonly<RowsAskedFor> | null = state.contextBarMenu === 'sort' ? state.rowsAskedFor : null;
   if (rowsAskedFor === null) return null;
   let ownFilter = rowsAskedFor.table === null ? null : ownFilterByKey(state, rowsAskedFor.table.key);
-  let { isOfFilterBar: isOfFilterBar, isFilterNotDrawnYet: isFilterNotDrawnYet } = rowsAskedFor;
+  let { isOfFilterBar, isFilterNotDrawnYet } = rowsAskedFor;
   if (rowsAskedFor.table === null || ownFilter === null)
     return {
-      isOfFilterBar: isOfFilterBar,
-      isFilterNotDrawnYet: isFilterNotDrawnYet,
+      isOfFilterBar,
+      isFilterNotDrawnYet,
       hasTable: false,
       ...DRAWN_ROWS_ASK_WITHOUT_TABLE,
     };
-  let { table: table, read: read } = rowsAskedFor;
+  const { table, read } = rowsAskedFor;
   let filterBefore = filterBeforeRowsTry(state);
-  let columnsAsked = new (Set as Dynamic)(
-    (filterBefore?.allOf ?? []).flatMap(({ anyOf: anyOf }: Dynamic) => anyOf.flatMap(columnsOfFilterItem)),
+  let columnsAsked = new Set(
+    (filterBefore?.allOf ?? []).flatMap(({ anyOf }) => anyOf.flatMap(columnsOfFilterItem)),
   );
   let canSortHere = canSortRowsAskTable(table, canSort);
   let usesColumnAtCell = canSortHere && !rowsAskedFor.isTableGuessed;
   let columnUnderLetters = canSortHere ? (rowsAskedFor.tableUnderLetters?.columnId ?? null) : null;
   let sortColumn = usesColumnAtCell
     ? table.columnAtCell
-    : ownFilter.columns.some((input?: Dynamic) => input.c === columnUnderLetters)
+    : ownFilter.columns.some((column) => column.c === columnUnderLetters)
       ? columnUnderLetters
       : null;
-  let toTake = rowsAskToTake(rowsAskedFor, canSort);
-  let isTaken = toTake !== null && ownFilter.filter === filterToTryForAsk(toTake.asked, state);
+  const toTake = rowsAskToTake(rowsAskedFor, canSort);
+  const isTaken = toTake !== null && ownFilter.filter === filterToTryForAsk(toTake.asked, state);
   let isSortLeftOut = read?.kind === 'read' && read.asked.sortBy.length > 0 && !canSortHere;
   let isAgentAsked = rowsAskedFor.agent?.kind === 'isAsked';
-  let hasAgentFailed = rowsAskedFor.agent?.kind === 'hasFailed';
-  let areWordsNotRead = read?.kind === 'notRead' && rowsAskedFor.hasStopped && !isAgentAsked && !hasAgentFailed;
+  const hasAgentFailed = rowsAskedFor.agent?.kind === 'hasFailed';
+  const areWordsNotRead = read?.kind === 'notRead' && rowsAskedFor.hasStopped && !isAgentAsked && !hasAgentFailed;
   return {
-    isOfFilterBar: isOfFilterBar,
-    isFilterNotDrawnYet: isFilterNotDrawnYet,
+    isOfFilterBar,
+    isFilterNotDrawnYet,
     isFilterTried: rowsAskedFor.beforeTry !== null,
     tableKey: ownFilter.key,
     columnCameBackFrom: rowsAskedFor.cameBackFrom,
     columns: !isOfFilterBar
       ? []
       : ownFilter.columns.map(
-          (input?: Dynamic) => ({
-            c: input.c,
-            column: columnLabelOfFilterTable(workbook, ownFilter, input.c),
-            isAsked: columnsAsked.has(input.c),
+          (column) => ({
+            c: column.c,
+            column: columnLabelOfFilterTable(workbook, ownFilter, column.c),
+            isAsked: columnsAsked.has(column.c),
           }),
         ),
     hasTable: true,
+    namedViews: namedViewsOfOwnFilter(workbook, ownFilter) ?? [],
     areSortsForOneself: table.sorts === 'forOneself',
     sortsOfColumn:
       sortColumn === null
         ? []
-        : SORT_DIRECTIONS.map((input?: Dynamic) => {
-            let { column: value, holds: value2 } = saidOfSortColumn(workbook, ownFilter, {
+        : SORT_DIRECTIONS.map((direction) => {
+            let { column, holds } = saidOfSortColumn(workbook, ownFilter, {
               c: sortColumn,
-              direction: input,
+              direction,
             });
             return {
-              column: value,
-              direction: input,
-              holds: value2,
+              column,
+              direction,
+              holds,
               asked: {
                 filter: null,
                 sortBy: [
                   {
                     c: sortColumn,
-                    direction: input,
+                    direction,
                   },
                 ],
               },
             };
           }),
     suggested: (usesColumnAtCell ? table.suggested : suggestionsWithoutSort(table.suggested)).filter(
-      (input?: Dynamic) => input.asked.filter !== null || input.asked.sortBy[0]?.c !== sortColumn,
+      (suggestion) => suggestion.asked.filter !== null || suggestion.asked.sortBy[0]?.c !== sortColumn,
     ),
     answer: !isTaken
       ? null
       : {
           asked: toTake.asked,
           lines: toTake.asked.filter === null ? [] : isOfFilterBar ? ownFilter.lines.slice(-toTake.asked.filter.allOf.length) : ownFilter.lines,
-          sortBy: toTake.asked.sortBy.map((input?: Dynamic) => saidOfSortColumn(workbook, ownFilter, input)),
+          sortBy: toTake.asked.sortBy.map((key) => saidOfSortColumn(workbook, ownFilter, key)),
           records: recordCountsOfOwnFilter(state, workbook, ownFilter)?.inView ?? null,
         },
     sortLeftOutBecause: !isSortLeftOut
       ? null
-      : canSort || table.sorts === null
-        ? {
-            blankRows: table.blankRows,
-          }
-        : 'cannotEdit',
-    isAgentAsked: isAgentAsked,
+      : !canSort && table.sorts !== null
+        ? 'cannotEdit'
+        : ownFilter.table.runs.some(({ role }) => role !== 'spacer')
+          ? 'hasSections'
+          : {
+              blankRows: table.rowsThatAreNoRecords,
+            },
+    isAgentAsked,
     askThatAnswered: hasAgentFailed || (rowsAskedFor.agent?.kind === 'hasRead' && isTaken) ? rowsAskedFor.agent.askId : null,
     callToAgent: !hasAgentFailed ? null : rowsAskedFor.agent.isRateLimited ? 'rateLimited' : 'failed',
-    areWordsNotRead: areWordsNotRead,
+    areWordsNotRead,
     wordsNotKnown: areWordsNotRead ? read.wordsNotKnown : [],
   };
 }
-export function ownFiltersBeforeRowsTry({ ownFilters: ownFilters, rowsAskedFor: rowsAskedFor }: Dynamic) {
+export function ownFiltersBeforeRowsTry({ ownFilters, rowsAskedFor }: Pick<PageState, 'ownFilters' | 'rowsAskedFor'>): Map<SheetId, OwnFilter[]> {
   let beforeTry = rowsAskedFor?.beforeTry ?? null;
   if (beforeTry === null) return ownFilters;
   let { key: heldKey, filter: heldFilter } = beforeTry.held;
   let cached = ownFiltersKeptCache.get(beforeTry);
   if (cached?.of === ownFilters) return cached.kept;
-  let kept = new (Map as Dynamic)(
-    Array.from<Dynamic, Dynamic>(
+  let kept = new Map<SheetId, OwnFilter[]>(
+    Array.from<[SheetId, OwnFilter[]], [SheetId, OwnFilter[]]>(
       ownFilters,
-      ([input, input2]: Dynamic) => [
-        input,
-        input2.map((input3?: Dynamic) => (input3.key === heldKey ? ownFilterWithFilter(input3, heldFilter) : input3)),
+      ([sheetId, filtersOfSheet]) => [
+        sheetId,
+        filtersOfSheet.map((ownFilter) => (ownFilter.key === heldKey ? ownFilterWithFilter(ownFilter, heldFilter) : ownFilter)),
       ],
     ),
   );
   ownFiltersKeptCache.set(beforeTry, {
     of: ownFilters,
-    kept: kept,
+    kept,
   });
   return kept;
 }
 export const GUESS_TABLE_FOR_ROWS_ASK = '';
 export const rowsAskPlaceOf = ({
-  sheetId: sheetId,
-  activeCell: activeCell,
-  selectionCorner: selectionCorner,
-  otherRanges: otherRanges,
-  rangeWalked: rangeWalked,
-  scrollTop: scrollTop,
-}: Dynamic) => ({
-  sheetId: sheetId,
-  activeCell: activeCell,
-  selectionCorner: selectionCorner,
-  otherRanges: otherRanges,
-  rangeWalked: rangeWalked,
-  scrollTop: scrollTop,
+  sheetId,
+  activeCell,
+  selectionCorner,
+  otherRanges,
+  rangeWalked,
+  scrollTop,
+}: SelectionPlace): SelectionPlace => ({
+  sheetId,
+  activeCell,
+  selectionCorner,
+  otherRanges,
+  rangeWalked,
+  scrollTop,
 });
-export const isSameRowsAskPlace = (place?: Dynamic, otherPlace?: Dynamic) =>
+export const isSameRowsAskPlace = (place: SelectionPlace, otherPlace: SelectionPlace): boolean =>
   place.sheetId === otherPlace.sheetId &&
   isSameCell(place.activeCell, otherPlace.activeCell) &&
   isSameCell(place.selectionCorner, otherPlace.selectionCorner) &&
   place.otherRanges === otherPlace.otherRanges;
-export const filterAreasOfSheet = (state: PageState, workbook: ReadsWithTextMeasurer) => [
-  ...ownFiltersOfSheet(state, state.sheetId).flatMap((input?: Dynamic) => areaOfFilteredTable(workbook, input) ?? []),
-  ...tablesInSightOf(state, workbook).map(({ area: area }: Dynamic) => area),
+export const filterAreasOfSheet = (state: PageState, workbook: ReadsWithTextMeasurer): CellArea[] => [
+  ...ownFiltersOfSheet(state, state.sheetId).flatMap((ownFilter) => areaOfFilteredTable(workbook, ownFilter) ?? []),
+  ...tablesInSightOf(state, workbook).map(({ area }) => area),
 ];
 export const MAX_TABLE_GUESS_STEPS = 5;
-export const suggestionsWithoutSort = (suggested?: Dynamic) =>
-  suggested.filter(({ asked: asked }: Dynamic) => asked.sortBy.length === 0);
-export const isLinesSelection = ({ selectionSeen: { shape: shape } }: Dynamic) => shape === 'columns' || shape === 'rows';
-export const areFilterConditionsSame = (one?: Dynamic, other?: Dynamic) => JSON.stringify(one) === JSON.stringify(other);
-export const columnsKeyOfCondition = ({ anyOf: anyOf }: Dynamic) =>
-  [...new (Set as Dynamic)(anyOf.flatMap(columnsOfFilterItem))].toSorted().join(' ');
-export const canSortRowsAskTable = ({ sorts: sorts }: Dynamic, canSort?: Dynamic) =>
+export const suggestionsWithoutSort = (suggested: readonly SuggestedAsk[]): SuggestedAsk[] =>
+  suggested.filter(({ asked }) => asked.sortBy.length === 0);
+export const isLinesSelection = ({ selectionSeen: { shape } }: Pick<PageState, 'selectionSeen'>): boolean => shape === 'columns' || shape === 'rows';
+export const areFilterConditionsSame = <Compared>(one: Compared, other: Compared): boolean => JSON.stringify(one) === JSON.stringify(other);
+export const columnsKeyOfCondition = ({ anyOf }: FilterLine): string =>
+  [...new Set(anyOf.flatMap(columnsOfFilterItem))].toSorted().join(' ');
+export const canSortRowsAskTable = ({ sorts }: Pick<RowsAskTable, 'sorts'>, canSort: boolean): boolean =>
   sorts === 'forOneself' || (sorts === 'forEveryone' && canSort);
-export const isRowsAskOfFilterBar = ({ isOfFilterBar: isOfFilterBar, isFilterNotDrawnYet: isFilterNotDrawnYet }: Dynamic) =>
+export const isRowsAskOfFilterBar = ({ isOfFilterBar, isFilterNotDrawnYet }: Pick<RowsAskedFor, 'isOfFilterBar' | 'isFilterNotDrawnYet'>): boolean =>
   isOfFilterBar || isFilterNotDrawnYet;
-export const shouldTurnFilterBackOff = (rowsAskedFor?: Dynamic, ownFilter?: Dynamic) =>
+export const shouldTurnFilterBackOff = (rowsAskedFor: RowsAskedFor | null, ownFilter: OwnFilter | null): boolean =>
   rowsAskedFor?.hasTurnedFilterOn === true && isRowsAskOfFilterBar(rowsAskedFor) && (ownFilter === null || isOwnFilterUnused(ownFilter));
-export const tableKeyOfFilterBarTurnedOn = ({ rowsAskedFor: rowsAskedFor }: Dynamic) =>
+export const tableKeyOfFilterBarTurnedOn = ({ rowsAskedFor }: Pick<PageState, 'rowsAskedFor'>): string | null =>
   rowsAskedFor?.hasTurnedFilterOn === true && isRowsAskOfFilterBar(rowsAskedFor) ? (rowsAskedFor.table?.key ?? null) : null;
-export const isOwnFilterHeldForTry = ({ rowsAskedFor: rowsAskedFor }: Dynamic, key?: Dynamic) =>
+export const isOwnFilterHeldForTry = ({ rowsAskedFor }: Pick<PageState, 'rowsAskedFor'>, key: string): boolean =>
   rowsAskedFor?.beforeTry?.held.key === key;
-export const hasRowsAskEndedWhereBegun = (before: Dynamic, state: PageState) =>
+export const hasRowsAskEndedWhereBegun = (before: Pick<PageState, 'rowsAskedFor'>, state: PageState): boolean =>
   before.rowsAskedFor !== null && state.rowsAskedFor === null && isSameRowsAskPlace(rowsAskPlaceOf(state), before.rowsAskedFor.placeBefore);
-export const SORT_DIRECTIONS = ['ascending', 'descending'];
-export const DRAWN_ROWS_ASK_WITHOUT_TABLE = {
+export const SORT_DIRECTIONS: SortDirection[] = ['ascending', 'descending'];
+export const DRAWN_ROWS_ASK_WITHOUT_TABLE: Omit<SortFilterCard, 'isOfFilterBar' | 'isFilterNotDrawnYet' | 'hasTable'> = {
   isFilterTried: false,
   tableKey: null,
   columnCameBackFrom: null,
   columns: [],
+  namedViews: [],
   areSortsForOneself: false,
   sortsOfColumn: [],
   suggested: [],
@@ -1195,8 +1275,8 @@ export const DRAWN_ROWS_ASK_WITHOUT_TABLE = {
   areWordsNotRead: false,
   wordsNotKnown: [],
 };
-export const ownFilterWithFilter = (rowsAskedFor?: Dynamic, filter?: Dynamic) => ({
-  ...rowsAskedFor,
-  filter: filter,
+export const ownFilterWithFilter = (ownFilter: OwnFilter, filter: Filter | null): OwnFilter => ({
+  ...ownFilter,
+  filter,
 });
-export const ownFiltersKeptCache = new (WeakMap as Dynamic)();
+export const ownFiltersKeptCache = new WeakMap<HeldOwnFilterSnapshot, OwnFiltersKept>();

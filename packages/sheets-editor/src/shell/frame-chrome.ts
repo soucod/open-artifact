@@ -1,4 +1,4 @@
-import type { ChromeCommand, ChromeReport, ShellConnection } from '@open-artifact/runtime';
+import type { ChromeCommand, ChromePeer, ChromeReport, ShellConnection } from '@open-artifact/runtime';
 import type { ShellBridge } from '@open-artifact/editor-kit';
 
 export type ExportFormat = 'csv' | 'xlsx';
@@ -35,6 +35,10 @@ export interface FrameChrome {
   offerHistory(handler: (() => void) | null): void;
   offerFollow(handler: FollowHandler | null): void;
   followHandler(): FollowHandler | null;
+  /** Who else views the sheet (null: not known), for the Shell's list with Follow. */
+  peersHere(peers: ChromePeer[] | null): void;
+  /** The tab whose view this page follows now (null: nobody). */
+  followsTab(tabKey: string | null): void;
   onFollowOfferChanged(listener: () => void): () => void;
   offerCloseOfTopLayer(layer: TopLayer, close: LayerCloser | null): void;
   cellsHoldSomething(holdsSomething: boolean | null): void;
@@ -59,6 +63,8 @@ export function createFrameChrome({ bridge, shell, window: win, exportLabels }: 
   let importHandler: ((byKey: boolean) => void) | null = null;
   let historyHandler: (() => void) | null = null;
   let followHandler: FollowHandler | null = null;
+  let peers: ChromePeer[] | null = null;
+  let followedTab: string | null = null;
   let cellsHoldSomething: boolean | null = null;
   const followOfferListeners = new Set<() => void>();
   const exportHandlers = new Map<ExportFormat, ExportHandler>();
@@ -92,6 +98,8 @@ export function createFrameChrome({ bridge, shell, window: win, exportLabels }: 
       exports: false,
       history: historyHandler === null ? undefined : true,
       hasContent: cellsHoldSomething ?? undefined,
+      peers: peers ?? undefined,
+      following: followHandler === null ? undefined : followedTab,
     };
     bridge.setShellReport(part);
   };
@@ -153,6 +161,11 @@ export function createFrameChrome({ bridge, shell, window: win, exportLabels }: 
       historyHandler?.();
       return;
     }
+    if (command.cmd === 'follow') {
+      const key = typeof command.key === 'string' ? command.key : null;
+      if (key === null || peers?.some((peer) => peer.key === key)) followHandler?.(key);
+      return;
+    }
     if (command.cmd !== 'export_format') return;
     const handler = exportHandlers.get(command.format as ExportFormat);
     if (handler === undefined) {
@@ -206,8 +219,20 @@ export function createFrameChrome({ bridge, shell, window: win, exportLabels }: 
       report();
     },
     offerFollow(handler) {
+      const changed = (handler === null) !== (followHandler === null);
       followHandler = handler;
+      if (handler === null) followedTab = null;
       for (const listener of followOfferListeners) listener();
+      if (changed) report();
+    },
+    peersHere(next) {
+      peers = next;
+      report();
+    },
+    followsTab(tabKey) {
+      if (tabKey === followedTab) return;
+      followedTab = tabKey;
+      report();
     },
     followHandler: () => followHandler,
     onFollowOfferChanged(listener) {

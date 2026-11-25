@@ -15,6 +15,11 @@ export const DECK_SIZE_WIDTHS: Readonly<Record<DeckSize, number>> = { '16:9': 19
  * Slide canvas width in CSS pixels of the deck being worked on: 1920, or
  * 1440 in a 4:3 deck. A live binding: {@link setSlideSize} changes it, and
  * every module that reads it at call time sees the new width.
+ *
+ * Module state, so it is the editor's alone (one deck per page). Code that runs
+ * where many decks are served at once (the type server's project check, on a
+ * cloud host every person's decks in one process) takes the width from the
+ * deck it is given (`createSourceDeck(css, index.size)`) and never sets this.
  */
 export let SLIDE_WIDTH = 1920;
 /** Slide canvas height in CSS pixels (the same for both sizes). */
@@ -26,9 +31,9 @@ export function normalizeDeckSize(value: unknown): DeckSize | undefined {
 }
 
 /**
- * Sets the canvas size every later compile, layout and export uses (the
+ * Sets the canvas size every later layout and export of the editor uses (the
  * deck's `size`; undefined is 16:9). The editor calls it when the index
- * loads or changes; the project check calls it before reading the slides.
+ * loads or changes; nothing on a server calls it (see {@link SLIDE_WIDTH}).
  */
 export function setSlideSize(size: DeckSize | undefined): void {
   SLIDE_WIDTH = DECK_SIZE_WIDTHS[size ?? '16:9'];
@@ -81,6 +86,8 @@ export const LIMITS = {
   group: 24,
   /** Stops in one gradient. */
   gradientStops: 8,
+  /** Vertices in one clip-path polygon. */
+  polygonVertices: 128,
   /** Layers of one box-shadow / text-shadow. */
   shadows: 8,
   /** Tracks of one grid template. */

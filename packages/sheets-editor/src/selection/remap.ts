@@ -16,7 +16,7 @@ export interface LinesBeforeAndNow {
 /** The indexes of two lines: where a selection starts and where it reaches. */
 export type LineIndexPair = [number, number];
 export function remapLineSpan(span: LineSpan, isForward: boolean, lines: LinesBeforeAndNow): LineIndexPair | null {
-  let { before: before, now: now } = lines;
+  let { before, now } = lines;
   let stretches = stretchesNowOfSpan(span, lines);
   let endStretch = isForward ? stretches.at(0) : stretches.at(-1);
   if (endStretch === undefined) return null;
@@ -71,7 +71,7 @@ export function remapLinePair(oneIndex: number | null, otherIndex: number | null
   return survivor === null ? [Math.min(fromIndex, lastIndex), Math.min(toIndex, lastIndex)] : [survivor, survivor];
 }
 export function remapSelectionCorners(
-  { sheetId: sheetId, activeCell: activeCell, selectionCorner: selectionCorner }: Pick<Place, 'sheetId' | 'activeCell' | 'selectionCorner'>,
+  { sheetId, activeCell, selectionCorner }: Pick<Place, 'sheetId' | 'activeCell' | 'selectionCorner'>,
   readsBefore: WorkbookReads,
   readsNow: Pick<WorkbookReads, 'linesOf' | 'cellIdAt'>,
 ): Pick<CellSelection, 'activeCell' | 'selectionCorner'> | null {
@@ -99,7 +99,7 @@ export function isActiveCellFullyInView(
   view: LayoutView & Pick<PageState, 'gridWidth' | 'gridHeight'>,
   reads: ReadsWithTextMeasurer,
 ): boolean {
-  let { sheetId: sheetId, activeCell: activeCell } = selection;
+  let { sheetId, activeCell } = selection;
   let rowIndex = reads.rowIndexOf(sheetId, activeCell.rowId);
   let columnIndex = reads.columnIndexOf(sheetId, activeCell.columnId);
   if (rowIndex === null || columnIndex === null) return false;
@@ -112,13 +112,13 @@ export function isActiveCellFullyInView(
   let layout = layoutOfView(
     {
       ...view,
-      sheetId: sheetId,
+      sheetId,
       dragging: null,
     },
     reads,
   );
   return isRangeInSight(area, selection, layout, view);
 }
-export const spanEnd = ({ firstIndex: firstIndex, count: count }: LineSpan): number => firstIndex + count;
-export const stretchesNowOfSpan = (span: LineSpan, { before: before, now: now }: LinesBeforeAndNow): LineSpan[] =>
+export const spanEnd = ({ firstIndex, count }: LineSpan): number => firstIndex + count;
+export const stretchesNowOfSpan = (span: LineSpan, { before, now }: LinesBeforeAndNow): LineSpan[] =>
   before.runsIn(span).flatMap((run: IdRun) => now.stretchesOf(run));

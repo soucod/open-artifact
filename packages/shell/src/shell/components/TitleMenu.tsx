@@ -35,19 +35,21 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ConfirmDialog, Menu, MenuItem, MenuLabel, MenuSeparator, MenuSubmenu, TextInput, cn } from '@open-artifact/ui';
 import { ago, bytesText } from '../../lib/format.ts';
 import { t } from '../../lib/i18n.ts';
-import { command, reloadPage, runAction } from '../bridge.ts';
+import { command, openExternal, reloadPage, runAction } from '../bridge.ts';
 import {
+  copyGivenLink,
   copyPath,
-  copyShellLink,
   deleteArtifact,
   duplicate,
+  loadGivenLink,
   loadLibrary,
   openSession,
   refreshArtifact,
   rename,
   togglePin,
 } from '../actions.ts';
-import { useAgentName, useCanOpenSession, useOwner, useTitle } from '../hooks.ts';
+import { mayEdit } from '../../lib/cloud.ts';
+import { useAgentName, useCanOpenSession, useCloud, useOwner, useRole, useTitle } from '../hooks.ts';
 import { actionLabel, whyText } from '../labels.ts';
 import { actionOf, hasExportTab, menuActions, switchPool } from '../model.ts';
 import { useBoot, useShell } from '../store.ts';
@@ -165,6 +167,14 @@ export function TitleMenu() {
   const owner = useOwner();
   const canOpen = useCanOpenSession();
   const agent = useAgentName();
+  // On a cloud host: no folder, and no duplicate or delete (not offered there yet); renaming by role, and pinning for
+  // anyone signed in (the host keeps pins per person; a link guest has nowhere to keep one).
+  const cloudInfo = useCloud();
+  const cloud = !!cloudInfo;
+  const role = useRole();
+  const local = !cloud;
+  const canRename = mayEdit(role);
+  const canPin = local || !!cloudInfo?.user;
   const pageActions = menuActions(report).filter(action => boot.type !== 'docs' || (action.id !== 'rename_doc' && action.id !== 'open_page_list'));
   const hasPage = !!boot.page && !boot.empty && !boot.problem;
   const store = useShell.getState();
@@ -179,6 +189,7 @@ export function TitleMenu() {
       // Open at once on what is known; refresh behind it.
       if (useShell.getState().library === null) void loadLibrary();
       void refreshArtifact();
+      void loadGivenLink();
     }
   };
 
@@ -262,7 +273,7 @@ export function TitleMenu() {
           {t('export')}
         </MenuItem>
         {canOpen && owner ? (
-          <MenuItem icon={<MessageSquare className="size-3.5" />} shortcut={owner.live ? owner.harness : `${owner.harness} · ${t('offline')}`} onSelect={openSession}>
+          <MenuItem icon={<MessageSquare className="size-3.5" />} shortcut={owner.live ? (owner.harnessTitle ?? owner.harness) : `${owner.harnessTitle ?? owner.harness} · ${t('offline')}`} onSelect={openSession}>
             {t('openSession')}
           </MenuItem>
         ) : null}
@@ -272,16 +283,22 @@ export function TitleMenu() {
             <span title={action.disabled ? whyText(action.why, agent) : undefined}>{actionLabel(action)}</span>
           </MenuItem>
         ))}
-        <MenuSeparator />
-        <MenuItem icon={artifact?.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />} onSelect={() => void togglePin()}>
-          {artifact?.pinned ? t('unpin') : t('pin')}
-        </MenuItem>
-        <MenuItem icon={<Pencil className="size-3.5" />} disabled={boot.type === 'docs' && !actionOf(report, 'rename_doc')} onSelect={() => boot.type === 'docs' ? runAction('rename_doc') : store.setRenaming(true)}>
-          {t('rename')}
-        </MenuItem>
-        <MenuItem icon={<Copy className="size-3.5" />} disabled={boot.type === 'docs' && report.leaveLosesWork} onSelect={() => boot.type === 'docs' ? setCopying(true) : void duplicate()}>
-          {t('duplicate')}
-        </MenuItem>
+        {canPin || canRename || local || report.history ? <MenuSeparator /> : null}
+        {canPin ? (
+          <MenuItem icon={artifact?.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />} onSelect={() => void togglePin()}>
+            {artifact?.pinned ? t('unpin') : t('pin')}
+          </MenuItem>
+        ) : null}
+        {canRename ? (
+          <MenuItem icon={<Pencil className="size-3.5" />} disabled={boot.type === 'docs' && !actionOf(report, 'rename_doc')} onSelect={() => boot.type === 'docs' ? runAction('rename_doc') : store.setRenaming(true)}>
+            {t('rename')}
+          </MenuItem>
+        ) : null}
+        {local ? (
+          <MenuItem icon={<Copy className="size-3.5" />} disabled={boot.type === 'docs' && report.leaveLosesWork} onSelect={() => boot.type === 'docs' ? setCopying(true) : void duplicate()}>
+            {t('duplicate')}
+          </MenuItem>
+        ) : null}
         {report.history ? (
           <MenuItem icon={<History className="size-3.5" />} onSelect={() => command({ cmd: 'history' })}>
             {t('versionHistory')}
@@ -291,12 +308,12 @@ export function TitleMenu() {
         {hasPage ? (
           <MenuItem
             icon={<ExternalLink className="size-3.5" />}
-            onSelect={() => window.open(boot.pageUrl || new URL(boot.page!, location.href).href, '_blank', 'noopener')}
+            onSelect={() => openExternal(boot.pageUrl || new URL(boot.page!, location.href).href)}
           >
             {t('openInNewTab')}
           </MenuItem>
         ) : null}
-        <MenuItem icon={<Link className="size-3.5" />} onSelect={() => void copyShellLink()}>
+        <MenuItem icon={<Link className="size-3.5" />} onSelect={() => void copyGivenLink()}>
           {t('copyLink')}
         </MenuItem>
         {hasPage ? (
@@ -304,33 +321,37 @@ export function TitleMenu() {
             {t('refresh')}
           </MenuItem>
         ) : null}
-        <MenuSubmenu
-          icon={<Database className="size-3.5" />}
-          label={
-            <span className="flex items-center justify-between gap-4">
-              {t('storage')}
-              <span className="text-xs text-fg-subtle">{bytesText(artifact?.bytes)}</span>
-            </span>
-          }
-        >
-          <MenuLabel>
-            <span className="flex max-w-72 items-start gap-2 break-all" title={boot.root}>
-              <Folder className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                {boot.root}
-                {artifact ? <span className="block text-fg-subtle">{t('inThisFolder', { size: bytesText(artifact.bytes) })}</span> : null}
-              </span>
-            </span>
-          </MenuLabel>
-          <MenuSeparator />
-          <MenuItem icon={<Copy className="size-3.5" />} onSelect={() => void copyPath()}>
-            {t('copyPath')}
-          </MenuItem>
-        </MenuSubmenu>
-        <MenuSeparator />
-        <MenuItem icon={<Trash2 className="size-3.5" />} danger onSelect={() => store.setConfirmingDelete(true)}>
-          {t('delete')}
-        </MenuItem>
+        {local ? (
+          <>
+            <MenuSubmenu
+              icon={<Database className="size-3.5" />}
+              label={
+                <span className="flex items-center justify-between gap-4">
+                  {t('storage')}
+                  <span className="text-xs text-fg-subtle">{bytesText(artifact?.bytes)}</span>
+                </span>
+              }
+            >
+              <MenuLabel>
+                <span className="flex max-w-72 items-start gap-2 break-all" title={boot.root}>
+                  <Folder className="mt-0.5 size-3.5 shrink-0" />
+                  <span>
+                    {boot.root}
+                    {artifact ? <span className="block text-fg-subtle">{t('inThisFolder', { size: bytesText(artifact.bytes) })}</span> : null}
+                  </span>
+                </span>
+              </MenuLabel>
+              <MenuSeparator />
+              <MenuItem icon={<Copy className="size-3.5" />} onSelect={() => void copyPath()}>
+                {t('copyPath')}
+              </MenuItem>
+            </MenuSubmenu>
+            <MenuSeparator />
+            <MenuItem icon={<Trash2 className="size-3.5" />} danger onSelect={() => store.setConfirmingDelete(true)}>
+              {t('delete')}
+            </MenuItem>
+          </>
+        ) : null}
       </Menu>
       {copying && <DocCopyDialog title={title} close={() => setCopying(false)} />}
       {confirm}

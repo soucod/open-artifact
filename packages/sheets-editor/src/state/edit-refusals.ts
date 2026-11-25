@@ -1,4 +1,4 @@
-import type { Menu, Notice, PageState, SidePane } from './initial-state.ts';
+import type { Menu, NewsOfLoss, Notice, PageState, SidePane } from './initial-state.ts';
 import type { PageEvent, RefusalOfEveryEdit } from './event-reducer.ts';
 import type { PageEffect, PageTransition } from './transitions.ts';
 import { isEditRefusalReason } from '../model/refusals.ts';
@@ -72,11 +72,12 @@ export function isEffectAnEdit(effect: PageEffect) {
       return false;
   }
 }
-export function isNoticeOfEditAttempt(notice: Notice) {
+export function isNoticeOfEditAttempt(notice: Notice | NewsOfLoss) {
   switch (notice.kind) {
     case 'mergeWouldClearCells':
     case 'cellHoldsNoMorePeople':
     case 'groupsTooDeep':
+    case 'tooManyNamedViews':
     case 'dropdownCellsRefused':
     case 'fileNotImported':
     case 'alreadySorted':
@@ -127,7 +128,7 @@ export function editsOfEffect(effect: PageEffect) {
   if (effect.kind === 'discardChartNodes') return [effect];
   return effect.kind === 'queueEdit' ? discardCopiedChartNodes(effect.edit) : [];
 }
-export function triesToEdit(state: PageState, { state: transition, effects: effects }: PageTransition) {
+export function triesToEdit(state: PageState, { state: transition, effects }: PageTransition) {
   return (
     effects.some(isEffectAnEdit) ||
     effects.some(isCutToClipboard) ||
@@ -148,7 +149,7 @@ export function triesToEdit(state: PageState, { state: transition, effects: effe
       transition.lastDone !== state.lastDone)
   );
 }
-export function refuseEditsInCommentMode(state: PageState, transition: PageTransition, { kind: kind }: PageEvent): PageTransition {
+export function refuseEditsInCommentMode(state: PageState, transition: PageTransition, { kind }: PageEvent): PageTransition {
   if (
     kind === 'editAnswered' ||
     kind === 'undoOrRedoAnswered' ||
@@ -179,7 +180,7 @@ export function refuseEditsInCommentMode(state: PageState, transition: PageTrans
       : [],
   };
 }
-export function menuAfterEdit(state: PageState, { menu: menu }: Pick<PageState, 'menu'>): Menu | null {
+export function menuAfterEdit(state: PageState, { menu }: Pick<PageState, 'menu'>): Menu | null {
   if (menu === null || menu.holds === 'noEdits') return menu;
   return menu.holds === 'all' && menu !== state.menu
     ? {
@@ -204,7 +205,7 @@ export function closeEverythingOpen(state: PageState, why: EditRefusalWhy, menu:
   if (isAllShut && !isUndoOffered && !isNoticeOfAttemptUp) return state;
   return {
     ...(state.linkForm?.opensEntry === true ? leaveEntryEditing(state) : state),
-    menu: menu,
+    menu,
     customNumberFormat: null,
     pasteThatWaits: null,
     pickForWorkbook: null,
@@ -214,8 +215,8 @@ export function closeEverythingOpen(state: PageState, why: EditRefusalWhy, menu:
     calendar: null,
     linkForm: null,
     dropdown: null,
-    sidePane: sidePane,
-    waysIn: waysIn,
+    sidePane,
+    waysIn,
     peopleList: null,
     timeList: null,
     sheetBeingRenamed: null,
@@ -240,11 +241,11 @@ export function refuseEditsOfTransition(state: PageState, transition: PageTransi
       ? state.notice
       : {
           kind: 'editRefused',
-          why: why,
+          why,
           asked: 'otherEdit',
         };
   let isEarlierVersionShown = why === 'earlierVersionShown';
-  let sidePaneKept = ({ sidePane: sidePane }: Pick<PageState, 'sidePane'>) =>
+  let sidePaneKept = ({ sidePane }: Pick<PageState, 'sidePane'>) =>
     isEarlierVersionShown && sidePane?.kind === 'versionHistory' ? sidePane : null;
   if (triesToEdit(state, transition)) {
     let heldEdits = stopArrowsActingOnCells(state);
@@ -253,8 +254,8 @@ export function refuseEditsOfTransition(state: PageState, transition: PageTransi
       state: closeEverythingOpen(
         {
           ...heldEdits,
-          notice: notice,
-          heldUntilAnswered: heldUntilAnswered,
+          notice,
+          heldUntilAnswered,
         },
         why,
         null,
@@ -265,7 +266,7 @@ export function refuseEditsOfTransition(state: PageState, transition: PageTransi
           ? [
               {
                 kind: 'putNothingOnClipboard',
-              },
+              } satisfies PageEffect,
             ]
           : []),
         ...transition.effects.flatMap(editsOfEffect),
@@ -288,11 +289,11 @@ export function refuseEditsOfTransition(state: PageState, transition: PageTransi
     state: isRefusalTold
       ? {
           ...shut,
-          notice: notice,
+          notice,
         }
       : shut,
     effects: transition.effects.filter(
-      ({ kind: kind }: PageEffect) =>
+      ({ kind }: PageEffect) =>
         kind !== 'askAgentAboutImport' &&
         kind !== 'askAgentAboutConditionalFormats' &&
         kind !== 'askAgentForAFormula' &&
@@ -337,7 +338,7 @@ export const isNothingOpenButPane = (state: PageState) =>
         }
       : state,
   );
-export const leavesEntryUnchanged = (state: PageState, { effects: effects }: PageTransition) =>
+export const leavesEntryUnchanged = (state: PageState, { effects }: PageTransition) =>
   state.mode.kind === 'editing' &&
   [state.mode.textAtStart, entryCellTextAsEdited(state)].includes(state.mode.text) &&
   effects.some((effect) => effect.kind === 'queueEdit' && effect.edit.kind === 'enter' && !effect.ifQueued.leavesEntryOpen);

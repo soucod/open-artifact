@@ -2,19 +2,27 @@
 //
 // findChrome() → the Chrome to run (E2E_CHROME, else the usual places), or null when there is none.
 // launch() → a browser; browser.load(url, {ready}) opens a tab and returns once `ready` (an expression) is truthy in
-// the page or in any of its frames, sandboxed and out-of-process ones too. `page.problems` is what went wrong on the
+// the page or in any of its frames, sandboxed and out-of-process ones too (never in a worker: workers are watched for
+// problems, not asked). `page.problems` is what went wrong on the
 // way, in the page and its frames: uncaught exceptions, console errors, failed requests and HTTP errors; `page.urls`
 // every URL it requested. Both keep filling while the page stays open.
-// An editor whose React root went empty after it had drawn something (what React leaves after an uncaught render
-// error: the editors have no error boundary, see findCrash) is a problem too, `crashed: …`, reported the moment it
-// happens; `page.crashed()` looks at every frame now, and `crashes()` hands over the crashes on every page of every
-// browser in this process not yet handed over (editor.mjs's failOnCrash fails the case with them).
+// An editor that shows its crash card, or whose React root went empty after it had drawn something (what React
+// leaves after an uncaught render error with no error boundary; see findCrash), is a problem too, `crashed: …`,
+// reported the moment it happens; `page.crashed()` looks at every frame now, and `crashes()` hands over the crashes on
+// every page of every browser in this process not yet handed over (editor.mjs's failOnCrash fails the case with them).
 // A tab whose renderer crashed, or that Chrome let go of while the page was still in use, is a problem too (`tab gone:
 // …`); a call on a tab that is gone fails with what became of it (closed by the test, crashed, let go of, Chrome gone).
 // Input goes through the DevTools protocol as real events: `page.click`, `page.clickTimes` (2 = a word, 3 = a
-// paragraph), `page.rightClick` (a context menu), `page.hover` (the mouse over a point, nothing pressed), `page.type`
-// (keys, to whatever has focus), `page.press` (a named key or a shortcut) and `page.typeIme` (composed text, as pinyin
-// sends it). E2E_HEADFUL=1 runs Chrome with a window, to watch a case; the default is headless.
+// paragraph), `page.rightClick` (a context menu), `page.hover` (the mouse over a point, nothing pressed),
+// `page.dragMouse` (pressed, moved, let go), `page.type` (keys, to whatever has focus), `page.press` (a named key or a
+// shortcut) and `page.typeIme` (composed text, as pinyin sends it). E2E_HEADFUL=1 runs Chrome with a window, to watch a
+// case; the default is headless.
+//
+// A DevTools call Chrome does not answer within a bound (E2E_CALL_TIMEOUT_MS, default 60 s; `launch({callTimeout})`,
+// or per call) fails naming the call, and is a problem on its page (`unanswered: …`), so a test that would hang fails
+// and says why. That error, and `outstanding()` (printed by `browser.close()` when calls are still waiting, as after a
+// test timed out), list every call still waiting (method, session, context, age) and the last frame and context events
+// of each session involved.
 //
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -40,12 +48,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * Whether the editor in this frame crashed, or null. Run in the frame (it is passed in as source, so it closes over
- * nothing). Both editors render into `#root` with no error boundary, so an uncaught render error unmounts the whole
+ * nothing). An editor with an error boundary (design, slides) shows a card marked `data-testid="<type>-crashed"`
+ * instead of what failed to render. One without renders into `#root`, where an uncaught render error unmounts the whole
  * tree and leaves `#root` empty: the whole page is blank and cannot be used. A root that never drew anything yet (still
  * loading) is not a crash; one that drew and then went empty is. Artboard frames have no `#root` and are passed over.
  */
 function findCrash() {
   if (typeof document === 'undefined') return null;
+  const card = document.querySelector('[data-testid$="-crashed"]');
+  if (card) return `the editor showed its crash card, ${card.getAttribute('data-testid')} (in ${location.href.slice(0, 160)})`;
   const root = document.getElementById('root');
   if (!root) return null;
   const drawn = Symbol.for('open-artifact e2e root drawn');
@@ -58,6 +69,11 @@ function findCrash() {
 
 /** Why a call on a tab that crashed or was let go of fails (it would otherwise wait for an answer that never comes). */
 const TAB_GONE = 'the tab went away';
+/**
+ * Why a call on a frame that went away fails: a frame in a process of its own (its own DevTools session) that was
+ * removed, navigated away or crashed while a call on it was waiting. Chrome never answers such a call.
+ */
+export const FRAME_GONE = 'the frame was detached';
 
 /** The binding a frame calls with findCrash's answer (Runtime.addBinding: a function on its global object). */
 const CRASH_BINDING = '__openArtifactE2ePageCrashed';
@@ -85,6 +101,18 @@ const CRASH_WATCH = `(${watchCrash})(${JSON.stringify(CRASH_BINDING)}, ${findCra
 /** `promise`, or `fallback` once `ms` have gone by (a page held by a dialog never answers an evaluate). */
 const within = (promise, ms, fallback) => Promise.race([promise, sleep(ms).then(() => fallback)]);
 
+/** How long a DevTools call may go unanswered before it fails (a diagnostic bound: Chrome answers in milliseconds). */
+const CALL_TIMEOUT_MS = Number(process.env.E2E_CALL_TIMEOUT_MS) || 60000;
+/** Events kept per session for the report of an unanswered call: how frames and contexts came and went. */
+const RECENT_EVENTS = 24;
+const KEPT_EVENT = /^(Target\.(attachedToTarget|detachedFromTarget|targetDestroyed|targetCrashed)|Inspector\.|Page\.(frameNavigated|frameDetached|frameAttached|navigatedWithinDocument|loadEventFired)|Runtime\.(executionContext|exceptionThrown))/;
+const browsersOpen = new Set(); // every open browser's `outstanding` report
+
+/** Every DevTools call still waiting in any browser of this process, with each session's last events; '' when none. */
+export function outstanding() {
+  return [...browsersOpen].map(report => report()).filter(Boolean).join('\n');
+}
+
 const pagesOpen = new Set(); // every browser's open pages
 const pagesStuck = new WeakSet(); // ones that did not answer crashes(): not asked again
 const crashLog = []; // crashes on any page, open or closed, not yet handed over by crashes()
@@ -102,7 +130,11 @@ export async function crashes() {
   return crashLog.splice(0);
 }
 
-export async function launch({ chrome = findChrome(), width = 1440, height = 900 } = {}) {
+/**
+ * `args`: more Chrome switches, such as `--host-resolver-rules=MAP *.lan 127.0.0.1` for made-up LAN names.
+ * `callTimeout`: ms a DevTools call may wait for its answer (0: for ever).
+ */
+export async function launch({ chrome = findChrome(), width = 1440, height = 900, args = [], callTimeout = CALL_TIMEOUT_MS } = {}) {
   if (!chrome) throw new Error('no Chrome found (set E2E_CHROME)');
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'open-artifact-e2e-chrome-'));
   // 2026-11-02: stderr goes to a file, not a pipe. Chrome's crash handler and Google's updater inherit it and can outlive
@@ -114,7 +146,7 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
     // Keep the test profile independent of the macOS login keychain.
     ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-background-networking',
-    '--disable-sync', '--disable-component-update', '--mute-audio', 'about:blank',
+    '--disable-sync', '--disable-component-update', '--mute-audio', ...args, 'about:blank',
   ], { stdio: ['ignore', 'ignore', fd] });
   fs.closeSync(fd);
   // A test file that is signalled runs no `after` hook, so the browser goes when the process does (see target.mjs).
@@ -157,53 +189,138 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
   let closingAt = null; // when browser.close() was called
   child.on('exit', (code, signal) => (chromeExit = { code, signal, at: Date.now() }));
   let nextId = 1;
-  const pending = new Map();
+  const pending = new Map(); // id → {resolve, reject, method, sessionId, contextId, what, at, timer, onUnanswered}
   const listeners = new Set();
   const pages = new Set(); // this browser's open pages (also in pagesOpen)
+  const recent = new Map(); // session ('browser' for none) → its last frame/context events, oldest first
+  const labels = new Map(); // session → what it is ('tab <url>', 'iframe <url>', 'worker <url>')
+  /** Keep `msg` (an event) in its session's ring of recent events. Cheap: only frame and context events are kept. */
+  const remember = msg => {
+    if (!KEPT_EVENT.test(msg.method)) return;
+    const key = msg.sessionId ?? 'browser';
+    let ring = recent.get(key);
+    if (!ring) recent.set(key, (ring = []));
+    ring.push({ at: Date.now(), method: msg.method, params: msg.params });
+    if (ring.length > RECENT_EVENTS) ring.shift();
+  };
+  /** The answer (or error) to call `id` arrived, or it was given up: it stops waiting. */
+  const settle = id => {
+    const p = pending.get(id);
+    if (!p) return null;
+    pending.delete(id);
+    clearTimeout(p.timer);
+    return p;
+  };
   ws.addEventListener('message', event => {
     const msg = JSON.parse(String(event.data));
     if (msg.id !== undefined) {
-      const p = pending.get(msg.id);
-      pending.delete(msg.id);
+      const p = settle(msg.id);
       if (!p) return;
       if (msg.error) p.reject(new Error(`${p.method}: ${msg.error.message}`));
       else p.resolve(msg.result);
     } else {
+      remember(msg);
       for (const fn of listeners) fn(msg);
     }
   });
   // Once the connection to Chrome is gone, nothing more will answer: what was waiting fails, and so does what comes later.
   const CLOSED = 'the connection to Chrome closed';
   ws.addEventListener('close', () => {
-    for (const p of pending.values()) p.reject(new Error(`${p.method}: ${CLOSED}`));
-    pending.clear();
+    for (const id of [...pending.keys()]) {
+      const p = settle(id);
+      p.reject(new Error(`${p.method}: ${CLOSED}`));
+    }
   });
-  const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+  const short = id => (id ? `${id.slice(0, 8)}…` : 'browser');
+  const sessionName = id => `${short(id)}${labels.has(id) ? ` (${labels.get(id)})` : ''}`;
+  const brief = params => {
+    if (!params) return '';
+    const parts = [];
+    if (params.executionContextId !== undefined) parts.push(`context ${params.executionContextId}`);
+    if (params.context) parts.push(`context ${params.context.id}${params.context.auxData?.isDefault ? ' (default)' : ''} ${params.context.origin}`);
+    if (params.sessionId) parts.push(`session ${short(params.sessionId)}`);
+    if (params.targetInfo) parts.push(`${params.targetInfo.type} ${params.targetInfo.url.slice(0, 100)}`);
+    if (params.targetId && !params.targetInfo) parts.push(`target ${params.targetId.slice(0, 8)}…`);
+    if (params.frame) parts.push(`frame ${params.frame.id.slice(0, 8)}…${params.frame.parentId ? '' : ' (main)'} ${params.frame.url.slice(0, 100)}`);
+    if (params.frameId && !params.frame) parts.push(`frame ${params.frameId.slice(0, 8)}…${params.reason ? ` (${params.reason})` : ''}`);
+    if (params.reason && !params.frameId) parts.push(params.reason);
+    return parts.join(', ');
+  };
+  /** The calls still waiting and the last events of each session they wait on (and the browser's own); '' when none. */
+  const report = () => {
+    const now = Date.now();
+    const waiting = [...pending.entries()].filter(([, p]) => p.method !== 'Browser.close');
+    if (!waiting.length) return '';
+    const lines = [`outstanding DevTools calls (browser pid ${child.pid}): ${waiting.length}`];
+    const involved = new Set(['browser']);
+    for (const [id, p] of waiting) {
+      involved.add(p.sessionId ?? 'browser');
+      lines.push(`  #${id} ${p.method} on ${sessionName(p.sessionId)}${p.contextId !== undefined ? `, context ${p.contextId}` : ''}, waiting ${now - p.at} ms${p.what ? `: ${p.what}` : ''}`);
+    }
+    for (const key of involved) {
+      const ring = recent.get(key) ?? [];
+      lines.push(`  last events of ${key === 'browser' ? 'the browser' : sessionName(key)}:${ring.length ? '' : ' none'}`);
+      for (const e of ring) lines.push(`    ${e.at - now} ms ${e.method} ${brief(e.params)}`);
+    }
+    return lines.join('\n');
+  };
+  browsersOpen.add(report);
+  /**
+   * Call `method` on `sessionId` (the browser's own session when omitted). `what`: what an evaluate runs, for the
+   * error if its frame goes away first. `timeout`: ms to wait for the answer (0: for ever); past it the call fails
+   * naming itself and the report above, and `onUnanswered` (a page's) is told.
+   */
+  const send = (method, params = {}, sessionId, what, { timeout = callTimeout, onUnanswered } = {}) => new Promise((resolve, reject) => {
     if (ws.readyState !== WebSocket.OPEN) return reject(new Error(`${method}: ${CLOSED}`));
     const id = nextId++;
-    pending.set(id, { resolve, reject, method, sessionId });
+    const entry = { resolve, reject, method, sessionId, contextId: params.contextId, what, at: Date.now(), timer: null };
+    if (timeout > 0) {
+      entry.timer = setTimeout(() => {
+        const dump = report();
+        if (!settle(id)) return;
+        const text = `${method} on ${sessionName(sessionId)} got no answer from Chrome in ${timeout} ms${what ? ` (evaluating: ${what})` : ''}`;
+        onUnanswered?.(text);
+        // Printed too: a caller that catches the error (a retry loop) must not hide why the call hung.
+        console.log(`# ${text}\n${dump}`.replace(/\n/g, '\n# '));
+        reject(new Error(`${text}\n${dump}`));
+      }, timeout);
+    }
+    pending.set(id, entry);
     ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
-  /** Fail what waits on a session that will not answer any more (a crashed tab never does). */
-  const dropSession = (sessionId, why) => {
-    for (const [id, p] of pending) {
+  /**
+   * Fail what waits on a session that will not answer any more (a crashed tab, a frame that was removed: Chrome never
+   * answers those), or, with `contextId`, only what runs in that execution context of it.
+   */
+  const dropSession = (sessionId, why, contextId) => {
+    for (const [id, p] of [...pending]) {
       if (p.sessionId !== sessionId) continue;
-      pending.delete(id);
-      p.reject(new Error(`${p.method}: ${why}`));
+      if (contextId !== undefined && p.contextId !== contextId) continue;
+      settle(id);
+      p.reject(new Error(`${p.method}: ${why}${p.what ? ` while evaluating: ${p.what}` : ''}`));
     }
   };
+  // Target.targetDestroyed is sent only to a client that discovers targets.
+  await send('Target.setDiscoverTargets', { discover: true });
 
   /**
    * Open `url` in a new tab. `ready`: an expression, true in the page or one of its frames once it is up.
    * `ignore`: regexps for problems that are expected. `userAgent`: the tab's user agent, in its requests and
-   * `navigator.userAgent` (a host browser that is not Chrome). Returns {problems, evaluate, evaluateAll,
-   * crashed, click, close}.
+   * `navigator.userAgent` (a host browser that is not Chrome). `cache: false`: the tab and its frames and workers
+   * take nothing from the HTTP cache, so it fetches every file as a browser that never loaded the page would (built
+   * files are kept for good, and an earlier tab of this browser may hold them). Returns {problems, evaluate,
+   * evaluateAll, crashed, click, close}.
    */
-  async function load(url, { ready = 'true', timeout = 30000, settle = 1000, ignore = [], userAgent } = {}) {
+  async function load(url, { ready = 'true', timeout = 30000, settle = 1000, ignore = [], userAgent, cache = true } = {}) {
     const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
     const { sessionId: top } = await send('Target.attachToTarget', { targetId, flatten: true });
     const sessions = new Set([top]);
-    const contexts = new Map(); // `${session} ${contextId}` → {session, id}
+    const parents = new Map(); // a frame's or worker's session → the session it was attached under
+    const targets = new Map(); // target id → its session
+    targets.set(targetId, top);
+    labels.set(top, `tab ${url.slice(0, 100)}`);
+    const contexts = new Map(); // `${session} ${contextId}` → {session, id}: the frames' contexts, never a worker's
+    const kinds = new Map(); // an attached session → its target's type ('iframe', 'worker', …)
     const requests = new Map();
     const urls = new Set();
     const problems = [];
@@ -215,6 +332,8 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
     const add = text => {
       if (!ignore.some(re => re.test(text))) problems.push(text);
     };
+    /** `send` for this page: a call Chrome never answers is a problem of the page (never ignored). */
+    const call = (method, params, session, what, options = {}) => send(method, params, session, what, { onUnanswered: text => problems.push(`unanswered: ${text}`), ...options });
     /** A crash findCrash saw, once per page: a problem, and in crashLog for crashes(). */
     const noteCrash = what => {
       if (typeof what !== 'string' || crashesSeen.has(what)) return;
@@ -231,52 +350,141 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
       add(`tab gone: ${why}`);
       dropSession(top, TAB_GONE);
     };
+    /**
+     * Frames whose renderer crashed (`renderer crashed: <frame>`), each also a problem of the page. Chrome draws such a
+     * frame as gone and the page around it carries on, so without this a test sees only a frame that is not there (a
+     * wait that times out, `inFrame` finding nothing). `waitFor` and `inFrame` name these when they give up.
+     * 2026-11-22: the whiteboard's content frame on the Cloudflare suites, about one load in ten under load and once in
+     * a plain full run: Chrome 157.0.8103.80 stopped the renderer at a CHECK of its own (`brk #0` in Google Chrome
+     * Framework +0x12622ac, no out-of-memory keys in the minidump), the same place in every dump.
+     */
+    const crashedFrames = [];
+    const noteFrameCrash = (session, detail = '') => {
+      const what = `renderer crashed: ${labels.get(session) ?? session}${detail}`;
+      if (crashedFrames.some(c => c.startsWith(`renderer crashed: ${labels.get(session) ?? session}`))) return;
+      crashedFrames.push(what);
+      problems.push(what);
+    };
+    /**
+     * A frame's session ended (removed, navigated away, crashed): its contexts go, what waits on it fails, and so does
+     * every session attached under it (a worker of that frame, a frame inside it).
+     * 2026-11-22: Chrome does not always say so of those. A content frame's drawing worker, attached under the frame's
+     * session, got no detach when the guest's tab navigated to sign-in; an evaluate sent to it then was never answered
+     * and held the test until its timeout (`e2e/cloudflare-host.test.mjs` step 7, about one run in ten).
+     */
+    const endSession = (session, why) => {
+      if (session === top || !sessions.has(session)) return;
+      sessions.delete(session);
+      for (const [key, c] of contexts) if (c.session === session) contexts.delete(key);
+      dropSession(session, why);
+      for (const [child, parent] of [...parents]) {
+        if (parent !== session) continue;
+        parents.delete(child);
+        endSession(child, `${why} (the frame it belonged to went)`);
+      }
+    };
+    /**
+     * The tab's main frame loaded another document: every frame and worker of the old one went with it, whether or not
+     * Chrome says so of each. A session attached from now on belongs to the new document; those already here do not.
+     */
+    const endChildSessions = why => {
+      for (const session of [...sessions]) if (session !== top) endSession(session, why);
+    };
+    /**
+     * Whether a session's contexts are asked by evaluateFrames, evaluateAll, waitFor and `ready`: the tab's and its
+     * frames', not a worker's or a worklet's. Those calls ask "every frame", and what they ask is written for a page.
+     * 2026-11-23: asking a worker also crashed the renderer. Chrome 157.0.8103.80 stops it at a CHECK of its own when
+     * `location` is read in a module worker whose script has not all arrived (`WorkerGlobalScope.location`, in every
+     * minidump: Google Chrome Framework +0x12622ac), and the suites' usual question starts with `location.hostname`.
+     * The whiteboard starts a module worker (`whiteboard-looks`) while a test still waits for the board, so its content
+     * frame went, about one first load in four on the Cloudflare suites, where the script takes longest to arrive
+     * (`renderer crashed: iframe …/whiteboard/…` in `cloudflare-link`). `e2e/browser-lib.test.mjs` holds a worker's
+     * script back and asks.
+     */
+    const askable = session => session === top || ['page', 'iframe'].includes(kinds.get(session));
     const enable = session => Promise.all([
       // Before Runtime.enable, so the frames' contexts have it by the time CRASH_WATCH goes into them.
-      send('Runtime.addBinding', { name: CRASH_BINDING }, session),
-      send('Runtime.enable', {}, session),
-      send('Inspector.enable', {}, session),
-      send('Log.enable', {}, session),
-      send('Network.enable', {}, session),
-      send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session),
+      call('Runtime.addBinding', { name: CRASH_BINDING }, session),
+      call('Runtime.enable', {}, session),
+      call('Inspector.enable', {}, session),
+      call('Log.enable', {}, session),
+      call('Network.enable', {}, session),
+      call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, session),
+      ...(cache ? [] : [call('Network.setCacheDisabled', { cacheDisabled: true }, session).catch(() => {})]),
     ]).catch(() => {});
     const onEvent = msg => {
       const session = msg.sessionId;
       const p = msg.params;
       // The tab's own session is attached from the browser, so Chrome says it let go of it there.
-      if (session === undefined && msg.method === 'Target.detachedFromTarget' && p.sessionId === top) noteGone('Chrome detached from the tab');
+      if (session === undefined && msg.method === 'Target.detachedFromTarget') {
+        if (p.sessionId === top) noteGone('Chrome detached from the tab');
+        else endSession(p.sessionId, FRAME_GONE);
+      }
+      if (session === undefined && msg.method === 'Target.targetCrashed' && targets.has(p.targetId) && targets.get(p.targetId) !== top) {
+        noteFrameCrash(targets.get(p.targetId), ` (${p.status}, error code ${p.errorCode})`);
+      }
+      // The target behind a session is gone: nothing will answer on that session, detach or not.
+      if (session === undefined && msg.method === 'Target.targetDestroyed' && targets.has(p.targetId)) {
+        const ended = targets.get(p.targetId);
+        targets.delete(p.targetId);
+        if (ended === top) noteGone('Chrome destroyed the tab');
+        else endSession(ended, `${FRAME_GONE} (its target was destroyed)`);
+      }
       if (!sessions.has(session)) return;
       switch (msg.method) {
         case 'Inspector.targetCrashed':
           if (session === top) noteGone('its renderer crashed');
+          else {
+            noteFrameCrash(session);
+            endSession(session, `${FRAME_GONE} (its renderer crashed)`);
+          }
           break;
         case 'Inspector.detached':
           if (session === top) noteGone(`Chrome detached from the tab (${p.reason})`);
+          else endSession(session, `${FRAME_GONE} (${p.reason})`);
           break;
         case 'Target.attachedToTarget':
           // A frame in a process of its own (a sandboxed iframe, a worker): watch it like the page.
           sessions.add(p.sessionId);
+          parents.set(p.sessionId, session);
+          kinds.set(p.sessionId, p.targetInfo.type);
+          targets.set(p.targetInfo.targetId, p.sessionId);
+          labels.set(p.sessionId, `${p.targetInfo.type} ${p.targetInfo.url.slice(0, 100)}`);
           enable(p.sessionId);
           break;
+        case 'Target.targetInfoChanged':
+          if (targets.has(p.targetInfo.targetId) && targets.get(p.targetInfo.targetId) !== top) labels.set(targets.get(p.targetInfo.targetId), `${p.targetInfo.type} ${p.targetInfo.url.slice(0, 100)}`);
+          break;
         case 'Target.detachedFromTarget':
-          sessions.delete(p.sessionId);
+          endSession(p.sessionId, FRAME_GONE);
           break;
         case 'Page.loadEventFired':
           loaded = true;
           break;
+        case 'Page.frameNavigated':
+          if (session === top && !p.frame.parentId) endChildSessions(`${FRAME_GONE} (the tab loaded ${p.frame.url.slice(0, 100)})`);
+          break;
         case 'Runtime.executionContextCreated':
+          // A worker is watched (its errors, its requests, its crash) and never asked: see askable.
+          if (!askable(session)) break;
           contexts.set(`${session} ${p.context.id}`, { session, id: p.context.id });
           // A frame's own world (not an isolated one): watch it for a crash from now on.
-          if (p.context.auxData?.isDefault) send('Runtime.evaluate', { expression: CRASH_WATCH, contextId: p.context.id }, session).catch(() => {});
+          if (p.context.auxData?.isDefault) call('Runtime.evaluate', { expression: CRASH_WATCH, contextId: p.context.id }, session).catch(() => {});
           break;
         case 'Runtime.bindingCalled':
           if (p.name === CRASH_BINDING) noteCrash(p.payload);
           break;
         case 'Runtime.executionContextDestroyed':
           contexts.delete(`${session} ${p.executionContextId}`);
+          dropSession(session, `${FRAME_GONE} (its context was destroyed)`, p.executionContextId);
           break;
         case 'Runtime.executionContextsCleared':
-          for (const [key, c] of contexts) if (c.session === session) contexts.delete(key);
+          for (const [key, c] of contexts) {
+            if (c.session !== session) continue;
+            contexts.delete(key);
+            dropSession(session, `${FRAME_GONE} (it navigated away)`, c.id);
+          }
+          if (session === top) endChildSessions(`${FRAME_GONE} (the tab navigated away)`);
           break;
         case 'Runtime.exceptionThrown': {
           const d = p.exceptionDetails;
@@ -310,9 +518,9 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
      * `send` on the tab's own session. A call on a tab that is gone ("Session with given id not found") fails with what
      * became of it, so a case that dies on one says whether the test closed the tab, it crashed, or Chrome let go of it.
      */
-    const onTop = async (method, params) => {
+    const onTop = async (method, params, what, options) => {
       if (gone) throw await whyGone(new Error(`${method}: ${TAB_GONE}`));
-      return send(method, params, top).catch(async e => {
+      return call(method, params, top, what, options).catch(async e => {
         throw /Session with given id not found|No session with given id|Target closed|connection to Chrome closed|the tab went away/i.test(e.message) ? await whyGone(e) : e;
       });
     };
@@ -325,24 +533,39 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
       if (closingAt) facts.push(`browser.close() was called ${ago(closingAt)}`);
       if (chromeExit) facts.push(`Chrome exited (${chromeExit.signal ?? chromeExit.code}) ${ago(chromeExit.at)}`);
       else {
-        const targets = await within(send('Target.getTargets').then(r => r.targetInfos, () => null), 2000, null);
-        facts.push(targets === null ? 'Chrome did not answer Target.getTargets' : targets.some(t => t.targetId === targetId) ? 'the tab is still open in Chrome' : 'the tab is no longer open in Chrome');
+        const infos = await within(send('Target.getTargets').then(r => r.targetInfos, () => null), 2000, null);
+        facts.push(infos === null ? 'Chrome did not answer Target.getTargets' : infos.some(t => t.targetId === targetId) ? 'the tab is still open in Chrome' : 'the tab is no longer open in Chrome');
       }
       const recent = problems.slice(-8);
       return new Error(`${e.message}\n  what became of the tab:\n    ${facts.join('\n    ')}${recent.length ? `\n  last problems:\n    ${recent.join('\n    ')}` : ''}`, { cause: e });
     }
 
-    /** Evaluate in every frame's main world; one value per frame that answered. */
-    async function evaluateAll(expression) {
-      const out = [];
+    /**
+     * Evaluate in every frame's main world: `values`, one per frame that answered, and `detached`, why a frame went
+     * away (removed, navigated, crashed) before it answered (FRAME_GONE: the caller may look for the frame again).
+     * Frames only: a worker is never asked (see askable).
+     * `timeout`: ms each frame may take to answer (the browser's call bound by default). `userGesture`: run as if from
+     * a click.
+     */
+    async function evaluateFrames(expression, { timeout, userGesture = false } = {}) {
+      const values = [];
+      const detached = [];
+      const what = expression.slice(0, 80);
       for (const { session, id } of [...contexts.values()]) {
         try {
-          const params = { expression, contextId: id, returnByValue: true, awaitPromise: true };
-          const r = await (session === top ? onTop('Runtime.evaluate', params) : send('Runtime.evaluate', params, session));
-          if (!r.exceptionDetails) out.push(r.result?.value);
-        } catch {}
+          // userGesture: the frame gets transient activation, as from a click (a popup or a top navigation may need it).
+          const params = { expression, contextId: id, returnByValue: true, awaitPromise: true, ...(userGesture ? { userGesture: true } : {}) };
+          const r = await (session === top ? onTop('Runtime.evaluate', params, what, { timeout }) : call('Runtime.evaluate', params, session, what, { timeout }));
+          if (!r.exceptionDetails) values.push(r.result?.value);
+        } catch (e) {
+          if (/the frame was detached|Execution context was destroyed|Cannot find context|Session with given id not found|No session with given id/i.test(e.message)) detached.push(e.message);
+        }
       }
-      return out;
+      return { values, detached };
+    }
+    /** Evaluate in every frame's main world; one value per frame that answered. */
+    async function evaluateAll(expression, options) {
+      return (await evaluateFrames(expression, options)).values;
     }
     /**
      * What the first frame fallen to its error boundary shows (see findCrash), or null. Looks now, in every frame; the
@@ -353,9 +576,9 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
       for (const what of found) noteCrash(what);
       return found[0] ?? null;
     }
-    /** Evaluate in the page itself. */
-    async function evaluate(expression) {
-      const r = await onTop('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    /** Evaluate in the page itself. `timeout`: ms it may take (the browser's call bound by default). */
+    async function evaluate(expression, { timeout } = {}) {
+      const r = await onTop('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, expression.slice(0, 80), { timeout });
       if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
       return r.result?.value;
     }
@@ -366,6 +589,8 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
         if ((await evaluateAll(`Boolean(${expression})`)).includes(true)) return true;
         await sleep(200);
       }
+      // Not a page that is slow: a frame of it is gone for good.
+      if (crashedFrames.length) throw new Error(`waiting for ${expression.slice(0, 120)}: ${crashedFrames.join('; ')}`);
       return false;
     }
     /**
@@ -380,6 +605,19 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
     /** Move the real mouse to (x, y) and press nothing: what shows on hover (a card's buttons) shows. */
     async function hover(x, y) {
       await onTop('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    }
+    /**
+     * Drag with the real mouse from `[x, y]` to `[toX, toY]`: press, move there in `steps` moves, release. A page that
+     * waits for the pointer to move some way before it starts a drag sees it start.
+     */
+    async function dragMouse([x, y], [toX, toY], { steps = 10 } = {}) {
+      await onTop('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await onTop('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      for (let n = 1; n <= steps; n++) {
+        await onTop('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + ((toX - x) * n) / steps, y: y + ((toY - y) * n) / steps, button: 'left', buttons: 1 });
+        await sleep(16);
+      }
+      await onTop('Input.dispatchMouseEvent', { type: 'mouseReleased', x: toX, y: toY, button: 'left', buttons: 0, clickCount: 1 });
     }
     /** Click with the real mouse's right button at (x, y): the page gets a contextmenu event, as from a person. */
     async function rightClick(x, y) {
@@ -428,13 +666,15 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
       await onTop('Input.insertText', { text: composing });
     }
     /** A raw DevTools call on the page's own session (benchmarks: Input, Performance, Memory). */
-    const cdp = (method, params = {}) => send(method, params, top);
-    const page = { problems, urls, evaluate, evaluateAll, crashed, waitFor, click, clickTimes, rightClick, hover, type, typeIme, press, close, cdp };
+    const cdp = (method, params = {}, options) => call(method, params, top, undefined, options);
+    const page = { problems, crashedFrames, urls, evaluate, evaluateAll, evaluateFrames, crashed, waitFor, click, clickTimes, rightClick, hover, dragMouse, type, typeIme, press, close, cdp };
     async function close() {
       closedAt ??= Date.now();
       pagesOpen.delete(page);
       pages.delete(page);
       listeners.delete(onEvent);
+      // Nothing more will answer what still waits on the tab or its frames.
+      for (const session of sessions) dropSession(session, 'the page was closed');
       await send('Target.closeTarget', { targetId }).catch(() => {});
     }
 
@@ -460,6 +700,10 @@ export async function launch({ chrome = findChrome(), width = 1440, height = 900
   async function close() {
     closingAt ??= Date.now();
     process.off('exit', atExit);
+    // Calls still waiting now (as after a test that timed out) are what held it: say which, before they are dropped.
+    const waiting = report();
+    if (waiting) console.log(waiting.replace(/^/gm, '# '));
+    browsersOpen.delete(report);
     for (const page of pages) pagesOpen.delete(page);
     // Chrome answers before it goes; one that never answers is killed below.
     await new Promise(resolve => {

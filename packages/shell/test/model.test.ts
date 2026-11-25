@@ -9,6 +9,8 @@ import {
   canOpenSession,
   countText,
   deliveryOf,
+  devBoot,
+  givenLink,
   isShared,
   isWorking,
   leastRole,
@@ -51,6 +53,26 @@ const artifact = (id: string, patch: Partial<ArtifactView> = {}): ArtifactView =
 });
 
 describe('shell model', () => {
+  it('keeps inactive toolbar slots during restoration and clears the old frame report on every boot', t => {
+    t.after(() => useShell.setState(useShell.getInitialState(), true));
+    const store = useShell.getState();
+    const boot = devBoot(artifact('refresh'), { page: 'http://localhost/board', page_url: 'http://localhost/board' }, null);
+    const comments = { available: true, on: true, open: true, count: 2, pageButton: false };
+    store.setBoot(boot);
+    const gen = useShell.getState().bootGen;
+    store.setReport({ ready: true, saved: 'saved', history: true, comments });
+    store.setPageReady(true);
+    store.setFrameLoading();
+    store.setReport({ ready: false });
+    assert.equal(useShell.getState().pageReady, false);
+    assert.deepEqual(useShell.getState().rememberedChrome, { history: true, comments: { ...comments, on: false, open: false } });
+    store.setReport({ ready: true, saved: 'saved', comments: { ...comments, pageButton: true } });
+    assert.deepEqual(useShell.getState().rememberedChrome, {});
+    store.setBoot(boot);
+    assert.equal(useShell.getState().bootGen, gen + 1);
+    assert.deepEqual(useShell.getState().report, {});
+  });
+
   it('opens the linked slide in the editor frame and scopes slide links to decks', () => {
     const boot = { id: 'deck', page: 'http://localhost:8000/', type: 'slides' };
     const address = 'http://localhost:8100/a/deck';
@@ -61,8 +83,26 @@ describe('shell model', () => {
     assert.equal(new URL(pageAddress({ ...boot, type: 'design' }, address + '#slide-1')!).hash, '');
   });
 
+  it('hands a design its page or a readable place link, and nothing else', () => {
+    const boot = { id: 'canvas', page: 'http://localhost:8000/', type: 'design' };
+    const address = 'http://localhost:8100/a/canvas';
+    for (const hash of ['#page=review', '#page-review', '#artboard-screens-sign-in', '#play-main']) {
+      assert.equal(new URL(pageAddress(boot, address + hash)!).hash, hash);
+    }
+    assert.equal(new URL(pageAddress(boot, address + '#page=review&x=1')!).hash, '#page=review');
+    assert.equal(new URL(pageAddress(boot, address + '#artboard-a=b')!).hash, '');
+  });
+
+  it('hands a sheet the page of a sheet link, with the cells it points at', () => {
+    const boot = { id: 'book', page: 'http://localhost:8000/', type: 'sheets' };
+    const address = 'http://localhost:8100/a/book';
+    const pageOf = (hash: string) => new URLSearchParams(new URL(pageAddress(boot, address + hash)!).hash.slice(1)).get('page');
+    assert.equal(pageOf('#sheet-sht_a.0'), 'sht_a.0');
+    assert.equal(pageOf('#sheet-sht_a.0~A2-D2'), 'sht_a.0~A2-D2');
+    assert.equal(pageOf('#page=sht_a.0'), 'sht_a.0');
+  });
   it('names the agent: host, then boot, then fallback', () => {
-    assert.equal(agentNameOf({ origin: 'x', caps: {}, agentName: 'Helper' }, { agentName: 'Boot' }, 'Agent'), 'Helper');
+    assert.equal(agentNameOf({ origin: 'x', caps: {}, agentName: 'Helper', declared: false, via: 'frame', theme: null, destinations: [] }, { agentName: 'Boot' }, 'Agent'), 'Helper');
     assert.equal(agentNameOf(null, { agentName: 'Boot' }, 'Agent'), 'Boot');
     assert.equal(agentNameOf(null, { agentName: '' }, 'Agent'), 'Agent');
   });
@@ -79,7 +119,7 @@ describe('shell model', () => {
   });
 
   it('opens sessions only with a sessions host and an owner session', () => {
-    const host = { origin: 'x', caps: { sessions: true }, agentName: null };
+    const host = { origin: 'x', caps: { sessions: true }, agentName: null, declared: false, via: 'frame' as const, theme: null, destinations: [] };
     assert.equal(canOpenSession(host, owner()), true);
     assert.equal(canOpenSession(host, owner({ session: null })), false);
     assert.equal(canOpenSession({ ...host, caps: {} }, owner()), false);
@@ -132,6 +172,24 @@ describe('shell model', () => {
     assert.equal(isShared(null, {}, { shared: false }), false);
   });
 
+  it("gives out the least role's network link, not 127.0.0.1, for the title menu's Copy link as for the Export tab's", () => {
+    const off: ShareView = {
+      lan: false,
+      links: {
+        editor: { on: true, url: 'http://192.168.1.5:4800/s/e' },
+        commenter: { on: true, url: 'http://192.168.1.5:4800/s/c' },
+        viewer: { on: false, url: 'http://192.168.1.5:4800/s/v' },
+      },
+    };
+    assert.deepEqual(givenLink(off), { which: 'commenter', url: 'http://192.168.1.5:4800/s/c' });
+    // Every link off: none to give, the Shell's own address is left.
+    assert.equal(givenLink({ lan: true, links: { editor: { on: false, url: 'http://x/s/e' } } }), null);
+    // A link that is on but has no address yet gives nothing either.
+    assert.equal(givenLink({ lan: true, links: { viewer: { on: true } } }), null);
+    const cloud = { url: 'https://oa.example/a/art_1', access: 'restricted', owner: { id: 'u', name: 'Ada' }, members: [], canManage: true, settings: { viewersCanExport: true, editorsCanAskAgent: true } } as unknown as NonNullable<ShareView['cloud']>;
+    assert.deepEqual(givenLink({ lan: false, links: off.links, cloud }), { which: 'cloud', url: 'https://oa.example/a/art_1' });
+  });
+
   it('tracks sent messages', () => {
     assert.equal(deliveryOf('live'), 'delivered');
     assert.equal(deliveryOf('wait'), 'delivered');
@@ -157,12 +215,12 @@ describe('home model', () => {
     assert.deepEqual(sorted.map((a) => a.id), ['pinned', 'new', 'old']);
   });
 
-  it('creates only usable design types', () => {
+  it('creates usable design and page built-ins and custom types, not the other built-ins', () => {
     const type = (patch: Partial<TypeView>): TypeView => ({
       id: 'design',
       title: 'Design',
       description: '',
-      scope: 'user',
+      scope: 'builtin',
       root: '/types',
       runtime: 'server',
       entry: null,
@@ -181,6 +239,18 @@ describe('home model', () => {
     assert.equal(isCreatable(type({ shadowedBy: 'project' })), false);
     assert.equal(defaultCreatable([type({ id: 'slides' }), type({})])?.id, 'design');
     assert.equal(defaultCreatable([]), null);
+    assert.equal(isCreatable(type({ id: 'page' })), true);
+    assert.equal(isCreatable(type({ id: 'notes', scope: 'user', runtime: 'frame' })), true);
+    assert.equal(isCreatable(type({ id: 'slides', scope: 'extra', runtime: 'server' })), false, 'a server type outside the built-ins is not offered');
+    assert.equal(isCreatable(type({ id: 'notes', scope: 'extra', runtime: 'frame' })), true);
+    assert.equal(isCreatable(type({ id: 'notes', scope: 'user', runtime: 'frame', runnable: false })), false);
+    assert.equal(isCreatable(type({ id: 'notes', scope: 'user', runtime: 'frame', enabled: false })), false);
+    // A project's type is made from a session in that project, and only once the project is trusted.
+    assert.equal(isCreatable(type({ id: 'notes', scope: 'project', runtime: 'frame' })), false);
+    assert.equal(isCreatable(type({ id: 'page', scope: 'project', trusted: false })), false);
+    // "New artifact" is Design while there is one, else the first that can be made.
+    assert.equal(defaultCreatable([type({ id: 'page' }), type({})])?.id, 'design');
+    assert.equal(defaultCreatable([type({ id: 'slides' }), type({ id: 'notes', scope: 'user', runtime: 'frame' })])?.id, 'notes');
   });
 
   it('draws owner badges', () => {
@@ -223,6 +293,9 @@ describe('the page report (chrome protocol)', async () => {
 
   it('shows save state: read-only always, saving only with save_now, a retry when save_now runs', () => {
     assert.equal(saveIndicator({ saved: 'readonly' }), 'readonly');
+    assert.deepEqual(normalizeReport({ ready: false, saved: 'saved' }), { ready: false, saved: 'saved' });
+    assert.equal(normalizeReport({ ready: 'later' }).ready, undefined);
+    assert.equal(normalizeReport({ saved: 'loading' }).saved, undefined);
     assert.equal(saveIndicator({ saved: 'saving' }), 'none');
     assert.equal(saveIndicator({ saved: 'saving', actions: [{ id: 'save_now' }] }), 'saving');
     assert.equal(saveIndicator({ saved: 'unsaved' }), 'unsaved');
@@ -368,5 +441,49 @@ describe('the Share tab', () => {
     assert.deepEqual(shownAddresses(view), ['192.168.1.5:4801', '[fe80::1]:4801']);
     assert.deepEqual(shownAddresses({ lan: true, links: {}, addresses: ['10.0.0.2'] }), ['10.0.0.2']);
     assert.deepEqual(shownAddresses({ lan: true, links: {}, port: 80, addresses: ['100.64.0.7'], tailnet: { address: '100.64.0.7', links: {} } }), ['100.64.0.7:80']);
+  });
+});
+
+describe('peers and following', async () => {
+  const { MAX_CHROME_PEERS } = await import('@open-artifact/protocol');
+  const { followedPeer, inkOnColor, normalizeReport, offersFollow, peerColorOf, peerInitials } = await import('../src/shell/model.ts');
+
+  it('keeps valid peers once each, and following as a key or null', () => {
+    const report = normalizeReport({
+      peers: [
+        { key: 'p1', name: '  Ada Lovelace ', color: '#DC3C3D', self: true, followsYou: true },
+        { key: 'p1', name: 'Again' },
+        { key: 'bad key', name: 'Spaces' },
+        { key: 'p2', name: '' },
+        { key: 'p3', name: 'Grace', color: 'red', self: 'yes' },
+      ],
+      following: 'p3',
+    });
+    assert.deepEqual(report.peers, [
+      { key: 'p1', name: 'Ada Lovelace', color: '#dc3c3d', self: true, followsYou: true },
+      { key: 'p3', name: 'Grace' },
+    ]);
+    assert.equal(report.following, 'p3');
+    assert.equal(offersFollow(report), true);
+    assert.equal(followedPeer(report)?.name, 'Grace');
+    assert.equal(normalizeReport({ following: null }).following, null);
+    assert.equal(offersFollow(normalizeReport({ following: null })), true);
+    assert.equal(offersFollow(normalizeReport({ following: 'no way' })), false);
+    assert.equal(followedPeer(normalizeReport({ peers: [], following: 'gone' })), null);
+  });
+
+  it('lists at most MAX_CHROME_PEERS', () => {
+    const peers = Array.from({ length: MAX_CHROME_PEERS + 5 }, (_, i) => ({ key: `p${i}`, name: `P ${i}` }));
+    assert.equal(normalizeReport({ peers }).peers?.length, MAX_CHROME_PEERS);
+  });
+
+  it('draws avatars from names and colours', () => {
+    assert.equal(peerInitials('ada lovelace byron'), 'AL');
+    assert.equal(peerInitials('宝玉'), '宝');
+    assert.equal(peerInitials('  '), '?');
+    assert.equal(peerColorOf({ key: 'x', color: '#123456' }), '#123456');
+    assert.equal(peerColorOf({ key: 'x' }), peerColorOf({ key: 'x' }));
+    assert.equal(inkOnColor('#fbb315'), '#0b0b0b');
+    assert.equal(inkOnColor('#257de0'), '#ffffff');
   });
 });

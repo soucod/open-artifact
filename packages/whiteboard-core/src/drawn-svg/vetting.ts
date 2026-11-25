@@ -11,7 +11,7 @@
  */
 
 import { SVG_NAMESPACE } from '../image-source.ts';
-import { flattenSvgShape, SVG_GEOMETRY_ATTRIBUTES } from './svg-geometry.ts';
+import { flattenSvgShape, splitSvgPathArcs, SVG_GEOMETRY_ATTRIBUTES } from './svg-geometry.ts';
 import { parseSvgTree, type XmlAttribute, type XmlElement } from './xml.ts';
 
 /** Elements that draw geometry. */
@@ -107,8 +107,10 @@ export interface SvgVetBudget {
 
 /**
  * Total outline length of a shape (or of the shapes in a group), used to
- * count dash segments. `Infinity` when it cannot be measured cheaply
- * (non-numeric geometry, arcs).
+ * count dash segments. A path's arc counts as the full circle of its larger
+ * radius, plus the straight line between its ends. `Infinity` when it
+ * cannot be measured cheaply (non-numeric geometry) or has an arc with a
+ * radius under 1.
  */
 export function svgShapeLength(element: XmlElement): number {
   if (!SVG_SHAPE_TAGS.has(element.localName)) return element.children.reduce((total, child) => total + svgShapeLength(child), 0);
@@ -117,8 +119,11 @@ export function svgShapeLength(element: XmlElement): number {
   if (element.localName === 'line') return Math.hypot(num('x2') - num('x1'), num('y2') - num('y1'));
   if (element.localName === 'rect') return 2 * (Math.abs(num('width')) + Math.abs(num('height')));
   if (element.localName === 'circle' || element.localName === 'ellipse') return 2 * Math.PI * Math.max(...['r', 'rx', 'ry'].map((name) => Math.abs(num(name))));
-  const polylines = /a/i.test(element.getAttribute('d') ?? '') ? undefined : flattenSvgShape(element);
-  let length = polylines === undefined ? Infinity : 0;
+  const d = element.localName === 'path' ? (element.getAttribute('d') ?? '') : '';
+  const arcs = /a/i.test(d) ? splitSvgPathArcs(d) : undefined;
+  if (/a/i.test(d) && (arcs === undefined || arcs.radii.some((radius) => radius < 1))) return Infinity;
+  const polylines = flattenSvgShape(arcs === undefined ? element : { localName: 'path', getAttribute: (name) => (name === 'd' ? arcs.lines : element.getAttribute(name)) });
+  let length = polylines === undefined ? Infinity : (arcs?.radii ?? []).reduce((total, radius) => total + 2 * Math.PI * radius, 0);
   for (const polyline of polylines ?? [])
     for (let index = 2; index + 1 < polyline.length; index += 2) length += Math.hypot((polyline[index] ?? 0) - (polyline[index - 2] ?? 0), (polyline[index + 1] ?? 0) - (polyline[index - 1] ?? 0));
   return length;

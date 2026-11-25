@@ -1,4 +1,5 @@
-import type { Dynamic } from '../dynamic.ts';
+import type { ConditionRead } from './conditions.ts';
+import type { PhraseFound, TypedWord } from './tokens.ts';
 import {
   dateToSerial,
   END_OF_DAY_FRACTION,
@@ -23,56 +24,65 @@ import {
 import { numberMatchedInWord, numberIsCondition, readRangeEndsAt, RANGE_JOINERS_AND_TO, RANGE_JOINERS_TO } from './numbers.ts';
 import { DATE_CONDITION_WORDS } from './vocabulary.ts';
 import { wordsMatchAt, longestPhraseAt } from './tokens.ts';
-export function dayNumberOfDate(year?: Dynamic, month?: Dynamic, day?: Dynamic) {
-  let date = new (Date as Dynamic)(Date.UTC(year, month, day));
+/** A day read from the words, as a day number, and how many words it takes. */
+export interface DayRead {
+  number: number;
+  wordCount: number;
+  /** The same day of the month in another year, where no year was given. */
+  inYear?: (year: number) => number | null;
+}
+/** The first and last day numbers of a range of days. */
+export type DayRange = [firstDay: number, lastDay: number];
+export function dayNumberOfDate(year: number, month: number, day: number): number | null {
+  let date = new Date(Date.UTC(year, month, day));
   return date.getUTCMonth() === month && date.getUTCDate() === day && year >= 1900 && year <= 9999
     ? dateToSerial(date.toISOString().slice(0, 10))
     : null;
 }
-export function dayRangeIfNear(firstDay?: Dynamic, lastDay?: Dynamic) {
+export function dayRangeIfNear(firstDay: number | null, lastDay: number | null): DayRange | null {
   if (firstDay === null || lastDay === null) return null;
   return yearOfDayNumber(firstDay) !== yearOfDayNumber(lastDay) && lastDay - firstDay > MOST_DAYS_IN_DATE_RANGE ? null : [firstDay, lastDay];
 }
-export function nearestYearForDay(dayRangeInYear?: Dynamic, today2?: Dynamic) {
-  let [todayNumber, thisYear] = [dateToSerial(today2), Number(today2.slice(0, 4))];
-  let [nearest, nearestDistance]: Dynamic = [null, MOST_DAYS_IN_DATE_RANGE + 1];
-  for (let year of [thisYear + 1, thisYear, thisYear - 1] as Dynamic) {
+export function nearestYearForDay(dayRangeInYear: (year: number) => DayRange | null, today: string): DayRange | null {
+  let [todayNumber, thisYear] = [dateToSerial(today), Number(today.slice(0, 4))];
+  let [nearest, nearestDistance]: [DayRange | null, number] = [null, MOST_DAYS_IN_DATE_RANGE + 1];
+  for (let year of [thisYear + 1, thisYear, thisYear - 1]) {
     let range = dayRangeInYear(year);
     let distance = range === null ? nearestDistance : Math.max(range[0] - todayNumber, todayNumber - range[1], 0);
     if (distance < nearestDistance) [nearest, nearestDistance] = [range, distance];
   }
   return nearest;
 }
-export function dayInNearestYear(month?: Dynamic, day?: Dynamic, wordCount?: Dynamic, today2?: Dynamic) {
-  let dayInYear = (year?: Dynamic) => dayNumberOfDate(year, month, day);
-  let [nearest] = nearestYearForDay((year?: Dynamic) => dayRangeIfNear(dayInYear(year), dayInYear(year)), today2) ?? [];
+export function dayInNearestYear(month: number, day: number, wordCount: number, today: string): DayRead | null {
+  let dayInYear = (year: number) => dayNumberOfDate(year, month, day);
+  let [nearest] = nearestYearForDay((year) => dayRangeIfNear(dayInYear(year), dayInYear(year)), today) ?? [];
   return nearest === undefined
     ? null
     : {
         number: nearest,
-        wordCount: wordCount,
+        wordCount,
         inYear: dayInYear,
       };
 }
-export function readDayAt(words?: Dynamic, at2?: Dynamic, today2?: Dynamic) {
-  let [first, second, third, fourth, fifth] = words.slice(at2, at2 + 5);
+export function readDayAt(words: readonly TypedWord[], at: number, today: string): DayRead | null {
+  let [first, second, third, fourth, fifth] = words.slice(at, at + 5);
   let relativeDay = RELATIVE_DAY_WORDS.get(first?.plain ?? '');
-  if (relativeDay !== undefined) return dayAndWordCount(dateToSerial(today2) + relativeDay, 1);
-  let withYear = (dayInYear?: Dynamic, wordCount?: Dynamic, ...[nextWord, wordAfterComma]: Dynamic[]) => {
+  if (relativeDay !== undefined) return dayAndWordCount(dateToSerial(today) + relativeDay, 1);
+  let withYear = (month: number, day: number, ...[nextWord, wordAfterComma]: (TypedWord | undefined)[]) => {
     let yearAfterComma = nextWord?.plain === ',' ? numberMatchedInWord(wordAfterComma, fourDigitYearPattern) : null;
     let year = yearAfterComma ?? numberMatchedInWord(nextWord, fourDigitYearPattern);
-    if (year === null) return dayInNearestYear(dayInYear, wordCount, 2, today2);
-    return dayAndWordCount(dayNumberOfDate(year, dayInYear, wordCount), yearAfterComma === null ? 3 : 4);
+    if (year === null) return dayInNearestYear(month, day, 2, today);
+    return dayAndWordCount(dayNumberOfDate(year, month, day), yearAfterComma === null ? 3 : 4);
   };
   let theCount = first?.plain === 'the' ? 1 : 0;
-  let wordBefore = words[at2 - 1]?.plain ?? '';
+  let wordBefore = words[at - 1]?.plain ?? '';
   let dayOfMonth =
     !['to', 'in', 'and'].includes(wordBefore) && (theCount === 1 || DATE_CONDITION_WORDS.has(wordBefore))
-      ? numberMatchedInWord(words[at2 + theCount], ordinalDayPattern)
+      ? numberMatchedInWord(words[at + theCount], ordinalDayPattern)
       : null;
-  if (dayOfMonth !== null && monthIndexOf(words[at2 + theCount + 1]?.plain ?? '') < 0 && words[at2 + theCount + 1]?.plain !== 'of') {
-    let value = dayNumberOfDate(Number(today2.slice(0, 4)), Number(today2.slice(5, 7)) - 1, dayOfMonth);
-    return value === null || value < dateToSerial(today2) ? null : dayAndWordCount(value, theCount + 1);
+  if (dayOfMonth !== null && monthIndexOf(words[at + theCount + 1]?.plain ?? '') < 0 && words[at + theCount + 1]?.plain !== 'of') {
+    let dayThisMonth = dayNumberOfDate(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 1, dayOfMonth);
+    return dayThisMonth === null || dayThisMonth < dateToSerial(today) ? null : dayAndWordCount(dayThisMonth, theCount + 1);
   }
   let [firstMonth, secondMonth] = [monthIndexOf(first?.plain ?? ''), monthIndexOf(second?.plain ?? '')];
   let [firstDayOfMonth, secondDayOfMonth] = [numberMatchedInWord(first, dayOfMonthPattern), numberMatchedInWord(second, dayOfMonthPattern)];
@@ -80,12 +90,12 @@ export function readDayAt(words?: Dynamic, at2?: Dynamic, today2?: Dynamic) {
   if (firstDayOfMonth !== null && secondMonth >= 0) return withYear(secondMonth, firstDayOfMonth, third, fourth);
   let [firstNumber, thirdNumber] = [numberMatchedInWord(first, oneOrTwoDigitsPattern), numberMatchedInWord(third, oneOrTwoDigitsPattern)];
   if (firstNumber !== null && isSlashBetweenWords(second, third) && thirdNumber !== null) {
-    let [value, value2] = isSlashBetweenWords(fourth, fifth)
+    let [fourDigitYear, twoDigitYear] = isSlashBetweenWords(fourth, fifth)
       ? [numberMatchedInWord(fifth, fourDigitYearPattern), numberMatchedInWord(fifth, twoDigitYearPattern)]
       : [null, null];
-    if (value === null && value2 === null) return dayInNearestYear(firstNumber - 1, thirdNumber, 3, today2);
-    let nearYear = Number(today2.slice(0, 4)) + 20;
-    let fullYear = value ?? nearYear - ((((nearYear - (value2 ?? 0)) % 100) + 100) % 100);
+    if (fourDigitYear === null && twoDigitYear === null) return dayInNearestYear(firstNumber - 1, thirdNumber, 3, today);
+    let nearYear = Number(today.slice(0, 4)) + 20;
+    let fullYear = fourDigitYear ?? nearYear - ((((nearYear - (twoDigitYear ?? 0)) % 100) + 100) % 100);
     return dayAndWordCount(dayNumberOfDate(fullYear, firstNumber - 1, thirdNumber), 5);
   }
   let firstYear = numberMatchedInWord(first, fourDigitYearPattern);
@@ -95,39 +105,39 @@ export function readDayAt(words?: Dynamic, at2?: Dynamic, today2?: Dynamic) {
     return dayAndWordCount(dayNumberOfDate(firstYear, secondNumber - 1, thirdNumberAgain), 3);
   return null;
 }
-export function dayInYearOnSide(dayInYear?: Dynamic, dayNumber?: Dynamic, side?: Dynamic) {
+export function dayInYearOnSide(dayInYear: (year: number) => number | null, dayNumber: number, side: number): number | null {
   return (
     [yearOfDayNumber(dayNumber), yearOfDayNumber(dayNumber) + side]
       .map(dayInYear)
-      .find((year?: Dynamic) => year !== null && (year - dayNumber) * side >= 0) ?? null
+      .find((dayThatYear) => dayThatYear !== null && (dayThatYear - dayNumber) * side >= 0) ?? null
   );
 }
-export function dayRangeOfEnds(oneEnd?: Dynamic, otherEnd?: Dynamic, today2?: Dynamic) {
+export function dayRangeOfEnds(oneEnd: DayRead, otherEnd: DayRead, today: string): DayRange | null {
   let [oneEndInYear, otherEndInYear] = [oneEnd.inYear, otherEnd.inYear];
   if (oneEndInYear === undefined)
     return otherEndInYear === undefined
       ? [Math.min(oneEnd.number, otherEnd.number), Math.max(oneEnd.number, otherEnd.number)]
       : dayRangeIfNear(oneEnd.number, dayInYearOnSide(otherEndInYear, oneEnd.number, 1));
   if (otherEndInYear === undefined) return dayRangeIfNear(dayInYearOnSide(oneEndInYear, otherEnd.number, -1), otherEnd.number);
-  return nearestYearForDay((year?: Dynamic) => {
+  return nearestYearForDay((year) => {
     let firstDay = oneEndInYear(year);
     return dayRangeIfNear(firstDay, firstDay === null ? null : dayInYearOnSide(otherEndInYear, firstDay, 1));
-  }, today2);
+  }, today);
 }
-export function readAgoCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynamic) {
-  let saysOlderThan = wordsMatchAt(words, at2, ['older', 'than']);
-  let comparison = saysOlderThan
+export function readAgoCondition(words: readonly TypedWord[], at: number, today: string): ConditionRead | null {
+  let saysOlderThan = wordsMatchAt(words, at, ['older', 'than']);
+  let comparison: PhraseFound<'before' | 'byThen' | 'since'> | null = saysOlderThan
     ? {
         meant: 'before',
         wordCount: 2,
       }
-    : longestPhraseAt(AGE_COMPARISON_PHRASES, words, at2);
-  let numberAt = at2 + (comparison?.wordCount ?? 0);
+    : longestPhraseAt(AGE_COMPARISON_PHRASES, words, at);
+  let numberAt = at + (comparison?.wordCount ?? 0);
   let days =
     (numberMatchedInWord(words[numberAt], /^(\d{1,5})$/) ?? Number.NaN) * (DAYS_IN_UNIT.get(words[numberAt + 1]?.plain ?? '') ?? Number.NaN);
   let saysAgo = words[numberAt + 2]?.plain === 'ago';
   if (!Number.isInteger(days) || days < 1 || days > 36600 || saysAgo === saysOlderThan) return null;
-  let [thatDay, todayNumber] = [dateToSerial(today2) - days, dateToSerial(today2)];
+  let [thatDay, todayNumber] = [dateToSerial(today) - days, dateToSerial(today)];
   return {
     condition: (
       {
@@ -135,22 +145,22 @@ export function readAgoCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynami
         byThen: numberIsCondition('lessThanOrEqualTo', thatDay + END_OF_DAY_FRACTION),
         since: serialRangeCondition(thatDay + 1, todayNumber),
         thatDay: serialRangeCondition(thatDay, thatDay),
-      } as Dynamic
+      }
     )[comparison?.meant ?? 'thatDay'],
-    wordCount: numberAt + (saysOlderThan ? 2 : 3) - at2,
+    wordCount: numberAt + (saysOlderThan ? 2 : 3) - at,
   };
 }
-export function readDateCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynamic) {
-  let readDay = (dayAt?: Dynamic) => readDayAt(words, dayAt, today2);
-  let agoCondition = readAgoCondition(words, at2, today2);
+export function readDateCondition(words: readonly TypedWord[], at: number, today: string): ConditionRead | null {
+  let readDay = (dayAt: number) => readDayAt(words, dayAt, today);
+  let agoCondition = readAgoCondition(words, at, today);
   if (agoCondition !== null) return agoCondition;
-  let pastPhrase = longestPhraseAt(PAST_PHRASES, words, at2);
+  let pastPhrase = longestPhraseAt(PAST_PHRASES, words, at);
   if (pastPhrase !== null)
     return {
-      condition: dueDatePresetCondition('overdue', today2),
+      condition: dueDatePresetCondition('overdue', today),
       wordCount: pastPhrase.wordCount,
     };
-  let periodAt: Dynamic = at2;
+  let periodAt = at;
   if (words[periodAt]?.plain === 'in' || words[periodAt]?.plain === 'within') periodAt += 1;
   let saysThe = words[periodAt]?.plain === 'the';
   if (saysThe) periodAt += 1;
@@ -161,51 +171,52 @@ export function readDateCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynam
   if (isTheWeek && monthsInPeriod !== undefined)
     return {
       condition: null,
-      wordCount: periodAt + 2 - at2,
+      wordCount: periodAt + 2 - at,
     };
   let isOneWeek = isTheWeek && periodWord === 'week';
   if (periodSide !== undefined && !isOneWeek && (periodWord === 'week' || monthsInPeriod !== undefined))
     return {
-      condition: monthsInPeriod === undefined ? weekRangeCondition(today2, periodSide) : monthSpanRangeCondition(today2, periodSide, monthsInPeriod),
-      wordCount: periodAt + 2 - at2,
+      condition: monthsInPeriod === undefined ? weekRangeCondition(today, periodSide) : monthSpanRangeCondition(today, periodSide, monthsInPeriod),
+      wordCount: periodAt + 2 - at,
     };
   let days = isOneWeek
     ? 7
     : (numberMatchedInWord(words[periodAt + 1], /^(\d{1,5})$/) ?? Number.NaN) * (DAYS_IN_UNIT.get(wordAfterPeriod) ?? Number.NaN);
   if (periodSide !== undefined && periodSide !== 0 && Number.isInteger(days) && days >= 1 && days <= 36600) {
-    let todayNumber = dateToSerial(today2);
+    let todayNumber = dateToSerial(today);
     return {
       condition:
         periodSide > 0 ? serialRangeCondition(todayNumber, todayNumber + days - 1) : serialRangeCondition(todayNumber - days + 1, todayNumber),
-      wordCount: periodAt + (isOneWeek ? 2 : 3) - at2,
+      wordCount: periodAt + (isOneWeek ? 2 : 3) - at,
     };
   }
-  let comparison = longestPhraseAt(DATE_COMPARISON_PHRASES, words, at2);
-  let comparedDay = comparison === null ? null : readDay(at2 + comparison.wordCount);
-  let betweenWordCount = words[at2]?.plain === 'between' || words[at2]?.plain === 'from' ? 1 : 0;
-  let range = readRangeEndsAt(words, at2 + betweenWordCount, betweenWordCount === 1 ? RANGE_JOINERS_AND_TO : RANGE_JOINERS_TO, readDay);
+  let comparison = longestPhraseAt(DATE_COMPARISON_PHRASES, words, at);
+  let comparedDay = comparison === null ? null : readDay(at + comparison.wordCount);
+  let betweenWordCount = words[at]?.plain === 'between' || words[at]?.plain === 'from' ? 1 : 0;
+  let range = readRangeEndsAt(words, at + betweenWordCount, betweenWordCount === 1 ? RANGE_JOINERS_AND_TO : RANGE_JOINERS_TO, readDay);
   if (range !== null) {
-    let todayNumber = (dayRangeOfEnds as Dynamic)(...range.ends, today2);
+    let dayRange = dayRangeOfEnds(...range.ends, today);
     return {
-      condition: todayNumber === null ? null : (serialRangeCondition as Dynamic)(...todayNumber),
+      condition: dayRange === null ? null : serialRangeCondition(...dayRange),
       wordCount: betweenWordCount + range.wordCount,
     };
   }
   if (comparison !== null && comparedDay !== null) {
-    let [todayNumber, meant] = comparison.meant;
-    let value =
-      words[at2]?.plain === 'since' && comparedDay.inYear !== undefined
-        ? dayInYearOnSide(comparedDay.inYear, dateToSerial(today2), -1)
+    let [dateComparison, isUntilEndOfDay] = comparison.meant;
+    let comparedDayNumber =
+      words[at]?.plain === 'since' && comparedDay.inYear !== undefined
+        ? dayInYearOnSide(comparedDay.inYear, dateToSerial(today), -1)
         : comparedDay.number;
-    let value2 = todayNumber === 'lessThanOrEqualTo' && comparedDay.inYear !== undefined && comparedDay.number < dateToSerial(today2);
+    let isByDayAlreadyPast = dateComparison === 'lessThanOrEqualTo' && comparedDay.inYear !== undefined && comparedDay.number < dateToSerial(today);
     return {
-      condition: value === null || value2 ? null : numberIsCondition(todayNumber, value + (meant ? END_OF_DAY_FRACTION : 0)),
+      condition:
+        comparedDayNumber === null || isByDayAlreadyPast ? null : numberIsCondition(dateComparison, comparedDayNumber + (isUntilEndOfDay ? END_OF_DAY_FRACTION : 0)),
       wordCount: comparison.wordCount + comparedDay.wordCount,
     };
   }
-  let onWordCount = words[at2]?.plain === 'on' ? 1 : 0;
-  let day = readDay(at2 + onWordCount);
-  let trailingComparison = day === null ? null : longestPhraseAt(DATE_TRAILING_COMPARISON_PHRASES, words, at2 + onWordCount + day.wordCount);
+  let onWordCount = words[at]?.plain === 'on' ? 1 : 0;
+  let day = readDay(at + onWordCount);
+  let trailingComparison = day === null ? null : longestPhraseAt(DATE_TRAILING_COMPARISON_PHRASES, words, at + onWordCount + day.wordCount);
   if (day !== null && trailingComparison !== null)
     return {
       condition: numberIsCondition(trailingComparison.meant[0], day.number + (trailingComparison.meant[1] ? END_OF_DAY_FRACTION : 0)),
@@ -216,11 +227,11 @@ export function readDateCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynam
       condition: serialRangeCondition(day.number, day.number),
       wordCount: onWordCount + day.wordCount,
     };
-  let inWordCount = words[at2]?.plain === 'in' ? 1 : 0;
-  let month = monthIndexOf(words[at2 + inWordCount]?.plain ?? '');
+  let inWordCount = words[at]?.plain === 'in' ? 1 : 0;
+  let month = monthIndexOf(words[at + inWordCount]?.plain ?? '');
   if (month < 0) return null;
-  let year = numberMatchedInWord(words[at2 + inWordCount + 1], fourDigitYearPattern);
-  let dayNumber = year === null ? (dayInNearestYear(month, 15, 1, today2)?.number ?? null) : dayNumberOfDate(year, month, 15);
+  let year = numberMatchedInWord(words[at + inWordCount + 1], fourDigitYearPattern);
+  let dayNumber = year === null ? (dayInNearestYear(month, 15, 1, today)?.number ?? null) : dayNumberOfDate(year, month, 15);
   let isoDay = dayNumber === null ? null : serialToIsoDate(dayNumber);
   if (isoDay === null) return null;
   return {
@@ -228,26 +239,26 @@ export function readDateCondition(words?: Dynamic, at2?: Dynamic, today2?: Dynam
     wordCount: inWordCount + (year === null ? 1 : 2),
   };
 }
-export const monthIndexOf = (word?: Dynamic) =>
-  MONTH_NAMES.findIndex((month?: Dynamic) => word === month || word === month.slice(0, 3) || (word === 'sept' && month === 'september'));
-export const isMonthName = (word?: Dynamic) => monthIndexOf(word) >= 0;
+export const monthIndexOf = (word: string): number =>
+  MONTH_NAMES.findIndex((month) => word === month || word === month.slice(0, 3) || (word === 'sept' && month === 'september'));
+export const isMonthName = (word: string): boolean => monthIndexOf(word) >= 0;
 export const dayOfMonthPattern = /^(\d{1,2})(?:st|nd|rd|th)?$/;
 export const ordinalDayPattern = /^(\d{1,2})(?:st|nd|rd|th)$/;
 export const oneOrTwoDigitsPattern = /^(\d{1,2})$/;
 export const fourDigitYearPattern = /^(\d{4})$/;
 export const twoDigitYearPattern = /^(\d{2})$/;
-export const dayAndWordCount = (dayNumber?: Dynamic, wordCount?: Dynamic) =>
+export const dayAndWordCount = (dayNumber: number | null, wordCount: number): DayRead | null =>
   dayNumber === null
     ? null
     : {
         number: dayNumber,
-        wordCount: wordCount,
+        wordCount,
       };
 export const MOST_DAYS_IN_DATE_RANGE = 183;
-export const yearOfDayNumber = (dayNumber?: Dynamic) => Number(serialToIsoDate(dayNumber)?.slice(0, 4));
-export const isSlashBetweenWords = (word?: Dynamic, nextWord?: Dynamic) =>
+export const yearOfDayNumber = (dayNumber: number): number => Number(serialToIsoDate(dayNumber)?.slice(0, 4));
+export const isSlashBetweenWords = (word: TypedWord | undefined, nextWord: TypedWord | undefined): boolean =>
   word?.said === '/' && !word.isAfterBlank && nextWord?.isAfterBlank === false;
-export const saysOverdueAt = (words?: Dynamic, at?: Dynamic) => longestPhraseAt(OVERDUE_PHRASES, words, at) !== null;
+export const saysOverdueAt = (words: readonly TypedWord[], at: number): boolean => longestPhraseAt(OVERDUE_PHRASES, words, at) !== null;
 export {
   PAST_PHRASES,
   OVERDUE_PHRASES,

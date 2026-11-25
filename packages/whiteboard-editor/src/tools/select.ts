@@ -4,12 +4,12 @@
  * on moving hosts and free arrow ends; ⌥ drags a copy, ⌘ moves freely),
  * rubber-band select on empty board (Shift toggles; ⌘ asks the agent about
  * the area), and double-tap: into a group, into an item's words, into an
- * image's crop, open a link, or new text on empty board.
+ * image's crop, open a link, or new text on empty board. A click on a link
+ * opens it (see `services/link-card.ts`).
  *
  * Moves write the board on every frame under one coalesced undo step.
  */
 
-import { boardLinkTarget, openBoardLink } from '../elements/links.ts';
 import {
   applyMoveDrag,
   carriedArrowEnds,
@@ -21,6 +21,7 @@ import {
   isElementLocked,
   marqueeSelection,
   outermostGroupOf,
+  showsTextPlaceholder,
   snapRectToGuidesStraight,
   straightDragAxis,
   tableColumnIds,
@@ -37,6 +38,7 @@ import {
 import type { Point, Rect } from '../lib/camera.ts';
 import { announce, duplicatedMessage, movedMessage } from '../services/announce.ts';
 import { boardElements, canEditBoard, duplicateIds, editContent, selectedIds } from '../services/actions.ts';
+import { cancelPendingLinkOpen, clickBoardLink, openLink } from '../services/link-card.ts';
 import { useAsk } from '../state/ask.ts';
 import { currentMeasures } from '../state/measures.ts';
 import { useSelection } from '../state/selection.ts';
@@ -44,24 +46,16 @@ import { useTool } from '../state/tool.ts';
 import { useInteraction } from '../selection/store.ts';
 import { setLiftedElements } from '../elements/view-state.ts';
 import { videoClickedRecently } from '../elements/video-playback.ts';
-import { pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
+import { gestureKey, pastThreshold, type Gesture, type PointerSample } from './gesture.ts';
 import { panGesture } from './hand.ts';
 import { containerAtPoint, hitContext, pressTargetAt, type HitContext } from './hit.ts';
 import { DOUBLE_TAP, MARQUEE_START_SLOP_PX, createTextAt, placeElement } from './place.ts';
 import { guideLines, snapCandidatesNear, snapDistanceFor, stillBoxes } from './snap.ts';
-import { TOUCH_LONG_PRESS_MS, reduceTouchPress, type TouchPress } from './touch.ts';
+import { TOUCH_LONG_PRESS_MS, isQuickTap, reduceTouchPress, type TouchPress } from './touch.ts';
 
 /* ------------------------------------------------------------------------ */
 /* Shared bits                                                              */
 /* ------------------------------------------------------------------------ */
-
-let gestureSerial = 0;
-
-/** A fresh coalescing key for one gesture (`<gesture>:<id>:<n>`), so two quick drags stay two undo steps. */
-export function gestureKey(gesture: string, id: string): string {
-  gestureSerial += 1;
-  return `${gesture}:${id}:${gestureSerial}`;
-}
 
 /** True when the event asks for the platform's primary modifier (⌘ on Apple platforms, Ctrl elsewhere). */
 export function hasModifier(event: Pick<PointerEvent, 'metaKey' | 'ctrlKey'>): boolean {
@@ -131,8 +125,7 @@ export function openElement(element: BoardElement, node: Element | null): boolea
     }
   }
   if (element.type === 'link') {
-    const target = boardLinkTarget(element.href);
-    if (target && typeof window !== 'undefined') openBoardLink(target);
+    if (typeof window !== 'undefined') openLink(element.href);
     return true;
   }
   if (!canEditBoard() || isElementLocked(element)) return false;
@@ -164,6 +157,15 @@ export function openElement(element: BoardElement, node: Element | null): boolea
     default:
       return false;
   }
+}
+
+/**
+ * Whether a click released on `element`, now the only selection, starts
+ * typing into it: a text showing only its placeholder does.
+ */
+export function clickStartsTyping(element: BoardElement): boolean {
+  const { ids } = useSelection.getState();
+  return showsTextPlaceholder(element) && !isElementLocked(element) && canEditBoard() && ids.length === 1 && ids[0] === element.id;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -409,6 +411,7 @@ export function selectPress(sample: PointerSample): Gesture | null {
 
   if (isSecondTap(sample, hit?.id ?? null)) {
     lastTap = null;
+    cancelPendingLinkOpen();
     if (hit) openElement(hit, sample.node);
     else if (editable) placeElement(createTextAt(sample.board), { label: 'Add text', keepTool: true });
     return SWALLOW;
@@ -421,6 +424,11 @@ export function selectPress(sample: PointerSample): Gesture | null {
       if (pressed === null) useSelection.getState().clear();
       else useSelection.getState().select([...expandSelectionToGroups(boardElements(), new Set([pressed.id]), useSelection.getState().ids)]);
       rememberTap(end, pressed?.id ?? null);
+      if (pressed !== null && isQuickTap(sample.screen, sample.event.timeStamp, end.screen, end.event.timeStamp) && clickStartsTyping(pressed)) {
+        useSelection.getState().edit({ kind: 'element', id: pressed.id });
+        return;
+      }
+      clickBoardLink(sample, end);
     });
   }
 
@@ -436,6 +444,7 @@ export function selectPress(sample: PointerSample): Gesture | null {
     return {
       up(end) {
         rememberTap(end, hit.id);
+        clickBoardLink(sample, end);
       },
     };
   }
@@ -461,6 +470,7 @@ export function selectPress(sample: PointerSample): Gesture | null {
         if (event.shiftKey) togglePicked(picked, selection);
         else useSelection.getState().select([...picked]);
         rememberTap(end, hit.id);
+        clickBoardLink(sample, end);
       },
       cancel() {
         if (dragging) marquee.cancel?.();
@@ -486,8 +496,9 @@ export function selectPress(sample: PointerSample): Gesture | null {
       if (event.shiftKey) togglePicked(expandSelectionToGroups(elements, new Set([hit.id]), selection), selection);
       else {
         useSelection.getState().select([...expandSelectionToGroups(elements, new Set([hit.id]), useSelection.getState().ids)]);
+        if (clickStartsTyping(hit)) useSelection.getState().edit({ kind: 'element', id: hit.id });
         // A click on an untitled section's title band starts typing its title.
-        if (
+        else if (
           hit.type === 'container' &&
           hit.text.trim() === '' &&
           useSelection.getState().ids.length === 1 &&
@@ -496,6 +507,7 @@ export function selectPress(sample: PointerSample): Gesture | null {
           useSelection.getState().edit({ kind: 'element', id: hit.id });
       }
       rememberTap(end, hit.id);
+      clickBoardLink(sample, end);
     },
     cancel() {
       move?.cancel?.();

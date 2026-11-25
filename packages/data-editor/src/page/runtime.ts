@@ -10,8 +10,10 @@ import {
   readSourceAddress,
 } from '@open-artifact/data-core';
 import type { DataEngine, PageDataResult } from '../data/engine.ts';
-import { getDatasetLoadKey, getRunTable, isFailedDatasetRun } from '../data/query-store.ts';
+import { getDatasetLoadKey } from '../data/query-store.ts';
 import { applyPageLanguage } from '../platform/color-scheme.ts';
+import { isInlineViewLink, showPageLink } from '../platform/inline-view.ts';
+import { sessionPageCapabilities, type PageCapabilities } from './capabilities.ts';
 import { createMutableD3Namespace, type DashboardD3 } from './d3.ts';
 import { createPageDrawings, toDrawSpec, type PageDrawings } from './draw.ts';
 import {
@@ -37,6 +39,7 @@ import {
   type PageKeptMarkup,
   type PageScript,
 } from './parse.ts';
+import { rootPageState, runSourceState, strongestMarkState, type PageSourceState } from './source-state.ts';
 import { renderShownPageHtml, isVisibleForExport, isVisibleIgnoringOpacity, type ShownPage } from './shown-page.ts';
 import {
   DERIVED_SOURCE_ATTRIBUTE,
@@ -69,9 +72,7 @@ export const ONE_WRITER_ATTRIBUTE = 'data-dash-one-writer';
 export const FETCH_PRIORITY_ATTRIBUTE = 'data-fetchpriority';
 export const LOADING_SPELL_DELAY_MS = 500;
 
-export type PageSourceState = 'error' | 'loading' | 'refreshing' | 'empty';
-
-const SOURCE_STATE_PRIORITY: readonly PageSourceState[] = ['error', 'loading', 'refreshing'];
+export type { PageSourceState } from './source-state.ts';
 
 /** The sources the page uses: read through `dash.data` or marked, and which of them are only one or the other. */
 export interface PageSourceUsage {
@@ -83,6 +84,8 @@ export interface PageSourceUsage {
   /** Under `data-fetchpriority="high"` / `"low"`. */
   high?: string[];
   low?: string[];
+  /** Marked only under `[hidden]`: loaded after the rest. */
+  hidden?: string[];
 }
 
 export interface PageMarkInspection {
@@ -114,10 +117,12 @@ export interface DashboardReadyGate {
   stop(): void;
 }
 
-/** The query and file sources among the page's reads have all finished. */
+const AWAITED_KINDS: ReadonlySet<Dataset['source']['kind']> = new Set(['query', 'file', 'store']);
+
+/** The query, file and saved-row sources among the page's reads have all finished. */
 export function areRequestedSourcesSettled(state: DashboardReadyState, reads: ReadonlySet<string>): boolean {
   return state.datasets.every((dataset) => {
-    if (!reads.has(dataset.id) || (dataset.source.kind !== 'query' && dataset.source.kind !== 'file')) return true;
+    if (!reads.has(dataset.id) || !AWAITED_KINDS.has(dataset.source.kind)) return true;
     const status = state.status(dataset.id);
     return status !== 'idle' && status !== 'running';
   });
@@ -219,11 +224,16 @@ const throwRemovedHelper = (): never => {
 /** Calling it, or reading any property of it (`dash.scale.linear`), throws. */
 const REMOVED_HELPER: unknown = new Proxy(throwRemovedHelper, { get: throwRemovedHelper });
 
-function runPageScript(script: PageScript, dash: DashApi, failed: (file: string, error: unknown) => void): void {
+function runPageScript(
+  script: PageScript,
+  dash: DashApi,
+  capabilities: PageCapabilities,
+  failed: (file: string, error: unknown) => void,
+): void {
   const text = `${script.text}\n//# sourceURL=${getDashboardSourceUrl(script.file)}`;
   try {
-    // Page scripts are the author's own code, run as plain scripts with `dash` in scope.
-    Function('dash', `(function () {${text}\n}).call(this);`)(dash);
+    // Page scripts are the author's own code, run as plain scripts with `dash` and `openartifact` in scope.
+    Function('dash', 'openartifact', `(function () {${text}\n}).call(this);`)(dash, capabilities);
   } catch (error) {
     failed(script.file, error);
   }
@@ -262,6 +272,8 @@ export interface PageMountOptions {
   editing?: boolean;
   /** `dash.setLink(fragment)`. */
   onLink?: (fragment: string) => void;
+  /** What `openartifact.use` gives the page's scripts (the session's, narrowed for a page, when left out). */
+  capabilities?: PageCapabilities;
 }
 
 export interface PageUpdate {
@@ -343,6 +355,7 @@ export function currentPage(): PageHandle | null {
  */
 export function mountDashboardPage(root: HTMLElement, options: PageMountOptions): PageHandle {
   const engine = options.engine;
+  const capabilities = options.capabilities ?? sessionPageCapabilities((documents) => engine.rereadSaved(documents));
   const listeners = new Set<() => void>();
   const sourceStateElements = new Set<Element>();
   let onLink = options.onLink;
@@ -406,9 +419,7 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
   const datasetState = (dataset: Dataset): PageSourceState | undefined => {
     if (dataset.source.kind === 'unsupported') return 'error';
     const run = engine.getRun(dataset.id);
-    if (run.status === 'idle') return getDatasetLoadKey(dataset) === '' ? undefined : 'loading';
-    if (run.status === 'running') return getRunTable(run) === null ? 'loading' : 'refreshing';
-    return isFailedDatasetRun(run) ? 'error' : undefined;
+    return runSourceState(run, run.status === 'idle' && getDatasetLoadKey(dataset) !== '');
   };
   const underlyingDatasets = (id: string): Dataset[] => (underOf(id) ?? [id]).flatMap((source) => baseDataset(source) ?? []);
   const sourceStates = (id: string): (PageSourceState | undefined)[] => {
@@ -418,10 +429,8 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
       ...underlyingDatasets(id).map(datasetState),
     ];
   };
-  const prioritize = (states: (PageSourceState | undefined)[]): PageSourceState | undefined =>
-    SOURCE_STATE_PRIORITY.find((state) => states.includes(state));
   const markState = (element: Element, ids: string[]): PageSourceState | undefined => {
-    const state = prioritize(ids.flatMap(sourceStates));
+    const state = strongestMarkState(ids.flatMap(sourceStates));
     if (state !== undefined) return state;
     const text = (element.textContent ?? '').trim();
     return text !== '' && EMPTY_VALUE_PATTERN.test(text) ? 'empty' : undefined;
@@ -473,19 +482,23 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
     writeOptionalAttribute(
       root,
       PAGE_STATE_ATTRIBUTE,
-      mounted.spell?.shown === true ? 'loading' : states.includes('error') ? 'error' : undefined,
+      rootPageState(states, mounted.spell?.shown === true),
     );
   };
 
   const collectUsage = (mounted: MountedPage): PageSourceUsage => {
     const markedIds = new Set<string>();
     const priorities = new Map<string, number>();
+    const shownMarks = new Set<string>();
+    const hiddenMarks = new Set<string>();
     for (const element of root.querySelectorAll(`[${MARK_SOURCE_ATTRIBUTE}]`)) {
       const held = isHeldByHidden(mounted, element);
       const into = held ? mounted.marked : markedIds;
       const rank = ({ high: 0, low: 2 } as Record<string, number>)[getMarkFetchPriority(root, element)] ?? 1;
+      const seen = element.closest(`#${DASHBOARD_ROOT_ID} [hidden]`) === null ? shownMarks : hiddenMarks;
       for (const id of getMarkedSourceIds(element)) {
         into.add(id);
+        seen.add(id);
         if (!held) priorities.set(id, Math.min(priorities.get(id) ?? 2, rank));
       }
     }
@@ -500,12 +513,17 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
     const datasets = [...new Set([...mounted.asked, ...markedIds])];
     const high = datasets.filter((id) => priorities.get(id) === 0);
     const low = datasets.filter((id) => priorities.get(id) === 2);
+    const reach = (ids: Set<string>): Set<string> => new Set([...ids].flatMap((id) => [id, ...(getUnderlyingSources(id, calcs) ?? [])]));
+    const shown = reach(shownMarks);
+    const concealed = reach(hiddenMarks);
+    const hidden = datasets.filter((id) => concealed.has(id) && !shown.has(id));
     return {
       datasets,
       unmarked: mounted.asked.filter((id) => !mounted.marked.has(id) && !failedInputs.has(id)),
       unread: [...markedIds].filter((id) => !mounted.asked.includes(id)),
       ...(high.length > 0 ? { high } : {}),
       ...(low.length > 0 ? { low } : {}),
+      ...(hidden.length > 0 ? { hidden } : {}),
     };
   };
 
@@ -525,9 +543,16 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
     const multipliers = getLocaleCompactMultipliers();
     const first: SourceMarkIssue[] = [];
     let total = 0;
+    // Saved rows start empty: the page's marks for them wait for the first row rather than count as wrong.
+    const isEmptyStore = (id: string): boolean => engine.getDataset(id)?.source.kind === 'store' && tables.get(id)?.rows.length === 0;
     for (const element of root.querySelectorAll(`[${MARK_SOURCE_ATTRIBUTE}]`)) {
       const address = readSourceAddress(element);
-      if (address.source === '' || isDataOnlyMark(address) || (typeof element.checkVisibility === 'function' && !element.checkVisibility()))
+      if (
+        address.source === '' ||
+        isDataOnlyMark(address) ||
+        isEmptyStore(address.source) ||
+        (typeof element.checkVisibility === 'function' && !element.checkVisibility())
+      )
         continue;
       const finding = findSourceMarkIssue(
         address,
@@ -552,7 +577,7 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
       usageKey = key;
       reads = { page: mounted.n, datasets: new Set(usage.datasets) };
       engine.use(usage.datasets);
-      engine.setFetchPriority(usage.high ?? [], usage.low ?? []);
+      engine.setFetchPriority(usage.high ?? [], usage.low ?? [], usage.hidden ?? []);
       publish({ usage });
     }
     dashboardReadyGate.check({
@@ -602,9 +627,9 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
     });
   };
 
-  const recordFailure = (mounted: MountedPage, label: string, error: unknown): void => {
+  const recordFailure = (mounted: MountedPage, label: string, error: unknown, where?: string): void => {
     if (!mounted.current) return;
-    const added = mounted.faults.record('stopped', error, mounted.files.find((file) => file.name === label)?.name);
+    const added = mounted.faults.record('stopped', error, mounted.files.find((file) => file.name === label)?.name, where);
     const stop = describePageStop(label, error);
     const newStop = !mounted.stops.includes(stop);
     if (newStop) mounted.stops.push(stop);
@@ -718,18 +743,14 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
         if (mounted.current) engine.resetParams();
       },
       setLink(fragment) {
-        if (typeof fragment !== 'string' || !mounted.current) return;
-        try {
-          window.history.replaceState(window.history.state, '', `#${fragment}`);
-        } catch {
-          // A sandboxed page may not change its address; the link callback still hears it.
-        }
+        if (typeof fragment !== 'string' || !mounted.current || isInlineViewLink(fragment)) return;
+        showPageLink(fragment);
         onLink?.(fragment);
       },
     };
     const drawings = createPageDrawings(root, {
       run: (fn) => mounted.guard.during(fn),
-      threw: (name, error) => recordFailure(mounted, `dash.draw("${name}")`, error),
+      threw: (name, error) => recordFailure(mounted, `dash.draw("${name}")`, error, name),
       drawn: notify,
     });
     const mounted: MountedPage = {
@@ -773,7 +794,8 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
       publish({ oneWriter });
       if (redrawFrame !== null) cancelAnimationFrame(redrawFrame);
       redrawFrame = null;
-      for (const script of scripts) mounted.guard.during(() => runPageScript(script, dash, (file, error) => recordFailure(mounted, file, error)));
+      for (const script of scripts)
+        mounted.guard.during(() => runPageScript(script, dash, capabilities, (file, error) => recordFailure(mounted, file, error)));
       drawings.pass();
       scriptsRan = true;
       applyEditing();
@@ -801,6 +823,9 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
   };
   window.addEventListener('error', onError);
   window.addEventListener('unhandledrejection', onRejection);
+  // A form on the page runs its listeners; the submission itself never navigates the page away.
+  const onSubmit = (event: Event): void => event.preventDefault();
+  root.addEventListener('submit', onSubmit, true);
 
   let width = root.clientWidth;
   const resizeObserver = new ResizeObserver(() => {
@@ -810,14 +835,21 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
   });
   resizeObserver.observe(root);
 
-  const showsMark = ({ target }: MutationRecord): boolean =>
+  // Labels measured before the page's fonts arrived would be off: draw again once they have.
+  const fonts = root.ownerDocument.fonts as FontFaceSet | undefined;
+  const onFontsLoaded = (): void => scheduleRedraw();
+  fonts?.addEventListener('loadingdone', onFontsLoaded);
+
+  // A mark shown or hidden changes what the page reads first, and on one-writer pages what it holds back. Setting
+  // `hidden` to what it already was (as a draw may on every run) changes neither.
+  const holdsMark = ({ target, oldValue }: MutationRecord): boolean =>
     target instanceof Element &&
-    !target.hasAttribute('hidden') &&
+    (oldValue !== null) !== target.hasAttribute('hidden') &&
     (target.hasAttribute(MARK_SOURCE_ATTRIBUTE) || target.querySelector(`[${MARK_SOURCE_ATTRIBUTE}]`) !== null);
   const hiddenObserver = new MutationObserver((records) => {
-    if (page !== null && page.guard !== NO_ONE_WRITER_GUARD && records.some(showsMark)) notify();
+    if (page !== null && records.some(holdsMark)) notify();
   });
-  hiddenObserver.observe(root, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+  hiddenObserver.observe(root, { subtree: true, attributes: true, attributeFilter: ['hidden'], attributeOldValue: true });
 
   const stopData = engine.subscribe(scheduleRedraw);
   let reports: ReadonlyMap<string, CalculationReport> = engine.store.getState().reports;
@@ -947,7 +979,9 @@ export function mountDashboardPage(root: HTMLElement, options: PageMountOptions)
       redrawFrame = null;
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
+      root.removeEventListener('submit', onSubmit, true);
       resizeObserver.disconnect();
+      fonts?.removeEventListener('loadingdone', onFontsLoaded);
       hiddenObserver.disconnect();
       stopData();
       stopStore();

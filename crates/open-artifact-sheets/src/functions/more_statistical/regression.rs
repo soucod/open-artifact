@@ -56,7 +56,6 @@ struct Kept {
 fn all_numbers(cells: &Cells) -> Result<Vec<f64>, CellError> {
     cells
         .values()
-        .iter()
         .map(|v| match v {
             Value::Number(n) => Ok(*n),
             _ => Err(CellError::Value),
@@ -65,7 +64,7 @@ fn all_numbers(cells: &Cells) -> Result<Vec<f64>, CellError> {
 }
 
 fn first_error(cells: &Cells) -> Result<(), CellError> {
-    match cells.values().iter().find_map(Value::error) {
+    match cells.values().find_map(Value::error) {
         Some(e) => Err(e),
         None => Ok(()),
     }

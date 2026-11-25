@@ -92,7 +92,7 @@ export async function sendAsk(words: string, selection: RequestSelection): Promi
   }
   if (result.status === 'failed') return { sent: false, error: NOT_LISTENING };
   closeAskBox();
-  if (result.status === 'delivered') toast.add({ title: ASK_SENT });
+  if (result.status === 'delivered' && !result.drafted) toast.add({ title: ASK_SENT });
   else {
     const { name, wakesIdle } = useAgentActivity.getState();
     toast.add(agentResultMessage(result, 'this dashboard', { name, wakesIdle }));

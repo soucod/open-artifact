@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { selectedArea, selectionOfArea, areaGrownOverMerges, areaOfPosition } from '../selection/model.ts';
 import { withNoEffects } from '../state/transitions.ts';
 import { cellBlockOfSelection, unbrokenCellBlockOfCorners } from '../model/cell-blocks.ts';
@@ -7,14 +6,19 @@ import { noticeRowsOutOfViewInTheWay } from '../edits/rows-out-of-view.ts';
 import { cellInputKey } from '../model/cell-values.ts';
 import { areaToA1AsStored } from '../formulas/from-words/where.ts';
 import { ownRowOrderOfSheet } from '../model/line-ids.ts';
-import type { PageState } from '../state/initial-state.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
-export function fitsMergeUndo(cellKeys?: Dynamic) {
-  return cellKeys.reduce((total?: Dynamic, key?: Dynamic) => total + 200 + 6 * key.length, 0) <= 262144;
+import type { MergeClearedCellsOffer, PageState } from '../state/initial-state.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
+import type { CellPosition } from '../selection/model.ts';
+import type { IfQueued } from '../state/event-reducer.ts';
+import type { PageTransition } from '../state/transitions.ts';
+/** Merging the selected cells, or taking their merges apart. */
+export type MergeAct = 'mergeCells' | 'unmergeCells';
+export function fitsMergeUndo(cellKeys: string[]): boolean {
+  return cellKeys.reduce((total, key) => total + 200 + 6 * key.length, 0) <= 262144;
 }
-export function topLeftPositionOf(cellIds: Dynamic, reads: WorkbookReads) {
-  let topLeft: Dynamic = null;
-  for (let cellId of cellIds as Dynamic) {
+export function topLeftPositionOf(cellIds: CellId[], reads: WorkbookReads): CellPosition | null {
+  let topLeft: CellPosition | null = null;
+  for (let cellId of cellIds) {
     let position = reads.positionOfCell(cellId);
     if (position === null) continue;
     if (
@@ -26,13 +30,13 @@ export function topLeftPositionOf(cellIds: Dynamic, reads: WorkbookReads) {
   }
   return topLeft;
 }
-export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, act?: Dynamic) {
+export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, act: MergeAct): PageTransition {
   let area = selectedArea(state, reads);
   let selection = area === null ? null : selectionOfArea(state, reads, area);
   if (area === null || selection === null) return withNoEffects(state);
   if (act === 'unmergeCells') {
     let cells = cellBlockOfSelection(state, reads, selection);
-    let queueOptions = {
+    let queueOptions: IfQueued = {
       ...IF_QUEUED_DEFAULTS,
       select: area,
       done: 'unmerged',
@@ -43,7 +47,7 @@ export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, 
           state,
           {
             kind: 'unmergeCells',
-            cells: cells,
+            cells,
           },
           queueOptions,
         );
@@ -53,7 +57,7 @@ export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, 
   let cellBlock = grownSelection === null ? null : unbrokenCellBlockOfCorners(state, reads, selectedRangeOf(grownSelection));
   if (cellBlock === null) return noticeRowsOutOfViewInTheWay(state, 'mergeCells');
   let filledCells = reads.filledCellsIn(state.sheetId, grownArea);
-  let cellKeys = filledCells.map((cellId?: Dynamic) => cellInputKey(reads.cellOf(cellId)));
+  let cellKeys = filledCells.map((cellId) => cellInputKey(reads.cellOf(cellId)));
   if (filledCells.length > 1 && !fitsMergeUndo(cellKeys))
     return withNoEffects({
       ...state,
@@ -62,7 +66,7 @@ export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, 
       },
     });
   let keptPosition = filledCells.length > 1 ? topLeftPositionOf(filledCells, reads) : null;
-  let undoOffer =
+  let undoOffer: MergeClearedCellsOffer | null =
     keptPosition === null
       ? null
       : {
@@ -80,7 +84,7 @@ export function mergeOrUnmergeSelection(state: PageState, reads: WorkbookReads, 
       ...IF_QUEUED_DEFAULTS,
       select: grownArea,
       done: undoOffer === null ? 'merged' : null,
-      undoOffer: undoOffer,
+      undoOffer,
     },
   );
 }

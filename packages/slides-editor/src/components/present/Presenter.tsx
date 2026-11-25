@@ -12,13 +12,16 @@
  * - The control bar hides after 3 s without pointer movement.
  * - With speaker notes, a popup shows notes, the next step and a timer; if
  *   the popup is blocked the notes show under the slide instead.
+ * - Opened from a `.only` link, one slide shows on its own on its own
+ *   background: every build done, arrows page whole slides, no control bar,
+ *   no full screen; Escape returns to the editor at that slide.
  */
 
 import { reportSlide } from '../../services/location.ts';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { ChevronLeft, ChevronRight, Maximize, Minimize, StickyNote, X } from 'lucide-react';
-import { SLIDE_HEIGHT, SLIDE_WIDTH, type Slide } from '@open-artifact/slides-core';
+import { SLIDE_HEIGHT, SLIDE_WIDTH, slideTitle, type Slide } from '@open-artifact/slides-core';
 import { IconButton, cn, toast } from '@open-artifact/ui';
 import { useDeck } from '../../state/deck.ts';
 import { useView } from '../../state/view.ts';
@@ -30,6 +33,7 @@ import { NotesEditor } from '../NotesPane.tsx';
 import { SpeakerWindow, openSpeakerPopup, type ShowClock } from './SpeakerWindow.tsx';
 import { prefersReducedMotion, runTransition, transitionBetween } from './transitions.ts';
 import { useSlideMotion } from './motion.ts';
+import { pagerText } from '../../lib/inline-view.ts';
 
 /** Idle time before the control bar hides, ms. */
 const CONTROLS_HIDE_MS = 3000;
@@ -93,13 +97,27 @@ function ShowSlide({
 /** The show. Mounted while `view.presenting` is set. */
 export function Presenter(): ReactNode {
   const presenting = useView((s) => s.presenting);
+  const run = useView((s) => s.presentRun);
   if (!presenting) return null;
-  return <Show key={presenting.start} start={presenting.start} speaker={presenting.speaker} />;
+  const only = presenting.only === true;
+  return <Show key={run} start={presenting.start} speaker={presenting.speaker && !only} only={only} />;
 }
 
-function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNode {
+/** Build steps of a slide in the deck (0 when it is gone). */
+function stepCount(id: string): number {
+  const slide = useDeck.getState().slides[id]?.slide;
+  return slide ? buildSteps(slide).length : 0;
+}
+
+/** A slide's own colour or gradient, to fill around it when it shows on its own. */
+function backdrop(slide: Slide): string | undefined {
+  const value = slide.style.background;
+  return value && !value.includes('url(') ? value : undefined;
+}
+
+function Show({ start, speaker, only }: { start: string; speaker: boolean; only: boolean }): ReactNode {
   const playable = useDeck(useShallow(() => playableSlides()));
-  const [position, setPosition] = useState<ShowPosition>({ id: start, done: 0, animate: false });
+  const [position, setPosition] = useState<ShowPosition>(() => ({ id: start, done: only ? stepCount(start) : 0, animate: false }));
   const index = Math.max(0, playable.indexOf(position.id));
   const slide = useDeck((s) => s.slides[position.id]?.slide);
   const steps = useMemo(() => (slide ? buildSteps(slide) : []), [slide]);
@@ -121,7 +139,9 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
   const stageH = notesUnder ? size.h * 0.72 : size.h;
   const scale = Math.min(size.w / SLIDE_WIDTH, stageH / SLIDE_HEIGHT);
 
-  useEffect(() => { reportSlide(position.id); }, [position.id]);
+  useEffect(() => {
+    reportSlide(position.id, only ? { position: index + 1, count: playable.length } : undefined);
+  }, [position.id, only, index, playable.length]);
 
   // A slide that left the show (deleted, skipped) hands over to its neighbour.
   useEffect(() => {
@@ -129,8 +149,11 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
       useView.getState().present(null);
       return;
     }
-    if (!playable.includes(position.id)) setPosition({ id: playable[Math.min(index, playable.length - 1)]!, done: 0, animate: false });
-  }, [playable, position.id, index]);
+    if (!playable.includes(position.id)) {
+      const id = playable[Math.min(index, playable.length - 1)]!;
+      setPosition({ id, done: only ? stepCount(id) : 0, animate: false });
+    }
+  }, [playable, position.id, index, only]);
 
   /* ----- Navigation ----- */
 
@@ -158,27 +181,36 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
       finishTransition.current?.();
       return;
     }
+    if (only) {
+      if (index < playable.length - 1) go(index + 1, 1, { allDone: true });
+      return;
+    }
     if (position.done < steps.length) {
       setPosition((p) => ({ ...p, done: p.done + 1, animate: true }));
       return;
     }
     if (index < playable.length - 1) go(index + 1, 1);
-  }, [leaving, position.done, steps.length, index, playable.length, go]);
+  }, [leaving, only, position.done, steps.length, index, playable.length, go]);
 
   const previous = useCallback(() => {
     if (leaving) finishTransition.current?.();
+    if (only) {
+      if (index > 0) go(index - 1, -1, { allDone: true });
+      return;
+    }
     if (position.done > 0) {
       setPosition((p) => ({ ...p, done: p.done - 1, animate: false }));
       return;
     }
     if (index > 0) go(index - 1, -1, { allDone: true });
-  }, [leaving, position.done, index, go]);
+  }, [leaving, only, position.done, index, go]);
 
   const exit = useCallback(() => {
     const id = position.id;
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
     useView.getState().present(null);
     useView.getState().showSlide(id);
+    reportSlide(id);
   }, [position.id]);
 
   // Auto steps: the first plays as the slide settles, the rest right after the step before.
@@ -225,7 +257,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
         state.timer = setTimeout(() => {
           const n = Number(state.text);
           state.text = '';
-          if (n >= 1 && n <= playableSlides().length) go(n - 1, n - 1 >= index ? 1 : -1, { cut: true });
+          if (n >= 1 && n <= playableSlides().length) go(n - 1, n - 1 >= index ? 1 : -1, { cut: true, allDone: only });
         }, 500);
         return;
       }
@@ -249,7 +281,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
           return;
         case 'Home':
           event.preventDefault();
-          go(0, -1, { cut: true });
+          go(0, -1, { cut: true, allDone: only });
           return;
         case 'End':
           event.preventDefault();
@@ -257,6 +289,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
           return;
         case 'f':
         case 'F':
+          if (only) return;
           event.preventDefault();
           toggleFullscreen(root.current);
           return;
@@ -266,7 +299,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
           return;
       }
     },
-    [next, previous, go, exit, index],
+    [next, previous, go, exit, index, only],
   );
 
   useEffect(() => {
@@ -285,12 +318,12 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
     window.addEventListener('resize', onResize);
     document.addEventListener('fullscreenchange', onFullscreen);
     // Full screen right away (the Present click is still a user gesture).
-    if (root.current?.requestFullscreen && !document.fullscreenElement) void root.current.requestFullscreen().catch(() => undefined);
+    if (!only && root.current?.requestFullscreen && !document.fullscreenElement) void root.current.requestFullscreen().catch(() => undefined);
     return () => {
       window.removeEventListener('resize', onResize);
       document.removeEventListener('fullscreenchange', onFullscreen);
     };
-  }, []);
+  }, [only]);
 
   const idle = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wake = useCallback(() => {
@@ -339,11 +372,18 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
   return (
     <div
       ref={root}
-      role="dialog"
-      aria-modal
-      aria-label="Presentation"
-      className={cn('fixed inset-0 z-[2000] select-none overflow-hidden bg-black', !controls && 'cursor-none')}
-      onPointerMove={wake}
+      role={only ? 'group' : 'dialog'}
+      aria-modal={only ? undefined : true}
+      aria-label={only ? pagerText(index, playable.length, slideTitle(slide)).announcement : 'Presentation'}
+      tabIndex={only ? 0 : undefined}
+      data-presenter-only={only ? '' : undefined}
+      className={cn(
+        'fixed inset-0 z-[2000] select-none overflow-hidden',
+        only ? 'outline-none focus-visible:outline-2 focus-visible:-outline-offset-4 focus-visible:outline-accent' : 'bg-black',
+        !controls && !only && 'cursor-none',
+      )}
+      style={only ? { background: backdrop(slide) ?? '#000' } : undefined}
+      onPointerMove={only ? undefined : wake}
       onPointerDown={(event) => {
         swipe.current = { x: event.clientX, y: event.clientY };
       }}
@@ -393,7 +433,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
         </div>
       ) : null}
 
-      <div
+      {only ? null : <div
         data-presenter-controls
         className={cn(
           'absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-neutral-900/85 px-2 py-1 text-white shadow-lg backdrop-blur transition-opacity duration-300',
@@ -423,7 +463,7 @@ function Show({ start, speaker }: { start: string; speaker: boolean }): ReactNod
           onClick={() => toggleFullscreen(root.current)}
         />
         <IconButton label="Stop presenting" shortcut="Esc" icon={<X className="size-4" />} className="text-white hover:bg-white/15 hover:text-white" onClick={exit} />
-      </div>
+      </div>}
 
       {speakerWindow ? (
         <SpeakerWindow

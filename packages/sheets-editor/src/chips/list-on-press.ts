@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { cellExplained, linkAddressesAt } from '../state/explained-under-cell.ts';
 import { isSameCell, anchorCellOf, isAnchorOfActiveCell } from '../selection/model.ts';
 import { doesCellTakeCalendar } from './calendar.ts';
@@ -8,21 +7,22 @@ import { commentAtActiveCell, isActiveCellInOpenComment, doesCommentModePick } f
 import { asOneCellSelection, editEndsOnAnotherCell } from '../editor/commit-moves.ts';
 import { hitTestGrid } from '../grid/geometry.ts';
 import { layoutOfView } from '../grid/layout.ts';
-import { withNoEffects } from '../state/transitions.ts';
+import { withNoEffects, type PageEffect, type PageTransition } from '../state/transitions.ts';
 import { textToEditAt, startEntryEditing } from '../editor/start-entry.ts';
 import { toggleableCheckboxValue } from './checkbox-presses.ts';
 import { fixAtCell } from '../formulas/fix/fixes-on-cells.ts';
 import { isFormulaText } from './dropdown-pane-edits.ts';
 import { openDropdownList } from './dropdowns.ts';
-import type { WorkbookReads } from '../model/workbook.ts';
+import type { CellId, WorkbookReads } from '../model/workbook.ts';
 import type { PageState } from '../state/initial-state.ts';
 import type { ReadsWithTextMeasurer } from '../state/controller.ts';
-export function isLinkCardOfCellShown(state: PageState, reads: WorkbookReads, cellId?: Dynamic) {
+import type { PageContext, PointerPressed, SelectAfterEdit } from '../state/event-reducer.ts';
+export function isLinkCardOfCellShown(state: PageState, reads: WorkbookReads, cellId: CellId): boolean {
   let card = cellExplained(state, reads);
   if (card === null || linkAddressesAt(state, reads, card.cellId).length === 0) return false;
   return card.isByPress || isSameCell(card.cellId, cellId);
 }
-export function doesCellOpenItsOwnOnPress(state: PageState, reads: WorkbookReads, cell?: Dynamic) {
+export function doesCellOpenItsOwnOnPress(state: PageState, reads: WorkbookReads, cell: CellId): boolean {
   let anchorCell = anchorCellOf(reads, cell);
   return (
     (state.isOnPhone && doesCellTakeCalendar(reads, anchorCell)) ||
@@ -33,27 +33,27 @@ export function doesCellOpenItsOwnOnPress(state: PageState, reads: WorkbookReads
     isLinkCardOfCellShown(state, reads, anchorCell)
   );
 }
-export function openListOfPressedActiveCell(state: PageState, reads: WorkbookReads, select?: Dynamic) {
+export function openListOfPressedActiveCell(state: PageState, reads: WorkbookReads, select: SelectAfterEdit): PageState {
   let oneCell = asOneCellSelection(select);
   return oneCell !== null && isAnchorOfActiveCell(state, reads, oneCell.activeCell) ? openListOfActiveCell(state, reads) : state;
 }
 export function openListOnPress(
-  before: Dynamic,
-  step: Dynamic,
-  event: Dynamic,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic,
-) {
+  before: PageState,
+  step: PageTransition,
+  event: PointerPressed,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition {
   if (refusalOfEveryEdit !== null || !editEndsOnAnotherCell(before, step, event.isShiftHeld)) return step;
   if (hitTestGrid(event, before, layoutOfView(before, reads))?.kind !== 'cell') return step;
-  let { state: state, effects: effects } = step;
+  let { state, effects } = step;
   return effects.length > 0
     ? {
-        state: state,
+        state,
         effects: effects.map(opensListOfPressedCell),
       }
     : withNoEffects(openListOfActiveCell(state, reads));
 }
-export function openEntryOfActiveCell(state: PageState, reads: ReadsWithTextMeasurer) {
+export function openEntryOfActiveCell(state: PageState, reads: ReadsWithTextMeasurer): PageState {
   let anchorCell = anchorCellOf(reads, state.activeCell),
     text = textToEditAt(state, reads, state.activeCell);
   return state.mode.kind !== 'navigating' ||
@@ -66,16 +66,16 @@ export function openEntryOfActiveCell(state: PageState, reads: ReadsWithTextMeas
     ? state
     : startEntryEditing(state, reads, text, 'cell', 'pointer');
 }
-export function openEntryOfPressedActiveCell(state: PageState, reads: ReadsWithTextMeasurer, select?: Dynamic) {
+export function openEntryOfPressedActiveCell(state: PageState, reads: ReadsWithTextMeasurer, select: SelectAfterEdit): PageState {
   let oneCell = asOneCellSelection(select);
   return oneCell !== null && isAnchorOfActiveCell(state, reads, oneCell.activeCell) ? openEntryOfActiveCell(state, reads) : state;
 }
 export function openEntryOnPress(
-  before: Dynamic,
-  step: Dynamic,
-  event: Dynamic,
-  { reads: reads, refusalOfEveryEdit: refusalOfEveryEdit }: Dynamic,
-) {
+  before: PageState,
+  step: PageTransition,
+  event: PointerPressed,
+  { reads, refusalOfEveryEdit }: Pick<PageContext, 'reads' | 'refusalOfEveryEdit'>,
+): PageTransition {
   if (
     !event.isByFinger ||
     !before.isOnPhone ||
@@ -88,16 +88,16 @@ export function openEntryOnPress(
   )
     return step;
   if (hitTestGrid(event, before, layoutOfView(before, reads))?.kind !== 'cell') return step;
-  let { state: state, effects: effects } = step;
+  let { state, effects } = step;
   return effects.length > 0
     ? {
-        state: state,
+        state,
         effects: effects.map(opensEntryOfPressedCell),
       }
     : withNoEffects(openEntryOfActiveCell(state, reads));
 }
-export const openListOfActiveCell = (state: PageState, reads: WorkbookReads) => refreshPeopleList(openDropdownList(state, reads), reads);
-export const opensListOfPressedCell = (effect?: Dynamic) =>
+export const openListOfActiveCell = (state: PageState, reads: WorkbookReads): PageState => refreshPeopleList(openDropdownList(state, reads), reads);
+export const opensListOfPressedCell = (effect: PageEffect): PageEffect =>
   effect.kind === 'queueEdit' && asOneCellSelection(effect.ifQueued.select) !== null
     ? {
         ...effect,
@@ -107,7 +107,7 @@ export const opensListOfPressedCell = (effect?: Dynamic) =>
         },
       }
     : effect;
-export const opensEntryOfPressedCell = (effect?: Dynamic) =>
+export const opensEntryOfPressedCell = (effect: PageEffect): PageEffect =>
   effect.kind === 'queueEdit' && asOneCellSelection(effect.ifQueued.select) !== null
     ? {
         ...effect,
@@ -117,11 +117,11 @@ export const opensEntryOfPressedCell = (effect?: Dynamic) =>
         },
       }
     : effect;
-export const withoutEntryOfPressedCell = (effect?: Dynamic) => {
+export const withoutEntryOfPressedCell = (effect: PageEffect): PageEffect => {
   if (effect.kind !== 'queueEdit' || effect.ifQueued.thenEntryOfPressedCell === undefined) return effect;
   let { thenEntryOfPressedCell: _thenEntryOfPressedCell, ...ifQueued } = effect.ifQueued;
   return {
     ...effect,
-    ifQueued: ifQueued,
+    ifQueued,
   };
 };

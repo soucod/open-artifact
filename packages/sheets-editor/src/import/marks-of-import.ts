@@ -1,33 +1,35 @@
-import type { Dynamic } from '../dynamic.ts';
-import type { PageState } from '../state/initial-state.ts';
+import type { Edit } from '@open-artifact/sheets-core';
+import type { MarksOfImport, MarksOfImportToCome, PageState, StateWhenImportMarked } from '../state/initial-state.ts';
+import type { PageEvent } from '../state/event-reducer.ts';
 import type { WorkbookReads } from '../model/workbook.ts';
-export function importMarksToCome(edit: Dynamic, reads: WorkbookReads) {
+import type { DrawnCell, DrawnRow } from '../grid/grid-drawing.tsx';
+export function importMarksToCome(edit: Edit, reads: WorkbookReads): MarksOfImportToCome | null {
   if (edit.kind !== 'importTableIntoSheet') return null;
-  let { sheetId: sheetId, columns: columns, how: how } = edit.table;
+  let { sheetId, columns, how } = edit.table;
   let changes = reads.whatATableChanges(edit.table);
   if (changes === null || changes.kind === 'refused') return null;
   let isReplacingRows = how.kind === 'replaceRows';
   return {
-    sheetId: sheetId,
-    updated: new (Set as Dynamic)(
+    sheetId,
+    updated: new Set(
       isReplacingRows
         ? []
         : changes.rows.flatMap(
-            (row?: Dynamic) =>
+            (row) =>
               row.kind !== 'changes'
                 ? []
-                : row.columns.flatMap((column?: Dynamic) => {
-                    let value = columns[column];
-                    return value === null || value === undefined ? [] : [`${row.row} ${value.column}`];
+                : row.columns.flatMap((columnIndex) => {
+                    let columnInto = columns[columnIndex];
+                    return columnInto === null || columnInto === undefined ? [] : [`${row.row} ${columnInto.column}`];
                   }),
           ),
     ),
-    columns: new (Set as Dynamic)(columns.flatMap((column?: Dynamic) => (column === null ? [] : [column.column]))),
-    rowsBefore: new (Set as Dynamic)(isReplacingRows ? [] : reads.rowsAsTheyStand(sheetId).keys()),
+    columns: new Set(columns.flatMap((columnInto) => (columnInto === null ? [] : [columnInto.column]))),
+    rowsBefore: new Set(isReplacingRows ? [] : reads.rowsAsTheyStand(sheetId).keys()),
   };
 }
-export function updateImportMarks(state: PageState, event: Dynamic, reads: WorkbookReads) {
-  let { marksOfImport: marksOfImport, marksOfImportToCome: marksOfImportToCome } = state;
+export function updateImportMarks(state: PageState, event: PageEvent, reads: WorkbookReads): PageState {
+  let { marksOfImport, marksOfImportToCome } = state;
   if (event.kind !== 'editAnswered' || event.edit.kind !== 'importTableIntoSheet' || marksOfImportToCome === null)
     return marksOfImport !== null && (event.kind === 'marksOfImportOver' || !areImportMarksStillShown(state, marksOfImport))
       ? {
@@ -35,25 +37,25 @@ export function updateImportMarks(state: PageState, event: Dynamic, reads: Workb
           marksOfImport: null,
         }
       : state;
-  let value = event.outcome.kind === 'editQueued' ? event.outcome.placeChanged?.area : null;
-  if (value === null || value === undefined)
+  let areaChanged = event.outcome.kind === 'editQueued' ? event.outcome.placeChanged?.area : null;
+  if (areaChanged === null || areaChanged === undefined)
     return {
       ...state,
       marksOfImport: null,
       marksOfImportToCome: null,
     };
-  let { sheetId: sheetId, updated: updated, columns: columns, rowsBefore: rowsBefore } = marksOfImportToCome;
+  let { sheetId, updated, columns, rowsBefore } = marksOfImportToCome;
   return {
     ...state,
     marksOfImportToCome: null,
     marksOfImport: {
-      sheetId: sheetId,
-      updated: updated,
-      columns: columns,
-      addedRows: new (Set as Dynamic)([...reads.rowsAsTheyStand(sheetId).keys()].filter((input?: Dynamic) => !rowsBefore.has(input))),
+      sheetId,
+      updated,
+      columns,
+      addedRows: new Set([...reads.rowsAsTheyStand(sheetId).keys()].filter((rowId) => !rowsBefore.has(rowId))),
       rowNumbersWritten: {
-        first: value.topRowIndex + 1,
-        last: value.topRowIndex + value.rowCount,
+        first: areaChanged.topRowIndex + 1,
+        last: areaChanged.topRowIndex + areaChanged.rowCount,
       },
       stateWhenSet: {
         changesAskedFor: state.changesAskedFor,
@@ -67,42 +69,53 @@ export function updateImportMarks(state: PageState, event: Dynamic, reads: Workb
     },
   };
 }
-export function markImportedCells(marks: Dynamic, { marksOfImport: marksOfImport, sheetId: sheetId }: Dynamic) {
-  if (marksOfImport === null || marksOfImport.sheetId !== sheetId) return marks;
-  let value = (input?: Dynamic, options?: Dynamic) =>
-    marksOfImport.addedRows.has(input.key) &&
-    input.rowNumber >= marksOfImport.rowNumbersWritten.first &&
-    input.rowNumber <= marksOfImport.rowNumbersWritten.last
-      ? marksOfImport.columns.has(options)
+export function markImportedCells(
+  rows: DrawnRow[],
+  { marksOfImport, sheetId }: Pick<PageState, 'marksOfImport' | 'sheetId'>,
+): DrawnRow[] {
+  if (marksOfImport === null || marksOfImport.sheetId !== sheetId) return rows;
+  let markOfCell = (row: DrawnRow, columnId: string): DrawnCell['markOfImport'] =>
+    marksOfImport.addedRows.has(row.key) &&
+    row.rowNumber >= marksOfImport.rowNumbersWritten.first &&
+    row.rowNumber <= marksOfImport.rowNumbersWritten.last
+      ? marksOfImport.columns.has(columnId)
         ? 'added'
         : null
-      : marksOfImport.updated.has(`${input.key} ${options}`)
+      : marksOfImport.updated.has(`${row.key} ${columnId}`)
         ? 'updated'
         : null;
-  let marksOnSheet = marks.filter((mark?: Dynamic) => mark.cells.some((cell?: Dynamic) => value(mark, cell.key) !== null));
-  let staggerMs = Math.min(120, 1200 / marksOnSheet.length);
-  return marks.map((mark?: Dynamic) => {
-    let value2 = marksOnSheet.indexOf(mark);
-    return value2 < 0
-      ? mark
+  let markedRows = rows.filter((row) => row.cells.some((cell) => markOfCell(row, cell.key) !== null));
+  let staggerMs = Math.min(120, 1200 / markedRows.length);
+  return rows.map((row) => {
+    let markedIndex = markedRows.indexOf(row);
+    return markedIndex < 0
+      ? row
       : {
-          ...mark,
-          cells: mark.cells.map((cell?: Dynamic) => {
-            let value3 = value(mark, cell.key);
-            return value3 === null
+          ...row,
+          cells: row.cells.map((cell) => {
+            let mark = markOfCell(row, cell.key);
+            return mark === null
               ? cell
               : {
                   ...cell,
-                  markOfImport: value3,
-                  markOfImportDelayMs: Math.round(value2 * staggerMs),
+                  markOfImport: mark,
+                  markOfImportDelayMs: Math.round(markedIndex * staggerMs),
                 };
           }),
         };
   });
 }
-export const IMPORT_MARKS_VIEW_KEYS = ['changesAskedFor', 'sheetId', 'scrollTop', 'scrollLeft', 'gridWidth', 'gridHeight', 'zoom'];
+export const IMPORT_MARKS_VIEW_KEYS: (keyof StateWhenImportMarked)[] = [
+  'changesAskedFor',
+  'sheetId',
+  'scrollTop',
+  'scrollLeft',
+  'gridWidth',
+  'gridHeight',
+  'zoom',
+];
 export const IMPORT_MARKS_SHOWN_MS = 2400;
-export const areImportMarksStillShown = (state: Dynamic, { stateWhenSet: stateWhenSet }: Dynamic) =>
-  IMPORT_MARKS_VIEW_KEYS.every((input?: Dynamic) => state[input] === stateWhenSet[input]) &&
+export const areImportMarksStillShown = (state: PageState, { stateWhenSet }: MarksOfImport) =>
+  IMPORT_MARKS_VIEW_KEYS.every((key) => state[key] === stateWhenSet[key]) &&
   state.mode.kind !== 'editing' &&
   state.importOfAFile === null;

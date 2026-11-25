@@ -61,7 +61,14 @@ export interface AckFile {
   /** `null`: the file is gone. */
   hash: string | null;
   size?: number;
+  /** The working copy takes this text even when it has unsaved changes. */
   adopt?: boolean;
+  /**
+   * The working copy stays as it is, even when it reads like the server's text before: a save's answer for a file
+   * the viewer changed while it was on its way. Undo can bring the text back to what the server held before that
+   * save (Remove a link, the save goes out, ⌘Z), and that text is still the viewer's change to save next.
+   */
+  keep?: boolean;
 }
 
 /** Longest undo history kept. */
@@ -213,9 +220,9 @@ export const useFiles = create<FilesState>()((set, get) => ({
     const listing = { ...state.listing };
     const server = { ...state.server };
     const texts = { ...state.texts };
-    for (const [path, { text, hash, size, adopt = false }] of Object.entries(files)) {
+    for (const [path, { text, hash, size, adopt = false, keep = false }] of Object.entries(files)) {
       // Is the working copy still what the server held before? Then it follows the server.
-      const clean = path in state.server ? texts[path] === fromDisk(path, state.server[path]!) : !(path in texts);
+      const clean = !keep && (path in state.server ? texts[path] === fromDisk(path, state.server[path]!) : !(path in texts));
       if (hash === null) {
         delete listing[path];
         delete server[path];

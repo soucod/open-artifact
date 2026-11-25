@@ -1,4 +1,3 @@
-import type { Dynamic } from '../../dynamic.ts';
 import { parseA1Area } from '../../model/a1-references.ts';
 import {
   NOTHING_SAID,
@@ -10,7 +9,45 @@ import {
   SLOT_READERS,
   typedTextOfPieces,
 } from './reading.ts';
-export function looksLikeIdentifiers(cells?: Dynamic, where?: Dynamic) {
+import type { CellArea } from '../../selection/model.ts';
+import type { FormulaBuilder, FormulaOfWords, Said, SlotReader, SlotReading, WordPiece, WordsReading } from './reading.ts';
+import type { FormulaWhere } from './where.ts';
+import type { HeldKind } from './area-holds.ts';
+/** A way of adding up or counting cells that words may name. */
+export type Aggregate =
+  | 'SUM'
+  | 'TOTAL'
+  | 'AVERAGE'
+  | 'COUNT'
+  | 'HOW_MANY'
+  | 'MIN'
+  | 'MAX'
+  | 'LOWEST'
+  | 'HIGHEST'
+  | 'SMALLEST'
+  | 'LARGEST'
+  | 'MEDIAN'
+  | 'MODE'
+  | 'STDEV'
+  | 'VAR'
+  | 'STDEVP'
+  | 'VARP';
+/** A condition read from words: which cells it judges (null for the cells aggregated), how, and against what. */
+export interface ConditionSaid {
+  judged: Said | null;
+  comparison: string;
+  value: Said;
+  isMarked: boolean;
+  isBegunLoosely?: boolean;
+}
+/** Conditions read from where they start, and the piece after them. */
+type ConditionReading = [conditions: ConditionSaid[], end: number];
+/** A phrase's key and its words, or, once found, its key and the piece after it. */
+type KeyedPhrase = [key: string, words: string[]];
+type PhraseFound = [key: string, end: number];
+/** A condition as a criterion of a conditional function: the cells judged, the criterion, and other spellings of its text. */
+export type Criterion = [judged: Said, criterion: string, otherSpellings?: string[]];
+export function looksLikeIdentifiers(cells: CellArea, where: FormulaWhere) {
   if (where.isAnyRepeatedIn(cells)) return false;
   let cellCount = cells.rowCount * cells.columnCount;
   let [smallest = 0, largest = 0] = where.numbersLieIn(cells) ?? [];
@@ -24,22 +61,22 @@ export function looksLikeIdentifiers(cells?: Dynamic, where?: Dynamic) {
   if (where.firstColumnIndexOfTable === cells.leftColumnIndex) return true;
   return cellCount >= MIN_SERIAL_CELLS && Number.isInteger(smallest) && largest - smallest === cellCount - 1;
 }
-export function holdsNumbersToAggregate({ cells: cells, isByHeading: isByHeading }: Dynamic, where?: Dynamic) {
+export function holdsNumbersToAggregate({ cells, isByHeading }: Said, where: FormulaWhere) {
   if (cells === null) return false;
   if (isByHeading !== true) return where.holdsNumbersAlone(cells);
   let kinds = where.kindsHeldIn(cells);
   return !looksLikeIdentifiers(cells, where) && (kinds.size === 0 || isNumbersOnlyKind(kinds));
 }
-export function looksLikeRatios(cells?: Dynamic, where?: Dynamic) {
+export function looksLikeRatios(cells: CellArea, where: FormulaWhere) {
   let [smallest = 0, largest = 0] = where.numbersLieIn(cells) ?? [];
   let isFractional = smallest >= -1 && largest <= 1 && !where.isEveryNumberWholeIn(cells);
   return where.kindsHeldIn(cells).has('percent') || isFractional;
 }
-export function isAggregateSensible(aggregate?: Dynamic, said?: Dynamic, where?: Dynamic) {
+export function isAggregateSensible(aggregate: Aggregate, said: Said, where: FormulaWhere) {
   if (said.cells === null || !holdsNumbersToAggregate(said, where)) return false;
   if (!(aggregate in AGGREGATE_FUNCTION_ALIASES) || said.isByHeading !== true) return true;
-  let heading = where.columns.find(({ cells: cells }: Dynamic) => cells === said.written)?.heading ?? '';
-  let headingOrTypedMatches = (pattern?: Dynamic) => pattern.test(heading) || pattern.test(said.typed);
+  let heading = where.columns.find(({ cells }) => cells === said.written)?.heading ?? '';
+  let headingOrTypedMatches = (pattern: RegExp) => pattern.test(heading) || pattern.test(said.typed);
   if (aggregate === 'TOTAL')
     return !(
       looksLikeRatios(said.cells, where) ||
@@ -51,7 +88,7 @@ export function isAggregateSensible(aggregate?: Dynamic, said?: Dynamic, where?:
   let [smallest = 0, largest = 0] = where.numbersLieIn(said.cells) ?? [];
   return smallest >= 0 || (largest > 0 && (aggregate === 'LOWEST' || aggregate === 'HIGHEST'));
 }
-export function countFormulaFromWords(aggregate: Dynamic, said: Dynamic, { where: where, call: call }: Dynamic) {
+export function countFormulaFromWords(aggregate: Aggregate, said: Said, { where, call }: FormulaBuilder) {
   let kinds = said.cells === null ? null : where.kindsHeldIn(said.cells);
   if (kinds === null || kinds.size === 0 || kinds.has('error')) return null;
   if (!isCleanCellsSaid(said, where)) return null;
@@ -59,47 +96,50 @@ export function countFormulaFromWords(aggregate: Dynamic, said: Dynamic, { where
   if (!hasAnyOf(kinds, 'text', 'trueOrFalse')) return mayCountNumbers ? call('COUNT', said) : null;
   return kinds.size === 1 && kinds.has('text') && !where.isAnyRepeatedIn(said.cells ?? EMPTY_SAID_AREA) ? call('COUNTA', said) : null;
 }
-export function phraseList(phrasesByKey?: Dynamic) {
+export function phraseList(phrasesByKey: Record<string, string>) {
   let list = Object.entries(phrasesByKey).flatMap(
-    ([key, phrases]: Dynamic) => phrases.split(', ').map((phrase?: Dynamic) => [key, phrase.split(' ')]),
+    ([key, phrases]) => phrases.split(', ').map((phrase): KeyedPhrase => [key, phrase.split(' ')]),
   );
-  list.sort(([, words]: Dynamic, [, otherWords]: Dynamic) => otherWords.length - words.length);
+  list.sort(([, words], [, otherWords]) => otherWords.length - words.length);
   return list;
 }
-export function phraseAt({ pieces: pieces }: Dynamic, start?: Dynamic, phrases?: Dynamic) {
-  for (let [key, words] of phrases as Dynamic)
+export function phraseAt({ pieces }: WordsReading, start: number, phrases: KeyedPhrase[]): PhraseFound | null {
+  for (let [key, words] of phrases)
     if (
-      words.every((word?: Dynamic, offset?: Dynamic) => pieces[start + offset]?.typed === word && pieces[start + offset]?.kind !== 'quoted')
+      words.every((word, offset) => pieces[start + offset]?.typed === word && pieces[start + offset]?.kind !== 'quoted')
     )
       return [key, start + words.length];
   return null;
 }
-export function* readConditions(reading?: Dynamic, start?: Dynamic, isAfterAnd?: Dynamic): Generator<Dynamic, Dynamic, Dynamic> {
+export function* readConditions(reading: WordsReading, start: number, isAfterAnd: boolean): Generator<ConditionReading, void, undefined> {
   let opening = phraseAt(reading, start, CONDITION_OPENING_PHRASES);
   let isMarkedAsCondition = isAfterAnd || opening !== null;
   let afterOpening = opening?.[1] ?? start;
-  let judgedOptions = [[null, afterOpening], ...(isMarkedAsCondition ? readSlot('cells', reading, afterOpening) : [])];
-  for (let [judged, judgedEnd] of judgedOptions as Dynamic) {
-    let at: Dynamic = judgedEnd;
-    for (let firstFound: Dynamic = phraseAt(reading, at, IS_PHRASES); firstFound !== null; firstFound = phraseAt(reading, at, IS_PHRASES))
+  let judgedOptions: [judged: Said | null, end: number][] = [
+    [null, afterOpening],
+    ...(isMarkedAsCondition ? readSlot('cells', reading, afterOpening) : []),
+  ];
+  for (let [judged, judgedEnd] of judgedOptions) {
+    let at = judgedEnd;
+    for (let firstFound = phraseAt(reading, at, IS_PHRASES); firstFound !== null; firstFound = phraseAt(reading, at, IS_PHRASES))
       at = firstFound[1];
     let isMarked = isMarkedAsCondition || at > judgedEnd;
     if (reading.pieces[at]?.typed === 'between') {
-      for (let [firstFound, next] of readSlot('number', reading, at + 1) as Dynamic)
-        for (let [secondFound, end] of (reading.pieces[next]?.typed === 'and' ? readSlot('number', reading, next + 1) : []) as Dynamic)
-          if ((firstFound.number ?? 0) <= (secondFound.number ?? 0))
+      for (let [lowest, next] of readSlot('number', reading, at + 1))
+        for (let [highest, end] of reading.pieces[next]?.typed === 'and' ? readSlot('number', reading, next + 1) : [])
+          if ((lowest.number ?? 0) <= (highest.number ?? 0))
             yield [
               [
                 {
-                  judged: judged,
+                  judged,
                   comparison: '>=',
-                  value: firstFound,
+                  value: lowest,
                   isMarked: true,
                 },
                 {
-                  judged: judged,
+                  judged,
                   comparison: '<=',
-                  value: secondFound,
+                  value: highest,
                   isMarked: true,
                 },
               ],
@@ -107,29 +147,29 @@ export function* readConditions(reading?: Dynamic, start?: Dynamic, isAfterAnd?:
             ];
     }
     if (judged === null && isMarkedAsCondition)
-      for (let [firstFound, next] of readSlot('words', reading, reading.pieces[at]?.typed === 'the' ? at + 1 : at) as Dynamic)
-        for (let [secondFound, end] of readSlot('cells', reading, next) as Dynamic)
+      for (let [words, next] of readSlot('words', reading, reading.pieces[at]?.typed === 'the' ? at + 1 : at))
+        for (let [cells, end] of readSlot('cells', reading, next))
           yield [
             [
               {
-                judged: secondFound,
+                judged: cells,
                 comparison: '',
-                value: firstFound,
+                value: words,
                 isMarked: true,
               },
             ],
             end,
           ];
     let comparisonFound = phraseAt(reading, at, COMPARISON_PHRASES);
-    for (let [firstFound, next] of [...(comparisonFound === null ? [] : [comparisonFound]), ['', at]] as Dynamic)
-      for (let [secondFound, end] of [...readSlot('number', reading, next), ...readSlot('words', reading, next)] as Dynamic)
+    for (let [comparison, next] of [...(comparisonFound === null ? [] : [comparisonFound]), ['', at] satisfies PhraseFound])
+      for (let [value, end] of [...readSlot('number', reading, next), ...readSlot('words', reading, next)])
         yield [
           [
             {
-              judged: judged,
-              comparison: firstFound,
-              value: secondFound,
-              isMarked: isMarked || firstFound !== '',
+              judged,
+              comparison,
+              value,
+              isMarked: isMarked || comparison !== '',
               isBegunLoosely: opening?.[0] === 'loosely' && at === judgedEnd,
             },
           ],
@@ -137,41 +177,41 @@ export function* readConditions(reading?: Dynamic, start?: Dynamic, isAfterAnd?:
         ];
   }
 }
-export function conditionReadingsAt(reading?: Dynamic, start?: Dynamic, isAfterAnd?: Dynamic) {
-  let byKey: Dynamic = conditionReadingsCache.get(reading.pieces);
-  if (byKey === undefined) conditionReadingsCache.set(reading.pieces, (byKey = new (Map as Dynamic)()));
+export function conditionReadingsAt(reading: WordsReading, start: number, isAfterAnd: boolean) {
+  let byKey = conditionReadingsCache.get(reading.pieces);
+  if (byKey === undefined) conditionReadingsCache.set(reading.pieces, (byKey = new Map<string, ConditionReading[]>()));
   let key = [start, isAfterAnd].join();
-  let readings: Dynamic = byKey.get(key);
-  if (readings === undefined) byKey.set(key, (readings = Array.from<Dynamic>(readConditions(reading, start, isAfterAnd))));
+  let readings = byKey.get(key);
+  if (readings === undefined) byKey.set(key, (readings = Array.from(readConditions(reading, start, isAfterAnd))));
   return readings;
 }
-export function conditionListsAt(reading?: Dynamic, start?: Dynamic, isAfterAnd?: Dynamic, conditionsLeft: Dynamic = MAX_CONDITIONS) {
+export function conditionListsAt(reading: WordsReading, start: number, isAfterAnd: boolean, conditionsLeft: number = MAX_CONDITIONS): ConditionSaid[][] {
   if (conditionsLeft === 0) return TOO_MANY_READINGS;
-  let byKey: Dynamic = conditionListsCache.get(reading.pieces);
-  if (byKey === undefined) conditionListsCache.set(reading.pieces, (byKey = new (Map as Dynamic)()));
+  let byKey = conditionListsCache.get(reading.pieces);
+  if (byKey === undefined) conditionListsCache.set(reading.pieces, (byKey = new Map<string, ConditionSaid[][]>()));
   let key = [start, isAfterAnd, conditionsLeft].join();
   let cached = byKey.get(key);
   if (cached !== undefined) return cached;
-  let lists: Dynamic = [];
-  let isTooMany: Dynamic = false;
-  for (let [conditions, end] of conditionReadingsAt(reading, start, isAfterAnd) as Dynamic) {
+  let lists: ConditionSaid[][] = [];
+  let isTooMany = false;
+  for (let [conditions, end] of conditionReadingsAt(reading, start, isAfterAnd)) {
     if (end === reading.pieces.length) lists.push(conditions);
     else if (reading.pieces[end]?.typed === 'and') {
       let rest = conditionListsAt(reading, end + 1, true, conditionsLeft - 1);
       isTooMany ||= rest === TOO_MANY_READINGS;
-      for (let restConditions of rest as Dynamic) lists.push([...conditions, ...restConditions]);
+      for (let restConditions of rest) lists.push([...conditions, ...restConditions]);
     }
     isTooMany ||= lists.length > MAX_CONDITION_LISTS;
     if (isTooMany) break;
   }
-  let result = isTooMany ? TOO_MANY_READINGS : lists;
-  byKey.set(key, result);
-  return result;
+  let conditionLists = isTooMany ? TOO_MANY_READINGS : lists;
+  byKey.set(key, conditionLists);
+  return conditionLists;
 }
-export function everyHeadedColumnSaid(where?: Dynamic) {
-  let said: Dynamic = headedColumnsSaidCache.get(where);
+export function everyHeadedColumnSaid(where: FormulaWhere) {
+  let said = headedColumnsSaidCache.get(where);
   if (said === undefined) {
-    said = where.columns.flatMap(({ cells: cellsWritten }: Dynamic) => {
+    said = where.columns.flatMap(({ cells: cellsWritten }): Said[] => {
       let cells = parseA1Area(cellsWritten, where);
       return cells === null
         ? []
@@ -179,7 +219,7 @@ export function everyHeadedColumnSaid(where?: Dynamic) {
             {
               ...NOTHING_SAID,
               written: cellsWritten,
-              cells: cells,
+              cells,
               isByHeading: true,
             },
           ];
@@ -188,27 +228,27 @@ export function everyHeadedColumnSaid(where?: Dynamic) {
   }
   return said;
 }
-export function canAddUpTextVariants(text?: Dynamic, otherSpellings?: Dynamic, cells?: Dynamic, where?: Dynamic) {
+export function canAddUpTextVariants(text: string, otherSpellings: string[], cells: CellArea, where: FormulaWhere) {
   return (
     otherSpellings.length <= 2 &&
-    !otherSpellings.some((spelling?: Dynamic) => CRITERIA_SYNTAX_PATTERN.test(spelling) || IGNORABLE_CHARACTER_PATTERN.test(spelling)) &&
+    !otherSpellings.some((spelling) => CRITERIA_SYNTAX_PATTERN.test(spelling) || IGNORABLE_CHARACTER_PATTERN.test(spelling)) &&
     (otherSpellings.length === 0 ||
       where.canBeAddedUpIn(
         cells,
         text,
-        otherSpellings.map((spelling?: Dynamic) => spelling.toLowerCase()),
+        otherSpellings.map((spelling) => spelling.toLowerCase()),
       ))
   );
 }
 export function criterionOfCondition(
-  { judged: judged, comparison: comparison, value: value, isMarked: isMarked, isBegunLoosely: isBegunLoosely }: Dynamic,
-  aggregate?: Dynamic,
-  said?: Dynamic,
-  where?: Dynamic,
-) {
+  { judged, comparison, value, isMarked, isBegunLoosely }: ConditionSaid,
+  aggregate: Aggregate,
+  said: Said,
+  where: FormulaWhere,
+): Criterion | typeof AMBIGUOUS_READING | null {
   if (said.cells === null) return null;
-  let { cells: cells } = said;
-  let otherColumns = everyHeadedColumnSaid(where).filter(({ written: written }: Dynamic) => written !== said.written);
+  let { cells } = said;
+  let otherColumns = everyHeadedColumnSaid(where).filter(({ written }) => written !== said.written);
   if (value.number !== null) {
     if (!isMarked) return null;
     if (comparison === '' && judged === null && (isBegunLoosely === true || !isCountAggregate(aggregate))) return null;
@@ -243,36 +283,36 @@ export function criterionOfCondition(
   if (/^all\b/.test(text)) return AMBIGUOUS_READING;
   let candidates = judged === null ? [...(isCountAggregate(aggregate) ? [said] : []), ...(isMarked ? otherColumns : [])] : [judged];
   let alignedCandidates = candidates.filter(
-    ({ cells: candidateCells }: Dynamic) => candidateCells !== null && areasLineUp(candidateCells, cells),
+    ({ cells: candidateCells }) => candidateCells !== null && areasLineUp(candidateCells, cells),
   );
-  let textMatches = alignedCandidates.flatMap((candidate?: Dynamic) => {
+  let textMatches = alignedCandidates.flatMap((candidate): [Said, string][] => {
     let textHeld = where.textHeldIn(candidate.cells ?? cells, text);
     return textHeld === null ? [] : [[candidate, textHeld]];
   });
   let criteria = textMatches.map(
-    ([candidate, textHeld]: Dynamic) => [
+    ([candidate, textHeld]): Criterion => [
       candidate,
       quoteForFormula(comparison + textHeld),
       where.textsWrittenOtherwiseIn(candidate.cells ?? cells, text),
     ],
   );
   if (
-    textMatches.some(([, textHeld]: Dynamic) => CRITERIA_SYNTAX_PATTERN.test(textHeld)) ||
+    textMatches.some(([, textHeld]) => CRITERIA_SYNTAX_PATTERN.test(textHeld)) ||
     (textMatches.length === 0 &&
       (/^[<>=]/.test(text) ? [judged ?? said] : [judged ?? said, ...alignedCandidates]).some(
-        (candidate?: Dynamic) => where.mayTextBeHeldIn(candidate.cells ?? cells, text),
+        (candidate) => where.mayTextBeHeldIn(candidate.cells ?? cells, text),
       ))
   )
     return AMBIGUOUS_READING;
-  if (textMatches.some(([candidate]: Dynamic) => where.isTextPartOfALongerOneIn(candidate.cells ?? cells, text))) return AMBIGUOUS_READING;
-  if (textMatches.some(([candidate]: Dynamic) => isPeriodInDateCells(text, candidate.cells ?? cells, where))) return AMBIGUOUS_READING;
+  if (textMatches.some(([candidate]) => where.isTextPartOfALongerOneIn(candidate.cells ?? cells, text))) return AMBIGUOUS_READING;
+  if (textMatches.some(([candidate]) => isPeriodInDateCells(text, candidate.cells ?? cells, where))) return AMBIGUOUS_READING;
   if (
     criteria.some(
-      ([candidate, , otherSpellings = []]: Dynamic) => !canAddUpTextVariants(text, otherSpellings, candidate.cells ?? cells, where),
+      ([candidate, , otherSpellings = []]) => !canAddUpTextVariants(text, otherSpellings, candidate.cells ?? cells, where),
     )
   )
     return AMBIGUOUS_READING;
-  if (comparison === '<>' && alignedCandidates.some((candidate?: Dynamic) => where.mayTextBeHeldIn(candidate.cells ?? cells, 'not ' + text)))
+  if (comparison === '<>' && alignedCandidates.some((candidate) => where.mayTextBeHeldIn(candidate.cells ?? cells, 'not ' + text)))
     return AMBIGUOUS_READING;
   let mayNameAHeading =
     (judged === null && isWithinAHeading(text, where)) || (MONTH_NAME_PATTERN.test(text) && namesAnyHeading('year', where));
@@ -283,78 +323,78 @@ export function criterionOfCondition(
   let blankCells = blankJudged?.cells ?? null;
   return blankJudged === undefined || blankCells === null || !areasLineUp(blankCells, cells) ? null : [blankJudged, quoteForFormula(comparison)];
 }
-export function conditionalAggregateFormula(aggregate?: Dynamic, said?: Dynamic, conditionsSaid?: Dynamic, builder?: Dynamic) {
-  let { where: where } = builder;
+export function conditionalAggregateFormula(aggregate: Aggregate, said: Said, conditionsSaid: Said, builder: FormulaBuilder): FormulaOfWords | null {
+  let { where } = builder;
   let conditions = conditionsOfSaid.get(conditionsSaid);
   if (conditions === undefined) return AMBIGUOUS_READING;
-  if (conditions.some(isUnjudgedNumberCondition) && conditions.some(({ judged: judged }: Dynamic) => judged !== null)) return null;
-  let criteria = conditions.map((condition?: Dynamic) => criterionOfCondition(condition, aggregate, said, where));
+  if (conditions.some(isUnjudgedNumberCondition) && conditions.some(({ judged }) => judged !== null)) return null;
+  let criteria = conditions.map((condition) => criterionOfCondition(condition, aggregate, said, where));
   if (criteria.includes(AMBIGUOUS_READING)) return AMBIGUOUS_READING;
   let readCriteria = criteria.flatMap(
-    (criterion?: Dynamic) => (criterion === null || criterion === AMBIGUOUS_READING ? [] : [criterion]),
+    (criterion): Criterion[] => (criterion === null || criterion === AMBIGUOUS_READING ? [] : [criterion]),
   );
   if (readCriteria.length < criteria.length) return null;
   let formula = conditionalAggregateCall(aggregate, said, conditions, readCriteria, builder);
-  let hasOtherSpellings = readCriteria.some(([, , otherSpellings = []]: Dynamic) => otherSpellings.length > 0);
+  let hasOtherSpellings = readCriteria.some(([, , otherSpellings = []]) => otherSpellings.length > 0);
   return formula === null && hasOtherSpellings ? AMBIGUOUS_READING : formula;
 }
 export function conditionalAggregateCall(
-  aggregate: Dynamic,
-  said: Dynamic,
-  conditions: Dynamic,
-  criteria: Dynamic,
-  { where: where, call: call }: Dynamic,
-) {
+  aggregate: Aggregate,
+  said: Said,
+  conditions: ConditionSaid[],
+  criteria: Criterion[],
+  { where, call }: FormulaBuilder,
+): FormulaOfWords | null {
   let [singleFunction, multiFunction] = CONDITIONAL_AGGREGATE_FUNCTIONS[aggregate] ?? [];
-  let pairs = criteria.map(([said2, criterion]: Dynamic) => [said2, criterion]);
+  let pairs = criteria.map(([judged, criterion]): [Said, string] => [judged, criterion]);
   if (multiFunction === undefined || pairs.length === 0 || said.cells === null) return null;
-  if (conditions.filter(({ judged: judged, value: value }: Dynamic) => judged === null && value.number === null).length > 1)
+  if (conditions.filter(({ judged, value }) => judged === null && value.number === null).length > 1)
     return AMBIGUOUS_READING;
-  let judgesOtherCells = pairs.some(([said2]: Dynamic) => said2.written !== said.written);
-  let holdsSeveralPeople = ({ cells: cells }: Dynamic) => cells !== null && where.kindsHeldIn(cells).has('severalPeople');
-  if (pairs.some(([said2]: Dynamic) => holdsSeveralPeople(said2))) return null;
+  let judgesOtherCells = pairs.some(([judged]) => judged.written !== said.written);
+  let holdsSeveralPeople = ({ cells }: Said) => cells !== null && where.kindsHeldIn(cells).has('severalPeople');
+  if (pairs.some(([judged]) => holdsSeveralPeople(judged))) return null;
   let equalityColumns = pairs
-    .filter(([, criterion]: Dynamic) => /^"[^<>]/.test(criterion))
-    .map(([said2]: Dynamic) => said2.written);
-  if (new (Set as Dynamic)(equalityColumns).size < equalityColumns.length) return null;
-  let notEqualColumns = new (Set as Dynamic)(
-    pairs.filter(([, criterion]: Dynamic) => criterion.startsWith('"<>')).map(([said2]: Dynamic) => said2.written),
+    .filter(([, criterion]) => /^"[^<>]/.test(criterion))
+    .map(([judged]) => judged.written);
+  if (new Set(equalityColumns).size < equalityColumns.length) return null;
+  let notEqualColumns = new Set(
+    pairs.filter(([, criterion]) => criterion.startsWith('"<>')).map(([judged]) => judged.written),
   );
-  if (equalityColumns.some((written?: Dynamic) => notEqualColumns.has(written))) return AMBIGUOUS_READING;
-  let isBlankInHeadedColumn = ([said2, criterion]: Dynamic) =>
-    said2.isByHeading === true && said2.cells !== null && !/^"(?:[<>]=?|<>)?-?\d[\d.]*"$/.test(criterion) && where.isAnyBlankIn(said2.cells);
+  if (equalityColumns.some((written) => notEqualColumns.has(written))) return AMBIGUOUS_READING;
+  let isBlankInHeadedColumn = ([judged, criterion]: [Said, string]) =>
+    judged.isByHeading === true && judged.cells !== null && !/^"(?:[<>]=?|<>)?-?\d[\d.]*"$/.test(criterion) && where.isAnyBlankIn(judged.cells);
   if (pairs.some(isBlankInHeadedColumn)) return null;
   if (isCountAggregate(aggregate)) {
     if (
       pairs.some(
-        ([said2, criterion]: Dynamic) =>
+        ([judged, criterion]) =>
           criterion.startsWith('"<>') &&
-          said2.cells !== null &&
-          (where.isAnyBlankIn(said2.cells) || (said2.isByHeading !== true && where.mayStartWithAHeading(said2.cells))),
+          judged.cells !== null &&
+          (where.isAnyBlankIn(judged.cells) || (judged.isByHeading !== true && where.mayStartWithAHeading(judged.cells))),
       )
     )
       return null;
     let kinds = where.kindsHeldIn(said.cells);
-    let value = hasAnyOf(kinds, 'number', 'percent');
-    if (aggregate === 'HOW_MANY' && value) return null;
-    if (said.isByHeading === true && value && looksLikeIdentifiers(said.cells, where)) return null;
+    let holdsNumbers = hasAnyOf(kinds, 'number', 'percent');
+    if (aggregate === 'HOW_MANY' && holdsNumbers) return null;
+    if (said.isByHeading === true && holdsNumbers && looksLikeIdentifiers(said.cells, where)) return null;
     if (judgesOtherCells && kinds.has('trueOrFalse')) return null;
     if (judgesOtherCells && where.isAnyRepeatedIn(said.cells)) return null;
-    if (judgesOtherCells && (where.isAnyBlankIn(said.cells) || value)) return null;
+    if (judgesOtherCells && (where.isAnyBlankIn(said.cells) || holdsNumbers)) return null;
   } else if (!isAggregateSensible(aggregate, said, where)) return null;
-  let callWith = (pairs2?: Dynamic) => {
-    if (isCountAggregate(aggregate)) return (call as Dynamic)(pairs2.length === 1 ? 'COUNTIF' : multiFunction, ...pairs2.flat());
-    return pairs2.length === 1 && singleFunction !== null && singleFunction !== undefined
-      ? (call as Dynamic)(singleFunction, ...pairs2.flat(), ...(judgesOtherCells ? [said] : []))
-      : (call as Dynamic)(multiFunction, said, ...pairs2.flat());
+  let callWith = (criteriaPairs: [Said, string][]) => {
+    if (isCountAggregate(aggregate)) return call(criteriaPairs.length === 1 ? 'COUNTIF' : multiFunction, ...criteriaPairs.flat());
+    return criteriaPairs.length === 1 && singleFunction !== null && singleFunction !== undefined
+      ? call(singleFunction, ...criteriaPairs.flat(), ...(judgesOtherCells ? [said] : []))
+      : call(multiFunction, said, ...criteriaPairs.flat());
   };
   let formula = callWith(pairs);
   let spelledOtherwise = criteria.flatMap(
-    ([said2, criterion, otherSpellings = []]: Dynamic, index?: Dynamic) =>
+    ([judged, criterion, otherSpellings = []], index) =>
       otherSpellings.length > 0
         ? [
             {
-              on: said2,
+              on: judged,
               condition: criterion,
               others: otherSpellings,
               at: index,
@@ -373,10 +413,10 @@ export function conditionalAggregateCall(
     )
       return AMBIGUOUS_READING;
     let mapped = firstSpelledOtherwise.others.map(
-      (spelling?: Dynamic) =>
+      (spelling) =>
         callWith(
           pairs.map(
-            (pair?: Dynamic, index?: Dynamic) =>
+            (pair, index): [Said, string] =>
               index === firstSpelledOtherwise.at ? [firstSpelledOtherwise.on, quoteForFormula(spelling)] : pair,
           ),
         ),
@@ -384,16 +424,16 @@ export function conditionalAggregateCall(
     return [formula, [formula, ...mapped].join('+'), 'onlyBeside'];
   }
   return mayAverageLeaveOutZeros(aggregate, said, where)
-    ? [formula, (call as Dynamic)(multiFunction, said, ...pairs.flat(), said, '"<>0"'), 'alone']
+    ? [formula, call(multiFunction, said, ...pairs.flat(), said, '"<>0"'), 'alone']
     : formula;
 }
-export function aggregateFormula(aggregate?: Dynamic, said?: Dynamic, builder?: Dynamic) {
+export function aggregateFormula(aggregate: Aggregate, said: Said, builder: FormulaBuilder): FormulaOfWords | null {
   if (isCountAggregate(aggregate)) return countFormulaFromWords(aggregate, said, builder);
   if (!isAggregateSensible(aggregate, said, builder.where)) return null;
   let formula = builder.call(AGGREGATE_FUNCTION_ALIASES[aggregate] ?? aggregate, said);
   return mayAverageLeaveOutZeros(aggregate, said, builder.where) ? [formula, builder.call('AVERAGEIF', said, '"<>0"'), 'alone'] : formula;
 }
-export const AGGREGATE_WORDS = {
+export const AGGREGATE_WORDS: Record<Aggregate, string> = {
   SUM: 'sum/sum_up',
   TOTAL: 'total/add_up',
   AVERAGE: 'average/avg/mean',
@@ -412,8 +452,8 @@ export const AGGREGATE_WORDS = {
   STDEVP: 'stdevp/population_standard_deviation',
   VARP: 'varp',
 };
-export const isCountAggregate = (aggregate?: Dynamic) => aggregate === 'COUNT' || aggregate === 'HOW_MANY';
-export const AGGREGATE_FUNCTION_ALIASES = {
+export const isCountAggregate = (aggregate: Aggregate): boolean => aggregate === 'COUNT' || aggregate === 'HOW_MANY';
+export const AGGREGATE_FUNCTION_ALIASES: Partial<Record<Aggregate, string>> = {
   TOTAL: 'SUM',
   LOWEST: 'MIN',
   HIGHEST: 'MAX',
@@ -422,7 +462,8 @@ export const AGGREGATE_FUNCTION_ALIASES = {
 };
 export const OF_RANGE_TEMPLATE = '[of/in/for/from] [all] [range] [of/in/from]';
 export const OF_VALUES_TEMPLATE = '[of/in/for/from] [all] value/values [of/in/from]';
-export const CONDITIONAL_AGGREGATE_FUNCTIONS = {
+/** The function for one condition (null when there is none) and for several, by aggregate. */
+export const CONDITIONAL_AGGREGATE_FUNCTIONS: Partial<Record<Aggregate, [single: string | null, multiple: string]>> = {
   SUM: ['SUMIF', 'SUMIFS'],
   TOTAL: ['SUMIF', 'SUMIFS'],
   AVERAGE: ['AVERAGEIF', 'AVERAGEIFS'],
@@ -435,23 +476,23 @@ export const CONDITIONAL_AGGREGATE_FUNCTIONS = {
   SMALLEST: [null, 'MINIFS'],
   LARGEST: [null, 'MAXIFS'],
 };
-export const EMPTY_SAID_AREA = {
+export const EMPTY_SAID_AREA: CellArea = {
   topRowIndex: 0,
   leftColumnIndex: 0,
   rowCount: 0,
   columnCount: 0,
 };
-export const hasAnyOf = (values?: Dynamic, ...items: Dynamic[]) => items.some((item?: Dynamic) => values.has(item));
+export const hasAnyOf = (values: Set<HeldKind>, ...items: HeldKind[]): boolean => items.some((item) => values.has(item));
 export const MIN_SERIAL_CELLS = 5;
 export const SERIAL_SPREAD_PER_CELL = 10;
 export const MIN_SERIAL_NUMBER = 1000;
-export const isNumbersOnlyKind = (kinds?: Dynamic) => kinds.size === 1 && hasAnyOf(kinds, 'number', 'percent');
+export const isNumbersOnlyKind = (kinds: Set<HeldKind>): boolean => kinds.size === 1 && hasAnyOf(kinds, 'number', 'percent');
 export const NOT_ADDABLE_HEADING_PATTERN =
   /\b(?:ytd|mtd|qtd|cum|cumulative|accumulated|running|to date|price|msrp|retail|wholesale|rate|rating|stars|ratio|margin|percent|pct|probability|avg|average|per|unit|each|age|year|rank|id|no|code|zip|phone|cac|arpu|aov|nps|ctr|cpa|cpc|latency|uptime|temperature|pace|speed)\b|[%#]/i;
 export const LEVEL_HEADING_PATTERN =
   /\b(?:headcount|employees|staff|team size|ftes?|stock|inventory|on hand|users|mau|dau|subscribers|followers|fans|readers|listeners|members|customers|clients|tenants|donors|volunteers|students|enrolled|enrollment|accounts|seats|licenses|stores|mrr|arr|pipeline|backlog|waitlist|vacancies|open|opening|closing|balance|remaining|outstanding|owed|debt|loan|cash|savings|reserves|net worth|portfolio|odometer|population|active)\b/i;
 export const RANK_HEADING_PATTERN = /\b(?:rank|ranking|priority|place|position|seed|tier|level|grade)\b/i;
-export const isCleanCellsSaid = ({ cells: cells, isByHeading: isByHeading }: Dynamic, where?: Dynamic) =>
+export const isCleanCellsSaid = ({ cells, isByHeading }: Said, where: FormulaWhere): boolean =>
   cells !== null && !where.isAnyFilledAndBlankIn(cells) && (isByHeading === true || !where.mayStartWithAHeading(cells));
 export const COMPARISON_PHRASES = phraseList({
   '>': 'over, above, more than, greater than, bigger than, larger than, higher than, >',
@@ -467,18 +508,20 @@ export const CONDITION_OPENING_PHRASES = phraseList({
 export const IS_PHRASES = phraseList({
   is: 'is, are, equals, equal to, =',
 });
-export const readSlot = (slot?: Dynamic, reading?: Dynamic, start?: Dynamic) => slotReadingsAt(SLOT_READERS[slot], reading, start);
-export const conditionReadingsCache = new (WeakMap as Dynamic)();
+export const readSlot = (slot: 'cells' | 'number' | 'words', reading: WordsReading, start: number): SlotReading[] => slotReadingsAt(SLOT_READERS[slot], reading, start);
+export const conditionReadingsCache = new WeakMap<WordPiece[], Map<string, ConditionReading[]>>();
 export const MAX_CONDITIONS = 4;
 export const MAX_CONDITION_LISTS = 200;
-export const TOO_MANY_READINGS: Dynamic = [];
-export const conditionListsCache = new (WeakMap as Dynamic)();
-export const conditionsOfSaid = new (WeakMap as Dynamic)();
+/** Stands for condition lists given up on as too many, told apart from none by being this very list. */
+export const TOO_MANY_READINGS: ConditionSaid[][] = [];
+export const conditionListsCache = new WeakMap<WordPiece[], Map<string, ConditionSaid[][]>>();
+/** The conditions each said slot of conditions was read as. */
+export const conditionsOfSaid = new WeakMap<Said, ConditionSaid[]>();
 export const conditionsSlotReader =
-  (isBegun?: Dynamic) =>
-  (reading?: Dynamic, start?: Dynamic) =>
+  (isBegun: boolean): SlotReader =>
+  (reading, start) =>
     (conditionListsAt(reading, start, isBegun) === TOO_MANY_READINGS ? [null] : conditionListsAt(reading, start, isBegun)).map(
-      (conditions?: Dynamic) => {
+      (conditions): SlotReading => {
         let said = {
           ...NOTHING_SAID,
           typed: typedTextOfPieces(reading, start, reading.pieces.length),
@@ -487,7 +530,7 @@ export const conditionsSlotReader =
         return [said, reading.pieces.length];
       },
     );
-export const areasLineUp = (area?: Dynamic, otherArea?: Dynamic) =>
+export const areasLineUp = (area: CellArea, otherArea: CellArea): boolean =>
   area.rowCount === otherArea.rowCount &&
   area.columnCount === otherArea.columnCount &&
   (area.rowCount > 1 || area.columnCount === 1 ? area.topRowIndex === otherArea.topRowIndex : area.leftColumnIndex === otherArea.leftColumnIndex);
@@ -499,13 +542,13 @@ export const MONTH_NAME_PATTERN =
 export const YEAR_NUMBER_PATTERN = /^(?:19|20)\d\d$/;
 export const PERIOD_WORD_PATTERN =
   /^(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|q[1-4]|[1-4]q\d*|h[12]|[12]h\d*|fy\d*|w(?:ee)?ks?\d*|c?w\d+|months?|quarters?|years?|spring|summer|fall|autumn|winter|today|yesterday|tomorrow|(?:19|20)\d\d)$/;
-export const headedColumnsSaidCache = new (WeakMap as Dynamic)();
-export const isNumberOffScale = ([smallest, largest]: Dynamic, number?: Dynamic) =>
+export const headedColumnsSaidCache = new WeakMap<FormulaWhere, Said[]>();
+export const isNumberOffScale = ([smallest, largest]: [number, number], number: number): boolean =>
   number !== 0 && smallest > 0 && (Math.abs(number) * 10 <= smallest || Math.abs(number) >= largest * 10);
-export const namesAPeriod = (text?: Dynamic) =>
-  text.split(/[^\p{L}\p{N}]+/u).some((word?: Dynamic) => MONTH_NAME_PATTERN.test(word) || PERIOD_WORD_PATTERN.test(word));
-export const isPeriodInDateCells = (text?: Dynamic, cells?: Dynamic, where?: Dynamic) =>
+export const namesAPeriod = (text: string): boolean =>
+  text.split(/[^\p{L}\p{N}]+/u).some((word) => MONTH_NAME_PATTERN.test(word) || PERIOD_WORD_PATTERN.test(word));
+export const isPeriodInDateCells = (text: string, cells: CellArea, where: FormulaWhere): boolean =>
   namesAPeriod(text) && hasAnyOf(where.kindsHeldIn(cells), 'date', 'dateAndTime');
-export const mayAverageLeaveOutZeros = (aggregate: Dynamic, { cells: cells, isByHeading: isByHeading }: Dynamic, where?: Dynamic) =>
+export const mayAverageLeaveOutZeros = (aggregate: Aggregate, { cells, isByHeading }: Said, where: FormulaWhere): boolean =>
   aggregate === 'AVERAGE' && isByHeading === true && cells !== null && where.areRecordsPeriods && where.endsInZerosAloneIn(cells);
-export const isUnjudgedNumberCondition = ({ judged: judged, value: value }: Dynamic) => judged === null && value.number !== null;
+export const isUnjudgedNumberCondition = ({ judged, value }: ConditionSaid): boolean => judged === null && value.number !== null;

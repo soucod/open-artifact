@@ -1,9 +1,18 @@
-import type { Dynamic } from '../dynamic.ts';
-export function dropStrayClosingBraces(text?: Dynamic) {
-  let openers: Dynamic = [];
-  let kept: Dynamic = '';
-  let inString: Dynamic = false;
-  for (let index: Dynamic = 0; index < text.length; index++) {
+/** A bracket still open in JSON being scanned: the bracket that closes it, and whether a key comes next in it. */
+interface OpenBracket {
+  closer: '}' | ']';
+  isKeyNext: boolean;
+}
+/** Where JSON written so far may be cut, and the brackets that close it there. */
+export interface JsonCut {
+  end: number;
+  closers: string;
+}
+export function dropStrayClosingBraces(text: string): string {
+  let openers: string[] = [];
+  let kept = '';
+  let inString = false;
+  for (let index = 0; index < text.length; index++) {
     let character = text.charAt(index);
     if (inString) {
       if (character === '"') inString = false;
@@ -16,7 +25,7 @@ export function dropStrayClosingBraces(text?: Dynamic) {
   }
   return kept;
 }
-export function parseMendedJson(text?: Dynamic) {
+export function parseMendedJson(text: string): unknown {
   let start = text.search(/[[{]/);
   let end = Math.max(text.lastIndexOf('}'), text.lastIndexOf(']')) + 1;
   if (start < 0 || end <= start || /[[{]/.test(text.slice(end))) return;
@@ -29,18 +38,18 @@ export function parseMendedJson(text?: Dynamic) {
     return;
   }
 }
-export function scanJsonPrefix(text?: Dynamic, start?: Dynamic) {
-  let openers: Dynamic = [];
-  let lastCut: Dynamic = null;
-  let inString: Dynamic = false;
-  let isKeyString: Dynamic = false;
-  let markCut = (end?: Dynamic) => {
+export function scanJsonPrefix(text: string, start: number): JsonCut | null {
+  let openers: OpenBracket[] = [];
+  let lastCut: JsonCut | null = null;
+  let inString = false;
+  let isKeyString = false;
+  let markCut = (end: number) => {
     lastCut = {
-      end: end,
-      closers: openers.reduce((closers: Dynamic, { closer: closer }: Dynamic) => closer + closers, ''),
+      end,
+      closers: openers.reduce((closers, { closer }) => closer + closers, ''),
     };
   };
-  for (let index: Dynamic = start; index < text.length; index++) {
+  for (let index = start; index < text.length; index++) {
     let character = text[index];
     let opener = openers.at(-1);
     if (inString) {
@@ -71,7 +80,7 @@ export function scanJsonPrefix(text?: Dynamic, start?: Dynamic) {
   }
   return lastCut;
 }
-export function parsePartialJson(text?: Dynamic) {
+export function parsePartialJson(text: string): unknown {
   let start = text.indexOf('{');
   let cut = start < 0 ? null : scanJsonPrefix(text, start);
   if (cut === null) return;
@@ -81,12 +90,12 @@ export function parsePartialJson(text?: Dynamic) {
     return;
   }
 }
-export function readPartialStringField(text?: Dynamic, fieldName?: Dynamic) {
-  let match = new (RegExp as Dynamic)(`^[^{]*\\{\\s*"${fieldName}"\\s*:\\s*"`, 'u').exec(text);
+export function readPartialStringField(text: string, fieldName: string): string | null {
+  let match = new RegExp(`^[^{]*\\{\\s*"${fieldName}"\\s*:\\s*"`, 'u').exec(text);
   if (match === null) return null;
   let escapedSoFar = /^(?:[^"\\]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*/u.exec(text.slice(match[0].length))?.[0] ?? '';
   try {
-    let parsed = JSON.parse(`"${escapedSoFar.replaceAll(/\p{Cc}/gu, ' ')}"`);
+    let parsed: unknown = JSON.parse(`"${escapedSoFar.replaceAll(/\p{Cc}/gu, ' ')}"`);
     return typeof parsed === 'string' ? parsed.replace(/[\ud800-\udbff]$/, '') : null;
   } catch {
     return null;

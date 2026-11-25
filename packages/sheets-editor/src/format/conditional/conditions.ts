@@ -1,11 +1,23 @@
-import type { Dynamic } from '../../dynamic.ts';
+import type { CellCondition, ColumnId, ColumnOfRecords, ConditionalFormatSuggestionsAnswer, KindOfAColumn, NumberOperand, RangeCorners, RuleInIds, Test } from '@open-artifact/sheets-core';
+import type { ConditionChoice, OperandKind } from '../../messages/conditional-format.ts';
 import { measureOfColumn } from '../../words/column-holds.ts';
-export function operatorOfCondition(condition?: Dynamic) {
+/** The records around some cells, with each of their columns counted. */
+export type TableOfRecords = ConditionalFormatSuggestionsAnswer['table'];
+/** The columns of a table of records, with what each holds. */
+export type ColumnStats = Pick<TableOfRecords, 'columns'>;
+/** The values a condition is written with, by the slot each fills. */
+export interface OperandSlots {
+  first?: NumberOperand;
+  second?: NumberOperand;
+  text?: string;
+  count?: number;
+}
+export function operatorOfCondition(condition: CellCondition): ConditionChoice {
   if (condition.kind === 'numberIs') return condition.comparison;
   if (condition.kind === 'booleanIs') return condition.value ? 'isChecked' : 'isNotChecked';
   return condition.kind;
 }
-export function operatorsForColumnKind(columnKind?: Dynamic) {
+export function operatorsForColumnKind(columnKind: KindOfAColumn): ConditionChoice[] {
   switch (columnKind) {
     case 'number':
     case 'currency':
@@ -20,14 +32,14 @@ export function operatorsForColumnKind(columnKind?: Dynamic) {
       return [...TEXT_OPERATORS, ...BLANK_OPERATORS, ...DUPLICATE_AND_ERROR_OPERATORS];
   }
 }
-export function defaultFirstOperand({ kind: kind, smallest: smallest, middle: middle, largest: largest }: Dynamic) {
+export function defaultFirstOperand({ kind, smallest, middle, largest }: ColumnOfRecords): NumberOperand {
   if (kind === 'date') return TODAY_OPERAND;
   return {
     kind: 'number',
     number: smallest !== null && largest !== null && smallest < 0 && largest > 0 ? 0 : (middle ?? 0),
   };
 }
-export function defaultSecondOperand(column?: Dynamic) {
+export function defaultSecondOperand(column: ColumnOfRecords): NumberOperand {
   if (column.kind === 'date')
     return {
       kind: 'daysFromToday',
@@ -38,7 +50,7 @@ export function defaultSecondOperand(column?: Dynamic) {
     number: column.largest ?? 0,
   };
 }
-export function operandSlotsOfCondition(condition?: Dynamic) {
+export function operandSlotsOfCondition(condition: CellCondition): OperandSlots {
   switch (condition.kind) {
     case 'numberIs':
       return {
@@ -73,33 +85,33 @@ export function operandSlotsOfCondition(condition?: Dynamic) {
   }
 }
 export function operandsFittingColumn(
-  { first: first, second: second, text: text, count: count }: Dynamic,
-  newColumn?: Dynamic,
-  oldColumn?: Dynamic,
-) {
-  let fitsNewColumn = (operand?: Dynamic) =>
+  { first, second, text, count }: OperandSlots,
+  newColumn: ColumnOfRecords,
+  oldColumn: ColumnOfRecords,
+): OperandSlots {
+  let fitsNewColumn = (operand: NumberOperand) =>
     operand.kind === 'number' && oldColumn.filled > 0
       ? newColumn.kind === oldColumn.kind
       : (newColumn.kind === 'date') === (oldColumn.kind === 'date');
   return {
     ...(first !== undefined &&
       fitsNewColumn(first) && {
-        first: first,
+        first,
       }),
     ...(second !== undefined &&
       fitsNewColumn(second) && {
-        second: second,
+        second,
       }),
     ...(text !== undefined &&
       (!isCommonestText(oldColumn, text) || isCommonestText(newColumn, text)) && {
-        text: text,
+        text,
       }),
     ...(count !== undefined && {
-      count: count,
+      count,
     }),
   };
 }
-export function conditionForOperator(operator?: Dynamic, operands?: Dynamic, column?: Dynamic) {
+export function conditionForOperator(operator: ConditionChoice, operands: OperandSlots, column: ColumnOfRecords): CellCondition {
   let firstOperand =
     operands.first !== undefined && operandFitsColumn(operands.first, column) ? operands.first : defaultFirstOperand(column);
   switch (operator) {
@@ -155,7 +167,7 @@ export function conditionForOperator(operator?: Dynamic, operands?: Dynamic, col
       };
   }
 }
-export function conditionForNewColumn(condition?: Dynamic, newColumn?: Dynamic, oldColumn?: Dynamic) {
+export function conditionForNewColumn(condition: CellCondition, newColumn: ColumnOfRecords, oldColumn: ColumnOfRecords): CellCondition {
   if (newColumn.filled === 0) return condition;
   let operator = operatorOfCondition(condition);
   let operands = operandSlotsOfCondition(condition);
@@ -164,11 +176,11 @@ export function conditionForNewColumn(condition?: Dynamic, newColumn?: Dynamic, 
     ? conditionForOperator(operator, keptOperands, newColumn)
     : defaultConditionForColumn(newColumn, keptOperands);
 }
-export function doesConditionFitColumn(condition?: Dynamic, newColumn?: Dynamic, oldColumn?: Dynamic) {
+export function doesConditionFitColumn(condition: CellCondition, newColumn: ColumnOfRecords, oldColumn: ColumnOfRecords): boolean {
   let operator = operatorOfCondition(condition);
   if (BLANK_OPERATORS.includes(operator) || DUPLICATE_AND_ERROR_OPERATORS.includes(operator)) return true;
   let operands = operandSlotsOfCondition(condition);
-  let { first: first, second: second } = operands;
+  let { first, second } = operands;
   let keptOperands = operandsFittingColumn(operands, newColumn, oldColumn);
   return (
     operatorsForColumnKind(newColumn.kind).includes(operator) &&
@@ -177,7 +189,7 @@ export function doesConditionFitColumn(condition?: Dynamic, newColumn?: Dynamic,
     (second === undefined || (keptOperands.second !== undefined && operandFitsColumn(second, newColumn)))
   );
 }
-export function defaultConditionForColumn(column?: Dynamic, operands: Dynamic = {}) {
+export function defaultConditionForColumn(column: ColumnOfRecords, operands: OperandSlots = {}): CellCondition {
   let [operator = 'isNotBlank'] = operatorsForColumnKind(column.kind);
   let condition = conditionForOperator(operator, operands, column);
   return hasEmptyTextOperand(condition)
@@ -186,12 +198,12 @@ export function defaultConditionForColumn(column?: Dynamic, operands: Dynamic = 
       }
     : condition;
 }
-export function operandChoiceOf(operand?: Dynamic, isDateColumn?: Dynamic) {
+export function operandChoiceOf(operand: NumberOperand, isDateColumn: boolean): OperandKind {
   if (operand.kind === 'sameRowInColumn') return 'column';
   if (operand.kind === 'number') return isDateColumn ? 'date' : 'number';
   return operand.days === 0 ? 'today' : operand.days > 0 ? 'daysFromToday' : 'daysAgo';
 }
-export function operandForChoice(choice?: Dynamic, operand?: Dynamic, column?: Dynamic, columns?: Dynamic) {
+export function operandForChoice(choice: OperandKind, operand: NumberOperand, column: ColumnOfRecords, table: TableOfRecords): NumberOperand | null {
   let dayCount = operand.kind === 'daysFromToday' && operand.days !== 0 ? Math.abs(operand.days) : null;
   switch (choice) {
     case 'today':
@@ -213,7 +225,7 @@ export function operandForChoice(choice?: Dynamic, operand?: Dynamic, column?: D
         number: column.middle ?? 0,
       };
     case 'column': {
-      let [otherColumn] = comparableOtherColumns(columns, column);
+      let [otherColumn] = comparableOtherColumns(table, column);
       return otherColumn === undefined
         ? null
         : {
@@ -223,8 +235,8 @@ export function operandForChoice(choice?: Dynamic, operand?: Dynamic, column?: D
     }
   }
 }
-export const BLANK_OPERATORS = ['isBlank', 'isNotBlank'];
-export const NUMBER_OPERATORS = [
+export const BLANK_OPERATORS: readonly ConditionChoice[] = ['isBlank', 'isNotBlank'];
+export const NUMBER_OPERATORS: readonly ConditionChoice[] = [
   'lessThan',
   'lessThanOrEqualTo',
   'equalTo',
@@ -234,41 +246,41 @@ export const NUMBER_OPERATORS = [
   'numberIsBetween',
   'numberIsNotBetween',
 ];
-export const TEXT_OPERATORS = ['textIs', 'textIsNot', 'textContains', 'textDoesNotContain', 'textStartsWith', 'textEndsWith'];
-export const RANK_OPERATORS = ['isAmongTheLargest', 'isAmongTheSmallest'];
-export const DUPLICATE_AND_ERROR_OPERATORS = ['appearsMoreThanOnce', 'isAnError'];
-export const TODAY_OPERAND = {
+export const TEXT_OPERATORS: readonly ConditionChoice[] = ['textIs', 'textIsNot', 'textContains', 'textDoesNotContain', 'textStartsWith', 'textEndsWith'];
+export const RANK_OPERATORS: readonly ConditionChoice[] = ['isAmongTheLargest', 'isAmongTheSmallest'];
+export const DUPLICATE_AND_ERROR_OPERATORS: readonly ConditionChoice[] = ['appearsMoreThanOnce', 'isAnError'];
+export const TODAY_OPERAND: Extract<NumberOperand, { kind: 'daysFromToday' }> = {
   kind: 'daysFromToday',
   days: 0,
 };
 export const DEFAULT_DAYS_FROM_TODAY = 7;
 export const DEFAULT_RANK_COUNT = 3;
-export const operandFitsColumn = (operand: Dynamic, { kind: kind, c: c }: Dynamic) =>
+export const operandFitsColumn = (operand: NumberOperand, { kind, c }: ColumnOfRecords): boolean =>
   operand.kind === 'daysFromToday' ? kind === 'date' : operand.kind !== 'sameRowInColumn' || operand.c !== c;
-export const isCommonestText = ({ commonest: commonest }: Dynamic, text?: Dynamic) =>
-  commonest.some((common?: Dynamic) => common.toLowerCase() === text.toLowerCase());
-export const conditionWithOperator = (operator?: Dynamic, condition?: Dynamic, column?: Dynamic) =>
+export const isCommonestText = ({ commonest }: ColumnOfRecords, text: string): boolean =>
+  commonest.some((common) => common.toLowerCase() === text.toLowerCase());
+export const conditionWithOperator = (operator: ConditionChoice, condition: CellCondition, column: ColumnOfRecords): CellCondition =>
   conditionForOperator(operator, operandSlotsOfCondition(condition), column);
-export const hasEmptyTextOperand = (operands?: Dynamic) => 'text' in operands && operands.text === '';
-export const operandChoicesFor = (columnKind?: Dynamic) =>
+export const hasEmptyTextOperand = (operands: CellCondition): boolean => 'text' in operands && operands.text === '';
+export const operandChoicesFor = (columnKind: KindOfAColumn): OperandKind[] =>
   columnKind === 'date' ? ['today', 'daysFromToday', 'daysAgo', 'date', 'column'] : ['number', 'column'];
-export const comparableOtherColumns = ({ columns: columns }: Dynamic, column?: Dynamic) =>
+export const comparableOtherColumns = ({ columns }: ColumnStats, column: ColumnOfRecords): ColumnOfRecords[] =>
   columns.filter(
-    ({ c: c, kind: kind }: Dynamic) =>
+    ({ c, kind }) =>
       c !== column.c &&
       measureOfColumn({
-        kind: kind,
+        kind,
       }) === (column.kind === 'date' ? 'days' : 'numbers'),
   );
-export const findColumnStats = ({ columns: columns }: Dynamic, c?: Dynamic) =>
-  columns.find((column?: Dynamic) => column.c === c) ?? null;
-export const testedColumnOf = ({ tested: tested }: Dynamic, rangeColumn?: Dynamic) =>
+export const findColumnStats = ({ columns }: ColumnStats, c: ColumnId | null): ColumnOfRecords | null =>
+  columns.find((column) => column.c === c) ?? null;
+export const testedColumnOf = ({ tested }: Pick<Test, 'tested'>, rangeColumn: ColumnId): ColumnId =>
   tested.kind === 'theCellItself' ? rangeColumn : tested.c;
-export const firstColumnOfRule = ({ ranges: [firstRange] }: Dynamic) => firstRange.topLeft.c;
-export const isOneColumnRange = ({ topLeft: topLeft, bottomRight: bottomRight }: Dynamic) => topLeft.c === bottomRight.c;
-export const areRangesOneSameColumn = (ranges?: Dynamic) =>
-  ranges.every((range?: Dynamic) => isOneColumnRange(range) && range.topLeft.c === ranges[0]?.topLeft.c);
-export const isWholeRowRule = ({ ranges: ranges, effect: effect }: Dynamic) =>
+export const firstColumnOfRule = ({ ranges: [firstRange] }: Pick<RuleInIds, 'ranges'>): ColumnId => firstRange.topLeft.c;
+export const isOneColumnRange = ({ topLeft, bottomRight }: RangeCorners): boolean => topLeft.c === bottomRight.c;
+export const areRangesOneSameColumn = (ranges: readonly RangeCorners[]): boolean =>
+  ranges.every((range) => isOneColumnRange(range) && range.topLeft.c === ranges[0]?.topLeft.c);
+export const isWholeRowRule = ({ ranges, effect }: RuleInIds): boolean =>
   effect.kind === 'formatWhere' &&
-  effect.allOf.every(({ tested: tested }: Dynamic) => tested.kind === 'sameRowInColumn') &&
+  effect.allOf.every(({ tested }) => tested.kind === 'sameRowInColumn') &&
   !ranges.every(isOneColumnRange);

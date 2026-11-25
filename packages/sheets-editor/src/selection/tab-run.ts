@@ -22,7 +22,7 @@ export function nextTabRun(state: PageState, key: string, move: KeyMove | null, 
   };
 }
 export function cellBelowTabRunStart(state: PageState, workbook: ReadsWithTextMeasurer): CellId | null {
-  let { tabRun: tabRun, activeCell: activeCell, sheetId: sheetId } = state;
+  let { tabRun, activeCell, sheetId } = state;
   if (tabRun === null) return null;
   let fromPosition = workbook.positionOfCell(tabRun.from);
   let fromArea = mergedAreaOrCellOf(workbook, tabRun.from);
@@ -35,7 +35,7 @@ export function cellBelowTabRunStart(state: PageState, workbook: ReadsWithTextMe
   return workbook.cellIdAt(sheetId, nextRowIndex, fromPosition.columnIndex);
 }
 export function keepTabRun(before: PageState, state: PageState, event: PageEvent): PageState {
-  let { tabRun: tabRun } = state;
+  let { tabRun } = state;
   if (tabRun === null || tabRun !== before.tabRun) return state;
   if (event.kind === 'editAnswered' && event.ifQueued.carriesTabRunOn === true && !isSameSelection(before, state))
     return {

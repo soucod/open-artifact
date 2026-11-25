@@ -2,7 +2,8 @@
  * Small React hooks shared by the chrome.
  */
 
-import { useMemo, useSyncExternalStore } from 'react';
+import { useLayoutEffect, useMemo, useRef, useSyncExternalStore, type FocusEvent, type RefObject } from 'react';
+import { shouldRefocus } from '../lib/refocus.ts';
 
 function mediaStore(query: string) {
   return {
@@ -39,4 +40,41 @@ export function useNarrowTouch(): boolean {
 export function useMediaQuery(query: string): boolean {
   const store = useMemo(() => mediaStore(query), [query]);
   return useSyncExternalStore(store.subscribe, store.get, () => false);
+}
+
+/** Focus handlers {@link useFocusThroughDisable} needs on its field. */
+export interface FocusThroughDisableProps<T extends HTMLInputElement | HTMLTextAreaElement> {
+  onFocus: () => void;
+  onBlur: (event: FocusEvent<T>) => void;
+}
+
+/**
+ * A field that had focus when it was disabled takes it back when it is
+ * enabled again within a few seconds, unless focus went somewhere else
+ * meanwhile. Spread the returned handlers on the field.
+ */
+export function useFocusThroughDisable<T extends HTMLInputElement | HTMLTextAreaElement>(field: RefObject<T | null>, disabled: boolean): FocusThroughDisableProps<T> {
+  const focused = useRef(false);
+  const lostAt = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const element = field.current;
+    if (!element) return;
+    const doc = element.ownerDocument;
+    if (disabled) {
+      lostAt.current = focused.current || doc.activeElement === element ? Date.now() : null;
+      return;
+    }
+    const idle = doc.activeElement === null || doc.activeElement === doc.body;
+    if (shouldRefocus(lostAt.current, Date.now(), idle)) element.focus();
+    lostAt.current = null;
+  }, [disabled, field]);
+  return {
+    onFocus: () => {
+      focused.current = true;
+    },
+    onBlur: (event) => {
+      // Being disabled blurs the field too; that blur keeps the claim to focus.
+      if (!event.currentTarget.disabled) focused.current = false;
+    },
+  };
 }

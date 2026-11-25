@@ -1,4 +1,3 @@
-import type { Dynamic } from '../dynamic.ts';
 import { translateMessage } from '../i18n/messages.ts';
 export const sheetWord = () =>
   translateMessage({
@@ -67,8 +66,9 @@ export const SHEET_COMMAND_SYNONYM_MESSAGES = {
       id: 'jLNnBNtkLL',
     }),
 };
-export const sheetCommandSynonyms = (command?: Dynamic) =>
+export type SheetCommandWithSynonyms = keyof typeof SHEET_COMMAND_SYNONYM_MESSAGES;
+export const sheetCommandSynonyms = (command: SheetCommandWithSynonyms): string[] =>
   SHEET_COMMAND_SYNONYM_MESSAGES[command]()
     .split(/[,،、，]/)
-    .map((input?: Dynamic) => input.trim())
-    .filter((input?: Dynamic) => input !== '');
+    .map((synonym) => synonym.trim())
+    .filter((synonym) => synonym !== '');

@@ -105,6 +105,17 @@ export function clampNumber(value: number, min?: number, max?: number): number {
   return out;
 }
 
+/** The nearest multiple of `step` (no snapping for a step that is not a positive number). */
+export function snapToStep(value: number, step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return value;
+  return Math.round(value / step) * step;
+}
+
+/** Where stepping starts in an empty (or mixed) field: 0, kept inside `[min, max]`. */
+export function stepStart(min?: number, max?: number): number {
+  return clampNumber(0, min, max);
+}
+
 /** Formats a value for a number field: rounded, no trailing zeros. */
 export function formatNumber(value: number, decimals: number): string {
   return String(roundTo(value, decimals));

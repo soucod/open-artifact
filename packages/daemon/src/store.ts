@@ -81,8 +81,14 @@ export interface CreateRecord {
   type: string;
   typeSource?: string | null;
   typeRelease?: string | null;
+  /** The `uid` of the type it is made with ({@link ArtifactRecord.typeUid}); also in `.artifact.json`. */
+  typeUid?: string | null;
+  /** Where that type came from, for `.artifact.json` (`builtin`, `local`, or an installed type's address). */
+  typeFrom?: string | null;
   owner?: SessionRef | null;
   title?: string;
+  /** A page artifact's declared capabilities ({@link ArtifactRecord.capabilities}). */
+  capabilities?: Record<string, unknown> | null;
 }
 
 /** The records of every artifact. Emits `changed` after each write. */
@@ -166,11 +172,35 @@ export class ArtifactStore extends EventEmitter<{ changed: [StoreChange] }> {
       openedAt: null,
       agentSeenAt: now,
       lastUserEditAt: null,
+      ...(fields.typeUid ? { typeUid: fields.typeUid } : {}),
+      ...(fields.capabilities ? { capabilities: fields.capabilities } : {}),
     };
     ensureDir(record.root);
-    const marker: ArtifactMarker = { type: record.type, id: record.id, release: record.typeRelease };
+    const marker: ArtifactMarker = {
+      type: record.type,
+      id: record.id,
+      release: record.typeRelease,
+      ...(fields.typeUid ? { typeUid: fields.typeUid } : {}),
+      ...(fields.typeUid && fields.typeFrom ? { typeSource: fields.typeFrom } : {}),
+      ...(fields.capabilities ? { capabilities: fields.capabilities } : {}),
+    };
     writeJson(join(record.root, '.artifact.json'), marker);
     return this.save(record);
+  }
+
+  /**
+   * Sets a page artifact's declared capabilities, in its record and in its folder's `.artifact.json` (what frame-host
+   * reads); `null` clears them. The marker's other fields stay as they are.
+   */
+  setCapabilities(id: string, capabilities: Record<string, unknown> | null): ArtifactRecord {
+    const record = this.get(id);
+    if (!record) throw new OpenArtifactError('not_found', `No artifact ${id}.`);
+    const file = join(record.root, '.artifact.json');
+    const marker = readJson<Record<string, unknown> | null>(file, null) ?? { type: record.type, id: record.id, release: record.typeRelease };
+    const { capabilities: _old, ...rest } = marker;
+    writeJson(file, capabilities ? { ...rest, capabilities } : rest);
+    const { capabilities: _was, ...kept } = record;
+    return this.save({ ...kept, ...(capabilities ? { capabilities } : {}), updatedAt: new Date().toISOString() });
   }
 
   /** Merges `patch` into a record; `updatedAt` moves unless the patch sets it. */

@@ -1,6 +1,6 @@
 {
   "name": "@open-artifact/design-core",
-  "version": "0.9.2",
+  "version": "0.14.6",
   "private": true,
   "type": "module",
   "description": "The Design artifact model: canvas.json, merging, view context and project checks.",
@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@open-artifact/dc": "0.9.2"
+    "@open-artifact/dc": "0.14.6"
   },
   "license": "Apache-2.0"
 }

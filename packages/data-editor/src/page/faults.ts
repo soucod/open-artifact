@@ -8,12 +8,14 @@ export interface PageFault {
   name: string;
   message: string;
   file?: string;
+  /** The part of the page it happened in: the name of the drawing that threw. */
+  where?: string;
   count: number;
 }
 
 /** A repeat raises its entry's count; `list()` hands out a new snapshot only when a new kind of fault arrives. */
 export interface PageFaultTracker {
-  record(kind: PageFaultKind, error: unknown, file?: string): boolean;
+  record(kind: PageFaultKind, error: unknown, file?: string, where?: string): boolean;
   list(): readonly PageFault[];
 }
 
@@ -55,9 +57,9 @@ export function createPageFaultTracker(): PageFaultTracker {
   const entries = new Map<string, PageFault>();
   let snapshot = EMPTY_PAGE_FAULTS;
   return {
-    record(kind, error, file) {
+    record(kind, error, file, where) {
       const name = getPageFaultName(error);
-      const key = [kind, name, file].join(' ');
+      const key = JSON.stringify([kind, name, file ?? null, where ?? null]);
       const entry = entries.get(key);
       if (entry !== undefined) {
         entry.count++;
@@ -68,6 +70,7 @@ export function createPageFaultTracker(): PageFaultTracker {
         name,
         message: getPageFaultMessage(error),
         ...(file === undefined ? {} : { file }),
+        ...(where === undefined || where === '' ? {} : { where }),
         count: 1,
       });
       snapshot = [...entries.values()].map((fault) => ({ ...fault }));
